@@ -1,4 +1,5 @@
 module Test {
+	import from GSM_Types all;
 	import from GSM_SystemInformation all;
 	import from GSMTAP_Types all;
 	import from GSMTAP_PortType all;
@@ -42,7 +43,6 @@ module Test {
 		sub_type := ch
 	}
 
-
 	template GsmtapMessage t_bcch := {
 		header := t_GsmtapHeaderUm(GSMTAP_CHANNEL_BCCH),
 		payload := ?
@@ -59,14 +59,337 @@ module Test {
 		msg := { header := t_GsmtapHeaderUm(ch), payload := ?}
 	}
 
+	/* tuple of gsmtap header + decoded SI */
+	type record SystemInformationGsmtap {
+		GsmtapHeader gsmtap,
+		SystemInformation si
+	}
+
+	/* an arbitrary-length vector of decoded SI + gsmtap header */
+	type record of SystemInformationGsmtap SystemInformationVector;
+
+	/* an array of SI-vectors indexed by TC value */
+	type SystemInformationVector SystemInformationVectorPerTc[8];
+
+	type record of integer IntegerRecord;
+
+	function f_array_contains(IntegerRecord arr, integer key) return boolean {
+		for (var integer i:= 0; i< sizeof(arr); i := i + 1) {
+			if (arr[i] == key) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+
+	/* compute TC as per 45.002 6.3.1.3 */
+	function f_gsm_compute_tc(integer fn) return integer {
+		return (fn / 51) mod 8;
+	}
+
+	/* determine if a given SI vector contains given SI type at least once */
+	function f_si_vecslot_contains(SystemInformationVector arr, RrMessageType key, boolean bcch_ext := false) return boolean {
+		for (var integer i:= 0; i< sizeof(arr); i := i + 1) {
+			var integer fn_mod51 := arr[i].gsmtap.frame_number mod 51;
+			if (not bcch_ext and fn_mod51 == 2 or
+			        bcch_ext and fn_mod51 == 6) {
+				if (arr[i].si.header.message_type == key) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/* check if a given SI vector contains given SI type at least once on any TC */
+	function f_si_vec_contains(SystemInformationVectorPerTc arr, RrMessageType key) return boolean {
+		for (var integer tc:= 0; tc < sizeof(arr); tc := tc + 1) {
+			if (f_si_vecslot_contains(arr[tc], key) or
+			    f_si_vecslot_contains(arr[tc], key, true)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/* ensure a given TC slot of the SI vector contains given SI type at least once at TC */
+	function f_ensure_si_vec_contains(SystemInformationVectorPerTc arr, integer tc, RrMessageType key,
+					  boolean ext_bcch := false) {
+		if (not f_si_vecslot_contains(arr[tc], key, ext_bcch)) {
+			log("Fail: No ", key, " in TC=", tc, "!");
+			setverdict(fail);
+		}
+	}
+
+	/* SI configuration of cell, against which we validate actual SI messages */
+	type set SystemInformationConfig {
+		boolean bcch_extended,
+		boolean si1_present,
+		boolean si2bis_present,
+		boolean si2ter_present,
+		boolean si2quater_present,
+		boolean si7_present,
+		boolean si8_present,
+		boolean si9_present,
+		boolean si13_present,
+		boolean si13alt_present,
+		boolean si15_present,
+		boolean si16_present,
+		boolean si17_present,
+		boolean si2n_present,
+		boolean si21_present,
+		boolean si22_present
+	}
+
+	/* validate the SI scheduling according to TS 45.002 version 14.1.0 Release 14, Section 6.3.1.3 */
+	function f_validate_si_scheduling(SystemInformationConfig cfg, SystemInformationVectorPerTc si_per_tc) {
+		var integer i;
+		for (i := 0; i < sizeof(si_per_tc); i := i + 1) {
+			if (sizeof(si_per_tc[i]) == 0) {
+				setverdict(fail, "No SI messages for TC=0!");
+			}
+		}
+		if (cfg.si1_present) {
+			/* ii) System Information Type 1 needs to be sent if frequency hopping is in use or
+			 * when the NCH is present in a cell. If the MS finds another message on BCCH Norm
+			 * when TC = 0, it can assume that System Information Type 1 is not in use. */
+			f_ensure_si_vec_contains(si_per_tc, 0, SYSTEM_INFORMATION_TYPE_1);
+			/* FIXME: make sure *ALL* contain SI1 */
+		}
+		f_ensure_si_vec_contains(si_per_tc, 1, SYSTEM_INFORMATION_TYPE_2);
+		/* iii) A SI 2 message will be sent at least every time TC = 1 */
+		f_ensure_si_vec_contains(si_per_tc, 2, SYSTEM_INFORMATION_TYPE_3);
+		f_ensure_si_vec_contains(si_per_tc, 6, SYSTEM_INFORMATION_TYPE_3);
+		f_ensure_si_vec_contains(si_per_tc, 3, SYSTEM_INFORMATION_TYPE_4);
+		f_ensure_si_vec_contains(si_per_tc, 7, SYSTEM_INFORMATION_TYPE_4);
+
+		/*  iii) System information type 2 bis or 2 ter messages are sent if needed, as determined by the
+		 *  system operator. If only one of them is needed, it is sent when TC = 5. If both are
+		 *  needed, 2bis is sent when TC = 5 and 2ter is sent at least once within any of 4
+		 *  consecutive occurrences of TC = 4. */
+		if (cfg.si2bis_present and not cfg.si2ter_present) {
+			f_ensure_si_vec_contains(si_per_tc, 5, SYSTEM_INFORMATION_TYPE_2bis);
+		} else if (cfg.si2ter_present and not cfg.si2bis_present) {
+			f_ensure_si_vec_contains(si_per_tc, 5, SYSTEM_INFORMATION_TYPE_2ter);
+		} else if (cfg.si2ter_present and cfg.si2bis_present) {
+			f_ensure_si_vec_contains(si_per_tc, 5, SYSTEM_INFORMATION_TYPE_2bis);
+			f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_2ter); //FIXME 1/4
+		}
+
+		if (cfg.si7_present or cfg.si8_present) {
+			/* vi) Use of System Information type 7 and 8 is not always necessary. It is necessary
+			 * if System Information type 4 does not contain all information needed for cell
+			 * selection and reselection. */
+			if (not cfg.bcch_extended) {
+				setverdict(fail, "Error: SI7/SI8 require BCCH Extd.");
+			}
+			if (cfg.si7_present) {
+				f_ensure_si_vec_contains(si_per_tc, 7, SYSTEM_INFORMATION_TYPE_7, true);
+			}
+			if (cfg.si8_present) {
+				f_ensure_si_vec_contains(si_per_tc, 3, SYSTEM_INFORMATION_TYPE_8, true);
+			}
+		}
+
+		if (cfg.si2quater_present) {
+			/*  iii) System information type 2 quater is sent if needed, as determined by the system
+			 *  operator.  If sent on BCCH Norm, it shall be sent when TC = 5 if neither of 2bis
+			 *  and 2ter are used, otherwise it shall be sent at least once within any of 4
+			 *  consecutive occurrences of TC = 4. If sent on BCCH Ext, it is sent at least once
+			 *  within any of 4 consecutive occurrences of TC = 5. */
+			if (not (cfg.bcch_extended)) {
+				if (not (cfg.si2bis_present or cfg.si2ter_present)) {
+					f_ensure_si_vec_contains(si_per_tc, 5, SYSTEM_INFORMATION_TYPE_2quater);
+				} else {
+					f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_2quater); // FIXME 1/4
+				}
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 5, SYSTEM_INFORMATION_TYPE_2quater, true); // FIXME: 1/4
+			}
+		}
+		if (cfg.si9_present) {
+			/* vi) System Information type 9 is sent in those blocks with TC = 4 which are specified
+			 * in system information type 3 as defined in 3GPP TS 44.018. */
+			f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_9); // FIXME SI3
+		}
+		if (cfg.si13_present) {
+			/* vii) System Information type 13 is only related to the GPRS service. System Information
+			 * Type 13 need only be sent if GPRS support is indicated in one or more of System
+			 * Information Type 3 or 4 or 7 or 8 messages. These messages also indicate if the
+			 * message is sent on the BCCH Norm or if the message is transmitted on the BCCH Ext.
+			 * In the case that the message is sent on the BCCH Norm, it is sent at least once
+			 * within any of 4 consecutive occurrences of TC=4. */
+			if (not cfg.bcch_extended) {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_13); // FIXME 1/4
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 0, SYSTEM_INFORMATION_TYPE_13, true);
+			}
+			if (f_si_vec_contains(si_per_tc, SYSTEM_INFORMATION_TYPE_13alt)) {
+				setverdict(fail, "Cannot have SI13alt and SI13");
+			}
+		}
+		if (cfg.si16_present or cfg.si17_present) {
+			/* viii) System Information type 16 and 17 are only related to the SoLSA service. They
+			 * should not be sent in a cell where network sharing is used (see rule xv). */
+			if (cfg.si22_present) {
+				setverdict(fail, "Error: Cannot have SI16/SI17 and SI22!");
+			}
+			if (f_si_vec_contains(si_per_tc, SYSTEM_INFORMATION_TYPE_22)) {
+				setverdict(fail, "Cannot have SI16/SI17 and SI22!");
+			}
+			if (not cfg.bcch_extended) {
+				setverdict(fail, "Error: SI16/SI17 requires BCCH Extd!");
+			}
+			if (cfg.si16_present) {
+				f_ensure_si_vec_contains(si_per_tc, 6, SYSTEM_INFORMATION_TYPE_16, true);
+			}
+			if (cfg.si17_present) {
+				f_ensure_si_vec_contains(si_per_tc, 2, SYSTEM_INFORMATION_TYPE_17, true);
+			}
+		}
+
+			/* ix) System Information type 18 and 20 are sent in order to transmit non-GSM
+			 * broadcast information. The frequency with which they are sent is determined by the
+			 * system operator. System Information type 9 identifies the scheduling of System
+			 * Information type 18 and 20 messages. */
+
+			/* x) System Information Type 19 is sent if COMPACT neighbours exist. If System
+			 * Information Type 19 is present, then its scheduling shall be indicated in System
+			 * Information Type 9. */
+
+		if (cfg.si15_present) {
+			/* xi) System Information Type 15 is broadcast if dynamic ARFCN mapping is used in the
+			 * PLMN. If sent on BCCH Norm, it is sent at least once within any of 4 consecutive
+			 * occurrences of TC = 4. If sent on BCCH Ext, it is sent at least once within any of
+			 * 4 consecutive occurrences of TC = 1. */
+			if (not cfg.bcch_extended) {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_15); // FIXME 1/4
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 1, SYSTEM_INFORMATION_TYPE_15, true); // FIXME 1/4
+			}
+		}
+		if (cfg.si13alt_present) {
+			/* xii) System Information type 13 alt is only related to the GERAN Iu mode. System
+			 * Information Type 13 alt need only be sent if GERAN Iu mode support is indicated in
+			 * one or more of System Information Type 3 or 4 or 7 or 8 messages and SI 13 is not
+			 * broadcast. These messages also indicate if the message is sent on the BCCH Norm or
+			 * if the message is transmitted on the BCCH Ext. In the case that the message is sent
+			 * on the BCCH Norm, it is sent at least once within any of 4 consecutive occurrences
+			 * of TC = 4. */
+			if (cfg.si13_present) {
+				setverdict(fail, "Error: Cannot have SI13alt and SI13");
+			}
+			if (f_si_vec_contains(si_per_tc, SYSTEM_INFORMATION_TYPE_13)) {
+				setverdict(fail, "Cannot have SI13alt and SI13");
+			}
+			if (not cfg.bcch_extended) {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_13alt); // FIXME 1/4
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 0, SYSTEM_INFORMATION_TYPE_13alt, true);
+			}
+		}
+		if (cfg.si2n_present) {
+			/* xiii) System Information Type 2n is optionally sent on BCCH Norm or BCCH Ext if needed,
+			 * as determined by the system operator. In the case that the message is sent on the
+			 * BCCH Norm, it is sent at least once within any of 4 consecutive occurrences of TC =
+			 * 4. If the message is sent on BCCH Ext, it is sent at least once within any of 2
+			 * consecutive occurrences of TC = 4. */
+			if (not cfg.bcch_extended) {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_2n); // FIXME 1/4
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_2n, true); // FIXME 2/4
+			}
+		}
+		if (cfg.si21_present) {
+			/* xiv) System Information Type 21 is optionally sent on BCCH Norm or BCCH Ext, as
+			 * determined by the system operator. If Extended Access Barring is in use in the cell
+			 * then this message is sent at least once within any of 4 consecutive occurrences of
+			 * TC = 4 regardless if it is sent on BCCH Norm or BCCH Ext. If BCCH Ext is used in a
+			 * cell then this message shall only be sent on BCCH Ext. */
+			if (not cfg.bcch_extended) {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_21); // FIXME 1/4
+			} else {
+				f_ensure_si_vec_contains(si_per_tc, 4, SYSTEM_INFORMATION_TYPE_21, true); // FIXME 1/4
+				if (f_si_vecslot_contains(si_per_tc[4], SYSTEM_INFORMATION_TYPE_21)) {
+					setverdict(fail, "Cannot have SI21 on BCCH Norm if BCCH Extd enabled!");
+				}
+			}
+		}
+		if (cfg.si22_present) {
+			/* xv) System Information Type 22 is sent if network sharing is in use in the cell. It
+			 * should not be sent in a cell where SoLSA is used (see rule viii). System
+			 * Information Type 22 instances shall be sent on BCCH Ext within any occurrence of TC
+			 * =2 and TC=6. */
+			if (cfg.si16_present or cfg.si17_present) {
+				setverdict(fail, "Error: Cannot have SI16/SI17 and SI22!");
+			}
+			if (f_si_vec_contains(si_per_tc, SYSTEM_INFORMATION_TYPE_16) or
+			    f_si_vec_contains(si_per_tc, SYSTEM_INFORMATION_TYPE_17)) {
+				setverdict(fail, "Cannot have SI16/SI17 and SI22!");
+			}
+			if (not cfg.bcch_extended) {
+				setverdict(fail, "Error: SI22 requires BCCH Extd!");
+			}
+		}
+	}
+
+
+	function f_gsmtap_sample_si(GSMTAP_PT pt, float duration := 5.0) return SystemInformationVectorPerTc {
+		timer T := duration;
+		var SystemInformationVectorPerTc si_per_tc;
+		var GSMTAP_RecvFrom rf;
+
+		/* initialize all per-TC vectors empty */
+		for (var integer i := 0; i < sizeof(si_per_tc); i := i + 1) {
+			si_per_tc[i] := {};
+		}
+
+		T.start;
+		alt {
+			[] pt.receive(t_recvfrom(GSMTAP_CHANNEL_BCCH)) -> value rf {
+					var SystemInformation si := dec_SystemInformation(rf.msg.payload);
+					var SystemInformationGsmtap sig := { rf.msg.header, si };
+					var integer tc := f_gsm_compute_tc(rf.msg.header.frame_number);
+					log("SI received at TC=", tc, ": ", si);
+					/* append to the per-TC bucket */
+					si_per_tc[tc] := si_per_tc[tc] & { sig };
+					repeat;
+				}
+			[] pt.receive { repeat; };
+			[] T.timeout { };
+		}
+		return si_per_tc;
+	}
+
 	testcase TC_gsmtap() runs on dummy_CT {
+		var SystemInformationVectorPerTc si_per_tc;
+		var SystemInformationConfig si_cfg := {
+			bcch_extended := false,
+			si1_present := true,
+			si2bis_present := false,
+			si2ter_present := false,
+			si2quater_present := false,
+			si7_present := false,
+			si8_present := false,
+			si9_present := false,
+			si13_present := false,
+			si13alt_present := false,
+			si15_present := false,
+			si16_present := false,
+			si17_present := false,
+			si2n_present := false,
+			si21_present := false,
+			si22_present := false
+		};
+
 		map(self:GSMTAP, system:GSMTAP);
 		IPL4_GSMTAP_CtrlFunct.f_IPL4_listen(GSMTAP, "0.0.0.0", GSMTAP_PORT, {udp := {}});
 
-		var GSMTAP_RecvFrom rf;
-		GSMTAP.receive(t_recvfrom(GSMTAP_CHANNEL_BCCH)) -> value rf;
-		log("UDP Rx:", rf);
-		log("SI: ", dec_SystemInformation(rf.msg.payload));
+		si_per_tc := f_gsmtap_sample_si(GSMTAP);
+		log("SI per TC: ", si_per_tc);
+		f_validate_si_scheduling(si_cfg, si_per_tc);
+		setverdict(pass);
 	}
 
 
@@ -120,7 +443,7 @@ module Test {
 			[] pt.receive(ENABLE_PROMPT) { };
 			[] pt.receive(config_pattern) { };
 			[] pt.receive(charstring:?) -> value rx { buf := buf & rx; repeat };
-			[] T.timeout { setverdict(fail); return ""};
+			[] T.timeout { setverdict(fail, "Timeout"); return ""};
 		}
 		T.stop;
 		return buf;
