@@ -1,5 +1,6 @@
 module Test {
 	import from GSM_Types all;
+	import from Osmocom_Types all;
 	import from GSM_SystemInformation all;
 	import from GSMTAP_Types all;
 	import from GSMTAP_PortType all;
@@ -95,6 +96,14 @@ module Test {
 	type SystemInformationVector SystemInformationVectorPerTc[8];
 
 	type record of integer IntegerRecord;
+
+	function int2bool(integer int) return boolean {
+		if (int != 0) {
+			return true;
+		} else {
+			return false;
+		}
+	}
 
 	function f_array_contains(IntegerRecord arr, integer key) return boolean {
 		for (var integer i:= 0; i< sizeof(arr); i := i + 1) {
@@ -446,6 +455,38 @@ module Test {
 		return si_per_tc;
 	}
 
+	function f_gsmtap_get_si(GSMTAP_PT pt, RrMessageType msg_type) return SystemInformation {
+		timer T := 10.0;
+		var GSMTAP_RecvFrom rf;
+		var SystemInformation si;
+
+		/* flush all previous/buffered elements */
+		pt.clear
+
+		T.start;
+		alt {
+			[] pt.receive(t_recvfrom(GSMTAP_CHANNEL_BCCH)) -> value rf {
+					si := dec_SystemInformation(rf.msg.payload);
+					if (si.header.message_type == msg_type) {
+						return si;
+					}
+					repeat;
+				}
+			[] pt.receive { repeat; };
+			[] T.timeout { testcase.stop("Error waiting for SI on GSMTAP"); };
+		}
+		return si;
+	}
+
+	function f_gsmtap_match_si(GSMTAP_PT pt, RrMessageType msg_type, template SystemInformation t) {
+		var SystemInformation si := f_gsmtap_get_si(pt, msg_type);
+		if (not match(si, t)) {
+			setverdict(fail, "SI ", si, " doesn't match ", t);
+		} else {
+			setverdict(pass);
+		}
+	}
+
 	function f_init() runs on dummy_CT {
 		if (initialized) {
 			return;
@@ -755,6 +796,212 @@ module Test {
 		setverdict(pass);
 	}
 
+	template SystemInformation t_SI_SI3 := {
+		header := t_SiHeader(SYSTEM_INFORMATION_TYPE_3, ?),
+		payload := { si3 := t_SI3 }
+	}
+
+	testcase TC_cellid() runs on dummy_CT {
+		var CellIdentity cid := float2int(rnd() * 65535.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_id := cid;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "cell_identity " & int2str(cid));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_lac() runs on dummy_CT {
+		var uint16_t lac := float2int(rnd() * 65535.0);
+
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.lai.lac := lac;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "location_area_code " & int2str(lac));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_rach_tx_int() runs on dummy_CT {
+		var uint16_t rach_tx_int := float2int(rnd() * 15.0);
+
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.rach_control.tx_integer := int2bit(rach_tx_int, 4);
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "rach tx integer " & int2str(rach_tx_int));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_rach_max_tx() runs on dummy_CT {
+		var uint16_t r := float2int(rnd() * 3.0);
+		const integer max_tx_map[4] := { 1, 2, 4, 7 };
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.rach_control.max_retrans := int2bit(r, 2);
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "rach max transmission " & int2str(max_tx_map[r]));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_dtx_ul() runs on dummy_CT {
+		var integer i := float2int(rnd() * 2.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_options.dtx := int2bit(i, 2);
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		if (i == 0) {
+			f_vty_transceive(BSCVTY, "dtx uplink");
+		} else if (i == 1) {
+			f_vty_transceive(BSCVTY, "dtx uplink force");
+		} else {
+			f_vty_transceive(BSCVTY, "no dtx uplink");
+		}
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_attach() runs on dummy_CT {
+		var integer i := float2int(rnd());
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.ctrl_chan_desc.att := int2bool(i);
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "channel-descrption attach " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_bs_pa_mfrms() runs on dummy_CT {
+		var integer i := 2 + float2int(rnd() * 7.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.ctrl_chan_desc.bs_pa_mfrms := i - 2;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "channel-descrption bs-pa-mfrms " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_bs_ag_blks_res() runs on dummy_CT {
+		var integer i := float2int(rnd() * 7.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.ctrl_chan_desc.bs_ag_blks_res := i;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "channel-descrption bs-ag-blks-res " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_radio_link_timeout() runs on dummy_CT {
+		var integer i := float2int(rnd() * 15.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_options.radio_link_timeout := int2bit(i, 4);
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "radio-link-timeout " & int2str(4 + i*4));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_cell_resel_hyst() runs on dummy_CT {
+		var integer i := float2int(rnd() * 7.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_sel_par.cell_resel_hyst := i;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "cell reselection hysteresis " & int2str(i*2));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_rxlev_acc_min() runs on dummy_CT {
+		var integer i := float2int(rnd() * 63.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_sel_par.rxlev_access_min := i;
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "rxlev access min " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_neci() runs on dummy_CT {
+		var integer i := float2int(rnd() * 1.0);
+		var template SystemInformation t := t_SI_SI3;
+		t.payload.si3.cell_sel_par.neci := int2bool(i);
+
+		f_init();
+		f_vty_enter_cfg_network(BSCVTY);
+		f_vty_transceive(BSCVTY, "neci " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	testcase TC_emerg_allowed() runs on dummy_CT {
+		var integer i := float2int(rnd());
+		var template SystemInformation t := t_SI_SI3;
+		if (i == 1) {
+			t.payload.si3.rach_control.ac := '?????0??????????'B;
+		} else {
+			t.payload.si3.rach_control.ac := '?????1??????????'B;
+		}
+
+		f_init();
+		f_vty_enter_cfg_bts(BSCVTY, 0);
+		f_vty_transceive(BSCVTY, "rach emergency call allowed " & int2str(i));
+		f_vty_transceive(BSCVTY, "end")
+		f_vty_si_resend(BSCVTY, 0);
+
+		f_gsmtap_match_si(GSMTAP, SYSTEM_INFORMATION_TYPE_3, t);
+	}
+
+	/* TODO:
+	* 	* don't only validate SI3 but check all other SI with same IE?
+	*	* parse + validate rest octets somehow
+	*	* validate contents/encoding of neighbor channel lists
+	*	* validate si2quater sub-mux scheduling
+	*/
+
+
 	control {
 		execute(TC_si1());
 		execute(TC_telnet());
@@ -765,5 +1012,18 @@ module Test {
 		execute(TC_si_sched_2quater());
 		execute(TC_si_sched_13());
 		execute(TC_si_sched_13_2bis_2ter_2quater());
+		execute(TC_neci());
+		execute(TC_cell_resel_hyst());
+		execute(TC_rxlev_acc_min());
+		execute(TC_cellid());
+		execute(TC_lac());
+		execute(TC_rach_tx_int());
+		execute(TC_rach_max_tx());
+		execute(TC_attach());
+		execute(TC_dtx_ul());
+		execute(TC_emerg_allowed());
+		execute(TC_bs_pa_mfrms());
+		execute(TC_bs_ag_blks_res());
+		execute(TC_radio_link_timeout());
 	}
 }
