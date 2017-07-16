@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn"
+FILES="*.ttcn UD_PT.cc UD_PT.hh"
 
 ttcn3_makefilegen -f L1CTL_Test.ttcn $FILES
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
