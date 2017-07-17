@@ -1,0 +1,248 @@
+/* Test Port that stacks on top of L1CTL test port and performs LAPDm encoding/decoding, so the user can send
+ * and receive LAPDm frames in decoded TTCN-3 data types.  This is particularly useful for sending/receiving
+ * all kinds of hand-crafted LAPDm frames for testing of the remote LAPDm layer */
+module LAPDm_RAW_PT {
+	import from GSM_Types all;
+	import from Osmocom_Types all;
+	import from L1CTL_Types all;
+	import from L1CTL_PortType all;
+	import from LAPDm_Types all;
+
+	/* request to tune to a given ARFCN and start BCCH decoding */
+	type record BCCH_tune_req {
+		Arfcn arfcn,
+		boolean combined_ccch
+	}
+
+	/* ask for a dedicated channel to be established */
+	type record DCCH_establish_req {
+		uint8_t ra
+	}
+
+	type record DCCH_establish_res {
+		ChannelDescription chan_desc optional,
+		charstring err optional
+	}
+
+	type record DCCH_release_req {
+	}
+
+	/* PH-DATA.ind / PH-DATA.req */
+	type record LAPDm_ph_data {
+		boolean sacch,
+		GsmSapi sapi,
+		LapdmFrame lapdm
+	}
+
+	/* port from our (internal) point of view */
+	type port LAPDm_SP_PT message {
+		in	BCCH_tune_req,
+			DCCH_establish_req,
+			DCCH_release_req,
+			LAPDm_ph_data;
+		out	DCCH_establish_res,
+			LAPDm_ph_data;
+	} with {extension "internal"};
+
+	/* port from user (external) point of view */
+	type port LAPDm_PT message {
+		in	DCCH_establish_res,
+			LAPDm_ph_data;
+		out	BCCH_tune_req,
+			DCCH_establish_req,
+			DCCH_release_req,
+			LAPDm_ph_data;
+	} with {extension "internal"};
+
+	function LAPDmStart() runs on lapdm_CT {
+		f_init();
+		ScanEvents();
+	}
+
+	/* TS 44.004 Figure 5.1 */
+	type enumerated ph_state_enum {
+		PH_STATE_NULL,
+		PH_STATE_BCH,
+		PH_STATE_SEARCHING_BCH,
+		PH_STATE_TUNING_DCH,
+		PH_STATE_DCH
+	}
+
+	type component lapdm_CT {
+		var charstring l1ctl_sock_path := "/tmp/osmocom_l2";
+
+		/* L1CTL port towards the bottom */
+		port L1CTL_PT L1CTL;
+		/* Port towards L2 */
+		port LAPDm_SP_PT LAPDM_SP;
+
+		/* physical layer state */
+		var ph_state_enum ph_state := PH_STATE_NULL;
+
+		/* channel description of the currently active DCH */
+		var ChannelDescription chan_desc;
+	};
+
+	/* wrapper function to log state transitions */
+	private function set_ph_state(ph_state_enum new_state) runs on lapdm_CT {
+		log("PH-STATE ", ph_state, " -> ", new_state);
+		ph_state := new_state;
+	}
+
+	private function f_init() runs on lapdm_CT {
+		L1CTL.send(L1CTL_connect:{path:=l1ctl_sock_path});
+		L1CTL.receive(L1CTL_connect_result:{result_code := SUCCESS, err:=omit});
+
+		L1CTL.send(t_L1ctlResetReq(L1CTL_RES_T_SCHED));
+		L1CTL.receive;
+		set_ph_state(PH_STATE_NULL);
+	}
+
+	/* release the dedicated radio channel */
+	private function f_release_dcch() runs on lapdm_CT {
+		L1CTL.send(t_L1CTL_DM_REL_REQ(chan_desc.chan_nr));
+		set_ph_state(PH_STATE_NULL);
+	}
+
+	/* tune to given ARFCN and start BCCH/CCCH decoding */
+	private function f_tune_bcch(Arfcn arfcn, boolean combined) runs on lapdm_CT {
+		var L1ctlCcchMode mode := CCCH_MODE_NON_COMBINED;
+		if (combined) {
+			mode := CCCH_MODE_COMBINED;
+		}
+
+		if (ph_state == PH_STATE_DCH) {
+			/* release any previous DCH */
+			f_release_dcch();
+		}
+
+		set_ph_state(PH_STATE_SEARCHING_BCH);
+
+		/* send FB/SB req to sync to cell */
+		f_L1CTL_FBSB(L1CTL, arfcn, mode);
+		set_ph_state(PH_STATE_BCH);
+	}
+
+	/* master function establishing a dedicated radio channel */
+	private function f_establish_dcch(uint8_t ra) runs on lapdm_CT {
+		var ImmediateAssignment imm_ass;
+		var GsmFrameNumber rach_fn;
+
+		/* send RACH request and obtain FN at which it was sent */
+		rach_fn := f_L1CTL_RACH(L1CTL, ra);
+		//if (not rach_fn) { return; }
+
+		/* wait for receiving matching IMM ASS */
+		imm_ass := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, rach_fn)
+		//if (not imm_ass) { return; }
+		set_ph_state(PH_STATE_TUNING_DCH);
+
+		/* store/save channel description */
+		chan_desc := imm_ass.chan_desc;
+
+		/* send DM_EST_REQ */
+		f_L1CTL_DM_EST_REQ_IA(L1CTL, imm_ass);
+		set_ph_state(PH_STATE_DCH);
+	}
+
+	function ScanEvents() runs on lapdm_CT {
+		var L1ctlDlMessage dl;
+		var BCCH_tune_req bt;
+		var LAPDm_ph_data lpd;
+		var DCCH_establish_req est_req;
+		var DCCH_establish_res est_res;
+
+		while (true) {
+		if (ph_state == PH_STATE_NULL) {
+			alt {
+			[] LAPDM_SP.receive(BCCH_tune_req:?) -> value bt {
+				f_tune_bcch(bt.arfcn, bt.combined_ccch);
+			}
+
+			[] LAPDM_SP.receive {}
+			[] L1CTL.receive {}
+
+			}
+		} else if (ph_state == PH_STATE_BCH or ph_state == PH_STATE_SEARCHING_BCH) {
+			alt {
+			[] LAPDM_SP.receive(BCCH_tune_req:?) -> value bt {
+				f_tune_bcch(bt.arfcn, bt.combined_ccch);
+			}
+
+			/* forward CCCH SAPI from L1CTL to User */
+			[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_BCCH(0))) -> value dl {
+				lpd.sacch := false;
+				lpd.sapi := 0;
+				lpd.lapdm.bbis := dec_LapdmFrameBbis(dl.payload.data_ind.payload);
+				LAPDM_SP.send(lpd);
+			}
+
+			/* forward BCCH SAPI from L1CTL to User */
+			[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0))) -> value dl {
+				lpd.sacch := false;
+				lpd.sapi := 0;
+				lpd.lapdm.bbis := dec_LapdmFrameBbis(dl.payload.data_ind.payload);
+				LAPDM_SP.send(lpd);
+			}
+
+			/* Establish dedicated channel */
+			[] LAPDM_SP.receive(DCCH_establish_req:?) -> value est_req {
+				var DCCH_establish_res res;
+				f_establish_dcch(est_req.ra);
+				if (ph_state == PH_STATE_DCH) {
+					res := { chan_desc, omit };
+				} else {
+					res := { omit, "Unable to esetablish DCCH" };
+				}
+				LAPDM_SP.send(res);
+			}
+
+			[] LAPDM_SP.receive {}
+			[] L1CTL.receive {}
+
+			}
+
+		} else if (ph_state == PH_STATE_TUNING_DCH or ph_state == PH_STATE_DCH) {
+			alt {
+
+			/* decode any received DATA frames for the dedicated channel and pass them up */
+			[] L1CTL.receive(t_L1CTL_DATA_IND(chan_desc.chan_nr)) -> value dl {
+				if (dl.dl_info.link_id.c == SACCH) {
+					lpd.sacch := true;
+					/* FIXME: how to deal with UI frames in B4 format (lo length!) */
+				} else {
+					lpd.sacch := false;
+				}
+				lpd.sapi := dl.dl_info.link_id.sapi;
+				lpd.lapdm.b := dec_LapdmFrameB(dl.payload.data_ind.payload);
+				LAPDM_SP.send(lpd);
+			}
+
+			/* encode any LAPDm record from user and pass it on to L1CTL */
+			[] LAPDM_SP.receive(LAPDm_ph_data:?) -> value lpd {
+				var octetstring buf;
+				var RslLinkId link_id;
+				if (lpd.sacch) {
+					link_id := valueof(ts_RslLinkID_SACCH(lpd.sapi));
+				} else {
+					link_id := valueof(ts_RslLinkID_DCCH(lpd.sapi));
+				}
+				buf := enc_LapdmFrame(lpd.lapdm);
+				L1CTL.send(t_L1CTL_DATA_REQ(chan_desc.chan_nr, link_id, buf));
+			}
+
+			/* Release dedicated channel */
+			[] LAPDM_SP.receive(DCCH_release_req:?) {
+				/* go back to BCCH */
+				f_release_dcch();
+			}
+
+			[] LAPDM_SP.receive {}
+			[] L1CTL.receive {}
+
+
+			}
+		}
+		} /* while (1) */
+	}
+}
