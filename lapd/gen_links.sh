@@ -17,6 +17,6 @@ gen_links $DIR $FILES
 
 
 
-DIR=../sysinfo
+DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn"
 gen_links $DIR $FILES

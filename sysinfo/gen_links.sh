@@ -26,3 +26,8 @@ gen_links $DIR $FILES
 DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
+
+DIR=../library
+FILES="GSMTAP_PortType.ttcn GSMTAP_Types.ttcn GSM_SystemInformation.ttcn GSM_Types.ttcn IPL4_GSMTAP_CtrlFunct.ttcn IPL4_GSMTAP_CtrlFunctDef.cc Osmocom_Types.ttcn General_Types.ttcn"
+gen_links $DIR $FILES
+
