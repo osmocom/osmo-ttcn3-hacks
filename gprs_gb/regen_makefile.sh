@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn BSSGP_Helper.cc"
+FILES="*.ttcn BSSGP_Helper.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc NS_CodecPort_CtrlFunctDef.cc"
 
 ttcn3_makefilegen -f Test.ttcn $FILES
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile

@@ -169,6 +169,8 @@ OCTETSTRING f__BSSGP__compact__len(OCTETSTRING const &in)
 	return prefix + compact_tlv_part(tlv_part_in);
 }
 
+#define NS_PDUT_NS_UNITDATA	0x00
+
 /* expand all the variable-length "length" fields of a NS message (Osmocom TvLV) into statlc TL16V format */
 OCTETSTRING f__NS__expand__len(OCTETSTRING const &in)
 {
@@ -176,6 +178,9 @@ OCTETSTRING f__NS__expand__len(OCTETSTRING const &in)
 	int in_len = in.lengthof();
 	uint8_t pdu_type = in_ptr[0];
 	uint8_t static_hdr_len = 1;
+
+	if (pdu_type == NS_PDUT_NS_UNITDATA)
+		return in;
 
 	if (in_len < static_hdr_len)
 		TTCN_error("NS message is shorter (%u bytes) than minimum header length (%u bytes) for msg_type 0x%02x",
@@ -194,6 +199,9 @@ OCTETSTRING f__NS__compact__len(OCTETSTRING const &in)
 	int in_len = in.lengthof();
 	uint8_t pdu_type = in_ptr[0];
 	uint8_t static_hdr_len = 1;
+
+	if (pdu_type == NS_PDUT_NS_UNITDATA)
+		return in;
 
 	if (in_len < static_hdr_len)
 		TTCN_error("NS message is shorter (%u bytes) than minimum header length (%u bytes) for msg_type 0x%02x",

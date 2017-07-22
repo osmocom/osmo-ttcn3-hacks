@@ -1,0 +1,157 @@
+module NS_Emulation {
+	import from NS_Types all;
+	import from BSSGP_Types all;
+	import from NS_CodecPort all;
+	import from NS_CodecPort_CtrlFunct all;
+	//import from IPL4asp_PortType all;
+	import from IPL4asp_Types all;
+
+	type record NsUnitdataRequest {
+		BssgpBvci	bvci,
+		Nsei		nsei,
+		octetstring	sdu
+	}
+
+	type record NsUnitdataIndication {
+		BssgpBvci	bvci,
+		Nsei		nsei,
+		octetstring	sdu
+	}
+
+	type enumerated NseState {
+		NSE_S_BLOCKED,
+		NSE_S_ALIVE,
+		NSE_S_RESET
+	};
+
+	/* port from our (internal) point of view */
+	type port NS_SP_PT message {
+		in	NsUnitdataRequest;
+		out	NsUnitdataIndication,
+			ASP_Event;
+	} with { extension "internal" };
+
+	/* port from the user point of view */
+	type port NS_PT message {
+		in	ASP_Event,
+			NsUnitdataIndication;
+		out	NsUnitdataRequest;
+	} with { extension "internal" };
+
+	function NSStart() runs on NS_CT {
+		f_init();
+		f_ScanEvents();
+	}
+
+	private function f_init() runs on NS_CT {
+		f_IPL4_connect(NSCP, remote_ip, remote_udp_port, local_ip, local_udp_port, 0, { udp := {}});
+	}
+
+	type component NS_CT {
+		/* UDP port towards the bottom (IUT) */
+		port NS_CODEC_PT NSCP;
+		/* NS-User SAP towards the user */
+		port NS_SP_PT NS_SP;
+
+		var NseState		state;
+		var ConnectionId	conn_id;
+	}
+
+	modulepar {
+		PortNumber local_udp_port := 23001;
+		charstring local_ip := "127.0.0.1";
+		PortNumber remote_udp_port := 23000;
+		charstring remote_ip := "127.0.0.1";
+	};
+
+	template NsTLV t_NS_IE_CAUSE(template NsCause cause) := {
+		iei := NS_IEI_CAUSE,
+		len := 1,
+		u := { cause := cause }
+	};
+
+	template NsTLV t_NS_IE_NSVCI(template Nsvci nsvci) := {
+		iei := NS_IEI_NSVCI,
+		len := 2,
+		u := { nsvci :=  nsvci }
+	}
+
+	template NsTLV t_NS_IE_NSEI(template Nsvci nsei) := {
+		iei := NS_IEI_NSEI,
+		len := 2,
+		u := { nsei := nsei }
+	}
+
+	template NsPdu t_NS_RESET(template NsCause cause, template Nsvci nsvci, template Nsei nsei) := {
+		pdu_type := NS_PDUT_NS_RESET,
+		u := {
+			other := {
+				tlvs := { t_NS_IE_CAUSE(cause), t_NS_IE_NSVCI(nsvci), t_NS_IE_NSEI(nsei) }
+			}
+		}
+	};
+
+	template NsPdu t_NS_RESET_ACK(template Nsvci nsvci, template Nsei nsei) := {
+		pdu_type := NS_PDUT_NS_RESET,
+		u := {
+			other := {
+				tlvs := { t_NS_IE_NSVCI(nsvci), t_NS_IE_NSEI(nsei) }
+			}
+		}
+	};
+
+	template NsPdu t_NS_SIMPLE(template NsPduType pdut) := { pdu_type := pdut, u := { other := { tlvs := {} } } };
+	template NsPdu t_NS_ALIVE := t_NS_SIMPLE(NS_PDUT_NS_ALIVE);
+	template NsPdu t_NS_ALIVE_ACK := t_NS_SIMPLE(NS_PDUT_NS_ALIVE_ACK);
+	template NsPdu t_NS_UNBLOCK := t_NS_SIMPLE(NS_PDUT_NS_UNBLOCK);
+	template NsPdu t_NS_UNBLOCK_ACK := t_NS_SIMPLE(NS_PDUT_NS_UNBLOCK_ACK);
+	template NsPdu t_NS_BLOCK := t_NS_SIMPLE(NS_PDUT_NS_BLOCK);
+	template NsPdu t_NS_BLOCK_ACK := t_NS_SIMPLE(NS_PDUT_NS_BLOCK_ACK);
+
+	template NS_Send t_NS_Send(template ConnectionId connId, template NsPdu msg) := {
+		connId := connId,
+		msg := msg
+	}
+
+	private function f_ScanEvents() runs on NS_CT {
+		var NsUnitdataRequest ud_req;
+		var NS_RecvFrom rf;
+		var ASP_Event evt;
+
+		while (true) {
+
+		if (state == NSE_S_BLOCKED) {
+			alt {
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK)) -> value rf {
+					NSCP.send(t_NS_Send(conn_id, t_NS_BLOCK_ACK));
+				}
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value rf {
+					NSCP.send(t_NS_Send(conn_id, t_NS_UNBLOCK_ACK));
+					state := NSE_S_ALIVE;
+				}
+				[] NSCP.receive(ASP_Event:?) -> value evt { NS_SP.send(evt); }
+			}
+		} else if (state == NSE_S_ALIVE) {
+			alt {
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK)) -> value rf {
+					NSCP.send(t_NS_Send(conn_id, t_NS_BLOCK_ACK));
+					state := NSE_S_BLOCKED;
+				}
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value rf {
+					NSCP.send(t_NS_Send(conn_id, t_NS_UNBLOCK_ACK));
+				}
+				[] NS_SP.receive(NsUnitdataRequest:?) -> value ud_req {
+					//NSCP.send(t_NS_Send(
+				}
+				[] NSCP.receive(ASP_Event:?) -> value evt { NS_SP.send(evt); }
+			}
+		} else if (state == NSE_S_RESET) {
+			alt {
+				[] NSCP.receive(ASP_Event:?) -> value evt { NS_SP.send(evt); }
+			}
+		}
+
+
+		}
+	}
+}
