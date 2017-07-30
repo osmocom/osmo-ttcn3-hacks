@@ -18,5 +18,5 @@ gen_links $DIR $FILES
 
 
 DIR=../library
-FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn L1CTL_PortType.ttcn L1CTL_Types.ttcn"
+FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn RLCMAC_CSN1_Types.ttcn Osmocom_Types.ttcn L1CTL_PortType.ttcn L1CTL_Types.ttcn"
 gen_links $DIR $FILES
