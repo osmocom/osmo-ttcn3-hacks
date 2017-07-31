@@ -113,8 +113,8 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 		in.mac__hdr().e() = false;
 
 	/* Fix other presence indications */
-	in.mac__hdr().tlli__ind() = in.tlli().is_bound();
-	in.mac__hdr().pfi__ind() = in.pfi().is_bound();
+	in.mac__hdr().tlli__ind() = in.tlli().is_bound() && in.tlli() != OMIT_VALUE;
+	in.mac__hdr().pfi__ind() = in.pfi().is_bound() && in.pfi() != OMIT_VALUE;
 
 	/* use automatic/generated decoder for header */
 	in.mac__hdr().encode(UlMacDataHeader_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
