@@ -261,5 +261,48 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 	return ret_val;
 }
 
+OCTETSTRING enc__RlcmacUlBlock(const RlcmacUlBlock& si)
+{
+	if (si.ischosen(RlcmacUlBlock::ALT_data))
+		return enc__RlcmacUlDataBlock(si.data());
+	else
+		return enc__RlcmacUlCtrlBlock(si.ctrl());
+}
+
+OCTETSTRING enc__RlcmacDlBlock(const RlcmacDlBlock& si)
+{
+	if (si.ischosen(RlcmacDlBlock::ALT_data))
+		return enc__RlcmacDlDataBlock(si.data());
+	else
+		return enc__RlcmacDlCtrlBlock(si.ctrl());
+}
+
+
+RlcmacUlBlock dec__RlcmacUlBlock(const OCTETSTRING& stream)
+{
+	RlcmacUlBlock ret_val;
+	unsigned char pt = stream[0].get_octet() >> 6;
+
+	if (pt == MacPayloadType::MAC__PT__RLC__DATA)
+		ret_val.data() = dec__RlcmacUlDataBlock(stream);
+	else
+		ret_val.ctrl() = dec__RlcmacUlCtrlBlock(stream);
+
+	return ret_val;
+}
+
+RlcmacDlBlock dec__RlcmacDlBlock(const OCTETSTRING& stream)
+{
+	RlcmacDlBlock ret_val;
+	unsigned char pt = stream[0].get_octet() >> 6;
+
+	if (pt == MacPayloadType::MAC__PT__RLC__DATA)
+		ret_val.data() = dec__RlcmacDlDataBlock(stream);
+	else
+		ret_val.ctrl() = dec__RlcmacDlCtrlBlock(stream);
+
+	return ret_val;
+}
+
 
 } // namespace
