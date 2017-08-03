@@ -2,9 +2,6 @@
 #include "IPL4asp_PT.hh"
 #include "GTP_CodecPort.hh"
 
-using namespace IPL4asp__PortType;
-using namespace IPL4asp__Types;
-
 namespace GTP__CodecPort__CtrlFunct {
 
   IPL4asp__Types::Result f__IPL4__listen(
@@ -54,5 +51,16 @@ namespace GTP__CodecPort__CtrlFunct {
   {
     return f__IPL4__PROVIDER__getUserData(portRef, connId, userData);
   }
-  
+
+
+  IPL4asp__Types::Result f__GTPU__listen(
+    GTP__CodecPort::GTPU__PT& portRef,
+    const IPL4asp__Types::HostName& locName,
+    const IPL4asp__Types::PortNumber& locPort,
+    const IPL4asp__Types::ProtoTuple& proto,
+    const IPL4asp__Types::OptionList& options)
+  {
+    return f__IPL4__PROVIDER__listen(portRef, locName, locPort, proto, options);
+  }
+
 }
