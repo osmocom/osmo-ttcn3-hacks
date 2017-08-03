@@ -1,3 +1,325 @@
 module GGSN_Tests {
 
+	import from General_Types all;
+	import from IPL4asp_PortType all;
+	import from IPL4asp_Types all;
+	import from GTP_CodecPort all;
+	import from GTP_CodecPort_CtrlFunct all;
+	import from GTPC_Types all;
+	import from GTPU_Types all;
+
+	const integer GTP0_PORT := 3386;
+	const integer GTP1C_PORT := 2123;
+	const integer GTP1U_PORT := 2152;
+	const charstring g_bind_ip := "127.23.42.1";
+
+	type component GT_CT {
+		port GTPC_PT GTPC;
+		port GTPU_PT GTPU;
+
+		var OCT1 g_restart_ctr := '01'O;
+		/* FIXME: unify with g_bind_ip + parse from config file */
+		var OCT4 g_sgsn_ip := '7f172a01'O;
+		/* FIXME: parse remName from config file */
+		var GtpPeer g_peer := { connId := 0, remName := "127.0.0.6", remPort := GTP1C_PORT };
+		timer T_default := 3.0;
+	}
+
+	function f_init() runs on GT_CT {
+		var Result res;
+		map(self:GTPC, system:GTPC);
+		res := GTP_CodecPort_CtrlFunct.f_IPL4_listen(GTPC, g_bind_ip, GTP1C_PORT, {udp:={}});
+		log("GTP1C ConnectionID: ", res.connId);
+		g_peer.connId := res.connId;
+
+		map(self:GTPU, system:GTPU);
+		GTP_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, g_bind_ip, GTP1U_PORT, {udp:={}});
+	}
+
+	/* generalized GTP-C receive template */
+	template PDU_GTPC tr_GTP1C_PDU(template OCT1 msg_type, template OCT4 teid) := {
+		/* N-PDU Number flag (PN) shall be set to '0'. A GTP-C receiver shall not return an
+		 * error if this flag is set to '1'. */
+		pn_bit := '0'B,
+		/* Sequence number flag (S) shall be set to '1'. */
+		s_bit := '1'B,
+		e_bit := ?,
+		spare := ?,
+		/* Protocol Type flag (PT) shall be set to '1'.*/
+		pt := '1'B,
+		/* Version shall be set to decimal 1 ('001'). */
+		version := '001'B,
+		messageType := msg_type,
+		lengthf := ?,
+		teid := teid,
+		opt_part := *,
+		gtpc_pdu := ?
+	}
+
+	/* generalized GTP-C send template */
+	template PDU_GTPC ts_GTP1C_PDU(OCT1 msg_type, OCT4 teid, GTPC_PDUs pdu) := {
+		/* N-PDU Number flag (PN) shall be set to '0'. A GTP-C receiver shall not return an
+		 * error if this flag is set to '1'. */
+		pn_bit := '0'B,
+		/* Sequence number flag (S) shall be set to '1'. */
+		s_bit := '1'B,
+		e_bit := '0'B,
+		spare := '0'B,
+		/* Protocol Type flag (PT) shall be set to '1'.*/
+		pt := '1'B,
+		/* Version shall be set to decimal 1 ('001'). */
+		version := '001'B,
+		messageType := msg_type,
+		lengthf := 0,	/* we assume encoder overwrites this */
+		teid := teid,
+		opt_part := {
+			sequenceNumber := '9801'O,
+			npduNumber := '00'O,
+			nextExtHeader := '00'O,
+			gTPC_extensionHeader_List := omit
+		},
+		gtpc_pdu := pdu
+	}
+
+	/* recovery IE */
+	template Recovery_gtpc ts_Recovery(OCT1 restart_counter) := {
+		type_gtpc := '00'O, /* we assume encoder fixes this */
+		restartCounter := restart_counter
+	}
+
+	/* template matching reception of GTP-C echo-request */
+	template Gtp1cUnitdata tr_GTPC_MsgType(template GtpPeer peer, template OCT1 msg_type, template OCT4 teid) := {
+		peer := peer,
+		gtpc := tr_GTP1C_PDU(msg_type, teid)
+	}
+
+	/* template matching reception of GTP-C echo-request */
+	template Gtp1cUnitdata tr_GTPC_PING(template GtpPeer peer) := tr_GTPC_MsgType(peer, echoRequest, '00000000'O);
+
+	template GTPC_PDUs ts_EchoRespPDU(OCT1 restart_counter) := {
+		echoResponse := {
+			recovery := {
+				type_gtpc := '00'O, /* we assume encoder fixes? */
+				restartCounter := restart_counter
+			},
+			private_extension_gtpc := omit
+		}
+	}
+
+	/* master template for senidng a GTP-C echo response */
+	template Gtp1cUnitdata ts_GTPC_PONG(GtpPeer peer, OCT1 rest_ctr) := {
+		peer := peer,
+		gtpc := ts_GTP1C_PDU(echoResponse, '00000000'O, valueof(ts_EchoRespPDU(rest_ctr)))
+	}
+
+	template EndUserAddress t_EuaIPv4(template OCT4 ip_addr) := {
+		type_gtpc := '80'O,
+		endUserAddress := {
+			endUserAddressIPv4 := {
+				lengthf := 2,
+				pdp_typeorg := '0001'B,
+				spare := '1111'B,
+				pdp_typenum := '21'O,
+				ipv4_address := ip_addr
+			}
+		}
+	}
+	template EndUserAddress t_EuaIPv4Dyn := t_EuaIPv4(omit);
+	template EndUserAddress t_EuaIPv6(template OCT16 ip_addr) := {
+		type_gtpc := '80'O,
+		endUserAddress := {
+			endUserAddressIPv6 := {
+				lengthf := 2,
+				pdp_typeorg := '0001'B,
+				spare := '1111'B,
+				pdp_typenum := '57'O,
+				ipv6_address := ip_addr
+			}
+		}
+	}
+	template EndUserAddress t_EuaIPv6Dyn := t_EuaIPv6(omit);
+
+	template AccessPointName ts_APN(octetstring apn) := {
+		type_gtpc := '83'O,
+		lengthf := lengthof(apn),
+		apn_value := apn
+	}
+
+	template GSN_Address_GTPC ts_GsnAddr(octetstring ip_addr) := {
+		type_gtpc := '85'O,
+		lengthf := lengthof(ip_addr),
+		addressf := ip_addr
+	}
+
+	template MSISDN ts_Msisdn(octetstring msisdn) := {
+		type_gtpc := '86'O,
+		lengthf := lengthof(msisdn),
+		msisdn := msisdn
+	}
+
+	template QualityOfServiceProfile ts_QosDefault := {
+		type_gtpc := '87'O,
+		lengthf := 4,
+		allocRetensionPrio := '00'O,
+		qos_ProfileValue := {
+			reliabilityClass := '011'B,
+			delayClass := '001'B,
+			spare1 := '00'B,
+			precedenceClass := '010'B,
+			spare2 := '0'B,
+			peakThroughput := '1001'B,
+			meanThroughput := '11111'B,
+			spare3 := '000'B,
+			deliverErroneusSDU := omit,
+			deliveryOrder := omit,
+			trafficClass := omit,
+			maxSDUSize := omit,
+			maxBitrateUplink := omit,
+			maxBitrateDownlink := omit,
+			sduErrorRatio := omit,
+			residualBER := omit,
+			trafficHandlingPriority := omit,
+			transferDelay := omit,
+			guaranteedBitRateUplink := omit,
+			guaranteedBitRateDownlink := omit,
+			sourceStatisticsDescriptor := omit,
+			signallingIndication := omit,
+			spare4 := omit,
+			maxBitrateDownlinkExt := omit,
+			guaranteedBitRateDownlinkExt := omit,
+			maxBitrateUplinkExt := omit,
+			guaranteedBitRateUplinkExt := omit
+		}
+	}
+
+	template IMSI_gtpc ts_Imsi(hexstring digits) := {
+		type_gtpc := '02'O,
+		digits := digits,
+		padding := 'F'H
+	}
+
+	template GTPC_PDUs ts_CreatePdpPDU(hexstring imsi, OCT1 restart_ctr, OCT4 teid_data, OCT4 teid_ctrl,
+					   BIT4 nsapi, EndUserAddress eua, octetstring apn,
+					   octetstring sgsn_ip_sign, octetstring sgsn_ip_data,
+					   octetstring msisdn) := {
+		createPDPContextRequest := {
+			imsi := ts_Imsi(imsi),
+			rai := omit,
+			recovery := ts_Recovery(restart_ctr),
+			selectionMode := {
+				type_gtpc := '0F'O,
+				selectModeValue := '00'B,
+				spare := '111111'B
+			},
+			teidDataI := {
+				type_gtpc := '00'O,
+				teidDataI := teid_data
+			},
+			teidControlPlane := {
+				type_gtpc := '00'O,
+				teidControlPlane := teid_ctrl
+			},
+			nsapi := {
+				type_gtpc := '00'O,
+				nsapi := nsapi,
+				unused := '0000'B
+			},
+			linked_nsapi := omit,
+			charging_char := omit,
+			trace_ref := omit,
+			trace_type := omit,
+			endUserAddress := eua,
+			accessPointName := ts_APN(apn),
+			protConfigOptions := omit,
+			sgsn_addr_signalling := ts_GsnAddr(sgsn_ip_sign),
+			sgsn_addr_traffic := ts_GsnAddr(sgsn_ip_data),
+			msisdn := ts_Msisdn(msisdn),
+			qualityOfServiceProfile := ts_QosDefault,
+			tft := omit,
+			triggerId := omit,
+			omcId := omit,
+			commonFlags := omit,
+			aPN_Restriction := omit,
+			ratType := omit,
+			userLocationInformation := omit,
+			mS_TimeZone := omit,
+			imeisv := omit,
+			camelChargingInformationContainer := omit,
+			additionalTraceInfo := omit,
+			correlationID := omit,
+			evolvedAllocationRetentionPriorityI := omit,
+			extendedCommonFlags := omit,
+			userCSGInformation := omit,
+			aPN_AMBR := omit,
+			signallingPriorityIndication := omit,
+			cN_OperatorSelectionEntity := omit,
+			private_extension_gtpc := omit
+		}
+	}
+
+	template Gtp1cUnitdata ts_GTPC_CreatePDP(GtpPeer peer, hexstring imsi, OCT1 restart_ctr, OCT4 teid_data,
+						 OCT4 teid_ctrl, BIT4 nsapi, EndUserAddress eua,
+						 octetstring apn, octetstring sgsn_ip_sign,
+						 octetstring sgsn_ip_data, octetstring msisdn) := {
+		peer := peer,
+		gtpc := ts_GTP1C_PDU(createPDPContextRequest, '00000000'O,
+					valueof(ts_CreatePdpPDU(imsi, restart_ctr, teid_data, teid_ctrl,
+								nsapi, eua, apn, sgsn_ip_sign,
+								sgsn_ip_data, msisdn)))
+	}
+
+	/* Altstep implementing responses to any incoming echo requests */
+	altstep pingpong() runs on GT_CT {
+		var Gtp1cUnitdata ud;
+		[] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+			GTPC.send(ts_GTPC_PONG(ud.peer, '00'O));
+			repeat;
+		};
+		//[] GTPU.receive(tr_GTP_PING(?)) {};
+		[] T_default.timeout { setverdict(fail); };
+	}
+
+	template octetstring t_ApnInternet := '08696E7465726E6574'O;
+
+	function f_pdp_ctx_act(hexstring imsi, BIT4 nsapi, EndUserAddress eua, octetstring apn, octetstring msisdn) runs on GT_CT {
+		var Gtp1cUnitdata ud;
+		var octetstring teid := '01020304'O;
+		var default d;
+
+		log("sending CreatePDP");
+		GTPC.send(ts_GTPC_CreatePDP(g_peer, imsi, g_restart_ctr, teid, teid, nsapi, eua, apn, g_sgsn_ip, g_sgsn_ip, msisdn));
+		T_default.start;
+
+		d := activate(pingpong());
+		alt {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer, createPDPContextResponse, teid)) -> value ud {
+				if (ud.gtpc.gtpc_pdu.createPDPContextResponse.cause.causevalue == '80'O) {
+					setverdict(pass);
+				} else {
+					setverdict(fail);
+				}
+			}
+		}
+		deactivate(d);
+	}
+
+	testcase TC_activate_pdp4() runs on GT_CT {
+		f_init();
+		var hexstring imsi := '262420123456789'H;
+		var octetstring msisdn := '1234'O;
+		f_pdp_ctx_act(imsi, '0010'B, valueof(t_EuaIPv4Dyn), valueof(t_ApnInternet), msisdn);
+	}
+
+	testcase TC_activate_pdp6() runs on GT_CT {
+		f_init();
+		var hexstring imsi := '262420123456789'H;
+		var octetstring msisdn := '1234'O;
+		f_pdp_ctx_act(imsi, '0010'B, valueof(t_EuaIPv6Dyn), valueof(t_ApnInternet), msisdn);
+	}
+
+
+	control {
+		execute(TC_activate_pdp4());
+		execute(TC_activate_pdp6());
+	}
 }
