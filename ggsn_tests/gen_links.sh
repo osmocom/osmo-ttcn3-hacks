@@ -23,8 +23,8 @@ DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
 FILES="Socket_API_Definitions.ttcn"
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.TestPorts.UDPasp/src
-FILES="UDPasp_PT.cc  UDPasp_PT.hh  UDPasp_PortType.ttcn  UDPasp_Types.ttcn"
+DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
+FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
 DIR=../GTP_v13.5.0_CNL113843_LATEST/src
