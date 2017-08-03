@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn IPL4asp_PT.cc  IPL4asp_discovery.cc  TCCConversion.cc  TCCInterface.cc GTPC_EncDec.cc GTPU_EncDec.cc"
+FILES="*.ttcn IPL4asp_PT.cc  IPL4asp_discovery.cc  TCCConversion.cc  TCCInterface.cc GTPC_EncDec.cc GTPU_EncDec.cc GTP_CodecPort_CtrlFunctDef.cc GTPC_PT.cc GTPU_PT.cc"
 
 ttcn3_makefilegen -f GGSN_Tests.ttcn $FILES
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
