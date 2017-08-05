@@ -1,6 +1,7 @@
 module GGSN_Tests {
 
 	import from General_Types all;
+	import from Osmocom_Types all;
 	import from IPL4asp_PortType all;
 	import from IPL4asp_Types all;
 	import from GTP_CodecPort all;
@@ -14,6 +15,26 @@ module GGSN_Tests {
 	const charstring g_bind_ip_c := "127.23.42.1";
 	const charstring g_bind_ip_u := g_bind_ip_c;
 
+	type set PdpContext {
+		hexstring	imsi,
+		octetstring	msisdn optional,
+		octetstring	apn,
+		EndUserAddress	eua,
+		BIT4		nsapi,
+		/* TEI (Data) local side */
+		OCT4		teid,
+		/* TEI (Control) local side */
+		OCT4		teic,
+		/* TEI (Data) remote side */
+		OCT4		teid_remote,
+		/* TEI (Control) remote side */
+		OCT4		teic_remote,
+		/* next to-be-sent GTP-C sequence number */
+		uint16_t	c_seq_nr,
+		/* next to-be-sent GTP-U sequence number */
+		uint16_t	d_seq_nr
+	}
+
 	type component GT_CT {
 		port GTPC_PT GTPC;
 		port GTPU_PT GTPU;
@@ -23,7 +44,8 @@ module GGSN_Tests {
 		var OCT4 g_sgsn_ip_c := '7f172a01'O;
 		var OCT4 g_sgsn_ip_u := '7f172a01'O;
 		/* FIXME: parse remName from config file */
-		var GtpPeer g_peer := { connId := 0, remName := "127.0.0.6", remPort := GTP1C_PORT };
+		var GtpPeer g_peer_c := { connId := 0, remName := "127.0.0.6", remPort := GTP1C_PORT };
+		var GtpPeer g_peer_u := { connId := 0, remName := "127.0.0.6", remPort := GTP1U_PORT };
 		timer T_default := 3.0;
 	}
 
@@ -32,10 +54,11 @@ module GGSN_Tests {
 		map(self:GTPC, system:GTPC);
 		res := GTP_CodecPort_CtrlFunct.f_IPL4_listen(GTPC, g_bind_ip_c, GTP1C_PORT, {udp:={}});
 		log("GTP1C ConnectionID: ", res.connId);
-		g_peer.connId := res.connId;
+		g_peer_c.connId := res.connId;
 
 		map(self:GTPU, system:GTPU);
-		GTP_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, g_bind_ip_u, GTP1U_PORT, {udp:={}});
+		res := GTP_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, g_bind_ip_u, GTP1U_PORT, {udp:={}});
+		g_peer_u.connId:= res.connId;
 	}
 
 	/* generalized GTP-C receive template */
@@ -59,7 +82,7 @@ module GGSN_Tests {
 	}
 
 	/* generalized GTP-C send template */
-	template PDU_GTPC ts_GTP1C_PDU(OCT1 msg_type, OCT4 teid, GTPC_PDUs pdu) := {
+	template PDU_GTPC ts_GTP1C_PDU(OCT1 msg_type, OCT4 teid, GTPC_PDUs pdu, uint16_t seq_nr) := {
 		/* N-PDU Number flag (PN) shall be set to '0'. A GTP-C receiver shall not return an
 		 * error if this flag is set to '1'. */
 		pn_bit := '0'B,
@@ -75,7 +98,7 @@ module GGSN_Tests {
 		lengthf := 0,	/* we assume encoder overwrites this */
 		teid := teid,
 		opt_part := {
-			sequenceNumber := '9801'O,
+			sequenceNumber := int2oct(seq_nr, 2),
 			npduNumber := '00'O,
 			nextExtHeader := '00'O,
 			gTPC_extensionHeader_List := omit
@@ -109,9 +132,9 @@ module GGSN_Tests {
 	}
 
 	/* master template for senidng a GTP-C echo response */
-	template Gtp1cUnitdata ts_GTPC_PONG(GtpPeer peer, OCT1 rest_ctr) := {
+	template Gtp1cUnitdata ts_GTPC_PONG(GtpPeer peer, uint16_t seq, OCT1 rest_ctr) := {
 		peer := peer,
-		gtpc := ts_GTP1C_PDU(echoResponse, '00000000'O, valueof(ts_EchoRespPDU(rest_ctr)))
+		gtpc := ts_GTP1C_PDU(echoResponse, '00000000'O, valueof(ts_EchoRespPDU(rest_ctr)), seq)
 	}
 
 	template EndUserAddress t_EuaIPv4(template OCT4 ip_addr) := {
@@ -259,7 +282,8 @@ module GGSN_Tests {
 		}
 	}
 
-	template Gtp1cUnitdata ts_GTPC_CreatePDP(GtpPeer peer, hexstring imsi, OCT1 restart_ctr, OCT4 teid_data,
+	template Gtp1cUnitdata ts_GTPC_CreatePDP(GtpPeer peer, uint16_t seq, hexstring imsi,
+						 OCT1 restart_ctr, OCT4 teid_data,
 						 OCT4 teid_ctrl, BIT4 nsapi, EndUserAddress eua,
 						 octetstring apn, octetstring sgsn_ip_sign,
 						 octetstring sgsn_ip_data, octetstring msisdn) := {
@@ -267,13 +291,15 @@ module GGSN_Tests {
 		gtpc := ts_GTP1C_PDU(createPDPContextRequest, '00000000'O,
 					valueof(ts_CreatePdpPDU(imsi, restart_ctr, teid_data, teid_ctrl,
 								nsapi, eua, apn, sgsn_ip_sign,
-								sgsn_ip_data, msisdn)))
+								sgsn_ip_data, msisdn)), seq)
 	}
 
 	function f_teardown_ind_IE(in template BIT1 ind) return template TearDownInd {
-		if (isvalue(ind)) {
+/*
+		if (not isvalue(ind)) {
 			return omit;
 		}
+*/
 		var TearDownInd ret := {
 			type_gtpc := '13'O,
 			tdInd := valueof(ind),
@@ -300,11 +326,11 @@ module GGSN_Tests {
 		}
 	}
 
-	template Gtp1cUnitdata ts_GTPC_DeletePDP(GtpPeer peer, OCT4 teid, BIT4 nsapi,
-						 template BIT1 teardown_ind) := {
+	template Gtp1cUnitdata ts_GTPC_DeletePDP(GtpPeer peer, uint16_t seq, OCT4 teid,
+						 BIT4 nsapi, template BIT1 teardown_ind) := {
 		peer := peer,
 		gtpc := ts_GTP1C_PDU(deletePDPContextRequest, teid,
-					valueof(ts_DeletePdpPDU(nsapi, teardown_ind)))
+					valueof(ts_DeletePdpPDU(nsapi, teardown_ind)), seq)
 	}
 
 
@@ -327,15 +353,14 @@ module GGSN_Tests {
 	}
 
 	/* generalized GTP-U send template */
-	template PDU_GTPU ts_GTP1U_PDU(OCT1 msg_type, OCT4 teid, GTPU_IEs ies,
-					template GTPU_Header_optional_part opt := omit) := {
+	template PDU_GTPU ts_GTP1U_PDU(OCT1 msg_type, uint16_t seq, OCT4 teid, GTPU_IEs ies) := {
 		/* N-PDU Number flag (PN): the GTP-U header contains a meaningful N-PDU Number field if the PN
 		 * flag is set to 1. */
 		pn_bit := '0'B,	/* we assume the encoder overwrites this if an optional part is given */
 		/* If the Sequence Number flag (S) is set to '1' the sequence number field is present and
 		 * meaningful otherwise it is set to '0'. For GTP-U messages Echo Request, Echo Response,
 		 * Error Indication and Supported Extension Headers Notification, the S flag shall be set to '1'. */
-		s_bit := '0'B, 	/* we assume the encoder overwrites this if an optional part is given */
+		s_bit := '1'B, 	/* we assume the encoder overwrites this if an optional part is given */
 		/* Extension header presence */
 		e_bit := '0'B,
 		spare := '0'B,
@@ -346,7 +371,12 @@ module GGSN_Tests {
 		messageType := msg_type,
 		lengthf := 0,	/* we assume encoder overwrites this */
 		teid := teid,
-		opt_part := opt,
+		opt_part :=  {
+			sequenceNumber := int2oct(seq, 2),
+			npduNumber := '00'O,
+			nextExtHeader := '00'O,
+			gTPU_extensionHeader_List := omit
+		},
 		gtpu_IEs := ies
 	}
 
@@ -370,43 +400,94 @@ module GGSN_Tests {
 	}
 
 	/* master template for sending a GTP-U echo response */
-	template Gtp1uUnitdata ts_GTPU_PONG(GtpPeer peer, OCT1 rest_ctr) := {
+	template Gtp1uUnitdata ts_GTPU_PONG(GtpPeer peer, uint16_t seq, OCT1 rest_ctr) := {
 		peer := peer,
-		gtpu := ts_GTP1U_PDU(echoResponse, '00000000'O, valueof(ts_UEchoRespPDU(rest_ctr)))
+		gtpu := ts_GTP1U_PDU(echoResponse, seq, '00000000'O, valueof(ts_UEchoRespPDU(rest_ctr)))
 	}
 
-	template PDU_GTPU ts_GTP1U_GPDU(OCT4 teid, octetstring data) :=
-				ts_GTP1U_PDU('FF'O, teid, { g_PDU_IEs := { data := data }});
+	/* master template for sending a GTP-U user plane data */
+	template Gtp1uUnitdata ts_GTP1U_GPDU(GtpPeer peer, uint16_t seq, OCT4 teid, octetstring data) := {
+		peer := peer,
+		gtpu := ts_GTP1U_PDU('FF'O, seq, teid, { g_PDU_IEs := { data := data }})
+	}
 
 	/* Altstep implementing responses to any incoming echo requests */
 	altstep pingpong() runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var Gtp1uUnitdata udu;
 		[] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
-			GTPC.send(ts_GTPC_PONG(ud.peer, '00'O));
+			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
+			GTPC.send(ts_GTPC_PONG(ud.peer, seq, '00'O));
 			repeat;
 		};
 		[] GTPU.receive(tr_GTPU_PING(?)) -> value udu {
-			GTPU.send(ts_GTPU_PONG(udu.peer, '00'O));
+			var uint16_t seq := oct2int(udu.gtpu.opt_part.sequenceNumber);
+			GTPU.send(ts_GTPU_PONG(udu.peer, seq, '00'O));
 		};
 		[] T_default.timeout { setverdict(fail); };
 	}
 
+	/* 'internet' in DNS encoding */
 	template octetstring t_ApnInternet := '08696E7465726E6574'O;
 
-	function f_pdp_ctx_act(hexstring imsi, BIT4 nsapi, EndUserAddress eua, octetstring apn, octetstring msisdn) runs on GT_CT {
+	/* return random integer between 0 and max */
+	function f_rnd_int(integer max) return integer {
+		return float2int(rnd()*int2float(max));
+	}
+
+	/* return random NSAPI */
+	function f_rnd_nsapi() return BIT4 {
+		return int2bit(f_rnd_int(16), 4);
+	}
+
+	/* return random TEI[DC] */
+	function f_rnd_tei() return OCT4 {
+		return int2oct(f_rnd_int(4294967296), 4);
+	}
+
+	/* define an (internal) representation of a PDP context */
+	template PdpContext t_DefinePDP(hexstring imsi, octetstring msisdn, octetstring apn,
+					EndUserAddress eua) := {
+		imsi := imsi,
+		msisdn := msisdn,
+		nsapi := f_rnd_nsapi(),
+		apn := apn,
+		eua := eua,
+		teid := f_rnd_tei(),
+		teic := f_rnd_tei(),
+		d_seq_nr := 0,
+		c_seq_nr := 0
+	}
+
+	/* send GTP-C for a given context and increment sequence number */
+	function f_send_gtpc(inout PdpContext ctx, in template Gtp1cUnitdata data) runs on GT_CT {
+		GTPC.send(data);
+		ctx.c_seq_nr := ctx.c_seq_nr + 1;
+	}
+
+	/* send GTP-U for a given context and increment sequence number */
+	function f_send_gtpu(inout PdpContext ctx, in template Gtp1uUnitdata data) runs on GT_CT {
+		GTPU.send(data);
+		ctx.d_seq_nr := ctx.d_seq_nr + 1;
+	}
+
+	/* send a PDP context activation */
+	function f_pdp_ctx_act(inout PdpContext ctx) runs on GT_CT {
 		var Gtp1cUnitdata ud;
-		var octetstring teid := '01020304'O;
 		var default d;
 
 		log("sending CreatePDP");
-		GTPC.send(ts_GTPC_CreatePDP(g_peer, imsi, g_restart_ctr, teid, teid, nsapi, eua, apn, g_sgsn_ip_c, g_sgsn_ip_u, msisdn));
+		f_send_gtpc(ctx, ts_GTPC_CreatePDP(g_peer_c, ctx.c_seq_nr, ctx.imsi, g_restart_ctr,
+						  ctx.teid, ctx.teic, ctx.nsapi, ctx.eua, ctx.apn,
+						  g_sgsn_ip_c, g_sgsn_ip_u, ctx.msisdn));
 		T_default.start;
-
 		d := activate(pingpong());
 		alt {
-			[] GTPC.receive(tr_GTPC_MsgType(g_peer, createPDPContextResponse, teid)) -> value ud {
-				if (ud.gtpc.gtpc_pdu.createPDPContextResponse.cause.causevalue == '80'O) {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, createPDPContextResponse, ctx.teic)) -> value ud {
+				var CreatePDPContextResponse cpr := ud.gtpc.gtpc_pdu.createPDPContextResponse;
+				if (cpr.cause.causevalue == '80'O) {
+					ctx.teid_remote := cpr.teidDataI.teidDataI;
+					ctx.teic_remote := cpr.teidControlPlane.teidControlPlane;
 					setverdict(pass);
 				} else {
 					setverdict(fail);
@@ -414,18 +495,18 @@ module GGSN_Tests {
 			}
 		}
 		deactivate(d);
+		T_default.stop;
 	}
 
-	function f_pdp_ctx_del(OCT4 teid, BIT4 nsapi, template BIT1 teardown_ind) runs on GT_CT {
+	function f_pdp_ctx_del(PdpContext ctx, template BIT1 teardown_ind) runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var default d;
 
-		GTPC.send(ts_GTPC_DeletePDP(g_peer, teid, nsapi, teardown_ind));
+		f_send_gtpc(ctx, ts_GTPC_DeletePDP(g_peer_c, ctx.c_seq_nr, ctx.teic_remote, ctx.nsapi, teardown_ind));
 		T_default.start;
-
 		d := activate(pingpong());
 		alt {
-			[] GTPC.receive(tr_GTPC_MsgType(g_peer, deletePDPContextResponse, teid)) -> value ud {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, ctx.teic)) -> value ud {
 				if (ud.gtpc.gtpc_pdu.deletePDPContextResponse.cause.causevalue == '80'O) {
 					setverdict(pass);
 				} else {
@@ -434,22 +515,27 @@ module GGSN_Tests {
 			}
 		}
 		deactivate(d);
+		T_default.stop;
 	}
+	/* IPv6 router solicitation  fe80::2 -> ff02::2 from 02:88:b5:1f:25:59 */
+	const octetstring c_router_solicit := '6000000000103afffe800000000000000000000000000002ff02000000000000000000000000000285009f2b0000000001010288b51f2559'O;
+	/* IPv6 neighbor solicitation fe80::2 -> ff02::1:ff00:2 from 02:88:b5:1f:25:59 */
+	const octetstring c_neigh_solicit:= '6000000000203afffe800000000000000000000000000002ff0200000000000000000001ff00000287009f9600000000fe80000000000000000000000000000201010288b51f2559'O;
 
 	testcase TC_activate_pdp4() runs on GT_CT {
 		f_init();
-		var hexstring imsi := '262420123456789'H;
-		var octetstring msisdn := '1234'O;
-		f_pdp_ctx_act(imsi, '0010'B, valueof(t_EuaIPv4Dyn), valueof(t_ApnInternet), msisdn);
+		var PdpContext ctx := valueof(t_DefinePDP('262420123456789'H, '1234'O, valueof(t_ApnInternet), valueof(t_EuaIPv4Dyn)));
+		f_pdp_ctx_act(ctx);
 	}
 
 	testcase TC_activate_pdp6() runs on GT_CT {
 		f_init();
-		var hexstring imsi := '262420123456789'H;
-		var octetstring msisdn := '1234'O;
-		f_pdp_ctx_act(imsi, '0010'B, valueof(t_EuaIPv6Dyn), valueof(t_ApnInternet), msisdn);
+		var PdpContext ctx := valueof(t_DefinePDP('262420123456789'H, '1234'O, valueof(t_ApnInternet), valueof(t_EuaIPv6Dyn)));
+		f_pdp_ctx_act(ctx);
+		f_send_gtpu(ctx, ts_GTP1U_GPDU(g_peer_u, ctx.d_seq_nr, ctx.teid_remote, c_router_solicit));
+		f_send_gtpu(ctx, ts_GTP1U_GPDU(g_peer_u, ctx.d_seq_nr, ctx.teid_remote, c_neigh_solicit));
+		f_pdp_ctx_del(ctx, '1'B);
 	}
-
 
 	control {
 		execute(TC_activate_pdp4());
