@@ -27,6 +27,14 @@ DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.ICMPv6/src
+FILES="ICMPv6_EncDec.cc  ICMPv6_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.IP/src
+FILES="IP_EncDec.cc  IP_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../GTP_v13.5.0_CNL113843_LATEST/src
 FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
