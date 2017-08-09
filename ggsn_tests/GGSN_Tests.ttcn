@@ -8,6 +8,8 @@ module GGSN_Tests {
 	import from GTP_CodecPort_CtrlFunct all;
 	import from GTPC_Types all;
 	import from GTPU_Types all;
+	import from IP_Types all;
+	import from ICMPv6_Types all;
 
 	const integer GTP0_PORT := 3386;
 	const integer GTP1C_PORT := 2123;
@@ -20,6 +22,7 @@ module GGSN_Tests {
 		octetstring	msisdn optional,
 		octetstring	apn,
 		EndUserAddress	eua,
+		OCT16		ip6_prefix optional,
 		BIT4		nsapi,
 		/* TEI (Data) local side */
 		OCT4		teid,
@@ -336,7 +339,7 @@ module GGSN_Tests {
 
 	/* GTP-U */
 
-	template PDU_GTPU tr_GTP1U_PDU(template OCT1 msg_type, template OCT4 teid) := {
+	template PDU_GTPU tr_GTP1U_PDU(template OCT1 msg_type, template OCT4 teid, template GTPU_IEs ies := ?) := {
 		pn_bit := ?,
 		s_bit := ?,
 		e_bit := ?,
@@ -349,7 +352,7 @@ module GGSN_Tests {
 		lengthf := ?,
 		teid := teid,
 		opt_part := *,
-		gtpu_IEs := ?
+		gtpu_IEs := ies
 	}
 
 	/* generalized GTP-U send template */
@@ -386,8 +389,19 @@ module GGSN_Tests {
 	}
 
 
-	/* template matching reception of GTP-C echo-request */
+	/* template matching reception of GTP-U echo-request */
 	template Gtp1uUnitdata tr_GTPU_PING(template GtpPeer peer) := tr_GTPU_MsgType(peer, echoRequest, '00000000'O);
+
+	/* template matching reception of GTP-U GPDU */
+	template GTPU_IEs t_GPDU(template octetstring data) := {
+		g_PDU_IEs := {
+			data := data
+		}
+	}
+	template Gtp1uUnitdata tr_GTPU_GPDU(template GtpPeer peer, template OCT4 teid, template octetstring data := ?) := {
+		peer := peer,
+		gtpu := tr_GTP1U_PDU('FF'O, teid, t_GPDU(data))
+	}
 
 	template GTPU_IEs ts_UEchoRespPDU(OCT1 restart_counter) := {
 		echoResponse_IEs := {
@@ -466,8 +480,8 @@ module GGSN_Tests {
 	}
 
 	/* send GTP-U for a given context and increment sequence number */
-	function f_send_gtpu(inout PdpContext ctx, in template Gtp1uUnitdata data) runs on GT_CT {
-		GTPU.send(data);
+	function f_send_gtpu(inout PdpContext ctx, in octetstring data) runs on GT_CT {
+		GTPU.send(ts_GTP1U_GPDU(g_peer_u, ctx.d_seq_nr, ctx.teid_remote, data));
 		ctx.d_seq_nr := ctx.d_seq_nr + 1;
 	}
 
@@ -488,6 +502,7 @@ module GGSN_Tests {
 				if (cpr.cause.causevalue == '80'O) {
 					ctx.teid_remote := cpr.teidDataI.teidDataI;
 					ctx.teic_remote := cpr.teidControlPlane.teidControlPlane;
+					ctx.eua := cpr.endUserAddress;
 					setverdict(pass);
 				} else {
 					setverdict(fail);
@@ -528,12 +543,200 @@ module GGSN_Tests {
 		f_pdp_ctx_act(ctx);
 	}
 
+	/* template to generate a 'Prefix Information' ICMPv6 option */
+	template OptionField ts_ICMP6_OptPrefix(OCT16 prefix, INT1 prefix_len) := {
+		prefixInformation := {
+			typeField := 3,
+			lengthIndicator := 8,
+			prefixLength := prefix_len,
+			reserved1 := '000000'B,
+			a_Bit := '0'B,
+			l_Bit := '0'B,
+			validLifetime := oct2int('FFFFFFFF'O),
+			preferredLifetime := oct2int('FFFFFFFF'O),
+			reserved2 := '00000000'O,
+			prefix := prefix
+		}
+	}
+
+	/* template for an ICMPv6 router solicitation */
+	template PDU_ICMPv6 ts_ICMPv6_RS := {
+		routerSolicitation := {
+			typeField := 133,
+			code := 0,
+			checksum := '0000'O,
+			reserved := '00000000'O,
+			/* TODO: do we need 'Source link-layer address' ? */
+			options := omit
+		}
+	}
+
+	/* template for an ICMPv6 router advertisement */
+	template PDU_ICMPv6 ts_ICMPv6_RA(OCT16 prefix, INT1 prefix_len) := {
+		routerAdvertisement := {
+			typeField := 134,
+			code := 0,
+			checksum := '0000'O,
+			curHopLimit := ?,
+			reserved := '000000'B,
+			o_Bit := '0'B,
+			m_Bit := '0'B,
+			routerLifetime := oct2int('FFFF'O),
+			reachableTime := oct2int('FFFFFFFF'O),
+			retransTimer := oct2int('FFFFFFFF'O),
+			options := {
+				ts_ICMP6_OptPrefix(prefix, prefix_len)
+			}
+		}
+	}
+
+	template PDU_ICMPv6 ts_ICMPv6_NS(OCT16 target_addr) := {
+		neighborSolicitation := {
+			typeField := 135,
+			code := 0,
+			checksum := '0000'O,
+			reserved := '00000000'O,
+			targetAddress := target_addr,
+			/* TODO: do we need 'Source link-layer address' ? */
+			options := omit
+		}
+	}
+
+	/* derive ICMPv6 link-local address from lower 64bit of link_id */
+	/* template for receiving/matching an ICMPv6 'Prefix Information' option */
+	template OptionField tr_ICMP6_OptPrefix(template OCT16 prefix, template INT1 prefix_len) := {
+		prefixInformation := {
+			typeField := 3,
+			lengthIndicator := 4,
+			prefixLength := prefix_len,
+			reserved1 := ?,
+			a_Bit := ?,
+			l_Bit := ?,
+			validLifetime := ?,
+			preferredLifetime := ?,
+			reserved2 := ?,
+			prefix := prefix
+		}
+	}
+
+	/* template for receiving/matching an ICMPv6 router advertisement */
+	template PDU_ICMPv6 tr_ICMPv6_RA(template OCT16 prefix, template INT1 prefix_len) := {
+		routerAdvertisement := {
+			typeField := 134,
+			code := 0,
+			checksum := ?,
+			curHopLimit := ?,
+			reserved := ?,
+			o_Bit := '0'B,
+			m_Bit := '0'B,
+			routerLifetime := ?,
+			reachableTime := ?,
+			retransTimer := ?,
+			options := {
+				tr_ICMP6_OptPrefix(prefix, prefix_len)
+			}
+		}
+	}
+
+	/* template to construct IPv6_packet from input arguments, ready for use in f_IPv6_enc() */
+	template IPv6_packet ts_IP6(OCT16 srcaddr, OCT16 dstaddr, LIN1 nexthead, octetstring payload, LIN1 hlim := 255) := {
+		header := {
+			ver := 6,
+			trclass := 0,
+			flabel := 0,
+			plen := 0,
+			nexthead := nexthead,
+			hlim := hlim,
+			srcaddr := srcaddr,
+			dstaddr := dstaddr
+		},
+		ext_headers := omit,
+		payload := payload
+	}
+
+	function f_ipv6_link_local(in OCT16 link_id) return OCT16 {
+		 return 'FE80000000000000'O & substr(link_id, 8, 8);
+	}
+
+	/* Compute solicited-node multicast address as per RFC4291 2.7.1 */
+	function f_ipv6_sol_node_mcast(in OCT16 addr) return OCT16 {
+		return 'FF0200000000000000000001FF'O & substr(addr, 13, 3);
+	}
+
+	/* generate and encode ICMPv6 router solicitation */
+	function f_gen_icmpv6_router_solicitation(in OCT16 link_id) return octetstring {
+		const OCT16 c_ip6_all_router_mcast := 'FF020000000000000000000000000002'O;
+		var OCT16 saddr := f_ipv6_link_local(link_id);
+
+		var octetstring tmp;
+		tmp := f_enc_PDU_ICMPv6(valueof(ts_ICMPv6_RS), saddr, c_ip6_all_router_mcast);
+		var IPv6_packet ip6 := valueof(ts_IP6(saddr, c_ip6_all_router_mcast, 58, tmp));
+
+		return f_IPv6_enc(ip6);
+	}
+
+	/* create ICMPv6 router solicitation deriving link-id from PDP Context EUA */
+	function f_icmpv6_rs_for_pdp(in PdpContext ctx) return octetstring {
+		var OCT16 interface_id := ctx.eua.endUserAddress.endUserAddressIPv6.ipv6_address;
+		return f_gen_icmpv6_router_solicitation(interface_id);
+	}
+
+	/* generate and encode ICMPv6 neighbor solicitation */
+	function f_gen_icmpv6_neigh_solicit(in OCT16 saddr, in OCT16 daddr, in OCT16 tgt_addr) return octetstring {
+		var octetstring tmp;
+		tmp := f_enc_PDU_ICMPv6(valueof(ts_ICMPv6_NS(tgt_addr)), saddr, daddr);
+		var IPv6_packet ip6 := valueof(ts_IP6(saddr, daddr, 58, tmp));
+		return f_IPv6_enc(ip6);
+	}
+
+	/* generate and encode ICMPv6 neighbor solicitation for PDP Context */
+	function f_gen_icmpv6_neigh_solicit_for_pdp(in PdpContext ctx) return octetstring {
+		var OCT16 interface_id := ctx.eua.endUserAddress.endUserAddressIPv6.ipv6_address;
+		var OCT16 link_local := f_ipv6_link_local(interface_id);
+		var OCT16 daddr := f_ipv6_sol_node_mcast(link_local);
+
+		return f_gen_icmpv6_neigh_solicit(link_local, daddr, link_local);
+	}
+
+	/* wait for GGSN to send us an ICMPv6 router advertisement */
+	function f_wait_rtr_adv(PdpContext ctx) runs on GT_CT {
+		var Gtp1uUnitdata ud;
+		T_default.start;
+		alt {
+			//'6???????????3aff'O
+			[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ?)) -> value ud {
+				var octetstring gpdu := ud.gtpu.gtpu_IEs.g_PDU_IEs.data;
+				var IPv6_packet ip6 := f_IPv6_dec(gpdu);
+				if (ip6.header.ver != 6 or ip6.header.nexthead != 58 or ip6.header.hlim != 255) {
+					repeat;
+				}
+				var PDU_ICMPv6 icmp6 := f_dec_PDU_ICMPv6(ip6.payload);
+				if (not match(icmp6, tr_ICMPv6_RA(?, 64))) {
+					repeat;
+				}
+				ctx.ip6_prefix := icmp6.routerAdvertisement.options[0].prefixInformation.prefix;
+				log("RA with /64 prefix ", ctx.ip6_prefix);
+			}
+			[] GTPU.receive(tr_GTPU_GPDU(?, ?)) { repeat; }
+			[] GTPU.receive { setverdict(fail); }
+			[] T_default.timeout { setverdict(fail); }
+		}
+		T_default.stop;
+	}
+
 	testcase TC_activate_pdp6() runs on GT_CT {
 		f_init();
+
 		var PdpContext ctx := valueof(t_DefinePDP('262420123456789'H, '1234'O, valueof(t_ApnInternet), valueof(t_EuaIPv6Dyn)));
 		f_pdp_ctx_act(ctx);
-		f_send_gtpu(ctx, ts_GTP1U_GPDU(g_peer_u, ctx.d_seq_nr, ctx.teid_remote, c_router_solicit));
-		f_send_gtpu(ctx, ts_GTP1U_GPDU(g_peer_u, ctx.d_seq_nr, ctx.teid_remote, c_neigh_solicit));
+
+		//f_send_gtpu(ctx, c_router_solicit);
+		//f_send_gtpu(ctx, c_neigh_solicit);
+
+		f_send_gtpu(ctx, f_icmpv6_rs_for_pdp(ctx));
+		f_wait_rtr_adv(ctx);
+		f_send_gtpu(ctx, f_gen_icmpv6_neigh_solicit_for_pdp(ctx));
+
 		f_pdp_ctx_del(ctx, '1'B);
 	}
 
