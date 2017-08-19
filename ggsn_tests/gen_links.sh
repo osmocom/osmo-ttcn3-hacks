@@ -16,7 +16,7 @@ gen_links() {
 #gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h Native_Functions.ttcn Native_FunctionDefs.cc"
+FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
@@ -40,5 +40,5 @@ FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn"
+FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc"
 gen_links $DIR $FILES
