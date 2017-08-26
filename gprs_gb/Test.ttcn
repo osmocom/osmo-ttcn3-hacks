@@ -1,18 +1,47 @@
 module Test {
 
+	import from General_Types all;
+	import from Osmocom_Types all;
+	import from GSM_Types all;
+	import from GSM_RR_Types all;
 	import from BSSGP_Helper_Functions all;
 	import from BSSGP_Types all;
 	import from BSSGP_Emulation all;
 	import from NS_Types all;
 	import from NS_Emulation all;
+	import from LLC_Types all;
+	import from MobileL3_Types all;
+	import from RLCMAC_Types all;
+	import from RLCMAC_CSN1_Types all;
+	import from LAPDm_RAW_PT all;
+
+	type record MmContext {
+		octetstring	imsi optional,
+		BssgpTlli	tlli,
+		uint9_t		n_u
+	};
 
 	type component dummy_CT {
+		var lapdm_CT lapdm_component;
+		port LAPDm_PT L1;
+
 		port BSSGP_PT BSSGP;
 		var NS_CT ns_component;
 		var BSSGP_CT bssgp_component;
+
+		var MmContext g_mmctx := {
+			tlli := 0,
+			n_u := 0
+		};
+
+		var boolean g_initialized := false;
 	}
 
 	function f_init() runs on dummy_CT {
+		if (g_initialized == true) {
+			return;
+		}
+		g_initialized := true;
 		/* create a new NS component */
 		ns_component := NS_CT.create;
 		bssgp_component := BSSGP_CT.create;
@@ -24,6 +53,11 @@ module Test {
 		map(ns_component:NSCP, system:NS_CODEC_PORT);
 		ns_component.start(NSStart());
 		bssgp_component.start(BssgpStart());
+
+		lapdm_component := lapdm_CT.create;
+		connect(self:L1, lapdm_component:LAPDM_SP);
+		map(lapdm_component:L1CTL, system:L1CTL);
+		lapdm_component.start(LAPDmStart());
 	}
 
 	function f_bssgp_assert_prepr(in octetstring a, in octetstring b) {
@@ -91,6 +125,8 @@ module Test {
 		f_bssgp_dec_and_log(c_gmm_mt_att_acc);
 		f_bssgp_dec_and_log(c_gmm_mt_det_req);
 		f_bssgp_dec_and_log(c_gmm_mo_att_cpl);
+
+		log(t_BSSGP_PS_PAGING_IMSI(196, '262420123456789'H));
 	}
 
 	function f_ns_assert_prepr(in octetstring a, in octetstring b) {
@@ -132,7 +168,76 @@ module Test {
 		f_ns_dec_and_log(c_ns_reset_pcu);
 	}
 
-	testcase TC_nsem() runs on dummy_CT {
+	const BssgpQosProfile c_DefaultQos := { r := 80, spare := '00'B, c_r := false, t := false, a := false, precedence := 0 };
+	template BssgpTLV c_DefaultLifetimeTLV := t_BSSGP_IE_Lifetime(65535);
+
+	template BssgpTLV t_BSSGP_IE_LLC_PDU(LlcPdu llc) := t_BssgpIE(LLC_PDU, { other := f_LLC_append_fcs(enc_LlcPdu(llc)) });
+
+	template BssgpPdu t_BSSGP_DL_UD(BssgpTlli tlli, LlcPdu llc, BssgpTLVs opt_tlvs := {}) := {
+		pdu_type := DL_UNITDATA,
+		u := {
+			dl_unitdata := {
+				tlli := tlli,
+				qos_profile := c_DefaultQos,
+				pdu_lifetime := c_DefaultLifetimeTLV,
+				//tlvs := opt_tlvs & { t_BSSGP_IE_LLC_PDU(llc) }
+				tlvs := { t_BSSGP_IE_LLC_PDU(llc) }
+			}
+		}
+	};
+
+	template BssgpPdu t_BSSGP_UL_UD(template BssgpTlli tlli, template BssgpCellId cell_id, template octetstring payload) := {
+		pdu_type := UL_UNITDATA,
+		u := {
+			ul_unitdata := {
+				tlli := tlli,
+				qos_profile := ?,
+				cell_id := { iei := CELL_ID, len := 8, u := { cell_id := cell_id } },
+				tlvs := {
+						{ iei := ALIGNMENT_OCTETS, len := ?, u := { other := ? } },
+						{ iei := LLC_PDU, len := ?, u := { other := payload } }
+				}
+			}
+		}
+	}
+
+	template BssgpPdu t_BSSGP_PS_PAGING_IMSI(BssgpBvci bvci, hexstring imsi) := {
+		pdu_type := PAGING_PS,
+		u := {
+			other := {
+				tlvs := { t_BSSGP_IE_Imsi(imsi), t_BSSGP_IE_Bvci(bvci), t_BSSGP_IE_Qos(c_DefaultQos) }
+			}
+		}
+	};
+
+	template BssgpPdu t_BSSGP_PS_PAGING_PTMSI(BssgpBvci bvci, hexstring imsi, GsmTmsi ptmsi) := {
+		pdu_type := PAGING_PS,
+		u := {
+			other := {
+				tlvs := { t_BSSGP_IE_Imsi(imsi), t_BSSGP_IE_Bvci(bvci), t_BSSGP_IE_Qos(c_DefaultQos), t_BSSGP_IE_Tmsi(ptmsi) }
+			}
+		}
+	};
+
+	const octetstring gmm_auth_req := '081200102198c72477ea104895e8b959acc58b108182'O;
+
+	function tx_gmm(boolean c_r, in octetstring gmm_pdu, LlcSapi sapi := LLC_SAPI_GMM) runs on dummy_CT {
+		var LlcPdu llc;
+
+		log("GMM Tx: ", dec_PDU_L3_SGSN_MS(gmm_pdu));
+
+		log(c_r, g_mmctx.n_u, gmm_pdu, sapi);
+		log(t_LLC_UI(c_r, g_mmctx.n_u, gmm_pdu, sapi));
+		llc := valueof(t_LLC_UI(c_r, g_mmctx.n_u, gmm_pdu, sapi));
+		log(llc);
+		g_mmctx.n_u := g_mmctx.n_u + 1;
+
+		log(t_BSSGP_DL_UD(g_mmctx.tlli, llc));
+
+		BSSGP.send(t_BSSGP_DL_UD(g_mmctx.tlli, llc));
+	}
+
+	function f_bssgp_establish() runs on dummy_CT {
 		timer T:= 60.0;
 
 		f_init();
@@ -144,6 +249,17 @@ module Test {
 		}
 		T.stop
 		log("BSSGP successfully initialized");
+	}
+
+	testcase TC_paging() runs on dummy_CT {
+		var hexstring imsi := '262420123456789'H;
+		var BssgpBvci bvci := 196;
+		var GsmTmsi tmsi := hex2int('01234567'H);
+
+		f_bssgp_establish();
+
+		BSSGP.send(t_BSSGP_PS_PAGING_IMSI(bvci, imsi));
+		BSSGP.send(t_BSSGP_PS_PAGING_PTMSI(bvci, imsi, tmsi));
 
 		while (true) {
 			var BssgpPdu pdu;
@@ -157,9 +273,329 @@ module Test {
 		}
 	}
 
+	function f_establish_ul_tbf() runs on dummy_CT {
+		timer T := 5.0;
+		var BCCH_tune_req tune_req := { { false, 871 }, true };
+		L1.send(tune_req);
+		/* FIXME: wait for confirm */
+
+		var TBF_establish_req est_req := { ra := hex2int('7B'H) };
+		L1.send(est_req);
+		T.start;
+		/* FIXME: wait for confirm */
+		alt {
+			[] L1.receive(TBF_establish_res:?) {}
+			[] L1.receive { repeat; }
+			[] T.timeout { setverdict(fail); }
+		}
+		T.stop;
+	}
+
+	template RlcmacUlBlock t_RLCMAC_UL_DATA(template uint5_t tfi, template uint4_t cv, template uint7_t bsn,
+						template LlcBlocks blocks := {}, template boolean stall := false) := {
+		data := {
+			mac_hdr := {
+				payload_type := MAC_PT_RLC_DATA,
+				countdown := cv,
+				stall_ind := false,
+				retry := false,
+				spare := '0'B,
+				pfi_ind := false,
+				tfi := tfi,
+				tlli_ind := false,
+				bsn := bsn,
+				e := false
+			},
+			tlli := omit,
+			pfi := omit,
+			blocks := blocks
+		}
+	}
+	template RlcmacUlBlock t_RLCMAC_UL_DATA_TLLI(template uint5_t tfi, template uint4_t cv, template uint7_t bsn,
+						     template LlcBlocks blocks := {}, template boolean stall := false, template GprsTlli tlli) modifies t_RLCMAC_UL_DATA := {
+		data := {
+			tlli := tlli
+		}
+	}
+
+	template DlMacHeader t_RLCMAC_DlMacH(template MacPayloadType pt, template MacRrbp rrbp, template
+uint3_t usf) := {
+		payload_type := pt,
+		rrbp := rrbp,
+		rrbp_valid := fixme,
+		usf := usf
+	}
+
+	template RlcmacDlBlock tr_RLCMAC_ACK_NACK(template uint5_t ul_tfi, template GprsTlli tlli := ?) := {
+		ctrl := {
+			mac_hdr := {
+				payload_type := (MAC_PT_RLCMAC_NO_OPT, MAC_PT_RLCMAC_OPT),
+				rrbp:= ?,
+				rrbp_valid := true,
+				usf := ?
+			},
+			opt := *,
+			payload := {
+				msg_type := PACKET_UL_ACK_NACK,
+				u := {
+					ul_ack_nack := {
+						page_mode := ?,
+						msg_excape := ?,
+						uplink_tfi := ul_tfi,
+						is_egprs := '0'B,
+						gprs := {
+							ch_coding_cmd := ?,
+							ack_nack_desc := ?,
+							cont_res_tlli_present := ?,
+							cont_res_tlli := tlli,
+							pkt_ta_present := ?,
+							pkt_ta := *,
+							pwr_ctrl_present := ?,
+							pwr_ctrl := *
+						}
+					}
+				}
+			}
+		}
+	}
+
+	template UlMacCtrlHeader t_RLCMAC_UlMacCtrlH(template MacPayloadType pt, template boolean retry := false) := {
+		payload_type := pt,
+		spare := '00000'B,
+		retry := retry
+	}
+
+	template RlcmacUlBlock ts_RLCMAC_CTRL_ACK(GprsTlli tlli, CtrlAck ack := MS_RCVD_TWO_RLC_SAME_RTI_DIFF_RBSN) := {
+		ctrl := {
+			mac_hdr := t_RLCMAC_UlMacCtrlH(MAC_PT_RLCMAC_NO_OPT),
+			payload := {
+				msg_type := PACKET_CONTROL_ACK,
+				u := {
+					ctrl_ack := {
+						tlli := tlli,
+						ctrl_ack := ack
+					}
+				}
+			}
+		}
+	}
+
+	template LlcBlock t_RLCMAC_LLCBLOCK(octetstring data, BIT1 more := '0'B, boolean e := true) := {
+		hdr := {
+			length_ind := lengthof(data),
+			more := more,
+			e := e
+		},
+		payload := data
+	}
+
+	function f_random_tlli() return GprsTlli {
+		var GprsTlli tlli := float2int(rnd()* 4294967295.0);
+		return tlli;
+	}
+
+	function f_single_ul_block(GprsCodingScheme cs) runs on dummy_CT {
+		var GprsTlli tlli := f_random_tlli();
+		var octetstring payload := '01020304'O;
+
+		/* establish upling TBF */
+		f_establish_ul_tbf();
+
+		/* Generate LLC PDU consisting of single RLC block and send it via simulated MS */
+		var template RlcmacUlBlock blk := t_RLCMAC_UL_DATA_TLLI(0, 0, 0, {t_RLCMAC_LLCBLOCK(payload)}, false, tlli);
+		L1.send(RLCMAC_ph_data_req:{tbf_id := 0, cs := cs, block := blk});
+		/* ensure that this LLC-PDU arrives from the right TLLI at the (simulated) SGSN */
+		BSSGP.receive(t_BSSGP_UL_UD(tlli, ?, payload));
+
+		/* ensure the MS eceives an UL_ACK_NACK */
+		alt {
+			[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, block:=tr_RLCMAC_ACK_NACK(0, tlli)}) { };
+			[] L1.receive { repeat; };
+		}
+		log("found matching ACK/NACK");
+		/* send CTRL ACK in uplink */
+		//L1.send(FIXME);
+	}
+
+	testcase TC_rach() runs on dummy_CT {
+		var hexstring imsi := '262420123456789'H;
+		var BssgpBvci bvci := 196;
+		var GsmTmsi tmsi := hex2int('01234567'H);
+
+		f_init();
+
+		f_bssgp_establish();
+
+		f_single_ul_block(CS1);
+
+		while (true) {
+			var BssgpPdu pdu;
+			var RLCMAC_ph_data_ind dl_msg;
+			alt {
+
+				[] BSSGP.receive(BssgpPdu:?) -> value pdu {
+					log("BSSGP Rx: ", pdu);
+				}
+				[] BSSGP.receive(t_BssgpStsInd(?, ?, BVC_S_UNBLOCKED)) { repeat; }
+				[] BSSGP.receive { repeat; }
+
+				[] L1.receive(RLCMAC_ph_data_ind:?) -> value dl_msg {
+					log("L1 DL: ", dl_msg);
+				}
+			}
+		}
+	}
+
+
+	testcase TC_nsem() runs on dummy_CT {
+
+		f_bssgp_establish();
+
+		while (true) {
+			var BssgpPdu pdu;
+			alt {
+				[] BSSGP.receive(BssgpPdu:?) -> value pdu {
+					log("BSSGP Rx: ", pdu);
+					//log("GMM Rx: ", dec_PDU_L3_MS_SGSN(pdu.payload));
+					g_mmctx.tlli := pdu.u.ul_unitdata.tlli;
+					tx_gmm(LLC_CR_DL_CMD, gmm_auth_req);
+				}
+				[] BSSGP.receive(t_BssgpStsInd(?, ?, BVC_S_UNBLOCKED)) { repeat; }
+				[] BSSGP.receive { repeat; }
+			}
+		}
+	}
+
+
+	function f_llc_dec_and_log(in octetstring inp) {
+		log("LLC Input: ", inp);
+		var LlcPdu dec := dec_LlcPdu(inp);
+		log("LLC Decoded: ", dec);
+	}
+
+	function f_llc_assert(in octetstring a, in octetstring b) {
+		log("LLC Input: ", a);
+		log("LLC Expected: ", b);
+
+		if (a != b) {
+			setverdict(fail);
+		} else {
+			setverdict(pass);
+		}
+	}
+
+
+	testcase TC_selftest_llc() runs on dummy_CT {
+		const octetstring c_gmm_att_pcu := '01c001080103e5e000210a0005f4fb146ddd32f44000c8001d1b53432b37159ef9090070000dd9c6321200e00019b32c642401c00020170580460b'O;
+		const octetstring c_gmm_att_pcu_nofcs := '01c001080103e5e000210a0005f4fb146ddd32f44000c8001d1b53432b37159ef9090070000dd9c6321200e00019b32c642401c000201705'O;
+		const octetstring c_ctrl_ui := 'c001'O;
+
+		log(dec_LlcCtrlUnion(c_ctrl_ui));
+		f_llc_assert(enc_LlcCtrlUnion({ ui := { presence := '110'B, spare := '00'B, n_u := 0, e := false, pm := true } }), c_ctrl_ui);
+
+		f_llc_dec_and_log(c_gmm_att_pcu);
+
+		f_llc_assert(f_LLC_append_fcs(c_gmm_att_pcu_nofcs), c_gmm_att_pcu);
+
+		log(valueof(t_LLC_UI(LLC_CR_DL_CMD, g_mmctx.n_u, gmm_auth_req, LLC_SAPI_GMM)));
+		log(t_LLC_UI(LLC_CR_DL_CMD, g_mmctx.n_u, gmm_auth_req, LLC_SAPI_GMM));
+	}
+
+	testcase TC_selftest_rlcmac() runs on dummy_CT {
+		var RlcmacDlCtrlBlock dcb;
+		var RlcmacUlCtrlBlock ucb;
+		const octetstring c_dl_ul_ack_nack := '40240080400000000000000077628dbba14b2b2b2b2b2b'O;
+		const octetstring c_dl_data := '0f00007341c001081200102198c72477ea104895e8b959acc58b108182f4d0454300'O;
+		const octetstring c_dl_data2 := '070002165dc0012b2b2b43c0012b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b00'O;
+		const octetstring c_ul_ctrl_ack := '4006ec51b7772b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b'O;
+		const octetstring c_ul_dl_ack_nack := '4008004000000000000000701000edc0000b2b2b2b2b2b'O;
+		const octetstring c_dl_ul_assign := '482857628dbbaf0126e68800082b2b2b2b2b2b2b2b2b2b'O;
+
+		log(c_dl_ul_ack_nack);
+		dcb := dec_RlcmacDlCtrlBlock(c_dl_ul_ack_nack);
+		log(dcb);
+		//log(dec_RlcmacDlCtrlMsg(dcb.payload));
+
+		f_rlcmac_dld_decenc(c_dl_data);
+
+		f_rlcmac_dld_decenc(c_dl_data2);
+
+		log(c_ul_ctrl_ack);
+		ucb := dec_RlcmacUlCtrlBlock(c_ul_ctrl_ack);
+		log(ucb);
+		//log(dec_RlcmacUlCtrlMsg(ucb.payload));
+
+		log(c_ul_dl_ack_nack);
+		ucb := dec_RlcmacUlCtrlBlock(c_ul_dl_ack_nack);
+		log(ucb);
+		//log(dec_RlcmacUlCtrlMsg(ucb.payload));
+
+		log(c_dl_ul_assign);
+		dcb := dec_RlcmacDlCtrlBlock(c_dl_ul_assign);
+		log(dcb);
+		//log(dec_RlcmacDlCtrlMsg(dcb.payload));
+
+		const octetstring c_uld_tlli_noext := '080101a61cab5201c001080103e5e000310a0005f4e61cab5232f44000c8001d1b00'O;
+		f_rlcmac_uld_decenc(c_uld_tlli_noext);
+
+		const octetstring c_uld_tlli_ext7pad := '0001041da61cab5200201705a96e102b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b00'O;
+		log("ULD_decenc");
+		f_rlcmac_uld_decenc(c_uld_tlli_ext7pad);
+		log("UL_decenc");
+		f_rlcmac_ul_decenc(c_uld_tlli_ext7pad);
+
+		f_rlcmac_ul_decenc(c_ul_dl_ack_nack);
+	}
+
+	function f_rlcmac_ul_decenc(in octetstring buf) {
+		log("==================================");
+		log("In: ", buf);
+		var RlcmacUlBlock udb := dec_RlcmacUlBlock(buf);
+		log("Dec: ", udb);
+		var octetstring enc := enc_RlcmacUlBlock(udb);
+		log("Enc: ", enc);
+		if (enc != buf) { setverdict(fail, "Re-encoded data doesn't equal input data"); }
+	}
+
+	function f_rlcmac_uld_decenc(in octetstring buf) {
+		log("==================================");
+		log("In: ", buf);
+		var RlcmacUlDataBlock udb := dec_RlcmacUlDataBlock(buf);
+		log("Dec: ", udb);
+		var octetstring enc := enc_RlcmacUlDataBlock(udb);
+		log("Enc: ", enc);
+		if (enc != buf) { setverdict(fail, "Re-encoded data doesn't equal input data"); }
+	}
+
+	function f_rlcmac_dld_decenc(in octetstring buf) {
+		log("==================================");
+		log("In: ", buf);
+		var RlcmacDlDataBlock udb := dec_RlcmacDlDataBlock(buf);
+		log("Dec: ", udb);
+		var octetstring enc := enc_RlcmacDlDataBlock(udb);
+		log("Enc: ", enc);
+		if (enc != buf) { setverdict(fail, "Re-encoded data doesn't equal input data"); }
+	}
+
+
+	testcase TC_selftest_rr() runs on dummy_CT {
+		//const octetstring c_paging_none := '06210001F02B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B'O
+		const octetstring c_paging_none := '1506210001F0'O;
+		const octetstring c_ia_tbf := '2d063f100fe3677bd8440000c800100b2b2b2b2b2b2b2b'O
+		log(c_paging_none);
+		log(dec_GsmRrMessage(c_paging_none));
+
+		log(c_ia_tbf);
+		log(dec_GsmRrMessage(c_ia_tbf));
+	}
+
 	control {
 		execute(TC_selftest_bssgp());
 		execute(TC_selftest_ns());
+		execute(TC_selftest_llc());
+		execute(TC_selftest_rr());
+		execute(TC_selftest_rlcmac());
 		execute(TC_nsem());
+		execute(TC_paging());
 	}
 };

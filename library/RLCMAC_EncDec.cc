@@ -16,7 +16,8 @@ OCTETSTRING enc__RlcmacDlDataBlock(const RlcmacDlDataBlock& si)
 	int i;
 
 	/* Fix 'e' bit of initial header based on following blocks */
-	if (!in.blocks().is_bound() || (in.blocks().size_of() == 1 && !in.blocks()[0].hdr().is_bound()))
+	if (!in.blocks().is_bound() ||
+	    (in.blocks().size_of() == 1 && !in.blocks()[0].hdr().is_bound()))
 		in.mac__hdr().hdr__ext().e() = true;
 	else
 		in.mac__hdr().hdr__ext().e() = false;
@@ -107,7 +108,8 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 	int i;
 
 	/* Fix 'e' bit of initial header based on following blocks */
-	if (!in.blocks().is_bound() || (in.blocks().size_of() == 1 && !in.blocks()[0].hdr().is_bound()))
+	if (!in.blocks().is_bound() ||
+	    (in.blocks().size_of() == 1 && !in.blocks()[0].hdr().is_bound()))
 		in.mac__hdr().e() = true;
 	else
 		in.mac__hdr().e() = false;

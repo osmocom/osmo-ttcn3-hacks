@@ -11,6 +11,7 @@ module GGSN_Tests {
 	import from IP_Types all;
 	import from ICMPv6_Types all;
 	import from Native_Functions all;
+	import from UDP_Types all;
 
 	const integer GTP0_PORT := 3386;
 	const integer GTP1C_PORT := 2123;
@@ -22,6 +23,10 @@ module GGSN_Tests {
 
 		charstring m_ggsn_ip_gtpc := "127.0.0.6";
 		charstring m_ggsn_ip_gtpu := "127.0.0.6";
+
+		/* IPv4 address on the external PDN for testing user plane */
+		charstring m_pdn_sock_host_v4 := "192.168.0.1";
+		integer m_pdn_sock_port_v4 := 5555;
 	}
 
 	type set PdpContext {
@@ -32,6 +37,7 @@ module GGSN_Tests {
 		ProtConfigOptions	pco_neg optional,
 		EndUserAddress	eua,
 		OCT16		ip6_prefix optional,
+		OCT4		ip4_addr optional,
 		BIT4		nsapi,
 		/* TEI (Data) local side */
 		OCT4		teid,
@@ -46,6 +52,7 @@ module GGSN_Tests {
 	type component GT_CT {
 		port GTPC_PT GTPC;
 		port GTPU_PT GTPU;
+		port IPL4asp_PT UDP;
 
 		var boolean g_initialized := false;
 
@@ -53,10 +60,15 @@ module GGSN_Tests {
 		/* FIXME: unify with g_bind_ip + parse from config file */
 		var OCT4 g_sgsn_ip_c;
 		var OCT4 g_sgsn_ip_u;
+		var OCT4 g_pdn_sock_ip;
 		/* FIXME: parse remName from config file */
 		var GtpPeer g_peer_c := { connId := 0, remName := m_ggsn_ip_gtpc, remPort := GTP1C_PORT };
 		var GtpPeer g_peer_u := { connId := 0, remName := m_ggsn_ip_gtpu, remPort := GTP1U_PORT };
+		/* address to which we can bind an IP socket to simulate an internet host */
 		timer T_default := 3.0;
+
+		/* UDP connection ID for UDP test port */
+		var integer g_udp_connId;
 
 		/* next to-be-sent GTP-C sequence number */
 		var uint16_t g_c_seq_nr;
@@ -72,6 +84,7 @@ module GGSN_Tests {
 
 		g_sgsn_ip_c := f_inet_addr(m_bind_ip_gtpc);
 		g_sgsn_ip_u := f_inet_addr(m_bind_ip_gtpu);
+		g_pdn_sock_ip := f_inet_haddr(m_pdn_sock_host_v4);
 
 		var Result res;
 		map(self:GTPC, system:GTPC);
@@ -82,6 +95,10 @@ module GGSN_Tests {
 		map(self:GTPU, system:GTPU);
 		res := GTP_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, m_bind_ip_gtpu, GTP1U_PORT, {udp:={}});
 		g_peer_u.connId:= res.connId;
+
+		map(self:UDP, system:IPL4);
+		res := IPL4asp_PortType.f_IPL4_listen(UDP, m_pdn_sock_host_v4, m_pdn_sock_port_v4, {udp:={}});
+		g_udp_connId := res.connId;
 
 		g_restart_ctr := f_rnd_octstring(1);
 		g_c_seq_nr := f_rnd_int(65535);
@@ -204,7 +221,7 @@ module GGSN_Tests {
 	template EndUserAddress tr_EuaIPv4(template OCT4 ip_addr) modifies t_EuaIPv4 := {
 		endUserAddress := {
 			endUserAddressIPv4 := {
-				lengthf := 2+lengthof(ip_addr)
+				lengthf := 2+4
 			}
 		}
 	}
@@ -667,6 +684,9 @@ module GGSN_Tests {
 					ctx.teid_remote := cpr.teidDataI.teidDataI;
 					ctx.teic_remote := cpr.teidControlPlane.teidControlPlane;
 					ctx.eua := cpr.endUserAddress;
+					if (match(ctx.eua, tr_EuaIPv4(?))) {
+						ctx.ip4_addr := ctx.eua.endUserAddress.endUserAddressIPv4.ipv4_address;
+					}
 					ctx.pco_neg := cpr.protConfigOptions;
 					setverdict(pass);
 				} else {
@@ -813,6 +833,28 @@ module GGSN_Tests {
 		payload := payload
 	}
 
+	/* template to construct IPv4_packet from input arguments, ready to use in f_IPv4_enc() */
+	template IPv4_packet ts_IP4(OCT4 srcaddr, OCT4 dstaddr, LIN1 proto, octetstring payload, LIN1 ttl := 255) := {
+		header := {
+			ver := 4,
+			hlen := 5,
+			tos := 0,
+			tlen := 0,
+			id := f_rnd_int(65535),
+			res := '0'B,
+			dfrag := '1'B,
+			mfrag := '0'B,
+			foffset := 0,
+			ttl := ttl,
+			proto := proto,
+			cksum := 0, /* overwritten in encoder */
+			srcaddr := srcaddr,
+			dstaddr := dstaddr
+		},
+		ext_headers := omit,
+		payload := payload
+	}
+
 	function f_ipv6_link_local(in OCT16 link_id) return OCT16 {
 		 return 'FE80000000000000'O & substr(link_id, 8, 8);
 	}
@@ -883,6 +925,103 @@ module GGSN_Tests {
 		T_default.stop;
 	}
 
+	template ASP_RecvFrom tr_UdpRecvFrom(template ConnectionId id, template HostName remName, template PortNumber remPort,
+					     template HostName locName, template PortNumber locPort, template octetstring payload) := {
+			connId := id,
+			remName := remName,
+			remPort := remPort,
+			locName := locName,
+			locPort := locPort,
+			proto := { udp := {} },
+			userData := ?,
+			msg := payload
+	}
+	function f_gen_UdpRT(template HostName remName, template PortNumber remPort,
+			     template octetstring payload) runs on GT_CT return template ASP_RecvFrom {
+		return tr_UdpRecvFrom(g_udp_connId, remName, remPort, m_pdn_sock_host_v4, m_pdn_sock_port_v4, payload);
+	}
+
+	template ASP_SendTo ts_UdpSendTo(ConnectionId id, HostName remName, PortNumber remPort, octetstring payload) := {
+		connId := id,
+		remName := remName,
+		remPort := remPort,
+		proto := { udp := {} },
+		msg := payload
+	}
+	function f_gen_UdpST(HostName remName, PortNumber remPort, octetstring payload) runs on GT_CT return ASP_SendTo {
+		return valueof(ts_UdpSendTo(g_udp_connId, remName, remPort, payload));
+	}
+
+	template UDP_packet ts_UDP(uint16_t srcport, uint16_t dstport, octetstring payload) := {
+		header := {
+			srcport := srcport,
+			dstport := dstport,
+			len := lengthof(payload),
+			cksum := 0
+		},
+		payload := payload
+	}
+
+	function f_gen_UDP4(OCT4 saddr, uint16_t sport, OCT4 daddr, uint16_t dport, octetstring payload) return octetstring {
+		var octetstring udp := f_UDP_enc(valueof(ts_UDP(sport, dport, payload)));
+		var UDP_pseudo_header phdr := {
+			ipv4 := {
+				srcaddr := saddr, dstaddr := daddr, zero := 0,
+				proto := 17, plen := 0
+			}
+		};
+		/* compute UDP checksum and patch into UDP binary */
+		var OCT2 udpcksum := f_UDP_checksum(f_UDP_pseudo_header_enc(phdr) & udp);
+		udp[6] := udpcksum[0];
+		udp[7] := udpcksum[1];
+		return f_IPv4_enc(valueof(ts_IP4(saddr, daddr, 17, udp)));
+	}
+
+	function f_gen_UDP6(OCT16 saddr, uint16_t sport, OCT16 daddr, uint16_t dport, octetstring payload) return octetstring {
+		var octetstring udp := f_UDP_enc(valueof(ts_UDP(sport, dport, payload)));
+		var UDP_pseudo_header phdr := {
+			ipv6 := {
+				srcaddr := saddr, dstaddr := daddr, plen := 0,
+				zero := 0, nextheader := 17
+			}
+		};
+		/* compute UDP checksum and patch into UDP binary */
+		var OCT2 udpcksum := f_UDP_checksum(f_UDP_pseudo_header_enc(phdr) & udp);
+		udp[6] := udpcksum[0];
+		udp[7] := udpcksum[1];
+		return f_IPv6_enc(valueof(ts_IP6(saddr, daddr, 17, udp)));
+	}
+
+	/* Send a packet via GTP (SGSN->GGSN) and confirm it arrives on UDP socket */
+	function f_transceive_udp_mo(PdpContext ctx, octetstring udp_payload) runs on GT_CT {
+		var uint16_t src_port := 8888;
+		/* build packet with UDP and IP header */
+		var octetstring ip_packet := f_gen_UDP4(ctx.ip4_addr, src_port, g_pdn_sock_ip, m_pdn_sock_port_v4, udp_payload);
+		/* send IP packet wrapped in GTP for given PDP context */
+		f_send_gtpu(ctx, ip_packet)
+		/* wait for it to arrive on UDP socket */
+		T_default.start;
+		alt {
+			[] UDP.receive(f_gen_UdpRT(f_inet_hntoa(ctx.ip4_addr), src_port, udp_payload)) { setverdict(pass); }
+			[] UDP.receive { setverdict(fail); }
+			[] T_default.timeout { setverdict(fail); }
+		}
+		T_default.stop;
+	}
+
+	function f_transceive_udp_mt(PdpContext ctx, octetstring udp_payload) runs on GT_CT {
+		var uint16_t dst_port := 7777;
+		var octetstring ip_packet := f_gen_UDP4(g_pdn_sock_ip, m_pdn_sock_port_v4, ctx.ip4_addr, dst_port, udp_payload);
+		/* Send IP packet in GGSN -> MS direction */
+		UDP.send(f_gen_UdpST(f_inet_hntoa(ctx.ip4_addr), dst_port, udp_payload));
+		T_default.start;
+		alt {
+			[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ctx.teid, ?)) { /* FIXME: check for ip_packet */}
+			[] T_default.timeout { setverdict(fail); }
+		}
+		T_default.stop;
+	}
+
 	/* Test IPv6 context activation for dynamic IPv6 EUA without request of IPv6 DNS */
 	testcase TC_pdp6_act_deact() runs on GT_CT {
 		f_init();
@@ -943,6 +1082,19 @@ module GGSN_Tests {
 		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
 		ctx.pco_req := valueof(ts_PCO_IPv4_DNS_CONT);
 		f_pdp_ctx_act(ctx);
+		f_pdp_ctx_del(ctx, '1'B);
+	}
+
+	/* Test PDP context activation for dynamic IPv4 EUA with IPv4 DNS in IPCP + UDP user data */
+	testcase TC_pdp4_act_deact_ipcp_udp() runs on GT_CT {
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		ctx.pco_req := valueof(ts_PCO_IPv4_DNS_IPCP);
+		f_pdp_ctx_act(ctx);
+		for (var integer i := 0; i < 10; i := i + i) {
+			var octetstring payload := f_rnd_octstring(512);
+			f_transceive_udp_mo(ctx, payload);
+		}
 		f_pdp_ctx_del(ctx, '1'B);
 	}
 
