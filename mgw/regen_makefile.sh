@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn"
+FILES="*.ttcn SDP_EncDec.cc *.c"
 
 ttcn3_makefilegen -f MGCP_Test.ttcn $FILES
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
