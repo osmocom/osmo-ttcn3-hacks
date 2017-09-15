@@ -1,8 +1,80 @@
 module MGCP_Test {
 	import from MGCP_Types all;
+	import from SDP_Types all;
+	import from MGCP_CodecPort all;
+	import from MGCP_CodecPort_CtrlFunct all;
+	import from IPL4asp_Types all;
 
 	type component dummy_CT {
+		port MGCP_CODEC_PT MGCP;
+		var boolean initialized := false;
+		var ConnectionId g_conn_id := -1;
 	};
+
+	modulepar {
+		PortNumber mp_local_udp_port := 2727;
+		charstring mp_local_ip := "127.0.0.1";
+		PortNumber mp_remote_udp_port := 2427;
+		charstring mp_remote_ip := "127.0.0.1";
+	}
+
+	private function f_init()runs on dummy_CT {
+		var Result res;
+		if (initialized == true) {
+			return;
+		}
+		initialized := true;
+
+		map(self:MGCP, system:MGCP_CODEC_PT);
+		res := f_IPL4_connect(MGCP, mp_remote_ip, mp_remote_udp_port, mp_local_ip, mp_local_udp_port, 0, { udp := {} });
+		g_conn_id := res.connId;
+	}
+
+	/* 3.2.2.6 Connection Mode (sendonly, recvonly, sendrecv, confrnce, inactive, loopback,
+	 * conttest, netwloop, netwtest) */
+	template MgcpParameter t_MgcpParConnMode(template MgcpConnectionMode mode) := { "M", mode };
+
+	/* 3.2.2.2 CallId: maximum 32 hex chars */
+	template MgcpParameter ts_MgcpParCallId(MgcpCallId cid) := {
+		code := "C",
+		val := hex2str(cid)
+	};
+
+	/* 3.2.2.18 RequestIdentifier: Maximum 32 hex chars */
+	template MgcpParameter ts_MgcpParReqId(MgcpRequestId rid) := {
+		code := "X",
+		val := hex2str(rid)
+	};
+
+	/* 3.2.2.10: LocalConnectionOptions (codec, packetization, bandwidth, ToS, eco, gain, silence, ...) */
+	template MgcpParameter t_MgcpParLocConnOpt(template charstring lco) := { "L", lco };
+
+	/* 3.2.2.5: ConnectionId: maximum 32 hex chars */
+	template MgcpParameter ts_MgcpParConnectionId(MgcpConnectionId cid) := {
+		code := "I",
+		val := hex2str(cid)
+	};
+
+	/* osmo-bsc_mgcp implements L/C/M/X only, osmo-mgw adds 'I' */
+	/* SDP: osmo-bsc_mgcp implements Tx of v,o,s,c,t,m,a */
+
+	template MgcpCommandLine t_MgcpCmdLine(template charstring verb, template MgcpTransId trans_id, template charstring ep) := {
+		verb := verb,
+		trans_id := trans_id,
+		ep := ep,
+		ver := "1.0"
+	};
+
+	template MgcpCommand ts_CRCX(MgcpTransId trans_id, charstring ep, MgcpConnectionMode mode, MgcpCallId call_id, template SDP_Message sdp := omit) := {
+		line := t_MgcpCmdLine("CRCX", trans_id, ep),
+		params := {
+			t_MgcpParConnMode(mode),
+			ts_MgcpParCallId(call_id),
+			//t_MgcpParReqId(omit),
+			t_MgcpParLocConnOpt("p: 20")
+		},
+		sdp := sdp
+	}
 
 	testcase TC_selftest() runs on dummy_CT {
 		const charstring c_auep := "AUEP 158663169 ds/e1-1/2@172.16.6.66 MGCP 1.0\r\n";
@@ -32,6 +104,7 @@ module MGCP_Test {
 						"m=audio 4441 RTP/AVP 99\r\n" &
 						"a=rtpmap:99 AMR/8000\r\n" &
 						"a=ptime:40\r\n";
+		const charstring c_crcx510_ret := "510 23 FAIL\r\n"
 
 		log(c_auep);
 		log(dec_MgcpCommand(c_auep));
@@ -44,9 +117,34 @@ module MGCP_Test {
 
 		log(c_mdcx4);
 		log(dec_MgcpCommand(c_mdcx4));
+
+		log(ts_CRCX("23", "42@mgw", "sendrecv", '1234'H));
+		log(enc_MgcpCommand(valueof(ts_CRCX("23", "42@mgw", "sendrecv", '1234'H))));
+
+		log(c_crcx510_ret);
+		log(dec_MgcpResponse(c_crcx510_ret));
+		log(dec_MgcpMessage(c_crcx510_ret));
+	}
+
+	testcase TC_crcx() runs on dummy_CT {
+		var MGCP_RecvFrom mrf;
+		timer T := 5.0;
+
+		f_init();
+
+		var MgcpMessage msg := { command := valueof(ts_CRCX("23", "42@mgw", "sendrecv", '1234'H)) };
+		MGCP.send(t_MGCP_Send(g_conn_id, msg));
+		T.start;
+		alt {
+			[] MGCP.receive(MGCP_RecvFrom:?) -> value mrf { log(mrf); }
+			[] MGCP.receive { repeat; }
+			[] T.timeout { setverdict(fail); }
+		}
+		T.stop;
 	}
 
 	control {
 		execute(TC_selftest());
+		execute(TC_crcx());
 	}
 }
