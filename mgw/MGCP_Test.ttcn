@@ -66,6 +66,16 @@ module MGCP_Test {
 	/* osmo-bsc_mgcp implements L/C/M/X only, osmo-mgw adds 'I' */
 	/* SDP: osmo-bsc_mgcp implements Tx of v,o,s,c,t,m,a */
 
+	template MgcpResponse tr_MgcpResp_Err(template MgcpResponseCode code) := {
+		line := {
+			code := code,
+			trans_id := ?,
+			string := ?
+		},
+		params := {},
+		sdp := omit
+	}
+
 	template MgcpCommandLine t_MgcpCmdLine(template charstring verb, template MgcpTransId trans_id, template charstring ep) := {
 		verb := verb,
 		trans_id := trans_id,
@@ -82,6 +92,107 @@ module MGCP_Test {
 			t_MgcpParLocConnOpt("p: 20")
 		},
 		sdp := sdp
+	}
+
+	template MgcpCommand ts_MDCX(MgcpTransId trans_id, charstring ep, MgcpConnectionMode mode, MgcpCallId call_id, template SDP_Message sdp := omit) := {
+		line := t_MgcpCmdLine("MDCX", trans_id, ep),
+		params := {
+			t_MgcpParConnMode(mode),
+			ts_MgcpParCallId(call_id),
+			//t_MgcpParReqId(omit),
+			t_MgcpParLocConnOpt("p: 20")
+		},
+		sdp := sdp
+	}
+
+	template MgcpCommand ts_DLCX(MgcpTransId trans_id, charstring ep,  MgcpCallId call_id) := {
+		line := t_MgcpCmdLine("DLCX", trans_id, ep),
+		params := {
+			ts_MgcpParCallId(call_id)
+		},
+		sdp := omit
+	}
+
+	/* SDP Templates */
+	template SDP_Origin ts_SDP_origin(charstring addr, charstring session_id,
+					  charstring session_version := "1",
+					  charstring addr_type := "IP4",
+					  charstring user_name := "-") := {
+		user_name := user_name,
+		session_id := session_id,
+		session_version := session_version,
+		net_type := "IN",
+		addr_type := addr_type,
+		addr := addr
+	}
+
+	template SDP_connection ts_SDP_connection_IP(charstring addr, charstring addr_type := "IP4",
+						     template integer ttl := omit,
+						     template integer num_of_addr := omit) :={
+		net_type := "IN",
+		addr_type := addr_type,
+		conn_addr := {
+			addr := addr,
+			ttl := ttl,
+			num_of_addr := num_of_addr
+		}
+	}
+
+	template SDP_time ts_SDP_time(charstring beg, charstring end) := {
+		time_field := {
+			start_time := beg,
+			stop_time := end
+		},
+		time_repeat := omit
+	}
+
+	template SDP_media_desc ts_SDP_media_desc(integer port_number, SDP_fmt_list fmts,
+						  SDP_attribute_list attributes) := {
+		media_field := {
+			media := "audio",
+			ports := {
+				port_number := port_number,
+				num_of_ports := omit
+			},
+			transport := "ARTP/AVP",
+			fmts := fmts
+		},
+		information := omit,
+		connections := omit,
+		bandwidth := omit,
+		key := omit,
+		attributes := attributes
+	}
+
+	template SDP_Message ts_SDP(charstring local_addr, charstring remote_addr,
+				    charstring session_id, charstring session_version,
+				    integer rtp_port, SDP_fmt_list fmts,
+				    SDP_attribute_list attributes) := {
+		protocol_version := 0,
+		origin := ts_SDP_origin(local_addr, session_id, session_version),
+		session_name := "-",
+		information := omit,
+		uri := omit,
+		emails := omit,
+		phone_numbers := omit,
+		connection := ts_SDP_connection_IP(remote_addr),
+		bandwidth := omit,
+		times := { ts_SDP_time("0","0") },
+		timezone_adjustments := omit,
+		key := omit,
+		attributes := omit,
+		media_list := { ts_SDP_media_desc(rtp_port, fmts, attributes) }
+	}
+
+	template SDP_attribute ts_SDP_rtpmap(integer fmt, charstring val) := {
+		rtpmap := {
+			attr_value := int2str(fmt) & " " & val
+		}
+	}
+	template SDP_attribute ts_SDP_ptime(integer p) := {
+		ptime := {
+			attr_value := int2str(p)
+		}
 	}
 
 	testcase TC_selftest() runs on dummy_CT {
@@ -134,25 +245,298 @@ module MGCP_Test {
 		log(dec_MgcpMessage(c_crcx510_ret));
 	}
 
-	testcase TC_crcx() runs on dummy_CT {
+	/* CRCX test ideas:
+	 * - without mandatory CallId
+	 * - without mandatory ConnectionId
+	 * - with forbidden parameters (e.g. Capabilities, PackageList, ...
+	 * - CRCX with remote session description and without
+	 *
+	 * general ideas:
+	 * - packetization != 20ms
+	 * - invalid mode
+	 * x unsupported mode (517)
+	 * x bidirectional mode before RemoteConnDesc: 527
+	 * - invalid codec
+	 * - retransmission of same transaction
+	 * - unsupported LocalConnectionOptions ("b", "a", "e", "gc", "s", "r", "k", ..)
+	 */
+
+	/* build a receive template for receiving a MGCP  message */
+	function tr_MGCP_RecvFrom_R(template MgcpResponse resp) runs on dummy_CT return template MGCP_RecvFrom {
+		var template MGCP_RecvFrom mrf := {
+			connId := g_conn_id,
+			remName := mp_remote_ip,
+			remPort := mp_remote_udp_port,
+			locName := mp_local_ip,
+			locPort := mp_local_udp_port,
+			msg := { response := resp }
+		}
+		return mrf;
+	}
+
+	/* Send a MGCP request + receive a (matching!) response */
+	function mgcp_transceive_mgw(template MgcpCommand cmd, template MgcpResponse resp := ?) runs on dummy_CT return MgcpResponse {
+		var MgcpMessage msg := { command := valueof(cmd) };
+		resp.line.trans_id := cmd.line.trans_id;
+		var template MGCP_RecvFrom mrt := tr_MGCP_RecvFrom_R(resp);
 		var MGCP_RecvFrom mrf;
 		timer T := 5.0;
 
-		f_init();
-
-		var MgcpMessage msg := { command := valueof(ts_CRCX("23", "42@mgw", "sendrecv", '1234'H)) };
 		MGCP.send(t_MGCP_Send(g_conn_id, msg));
 		T.start;
 		alt {
-			[] MGCP.receive(MGCP_RecvFrom:?) -> value mrf { log(mrf); }
+			[] MGCP.receive(mrt) -> value mrf { }
+			[] MGCP.receive(tr_MGCP_RecvFrom_R(?)) { setverdict(fail); }
 			[] MGCP.receive { repeat; }
 			[] T.timeout { setverdict(fail); }
 		}
 		T.stop;
+
+		if (isbound(mrf) and isbound(mrf.msg) and ischosen(mrf.msg.response)) {
+			return mrf.msg.response;
+		} else {
+			var MgcpResponse r := { line := { code := "999", trans_id := valueof(cmd.line.trans_id) } };
+			return r;
+		}
 	}
+
+	/* test valid CRCX without SDP */
+	testcase TC_crcx() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := {
+			line := {
+				code := "200",
+				string := "OK"
+			},
+			params:= ?,
+			sdp := ?
+		};
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "sendrecv", '1234'H);
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with unsupported mode, expect 517 */
+	testcase TC_crcx_unsupp_mode() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("517");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "netwtest", '1234'H);
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with early bi-directional mode, expect 527 */
+	testcase TC_crcx_early_bidir_mode() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("527");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "sendrecv", '1234'H);
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with unsupported Parameters */
+	testcase TC_crcx_unsupp_param() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("539");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "recvonly", '1234'H);
+		cmd.params := {
+			t_MgcpParConnMode("recvonly"),
+			ts_MgcpParCallId('1234'H),
+			t_MgcpParLocConnOpt("p:20"),
+			/* osmo-bsc_mgcp/mgw doesn't implement notifications */
+			{ "N", "foobar" }
+		}
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with missing CallId */
+	testcase TC_crcx_missing_callid() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("400");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "recvonly", '1234'H);
+		cmd.params := {
+			t_MgcpParConnMode("recvonly"),
+			t_MgcpParLocConnOpt("p:20")
+		}
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with missing Mode */
+	testcase TC_crcx_missing_mode() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("400");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "recvonly", '1234'H);
+		cmd.params := {
+			ts_MgcpParCallId('1234'H),
+			t_MgcpParLocConnOpt("p:20")
+		}
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with unsupported packetization interval */
+	testcase TC_crcx_unsupp_packet_intv() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("532");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "recvonly", '1234'H);
+		cmd.params := {
+			t_MgcpParConnMode("recvonly"),
+			ts_MgcpParCallId('1234'H),
+			t_MgcpParLocConnOpt("p:111")
+		}
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test CRCX with illegal double presence of local connection option */
+	testcase TC_crcx_illegal_double_lco() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := tr_MgcpResp_Err("524");
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "recvonly", '1234'H);
+		cmd.params := {
+			t_MgcpParConnMode("recvonly"),
+			ts_MgcpParCallId('1234'H),
+			t_MgcpParLocConnOpt("p:20, a:AMR, p:20")
+		}
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* test valid CRCX with valid SDP */
+	testcase TC_crcx_sdp() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := {
+			line := {
+				code := "200",
+				string := "OK"
+			},
+			params:= ?,
+			sdp := ?
+		};
+
+		f_init();
+
+		cmd := ts_CRCX(get_next_trans_id(), "2@mgw", "sendrecv", '1234'H);
+		cmd.sdp := ts_SDP("127.0.0.1", "127.0.0.2", "23", "42", 2344, { "98" },
+				  { valueof(ts_SDP_rtpmap(98, "AMR/8000")),
+				    valueof(ts_SDP_ptime(20)) });
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* TODO: various SDP related bits */
+
+
+	/* TODO: CRCX with X-Osmux */
+	/* TODO: double CRCX without force_realloc */
+
+	/* TODO: MDCX (various) */
+
+	/* TODO: MDCX without CRCX first */
+	testcase TC_mdcx_without_crcx() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := {
+			line := {
+				/* TODO: accept/enforce better error? */
+				code := "400",
+				string := ?
+			},
+			params:= { },
+			sdp := omit
+		};
+
+		f_init();
+
+		cmd := ts_MDCX(get_next_trans_id(), "3@mgw", "sendrecv", '31234'H);
+		cmd.sdp := ts_SDP("127.0.0.1", "127.0.0.2", "23", "42", 2344, { "98" },
+				  { valueof(ts_SDP_rtpmap(98, "AMR/8000")),
+				    valueof(ts_SDP_ptime(20)) });
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* DLCX without CRCX first */
+	testcase TC_dlcx_without_crcx() runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var template MgcpResponse rtmpl := {
+			line := {
+				/* TODO: accept/enforce better error? */
+				code := "400",
+				string := ?
+			},
+			params:= { },
+			sdp := omit
+		};
+
+		f_init();
+
+		cmd := ts_DLCX(get_next_trans_id(), "4@mgw", '41234'H);
+		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		setverdict(pass);
+	}
+
+	/* TODO: DLCX of valid endpoint but invalid call-id */
+	/* TODO: Double-DLCX (retransmission) */
+	/* TODO: Double-DLCX (no retransmission) */
+
+
+
+	/* TODO: AUEP (various) */
+	/* TODO: RSIP (various) */
+	/* TODO: RQNT (various) */
+	/* TODO: EPCF (various) */
+	/* TODO: AUCX (various) */
+	/* TODO: invalid verb (various) */
 
 	control {
 		execute(TC_selftest());
 		execute(TC_crcx());
+		execute(TC_crcx_unsupp_mode());
+		execute(TC_crcx_early_bidir_mode());
+		execute(TC_crcx_unsupp_param());
+		execute(TC_crcx_missing_callid());
+		execute(TC_crcx_missing_mode());
+		execute(TC_crcx_unsupp_packet_intv());
+		execute(TC_crcx_illegal_double_lco());
+		execute(TC_crcx_sdp());
+		execute(TC_mdcx_without_crcx());
+		execute(TC_dlcx_without_crcx());
 	}
 }
