@@ -37,5 +37,5 @@ FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn"
+FILES="General_Types.ttcn Osmocom_Types.ttcn"
 gen_links $DIR $FILES

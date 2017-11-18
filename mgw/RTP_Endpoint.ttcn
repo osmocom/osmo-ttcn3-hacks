@@ -1,0 +1,156 @@
+module RTP_Endpoint {
+
+	import from General_Types all;
+	import from Osmocom_Types all;
+	import from IPL4asp_Types all;
+	import from RTP_Types all;
+	import from RTP_CodecPort all;
+	import from RTP_CodecPort_CtrlFunct all;
+
+	/* state for one of the two UDP sockets in and endpoint */
+	type record RtpEndpointSub {
+		ConnectionId	connection_id,
+		HostName	local_name,
+		PortNumber	local_port,
+		HostName	remote_name,
+		PortNumber	remote_port
+	}
+	/* state for one RTP+RTCP endpoint */
+	type record RtpEndpoint {
+		/* static configuration */
+		INT7b		payload_type,
+		integer		sample_rate,		/* e.g. 8000 */
+		integer		samples_per_pkt,	/* e.g. 160 */
+		BIT32_BO_LAST	ssrc,
+
+		/* dynamic state */
+		uint32_t	next_ts,
+		LIN2_BO_LAST	next_seq_no,
+		RtpEndpointSub	rtp,
+		RtpEndpointSub	rtcp
+	}
+
+/*
+	type component RTP_CT {
+		port RTP_CODEC_PT RTP;
+		ConnectionId	g_conn_id := 1;
+	}
+
+	modulepar {
+		HostName rtp_local_ip := "127.0.0.1";
+		PortNumber rtp_local_base_port := 10000;
+	}
+*/
+
+	template RTP_messages_union ts_RTP(BIT1 marker, INT7b pt, LIN2_BO_LAST seq, uint32_t ts,
+					   BIT32_BO_LAST ssrc, octetstring data) := {
+		rtp := {
+			version := 2,
+			padding_ind := '0'B,
+			extension_ind := '0'B,
+			CSRC_count := 0,
+			marker_bit := marker,
+			payload_type := pt,
+			sequence_number := seq,
+			time_stamp := int2bit(ts, 32),
+			SSRC_id := ssrc,
+			CSRCs := omit,
+			ext_header := omit,
+			data := data
+		}
+	}
+
+	template RTP_messages_union tr_RTP(template INT7b pt, template octetstring data,
+					   template BIT32_BO_LAST ssrc := ?,
+					   template LIN2_BO_LAST seq := ?,
+					   template BIT32_BO_LAST ts := ?) := {
+		rtp := {
+			version := 2,
+			padding_ind := ?,
+			extension_ind := ?,
+			CSRC_count := ?,
+			marker_bit := ?,
+			payload_type := pt,
+			sequence_number := seq,
+			time_stamp := ts,
+			SSRC_id := ssrc,
+			CSRCs := *,
+			ext_header := *,
+			data := data
+		}
+	}
+
+	function rtp_endpoint_init(inout RtpEndpoint ep, charstring local_name, PortNumber local_port,
+				   uint32_t ssrc) {
+		ep.rtp.local_name := local_name;
+		ep.rtp.local_port := local_port;
+		ep.rtp.connection_id := -1;
+		ep.rtcp.local_name := local_name;
+		ep.rtcp.local_port := local_port + 1;
+		ep.rtcp.connection_id := -1;
+		ep.ssrc := int2bit(ssrc, 32);
+
+		ep.payload_type := 99;
+		ep.sample_rate := 8000;
+		ep.samples_per_pkt := 160;
+		ep.next_ts := float2int(rnd()*4294967295.0);
+		ep.next_seq_no := float2int(rnd()*65535.0);
+	}
+
+	function rtp_endpoint_sub_close(inout RTP_CODEC_PT RTP, inout RtpEndpointSub sub) {
+		if (sub.connection_id != -1) {
+			f_IPL4_close(RTP, sub.connection_id, { udp := {} });
+			sub.connection_id := -1;
+		}
+	}
+
+	function rtp_endpoint_sub_connect(inout RTP_CODEC_PT RTP, inout RtpEndpointSub sub) {
+		var Result res;
+
+		res := f_IPL4_connect(RTP, sub.remote_name, sub.remote_port,
+					sub.local_name, sub.local_port, sub.connection_id, { udp := {} });
+		/* FIXME: Check for success (no res.errorCode) */
+
+		/* connect without previous bind: save conenction id allocated by IPL4asp */
+		if (sub.connection_id == -1) {
+			sub.connection_id := res.connId;
+		}
+	}
+
+	function rtp_endpoint_close(inout RTP_CODEC_PT RTP, inout RtpEndpoint ep) {
+		rtp_endpoint_sub_close(RTP, ep.rtp);
+		rtp_endpoint_sub_close(RTP, ep.rtcp);
+	}
+
+	/* connect the RTP and RTCP */
+	function rtp_endpoint_connect(inout RTP_CODEC_PT RTP, inout RtpEndpoint ep) {
+		rtp_endpoint_sub_connect(RTP, ep.rtp);
+		rtp_endpoint_sub_connect(RTP, ep.rtcp);
+	}
+
+	function rtp_endpoint_sub_bind(inout RTP_CODEC_PT RTP, inout RtpEndpointSub sub) {
+		var Result res;
+		rtp_endpoint_sub_close(RTP, sub);
+		res := f_IPL4_listen(RTP, sub.local_name, sub.local_port, { udp := {} });
+		/* FIXME: Check for success (no res.errorCode) */
+		sub.connection_id := res.connId;
+	}
+
+	function rtp_endpoint_bind(inout RTP_CODEC_PT RTP, inout RtpEndpoint ep) {
+		rtp_endpoint_sub_bind(RTP, ep.rtp);
+		rtp_endpoint_sub_bind(RTP, ep.rtcp);
+	}
+
+	/* send user-specified data through given endpoint, incrementing seq_no and timestamp */
+	function rtp_endpoint_send(inout RTP_CODEC_PT RTP, inout RtpEndpoint ep,
+				   octetstring data := '00'O) {
+		var RTP_messages_union rtp;
+		/* generate RTP packet as abstract TTCN-3 type */
+		rtp := valueof(ts_RTP('0'B, ep.payload_type, ep.next_seq_no, ep.next_ts, ep.ssrc, data));
+		/* increment for next packet */
+		ep.next_seq_no := ep.next_seq_no + 1;
+		ep.next_ts := ep.next_ts + ep.samples_per_pkt;
+		/* encode and send */
+		RTP.send(t_RTP_Send(ep.rtp.connection_id, rtp));
+	}
+}
