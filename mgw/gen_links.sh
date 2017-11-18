@@ -31,3 +31,11 @@ DIR=$BASEDIR/titan.ProtocolModules.SDP/src
 FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
 SDP_parser.y lex.SDP_parse_.c"
 gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.RTP/src
+FILES="RTP_EncDec.cc RTP_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=../library
+FILES="General_Types.ttcn"
+gen_links $DIR $FILES
