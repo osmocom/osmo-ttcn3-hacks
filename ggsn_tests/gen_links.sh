@@ -39,7 +39,7 @@ DIR=$BASEDIR/titan.ProtocolModules.UDP/src
 FILES="UDP_EncDec.cc  UDP_Types.ttcn"
 gen_links $DIR $FILES
 
-DIR=../GTP_v13.5.0_CNL113843_LATEST/src
+DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
