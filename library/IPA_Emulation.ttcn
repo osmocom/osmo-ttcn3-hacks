@@ -1,0 +1,158 @@
+module IPA_Emulation {
+
+import from IPA_Types all;
+import from IPA_CodecPort all;
+import from IPA_CodecPort_CtrlFunct all;
+import from IPL4asp_Types all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
+
+/*
+modulepar {
+}
+*/
+
+type component IPA_Emulation_CT {
+	/* down-facing port to IPA codec port */
+	port IPA_CODEC_PT IPA_PORT;
+	/* up-facing port to SCCP */
+	port MTP3asp_SP_PT MTP3_SP_PORT;
+
+	var boolean g_initialized := false;
+	var ConnectionId g_ipa_conn_id := -1;
+}
+
+function f_connect(charstring remote_host, PortNumber remote_port,
+		   charstring local_host, PortNumber local_port) runs on IPA_Emulation_CT {
+	var Result res;
+	res := IPA_CodecPort_CtrlFunct.f_IPL4_connect(IPA_PORT, remote_host, remote_port,
+						local_host, local_port, 0, { tcp:={} });
+	g_ipa_conn_id := res.connId;
+}
+
+template ASP_MTP3_TRANSFERind ts_MTP3_XFER_ind(integer opc, octetstring data) := {
+	sio := { '10'B, '00'B, '0011'B },
+	opc := opc,
+	dpc := 0,
+	sls := 0,
+	data := data
+}
+
+
+private template IpaCcmRespPart t_IdRespPart(IpaCcmIdTag tag, charstring payload) := {
+	len := 0,	/* overwritten by codec */
+	tag := tag,
+	data := payload
+}
+
+/* build IPA CCM ID RESP response from IPA CCM GET */
+private function f_ccm_make_id_resp(PDU_IPA_CCM get) return PDU_IPA_CCM {
+	var integer i;
+	var PDU_IPA_CCM resp := {
+		msg_type := IPAC_MSGT_ID_RESP,
+		u := {
+			resp := {}
+		}
+	}
+
+	for (i := 0; i < sizeof(get.u.get); i := i + 1) {
+		var IpaCcmIdTag tag := get.u.get[i].tag;
+		var charstring foo;
+		select (tag) {
+			case (IPAC_IDTAG_UNIT) {
+				foo := "0/1/2";
+			}
+			case (IPAC_IDTAG_UNITNAME) {
+				foo := "mahlzeit";
+			}
+			case else {
+				foo := "foo";
+			}
+		}
+		resp.u.resp[sizeof(resp.u.resp)] := valueof(t_IdRespPart(tag, foo));
+	}
+
+	return resp;
+}
+
+/* transmit IPA CCM message */
+private function f_ccm_tx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
+	var IPA_Send ipa_tx := {
+		connId := g_ipa_conn_id,
+		streamId := IPAC_PROTO_CCM,
+		msg := enc_PDU_IPA_CCM(ccm)
+	}
+	log("CCM Tx:", ccm);
+	IPA_PORT.send(ipa_tx);
+}
+
+template PDU_IPA_CCM ts_IPA_PONG := {
+	msg_type := IPAC_MSGT_PONG,
+	u := omit
+}
+
+template PDU_IPA_CCM ts_IPA_ACK := {
+	msg_type := IPAC_MSGT_ID_ACK,
+	u := omit
+}
+
+/* receive IPA CCM message */
+private function f_ccm_rx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
+	select (ccm.msg_type) {
+		case (IPAC_MSGT_PING) {
+			f_ccm_tx(valueof(ts_IPA_PONG));
+		}
+		case (IPAC_MSGT_ID_ACK) {
+			f_ccm_tx(valueof(ts_IPA_ACK));
+		}
+		case (IPAC_MSGT_ID_GET) {
+			f_ccm_tx(f_ccm_make_id_resp(ccm));
+		}
+		case else {
+			log("Unknown/unsupported IPA CCM message type", ccm);
+		}
+	}
+}
+
+
+function ScanEvents() runs on IPA_Emulation_CT {
+	var IPA_RecvFrom ipa_rx;
+	var ASP_MTP3_TRANSFERreq mtp_req;
+
+	f_connect("127.0.0.1", 5000, "127.0.0.1", 49999);
+
+	while (true) {
+		alt {
+		/* Received IPA -> up into SCCP stack */
+		[] IPA_PORT.receive(IPA_RecvFrom: ?) -> value ipa_rx {
+			select (ipa_rx.streamId) {
+			case (IPAC_PROTO_CCM) {
+				var PDU_IPA_CCM ccm := dec_PDU_IPA_CCM(ipa_rx.msg);
+				log("CCM Rx:", ccm);
+				f_ccm_rx(ccm);
+				}
+			case (IPAC_PROTO_SCCP) {
+				var ASP_MTP3_TRANSFERind mtp;
+				mtp := valueof(ts_MTP3_XFER_ind(0, ipa_rx.msg));
+				MTP3_SP_PORT.send(mtp);
+				}
+			case else {
+				log("Unknown/unsupported IPA Stream ID", ipa_rx);
+				}
+			}
+		}
+
+		/* Received SCCP -> down into IPA */
+		[] MTP3_SP_PORT.receive(ASP_MTP3_TRANSFERreq: ?) -> value mtp_req {
+			var IPA_Send ipa_tx := {
+				connId := g_ipa_conn_id,
+				streamId := IPAC_PROTO_SCCP,
+				msg := mtp_req.data
+			}
+			IPA_PORT.send(ipa_tx);
+		}
+		}
+	}
+}
+
+}

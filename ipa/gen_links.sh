@@ -27,6 +27,17 @@ DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+# required by SCCP Emulation
+DIR=../MTP3asp_CNL113337/src
+FILES="MTP3asp_PortType.ttcn  MTP3asp_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=../SCCP_CNL113341/src
+FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
+gen_links $DIR $FILES
+ln -s SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
+
+
 DIR=../library
-FILES="Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc"
+FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc"
 gen_links $DIR $FILES
