@@ -1,0 +1,206 @@
+module BSSMAP_Emulation {
+
+import from SCCPasp_Types all;
+import from BSSAP_Types all;
+import from BSSMAP_Templates all;
+//import from MSC_ConnectionHandler all;
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component BSSAP_ConnHdlr {
+	/* port towards MSC Emulator core / SCCP connection dispatchar */
+	port BSSAP_Conn_PT BSSAP;
+}
+
+/* Auxiliary primitive that can happen on the port between per-connection client and this dispatcher */
+type enumerated BSSAP_Conn_Prim {
+	/* SCCP tell us that connection was released */
+	MSC_CONN_PRIM_DISC_IND,
+	/* we tell SCCP to release connection */
+	MSC_CONN_PRIM_DISC_REQ
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port BSSAP_Conn_PT message {
+	inout PDU_BSSAP;
+	inout BSSAP_Conn_Prim;
+} with { extension "internal" };
+
+
+/* represents a single BSSAP connection over SCCP */
+type record ConnectionData {
+	/* reference to the instance of the per-connection component */
+	BSSAP_ConnHdlr	comp_ref,
+	integer		sccp_conn_id
+}
+
+type component BSSMAP_Emulation_CT {
+	/* SCCP port on the bottom side, using ASP primitives */
+	port SCCPasp_PT SCCP;
+	/* BSSAP port to the per-connection clients */
+	port BSSAP_Conn_PT CLIENT;
+
+	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
+	var ConnectionData ConnectionTable[16];
+};
+
+
+/* resolve component reference by connection ID */
+private function f_comp_by_conn_id(integer sccp_conn_id)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id) {
+			return ConnectionTable[i].comp_ref;
+		}
+	}
+	log("BSSMAP Connection table not found by SCCP Connection ID ", sccp_conn_id);
+	self.stop;
+}
+
+/* resolve connection ID by component reference */
+private function f_conn_id_by_comp(BSSAP_ConnHdlr client)
+runs on BSSMAP_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return ConnectionTable[i].sccp_conn_id;
+		}
+	}
+	log("BSSMAP Connection table not found by component ", client);
+	self.stop;
+}
+
+private function f_conn_table_init()
+runs on BSSMAP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		ConnectionTable[i].comp_ref := null;
+		ConnectionTable[i].sccp_conn_id := -1;
+	}
+}
+
+private function f_conn_table_add(BSSAP_ConnHdlr comp_ref, integer sccp_conn_id)
+runs on BSSMAP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == -1) {
+			ConnectionTable[i].comp_ref := comp_ref;
+			ConnectionTable[i].sccp_conn_id := sccp_conn_id;
+			return;
+		}
+	}
+	log("BSSMAP Connection table full!");
+	self.stop;
+}
+
+private function f_conn_table_del(integer sccp_conn_id)
+runs on BSSMAP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id) {
+			ConnectionTable[i].sccp_conn_id := -1;
+			ConnectionTable[i].comp_ref := null;
+		}
+	}
+	log("BSSMAP Connection table attempt to delete non-existant ", sccp_conn_id);
+	self.stop;
+}
+
+/* handle (optional) userData portion of various primitives and dispatch it to the client */
+private function f_handle_userData(BSSAP_ConnHdlr client, template octetstring userdata)
+runs on BSSMAP_Emulation_CT {
+	if (not isvalue(userdata)) {
+		return;
+	}
+
+	/* decode + send decoded BSSAP to client */
+	var PDU_BSSAP bssap := dec_PDU_BSSAP(valueof(userdata));
+	CLIENT.send(bssap) to client;
+}
+
+/* call-back type, to be provided by specific implementation; called when new SCCP connection
+ * arrives */
+type function BssmapCreateCallback(ASP_SCCP_N_CONNECT_ind conn_ind)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr;
+
+type function BssmapUnitdataCallback(PDU_BSSAP bssap)
+runs on BSSMAP_Emulation_CT return template PDU_BSSAP;
+
+type record BssmapOps {
+	BssmapCreateCallback create_cb,
+	BssmapUnitdataCallback unitdata_cb
+}
+
+function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
+
+	f_conn_table_init();
+
+	while (true) {
+		var ASP_SCCP_N_UNITDATA_ind ud_ind;
+		var ASP_SCCP_N_CONNECT_ind conn_ind;
+		var ASP_SCCP_N_DATA_ind data_ind;
+		var ASP_SCCP_N_DISCONNECT_ind disc_ind;
+		var BSSAP_ConnHdlr vc_conn;
+		var PDU_BSSAP bssap;
+
+		alt {
+		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
+		[] SCCP.receive(ASP_SCCP_N_UNITDATA_ind:?) -> value ud_ind {
+			/* Connectionless Procedures like RESET */
+			var template PDU_BSSAP resp;
+			bssap := dec_PDU_BSSAP(ud_ind.userData);
+			resp := ops.unitdata_cb.apply(bssap);
+			if (isvalue(resp)) {
+				var octetstring resp_ud := enc_PDU_BSSAP(valueof(resp));
+				SCCP.send(t_ASP_N_UNITDATA_req(ud_ind.callingAddress,
+								ud_ind.calledAddress, omit,
+								omit, resp_ud, omit));
+			}
+			}
+
+		/* SCCP -> Client: new connection from BSC */
+		[] SCCP.receive(ASP_SCCP_N_CONNECT_ind:?) -> value conn_ind {
+			vc_conn := ops.create_cb.apply(conn_ind);
+			/* store mapping between client components and SCCP connectionId */
+			f_conn_table_add(vc_conn, conn_ind.connectionId);
+			/* handle user payload */
+			f_handle_userData(vc_conn, conn_ind.userData);
+			/* confirm connection establishment */
+			SCCP.send(t_ASP_N_CONNECT_res(omit, omit, omit, omit, conn_ind.connectionId, omit));
+			}
+
+		/* SCCP -> Client: connection-oriented data in existing connection */
+		[] SCCP.receive(ASP_SCCP_N_DATA_ind:?) -> value data_ind {
+			vc_conn := f_comp_by_conn_id(data_ind.connectionId);
+			f_handle_userData(vc_conn, conn_ind.userData);
+			}
+
+		/* SCCP -> Client: disconnect of an existing connection */
+		[] SCCP.receive(ASP_SCCP_N_DISCONNECT_ind:?) -> value disc_ind {
+			vc_conn := f_comp_by_conn_id(disc_ind.connectionId);
+			f_handle_userData(vc_conn, disc_ind.userData);
+			/* notify client about termination */
+			var BSSAP_Conn_Prim prim := MSC_CONN_PRIM_DISC_IND;
+			CLIENT.send(prim) to vc_conn;
+			f_conn_table_del(disc_ind.connectionId);
+			/* TOOD: return confirm to other side? */
+			}
+
+		/* Disconnect request client -> SCCP */
+		[] CLIENT.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ) -> sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			SCCP.send(t_ASP_N_DISCONNECT_req(omit, 0, omit, conn_id, omit));
+			f_conn_table_del(conn_id);
+			}
+
+		/* BSSAP from client -> SCCP */
+		[] CLIENT.receive(PDU_BSSAP:?) -> value bssap sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* encode + send to dispatcher */
+			var octetstring userdata := enc_PDU_BSSAP(bssap);
+			SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
+			}
+
+		}
+	}
+}
+
+
+}
