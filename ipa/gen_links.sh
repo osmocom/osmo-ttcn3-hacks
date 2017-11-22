@@ -37,7 +37,15 @@ FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn
 gen_links $DIR $FILES
 ln -s SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
 
+DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
+FILES="BSSAP_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
+FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
+gen_links $DIR $FILES
+
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc"
+FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc L3_Templates.ttcn BSSMAP_Templates.ttcn"
 gen_links $DIR $FILES
