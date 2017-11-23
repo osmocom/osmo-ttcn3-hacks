@@ -1,5 +1,6 @@
 module BSSMAP_Emulation {
 
+import from SCCP_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
 import from BSSMAP_Templates all;
@@ -20,10 +21,15 @@ type enumerated BSSAP_Conn_Prim {
 	MSC_CONN_PRIM_DISC_REQ
 }
 
+type record BSSAP_Conn_Req {
+	SCCP_PAR_Address	addr_peer,
+	SCCP_PAR_Address	addr_own,
+	PDU_BSSAP		bssap
+}
+
 /* port between individual per-connection components and this dispatcher */
 type port BSSAP_Conn_PT message {
-	inout PDU_BSSAP;
-	inout BSSAP_Conn_Prim;
+	inout PDU_BSSAP, BSSAP_Conn_Prim, BSSAP_Conn_Req;
 } with { extension "internal" };
 
 
@@ -44,6 +50,27 @@ type component BSSMAP_Emulation_CT {
 	var ConnectionData ConnectionTable[16];
 };
 
+private function f_conn_id_known(integer sccp_conn_id)
+runs on BSSMAP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id){
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(BSSAP_ConnHdlr client)
+runs on BSSMAP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
 
 /* resolve component reference by connection ID */
 private function f_comp_by_conn_id(integer sccp_conn_id)
@@ -70,6 +97,17 @@ runs on BSSMAP_Emulation_CT return integer {
 	self.stop;
 }
 
+private function f_gen_conn_id()
+runs on BSSMAP_Emulation_CT return integer {
+	var integer conn_id;
+
+	do {
+		conn_id := float2int(rnd()*SCCP_Emulation.tsp_max_ConnectionId);
+	} while (f_conn_id_known(conn_id) == true);
+
+	return conn_id;
+}
+
 private function f_conn_table_init()
 runs on BSSMAP_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
@@ -84,6 +122,7 @@ runs on BSSMAP_Emulation_CT {
 		if (ConnectionTable[i].sccp_conn_id == -1) {
 			ConnectionTable[i].comp_ref := comp_ref;
 			ConnectionTable[i].sccp_conn_id := sccp_conn_id;
+			log("Added conn table entry ", i, comp_ref, sccp_conn_id);
 			return;
 		}
 	}
@@ -95,6 +134,8 @@ private function f_conn_table_del(integer sccp_conn_id)
 runs on BSSMAP_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
 		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id) {
+			log("Deleted conn table entry ", i,
+			    ConnectionTable[i].comp_ref, sccp_conn_id);
 			ConnectionTable[i].sccp_conn_id := -1;
 			ConnectionTable[i].comp_ref := null;
 		}
@@ -135,8 +176,10 @@ function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
 	while (true) {
 		var ASP_SCCP_N_UNITDATA_ind ud_ind;
 		var ASP_SCCP_N_CONNECT_ind conn_ind;
+		var ASP_SCCP_N_CONNECT_cfm conn_cfm;
 		var ASP_SCCP_N_DATA_ind data_ind;
 		var ASP_SCCP_N_DISCONNECT_ind disc_ind;
+		var BSSAP_Conn_Req creq;
 		var BSSAP_ConnHdlr vc_conn;
 		var PDU_BSSAP bssap;
 
@@ -183,6 +226,12 @@ function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
 			/* TOOD: return confirm to other side? */
 			}
 
+		/* SCCP -> Client: connection confirm for outbound connection */
+		[] SCCP.receive(ASP_SCCP_N_CONNECT_cfm:?) -> value conn_cfm {
+			/* handle user payload */
+			f_handle_userData(vc_conn, conn_cfm.userData);
+			}
+
 		/* Disconnect request client -> SCCP */
 		[] CLIENT.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ) -> sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
@@ -191,9 +240,31 @@ function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
 			}
 
 		/* BSSAP from client -> SCCP */
+		[] CLIENT.receive(BSSAP_Conn_Req:?) -> value creq sender vc_conn {
+			var integer conn_id;
+			/* encode + send to dispatcher */
+			var octetstring userdata := enc_PDU_BSSAP(creq.bssap);
+
+			if (f_comp_known(vc_conn) == false) {
+				/* unknown client, create new connection */
+				conn_id := f_gen_conn_id();
+
+				/* store mapping between client components and SCCP connectionId */
+				f_conn_table_add(vc_conn, conn_id);
+
+				SCCP.send(t_ASP_N_CONNECT_req(creq.addr_peer, creq.addr_own, omit, omit,
+								userdata, conn_id, omit));
+			} else {
+				/* known client, send via existing connection */
+				conn_id := f_conn_id_by_comp(vc_conn);
+				SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
+			}
+
+			}
+
 		[] CLIENT.receive(PDU_BSSAP:?) -> value bssap sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
-			/* encode + send to dispatcher */
+			/* encode + send it to dispatcher */
 			var octetstring userdata := enc_PDU_BSSAP(bssap);
 			SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
 			}

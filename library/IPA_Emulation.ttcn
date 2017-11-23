@@ -12,6 +12,11 @@ modulepar {
 }
 */
 
+type enumerated IpaMode {
+	IPA_MODE_CLIENT,
+	IPA_MODE_SERVER
+}
+
 type record ASP_IPA_Unitdata {
 	IpaStreamId	streamId,
 	octetstring	payload
@@ -31,6 +36,8 @@ type component IPA_Emulation_CT {
 
 	var boolean g_initialized := false;
 	var ConnectionId g_ipa_conn_id := -1;
+
+	var IpaMode g_mode;
 }
 
 function f_connect(charstring remote_host, PortNumber remote_port,
@@ -38,6 +45,13 @@ function f_connect(charstring remote_host, PortNumber remote_port,
 	var Result res;
 	res := IPA_CodecPort_CtrlFunct.f_IPL4_connect(IPA_PORT, remote_host, remote_port,
 						local_host, local_port, 0, { tcp:={} });
+	g_ipa_conn_id := res.connId;
+}
+
+function f_bind(charstring local_host, PortNumber local_port) runs on IPA_Emulation_CT {
+	var Result res;
+	res := IPA_CodecPort_CtrlFunct.f_IPL4_listen(IPA_PORT, 
+						local_host, local_port, { tcp:={} });
 	g_ipa_conn_id := res.connId;
 }
 
@@ -107,6 +121,15 @@ template PDU_IPA_CCM ts_IPA_ACK := {
 	u := omit
 }
 
+template PDU_IPA_CCM ts_IPA_ID_GET := {
+	msg_type := IPAC_MSGT_ID_GET,
+	u := {
+		get := {
+			{ 1, IPAC_IDTAG_UNITNAME }
+		}
+	}
+}
+
 /* receive IPA CCM message */
 private function f_ccm_rx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
 	select (ccm.msg_type) {
@@ -142,12 +165,24 @@ private function f_from_asp(ConnectionId connId, ASP_IPA_Unitdata ipa_tx) return
 	return ret;
 }
 
-function ScanEvents() runs on IPA_Emulation_CT {
+function main_client(charstring remote_host, PortNumber remote_port,
+		     charstring local_host, PortNumber local_port) runs on IPA_Emulation_CT {
+	g_mode := IPA_MODE_CLIENT;
+	f_connect(remote_host, remote_port, local_host, local_port);
+	ScanEvents();
+}
+
+function main_server(charstring local_host, PortNumber local_port) runs on IPA_Emulation_CT {
+	g_mode := IPA_MODE_SERVER;
+	f_bind(local_host, local_port);
+	ScanEvents();
+}
+
+private function ScanEvents() runs on IPA_Emulation_CT {
 	var IPA_RecvFrom ipa_rx;
 	var ASP_IPA_Unitdata ipa_ud;
 	var ASP_MTP3_TRANSFERreq mtp_req;
-
-	f_connect("127.0.0.1", 5000, "127.0.0.1", 49999);
+	var ASP_Event asp_evt;
 
 	while (true) {
 		alt {
@@ -168,6 +203,21 @@ function ScanEvents() runs on IPA_Emulation_CT {
 				IPA_SP_PORT.send(f_to_asp(ipa_rx));
 				}
 			}
+		}
+
+		/* server only */
+		[] IPA_PORT.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
+			log("IPA: Connected");
+			g_ipa_conn_id := asp_evt.connOpened.connId;
+			if (g_mode == IPA_MODE_SERVER) {
+				f_ccm_tx(valueof(ts_IPA_ID_GET));
+			}
+		}
+
+		[] IPA_PORT.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
+			log("IPA: Closed");
+			g_ipa_conn_id := -1;
+			self.stop;
 		}
 
 		/* Received SCCP -> down into IPA */

@@ -47,5 +47,5 @@ gen_links $DIR $FILES
 
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc L3_Templates.ttcn BSSMAP_Templates.ttcn"
+FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn BSSMAP_Emulation.ttcn"
 gen_links $DIR $FILES

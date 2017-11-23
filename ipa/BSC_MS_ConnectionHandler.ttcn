@@ -1,4 +1,4 @@
-module MSC_ConnectionHandler {
+module BSC_MS_ConnectionHandler {
 
 import from General_Types all;
 import from Osmocom_Types all;
@@ -7,12 +7,14 @@ import from BSSAP_Types all;
 import from BSSMAP_Emulation all;
 import from BSSMAP_Templates all;
 
+import from MobileL3_Types all;
+import from MobileL3_CommonIE_Types all;
+import from L3_Templates all;
+
 /* this component represents a single subscriber connection at the MSC.
  * There is a 1:1 mapping between SCCP connections and BSSAP_ConnHdlr components.
  * We inherit all component variables, ports, functions, ... from BSSAP_ConnHdlr */
-type component MSC_ConnHdlr extends BSSAP_ConnHdlr {
-	/* E1 timeslot that is allocated to this component/connection */
-	var uint5_t g_e1_timeslot;
+type component BSC_MS_ConnHdlr extends BSSAP_ConnHdlr {
 	/* SCCP Connecction Identifier for the underlying SCCP connection */
 	var integer g_sccp_conn_id;
 }
@@ -21,14 +23,8 @@ type component MSC_ConnHdlr extends BSSAP_ConnHdlr {
  * SCCP connection arrivces. Must create + start a new component */
 private function CreateCallback(ASP_SCCP_N_CONNECT_ind conn_ind)
 runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
-	var MSC_ConnHdlr vc_conn;
-	/* Create a new BSSAP_ConnHdlr component */
-	vc_conn := MSC_ConnHdlr.create;
-	/* connect it to the port */
-	connect(vc_conn:BSSAP, self:CLIENT);
-	/* start it */
-	vc_conn.start(MSC_ConnectionHandler.main(conn_ind.connectionId, conn_ind.connectionId));
-	return vc_conn;
+	log("Incoming SCCP Connection on BSC ?!?");
+	self.stop;
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a connectionless
@@ -44,33 +40,56 @@ runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
 	return resp;
 }
 
-const BssmapOps MSC_BssmapOps := {
+const BssmapOps BSC_MS_BssmapOps := {
 	create_cb := refers(CreateCallback),
 	unitdata_cb := refers(UnitdataCallback)
 }
 
+
+function f_gen_cl3(hexstring imsi) return PDU_BSSAP {
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(imsi));
+	var PDU_ML3_MS_NW l3 := valueof(ts_CM_SERV_REQ('0001'B, mi));
+	var BSSMAP_IE_CellIdentifier cell_id := valueof(ts_CellID_LAC_CI(23, 42));
+	var PDU_BSSAP bssap := valueof(ts_BSSMAP_ComplL3(cell_id, enc_PDU_ML3_MS_NW(l3)));
+	return bssap;
+}
+
 /* main function processing various incoming events */
-function main(integer connection_id, integer timeslot) runs on MSC_ConnHdlr {
-	g_sccp_conn_id := connection_id;
-	g_e1_timeslot := 1; /* FIXME */
+function main(SCCP_PAR_Address sccp_addr_own, SCCP_PAR_Address sccp_addr_remote)
+runs on BSC_MS_ConnHdlr {
+	var PDU_BSSAP bssap;
+
+	log("Starting main of BSC_MS_ConnHdlr");
+
+	/* generate and send the Complete Layer3 Info */
+	bssap := f_gen_cl3('901770123456789'H);
+
+	var BSSAP_Conn_Req creq := {
+		addr_peer := sccp_addr_remote,
+		addr_own := sccp_addr_own,
+		bssap := bssap
+	}
+	BSSAP.send(creq);
 
 	while (true) {
-		var PDU_BSSAP bssap;
 		alt {
 		/* new SCCP-level connection indication from BSC */
-		[] BSSAP.receive(tr_BSSMAP_ComplL3) -> value bssap {
-			/* respond with ASSIGNMENT CMD  */
-			BSSAP.send(ts_BSSMAP_AssignmentCmd(0, g_e1_timeslot));
-			/* FIXME: Send MGCP */
+		[] BSSAP.receive(tr_BSSMAP_AssignmentCmd) -> value bssap {
+			/* TODO: Read CIC */
+			/* respond with ASSIGNMENT COMPL */
+			BSSAP.send(ts_BSSMAP_AssignmentComplete(bssap.pdu.bssmap.assignmentRequest.circuitIdentityCode));
 			}
-		/*
-		[] BSSAP.receive(tr_BSSMAP_AssignmentCompl) {
-		}
-		[] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
-		}
-		*/
 		/* TODO: CLEAR REQUEST from BSS */
-		/* TODO: CLEAR COMPLETE from BSS (response to CLEAR COMMAND) */
+		/* CLEAR COMMAND from MSC; respond with CLEAR COMPLETE) */
+		[] BSSAP.receive(tr_BSSMAP_ClearCommand) -> value bssap {
+			BSSAP.send(ts_BSSMAP_ClearComplete);
+			/* FIXME: local release? */
+			}
+
+		[] BSSAP.receive(tr_BSSAP_DTAP) -> value bssap {
+			var PDU_ML3_MS_NW l3 := dec_PDU_ML3_MS_NW(bssap.pdu.dtap);
+			log("Unhandled DTAP ", l3);
+			}
 
 		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
 			self.stop;
