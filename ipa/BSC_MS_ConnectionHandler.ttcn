@@ -11,12 +11,18 @@ import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
 import from L3_Templates all;
 
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from SDP_Types all;
+
 /* this component represents a single subscriber connection at the MSC.
  * There is a 1:1 mapping between SCCP connections and BSSAP_ConnHdlr components.
  * We inherit all component variables, ports, functions, ... from BSSAP_ConnHdlr */
 type component BSC_MS_ConnHdlr extends BSSAP_ConnHdlr {
 	/* SCCP Connecction Identifier for the underlying SCCP connection */
 	var integer g_sccp_conn_id;
+	var MgcpConnectionId g_mgcp_conn_id;
+	var SDP_Message g_sdp;
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a new incoming
@@ -58,12 +64,15 @@ function f_gen_cl3(hexstring imsi) return PDU_BSSAP {
 function main(SCCP_PAR_Address sccp_addr_own, SCCP_PAR_Address sccp_addr_remote)
 runs on BSC_MS_ConnHdlr {
 	var PDU_BSSAP bssap;
+	var MgcpCommand mgcp_cmd;
+	var MgcpResponse mgcp_resp;
 
 	log("Starting main of BSC_MS_ConnHdlr");
 
+	g_mgcp_conn_id := f_mgcp_alloc_conn_id();
+
 	/* generate and send the Complete Layer3 Info */
 	bssap := f_gen_cl3('901770123456789'H);
-
 	var BSSAP_Conn_Req creq := {
 		addr_peer := sccp_addr_remote,
 		addr_own := sccp_addr_own,
@@ -72,6 +81,7 @@ runs on BSC_MS_ConnHdlr {
 	BSSAP.send(creq);
 
 	while (true) {
+		/* TODO: Use an actual state machine to care about ordering */
 		alt {
 		/* new SCCP-level connection indication from BSC */
 		[] BSSAP.receive(tr_BSSMAP_AssignmentReq) -> value bssap {
@@ -79,11 +89,31 @@ runs on BSC_MS_ConnHdlr {
 			/* respond with ASSIGNMENT COMPL */
 			BSSAP.send(ts_BSSMAP_AssignmentComplete(bssap.pdu.bssmap.assignmentRequest.circuitIdentityCode));
 			}
-		/* TODO: CLEAR REQUEST from BSS */
+
+		/* CRCX -> OK */
+		[] BSSAP.receive(tr_CRCX) -> value mgcp_cmd {
+			g_sdp := valueof(ts_SDP("127.0.0.1", "127.0.0.1", "foo", "21", 1000, { "98" },
+						{ valueof(ts_SDP_rtpmap(98, "AMR/8000")),
+						  valueof(ts_SDP_ptime(20)) }));
+			/* respond with CRCX_ACK */
+			BSSAP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id, g_sdp));
+			}
+
+		/* MDCX -> OK */
+		[] BSSAP.receive(tr_MDCX) -> value mgcp_cmd {
+			/* respond with CRCX_ACK */
+			BSSAP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id, g_sdp));
+			}
+
 		/* CLEAR COMMAND from MSC; respond with CLEAR COMPLETE) */
 		[] BSSAP.receive(tr_BSSMAP_ClearCommand) -> value bssap {
 			BSSAP.send(ts_BSSMAP_ClearComplete);
 			/* FIXME: local release? */
+			}
+
+		/* DLCX -> OK */
+		[] BSSAP.receive(tr_DLCX) -> value mgcp_cmd {
+			BSSAP.send(ts_DLCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id));
 			}
 
 		[] BSSAP.receive(tr_BSSAP_DTAP) -> value bssap {
