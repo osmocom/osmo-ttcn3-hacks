@@ -7,6 +7,10 @@ import from BSSAP_Types all;
 import from BSSMAP_Emulation all;
 import from BSSMAP_Templates all;
 
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from SDP_Types all;
+
 /* this component represents a single subscriber connection at the MSC.
  * There is a 1:1 mapping between SCCP connections and BSSAP_ConnHdlr components.
  * We inherit all component variables, ports, functions, ... from BSSAP_ConnHdlr */
@@ -15,6 +19,11 @@ type component MSC_ConnHdlr extends BSSAP_ConnHdlr {
 	var uint5_t g_e1_timeslot;
 	/* SCCP Connecction Identifier for the underlying SCCP connection */
 	var integer g_sccp_conn_id;
+
+	var MSC_State g_state := MSC_STATE_NONE;
+	var MgcpEndpoint g_ep_name;
+	var MgcpCallId g_call_id;
+	var MgcpConnectionId g_mgcp_conn_id;
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a new incoming
@@ -49,30 +58,98 @@ const BssmapOps MSC_BssmapOps := {
 	unitdata_cb := refers(UnitdataCallback)
 }
 
+type enumerated MSC_State {
+	MSC_STATE_NONE,
+	MSC_STATE_WAIT_ASS_COMPL,
+	MSC_STATE_WAIT_CRCX_ACK,
+	MSC_STATE_WAIT_MDCX_ACK,
+	MSC_STATE_WAIT_CLEAR_COMPL,
+	MSC_STATE_WAIT_DLCX_ACK
+}
+
+private function f_mgcp_alloc_tid() return MgcpTransId {
+	return int2str(float2int(rnd()*2147483647.0));
+}
+
+private function f_mgcp_alloc_call_id() return MgcpCallId {
+	return int2hex(float2int(rnd()*2147483647.0), 8);
+}
+
+function extract_conn_id(MgcpResponse resp) return MgcpConnectionId {
+	var integer i;
+	for (i := 0; i < lengthof(resp.params); i := i + 1) {
+		var MgcpParameter par := resp.params[i];
+		if (par.code == "I") {
+			return str2hex(par.val);
+		}
+	}
+	setverdict(fail);
+	return '00000000'H;
+}
+
 /* main function processing various incoming events */
 function main(integer connection_id, integer timeslot) runs on MSC_ConnHdlr {
-	g_sccp_conn_id := connection_id;
+	var MgcpResponse mgcp_rsp;
+
 	g_e1_timeslot := 1; /* FIXME */
+
+	g_sccp_conn_id := connection_id;
+	g_call_id := f_mgcp_alloc_call_id();
+	g_ep_name := hex2str(int2hex(g_e1_timeslot, 1)) & "@mgw";
 
 	while (true) {
 		var PDU_BSSAP bssap;
 		alt {
 		/* new SCCP-level connection indication from BSC */
-		[] BSSAP.receive(tr_BSSMAP_ComplL3) -> value bssap {
+		[g_state == MSC_STATE_NONE] BSSAP.receive(tr_BSSMAP_ComplL3) -> value bssap {
 			/* respond with ASSIGNMENT CMD  */
+			g_state := MSC_STATE_WAIT_ASS_COMPL;
 			BSSAP.send(ts_BSSMAP_AssignmentReq(0, g_e1_timeslot));
-			/* FIXME: Send MGCP */
+			}
+		[g_state == MSC_STATE_WAIT_ASS_COMPL] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
+			/* FIXME: Send MGCP CRCX */
+			g_state := MSC_STATE_WAIT_CRCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			//template SDP_Message sdp := omit;
+			BSSAP.send(ts_CRCX(trans_id, g_ep_name, "recvonly", g_call_id)); //, sdp));
 			}
 		/*
-		[] BSSAP.receive(tr_BSSMAP_AssignmentCompl) {
-		}
 		[] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
 		}
 		*/
+
+		/* receive CRCX ACK: transmit MDCX */
+		[g_state == MSC_STATE_WAIT_CRCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
+			/* extract connection ID */
+			g_mgcp_conn_id := extract_conn_id(mgcp_rsp);
+			g_state := MSC_STATE_WAIT_MDCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			BSSAP.send(ts_MDCX(trans_id, g_ep_name, "sendrecv", g_call_id, g_mgcp_conn_id));
+			}
+
+		/* receive MDCX ACK: wait + transmit CLEAR COMMAND */
+		[g_state == MSC_STATE_WAIT_MDCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
+			g_state := MSC_STATE_WAIT_CLEAR_COMPL
+			BSSAP.send(ts_BSSMAP_ClearCommand(0));
+			}
+
+		/* CLEAR COMPLETE from BSS (response to CLEAR COMMAND) */
+		[g_state == MSC_STATE_WAIT_CLEAR_COMPL] BSSAP.receive(ts_BSSMAP_ClearComplete) {
+			/* send DLCX */
+			g_state := MSC_STATE_WAIT_DLCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			BSSAP.send(ts_DLCX(trans_id, g_ep_name, g_call_id));
+			}
+
+		[g_state == MSC_STATE_WAIT_DLCX_ACK] BSSAP.receive(tr_DLCX_ACK) {
+			setverdict(pass);
+			self.stop;
+			}
+
 		/* TODO: CLEAR REQUEST from BSS */
-		/* TODO: CLEAR COMPLETE from BSS (response to CLEAR COMMAND) */
 
 		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+			setverdict(fail);
 			self.stop;
 			}
 

@@ -4,7 +4,9 @@ import from SCCP_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
 import from BSSMAP_Templates all;
-//import from MSC_ConnectionHandler all;
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from IPA_Emulation all;
 
 /* General "base class" component definition, of which specific implementations
  * derive themselves by means of the "extends" feature */
@@ -29,7 +31,7 @@ type record BSSAP_Conn_Req {
 
 /* port between individual per-connection components and this dispatcher */
 type port BSSAP_Conn_PT message {
-	inout PDU_BSSAP, BSSAP_Conn_Prim, BSSAP_Conn_Req;
+	inout PDU_BSSAP, BSSAP_Conn_Prim, BSSAP_Conn_Req, MgcpCommand, MgcpResponse;
 } with { extension "internal" };
 
 
@@ -37,7 +39,11 @@ type port BSSAP_Conn_PT message {
 type record ConnectionData {
 	/* reference to the instance of the per-connection component */
 	BSSAP_ConnHdlr	comp_ref,
-	integer		sccp_conn_id
+	integer		sccp_conn_id,
+	/* most recent MGCP transaction ID (Used on MSC side) */
+	MgcpTransId	mgcp_trans_id optional,
+	/* CIC that has been used for voice of this channel (BSC side) */
+	integer		cic optional
 }
 
 type component BSSMAP_Emulation_CT {
@@ -45,6 +51,8 @@ type component BSSMAP_Emulation_CT {
 	port SCCPasp_PT SCCP;
 	/* BSSAP port to the per-connection clients */
 	port BSSAP_Conn_PT CLIENT;
+	/* MGCP port */
+	port IPA_MGCP_PT MGCP;
 
 	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
 	var ConnectionData ConnectionTable[16];
@@ -85,6 +93,56 @@ runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
 	self.stop;
 }
 
+/* resolve component reference by CIC */
+private function f_comp_by_mgcp_tid(MgcpTransId tid)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].mgcp_trans_id == tid) {
+			return ConnectionTable[i].comp_ref;
+		}
+	}
+	log("BSSMAP Connection table not found by MGCP Transaction ID ", tid);
+	self.stop;
+}
+
+private function f_comp_store_mgcp_tid(BSSAP_ConnHdlr client, MgcpTransId tid)
+runs on BSSMAP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			ConnectionTable[i].mgcp_trans_id := tid;
+			return;
+		}
+	}
+	log("BSSMAP Connection table not found by component ", client);
+	self.stop;
+}
+
+private function f_comp_by_cic(integer cic)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].cic == cic) {
+			return ConnectionTable[i].comp_ref;
+		}
+	}
+	log("BSSMAP Connection table not found by CIC ", cic);
+	self.stop;
+}
+
+private function f_comp_store_cic(BSSAP_ConnHdlr client, integer cic)
+runs on BSSMAP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			ConnectionTable[i].cic := cic;
+			return;
+		}
+	}
+	log("BSSMAP Connection table not found by component ", client);
+}
+
 /* resolve connection ID by component reference */
 private function f_conn_id_by_comp(BSSAP_ConnHdlr client)
 runs on BSSMAP_Emulation_CT return integer {
@@ -113,6 +171,8 @@ runs on BSSMAP_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
 		ConnectionTable[i].comp_ref := null;
 		ConnectionTable[i].sccp_conn_id := -1;
+		ConnectionTable[i].mgcp_trans_id := omit;
+		ConnectionTable[i].cic := omit;
 	}
 }
 
@@ -178,6 +238,8 @@ function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
 		var BSSAP_Conn_Req creq;
 		var BSSAP_ConnHdlr vc_conn;
 		var PDU_BSSAP bssap;
+		var MgcpCommand mgcp_req;
+		var MgcpResponse mgcp_resp;
 
 		alt {
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
@@ -266,14 +328,62 @@ function main(BssmapOps ops) runs on BSSMAP_Emulation_CT {
 
 		[] CLIENT.receive(PDU_BSSAP:?) -> value bssap sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* MSC Side: If this is an assignment command, store CIC */
+			if (ischosen(bssap.pdu.bssmap.assignmentRequest) and
+			    ispresent(bssap.pdu.bssmap.assignmentRequest.circuitIdentityCode)) {
+				var BSSMAP_IE_CircuitIdentityCode cic_ie :=
+					bssap.pdu.bssmap.assignmentRequest.circuitIdentityCode;
+				var integer cic := (oct2int(cic_ie.cicHigh) * 256) + oct2int(cic_ie.cicLow);
+				f_comp_store_cic(vc_conn, cic);
+			}
 			/* encode + send it to dispatcher */
 			var octetstring userdata := enc_PDU_BSSAP(bssap);
 			SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
+			}
+
+		/* Handling of MGCP in IPA SCCPLite case.  This predates 3GPP AoIP
+		 * and uses a MGCP session in parallel to BSSAP.  BSSAP uses CIC
+		 * as usual, and MGCP uses "CIC@mgw" endpoint naming, where CIC
+		 * is printed as hex string, e.g. a@mgw for CIC 10 */
+
+		/* CLIENT -> MGCP */
+		[] CLIENT.receive(MgcpCommand:?) -> value mgcp_req sender vc_conn {
+			/* MGCP request from Handler (we're MSC) */
+			/* store the transaction ID we've seen */
+			f_comp_store_mgcp_tid(vc_conn, mgcp_req.line.trans_id);
+			/* simply forward any MGCP from the client to the port */
+			MGCP.send(mgcp_req);
+			}
+		[] CLIENT.receive(MgcpResponse:?) -> value mgcp_resp sender vc_conn {
+			/* MGCP response from Handler (we're BSC/MGW) */
+			/* simply forward any MGCP from the client to the port */
+			MGCP.send(mgcp_resp);
+			}
+
+		/* MGCP -> CLIENT */
+		[] MGCP.receive(MgcpCommand:?) -> value mgcp_req {
+			/* MGCP request from network side (we're BSC/MGW) */
+			/* Extract CIC from local part of endpoint name */
+			var integer cic := f_mgcp_ep_extract_cic(mgcp_req.line.ep);
+			/* Resolve the vc_conn by the CIC */
+			vc_conn := f_comp_by_cic(cic);
+			CLIENT.send(mgcp_req) to vc_conn;
+			}
+		[] MGCP.receive(MgcpResponse:?) -> value mgcp_resp {
+			/* MGCP response from network side (we're MSC) */
+			/* Resolve the vc_conn by the transaction ID */
+			vc_conn := f_comp_by_mgcp_tid(mgcp_resp.line.trans_id);
+			CLIENT.send(mgcp_resp) to vc_conn;
 			}
 
 		}
 	}
 }
 
+private function f_mgcp_ep_extract_cic(charstring inp) return integer {
+	var charstring local_part := regexp(inp, "(.*)@(.*)", 0);
+	return hex2int(str2hex(local_part));
+
+}
 
 }

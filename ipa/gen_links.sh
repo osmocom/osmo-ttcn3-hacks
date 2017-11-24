@@ -16,7 +16,7 @@ gen_links() {
 #gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h"
+FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h SDP_EncDec.cc"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
@@ -35,7 +35,7 @@ gen_links $DIR $FILES
 DIR=../SCCP_CNL113341/src
 FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
-ln -s SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
+ln -sf SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
 
 DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
 FILES="BSSAP_Types.ttcn"
@@ -45,7 +45,15 @@ DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.SDP/src
+FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
+SDP_parser.y lex.SDP_parse_.c"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.RTP/src
+FILES="RTP_EncDec.cc RTP_Types.ttcn"
+gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn BSSMAP_Emulation.ttcn"
+FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn BSSMAP_Emulation.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn"
 gen_links $DIR $FILES

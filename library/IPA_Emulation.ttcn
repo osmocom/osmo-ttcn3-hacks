@@ -7,6 +7,8 @@ import from IPL4asp_Types all;
 import from MTP3asp_Types all;
 import from MTP3asp_PortType all;
 
+import from MGCP_Types all;
+
 /*
 modulepar {
 }
@@ -19,7 +21,7 @@ type enumerated IpaMode {
 
 type record ASP_IPA_Unitdata {
 	IpaStreamId	streamId,
-	IpaStreamIdExt	streamIdExt optional,
+	IpaExtStreamId	streamIdExt optional,
 	octetstring	payload
 }
 
@@ -27,16 +29,24 @@ type port IPA_SP_PT message {
 	inout ASP_IPA_Unitdata;
 } with { extension "internal" }
 
+type port IPA_MGCP_PT message {
+	inout MgcpCommand, MgcpResponse;
+} with { extension "internal" }
+
 type component IPA_Emulation_CT {
 	/* down-facing port to IPA codec port */
 	port IPA_CODEC_PT IPA_PORT;
 	/* up-facing port to SCCP */
 	port MTP3asp_SP_PT MTP3_SP_PORT;
+	/* up-facing port for MGCP */
+	port IPA_MGCP_PT IPA_MGCP_PORT;
 	/* up-facing port for other streams */
 	port IPA_SP_PT IPA_SP_PORT;
 
 	var boolean g_initialized := false;
 	var ConnectionId g_ipa_conn_id := -1;
+	/* Are we a BSC/MGW (truel) or MSC (false) */
+	var boolean g_is_bsc_mgw;
 
 	var IpaMode g_mode;
 }
@@ -47,6 +57,7 @@ function f_connect(charstring remote_host, PortNumber remote_port,
 	res := IPA_CodecPort_CtrlFunct.f_IPL4_connect(IPA_PORT, remote_host, remote_port,
 						local_host, local_port, 0, { tcp:={} });
 	g_ipa_conn_id := res.connId;
+	g_is_bsc_mgw := true;
 }
 
 function f_bind(charstring local_host, PortNumber local_port) runs on IPA_Emulation_CT {
@@ -54,6 +65,7 @@ function f_bind(charstring local_host, PortNumber local_port) runs on IPA_Emulat
 	res := IPA_CodecPort_CtrlFunct.f_IPL4_listen(IPA_PORT, 
 						local_host, local_port, { tcp:={} });
 	g_ipa_conn_id := res.connId;
+	g_is_bsc_mgw := false;
 }
 
 template ASP_MTP3_TRANSFERind ts_MTP3_XFER_ind(integer opc, octetstring data) := {
@@ -103,12 +115,7 @@ private function f_ccm_make_id_resp(PDU_IPA_CCM get) return PDU_IPA_CCM {
 
 /* transmit IPA CCM message */
 private function f_ccm_tx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
-	var IPA_Send ipa_tx := {
-		connId := g_ipa_conn_id,
-		streamId := IPAC_PROTO_CCM,
-		streamIdExt := omit,
-		msg := enc_PDU_IPA_CCM(ccm)
-	}
+	var IPA_Send ipa_tx := valueof(t_IPA_Send(g_ipa_conn_id, IPAC_PROTO_CCM, enc_PDU_IPA_CCM(ccm)));
 	log("CCM Tx:", ccm);
 	IPA_PORT.send(ipa_tx);
 }
@@ -160,12 +167,8 @@ private function f_to_asp(IPA_RecvFrom ipa_rx) return ASP_IPA_Unitdata {
 }
 
 private function f_from_asp(ConnectionId connId, ASP_IPA_Unitdata ipa_tx) return IPA_Send {
-	var IPA_Send ret := {
-		connId := connId,
-		streamId := ipa_tx.streamId,
-		streamIdExt := ipa_tx.streamIdExt,
-		msg := ipa_tx.payload
-	}
+	var IPA_Send ret := valueof(t_IPA_Send(connId, ipa_tx.streamId, ipa_tx.payload,
+						ipa_tx.streamIdExt));
 	return ret;
 }
 
@@ -182,11 +185,24 @@ function main_server(charstring local_host, PortNumber local_port) runs on IPA_E
 	ScanEvents();
 }
 
+private function f_mgcp_to_user(octetstring msg) runs on IPA_Emulation_CT {
+	var charstring msg_ch := oct2char(msg);
+	if (g_is_bsc_mgw) {
+		log("============");
+		log(msg_ch);
+		IPA_MGCP_PORT.send(dec_MgcpCommand(msg_ch));
+	} else {
+		IPA_MGCP_PORT.send(dec_MgcpResponse(msg_ch));
+	}
+}
+
 private function ScanEvents() runs on IPA_Emulation_CT {
 	var IPA_RecvFrom ipa_rx;
 	var ASP_IPA_Unitdata ipa_ud;
 	var ASP_MTP3_TRANSFERreq mtp_req;
 	var ASP_Event asp_evt;
+	var MgcpCommand mgcp_cmd;
+	var MgcpResponse mgcp_rsp;
 
 	while (true) {
 		alt {
@@ -197,13 +213,21 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 				var PDU_IPA_CCM ccm := dec_PDU_IPA_CCM(ipa_rx.msg);
 				log("CCM Rx:", ccm);
 				f_ccm_rx(ccm);
-				}
-			case (IPAC_PROTO_SCCP) {
+			} case (IPAC_PROTO_SCCP) {
 				var ASP_MTP3_TRANSFERind mtp;
 				mtp := valueof(ts_MTP3_XFER_ind(0, ipa_rx.msg));
 				MTP3_SP_PORT.send(mtp);
+			} case (IPAC_PROTO_MGCP_OLD) {
+				f_mgcp_to_user(ipa_rx.msg);
+			} case (IPAC_PROTO_OSMO) {
+				select (ipa_rx.streamIdExt) {
+					case (IPAC_PROTO_EXT_MGCP) {
+						f_mgcp_to_user(ipa_rx.msg);
+					} case else {
+						IPA_SP_PORT.send(f_to_asp(ipa_rx));
+					}
 				}
-			case else {
+			} case else {
 				IPA_SP_PORT.send(f_to_asp(ipa_rx));
 				}
 			}
@@ -226,15 +250,31 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 
 		/* Received SCCP -> down into IPA */
 		[] MTP3_SP_PORT.receive(ASP_MTP3_TRANSFERreq: ?) -> value mtp_req {
-			var IPA_Send ipa_tx := {
-				connId := g_ipa_conn_id,
-				streamId := IPAC_PROTO_SCCP,
-				msg := mtp_req.data
-			}
+			var IPA_Send ipa_tx := valueof(t_IPA_Send(g_ipa_conn_id, IPAC_PROTO_SCCP,
+							mtp_req.data));
 			IPA_PORT.send(ipa_tx);
 		}
 
-		/* Received MISC (RSL/OML/CTRL/MGCP) -> down into IPA */
+		/* Received MGCP -> down into IPA */
+		[] IPA_MGCP_PORT.receive(MgcpCommand:?) -> value mgcp_cmd {
+			ipa_ud := {
+				streamId := IPAC_PROTO_OSMO,
+				streamIdExt := IPAC_PROTO_EXT_MGCP,
+				payload := char2oct(enc_MgcpCommand(mgcp_cmd))
+			}
+			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+		}
+		[] IPA_MGCP_PORT.receive(MgcpResponse:?) -> value mgcp_rsp {
+			ipa_ud := {
+				streamId := IPAC_PROTO_OSMO,
+				streamIdExt := IPAC_PROTO_EXT_MGCP,
+				payload := char2oct(enc_MgcpResponse(mgcp_rsp))
+			}
+			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+		}
+
+
+		/* Received MISC (RSL/OML/CTRL) -> down into IPA */
 		[] IPA_SP_PORT.receive(ASP_IPA_Unitdata: ?) -> value ipa_ud {
 			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
 		}
