@@ -37,5 +37,5 @@ FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn"
+FILES="General_Types.ttcn Osmocom_Types.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc"
 gen_links $DIR $FILES
