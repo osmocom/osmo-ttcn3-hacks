@@ -23,6 +23,7 @@ type component BSC_MS_ConnHdlr extends BSSAP_ConnHdlr {
 	var integer g_sccp_conn_id;
 	var MgcpConnectionId g_mgcp_conn_id;
 	var SDP_Message g_sdp;
+	var BSC_State g_state;
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a new incoming
@@ -60,6 +61,16 @@ function f_gen_cl3(hexstring imsi) return PDU_BSSAP {
 	return bssap;
 }
 
+type enumerated BSC_State {
+	BSC_STATE_NONE,
+	BSC_STATE_WAIT_ASS_REQ,
+	BSC_STATE_WAIT_CRCX,
+	BSC_STATE_WAIT_MDCX,
+	BSC_STATE_WAIT_CLEAR_CMD,
+	BSC_STATE_WAIT_DLCX,
+	BSC_STATE_WAIT_DISC_IND
+}
+
 /* main function processing various incoming events */
 function main(SCCP_PAR_Address sccp_addr_own, SCCP_PAR_Address sccp_addr_remote)
 runs on BSC_MS_ConnHdlr {
@@ -78,43 +89,48 @@ runs on BSC_MS_ConnHdlr {
 		addr_own := sccp_addr_own,
 		bssap := bssap
 	}
+	g_state := BSC_STATE_WAIT_ASS_REQ;
 	BSSAP.send(creq);
 
 	while (true) {
-		/* TODO: Use an actual state machine to care about ordering */
 		alt {
 		/* new SCCP-level connection indication from BSC */
-		[] BSSAP.receive(tr_BSSMAP_AssignmentReq) -> value bssap {
+		[g_state == BSC_STATE_WAIT_ASS_REQ] BSSAP.receive(tr_BSSMAP_AssignmentReq) -> value bssap {
 			/* FIXME: Read CIC */
 			/* respond with ASSIGNMENT COMPL */
+			g_state := BSC_STATE_WAIT_CRCX;
 			BSSAP.send(ts_BSSMAP_AssignmentComplete(bssap.pdu.bssmap.assignmentRequest.circuitIdentityCode));
 			}
 
 		/* CRCX -> OK */
-		[] BSSAP.receive(tr_CRCX) -> value mgcp_cmd {
+		[g_state == BSC_STATE_WAIT_CRCX] BSSAP.receive(tr_CRCX) -> value mgcp_cmd {
 			/* FIXME: proper SDP parameters */
 			g_sdp := valueof(ts_SDP("127.0.0.1", "127.0.0.1", "foo", "21", 1000, { "98" },
 						{ valueof(ts_SDP_rtpmap(98, "AMR/8000")),
 						  valueof(ts_SDP_ptime(20)) }));
 			/* respond with CRCX_ACK */
+			g_state := BSC_STATE_WAIT_MDCX;
 			BSSAP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id, g_sdp));
 			}
 
 		/* MDCX -> OK */
-		[] BSSAP.receive(tr_MDCX) -> value mgcp_cmd {
+		[g_state == BSC_STATE_WAIT_MDCX] BSSAP.receive(tr_MDCX) -> value mgcp_cmd {
 			/* FIXME: verify if local part of endpoint name matches CIC */
 			/* respond with CRCX_ACK */
+			g_state := BSC_STATE_WAIT_CLEAR_CMD;
 			BSSAP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id, g_sdp));
 			}
 
 		/* CLEAR COMMAND from MSC; respond with CLEAR COMPLETE) */
-		[] BSSAP.receive(tr_BSSMAP_ClearCommand) -> value bssap {
+		[g_state == BSC_STATE_WAIT_CLEAR_CMD] BSSAP.receive(tr_BSSMAP_ClearCommand) -> value bssap {
+			g_state := BSC_STATE_WAIT_DLCX;
 			BSSAP.send(ts_BSSMAP_ClearComplete);
 			}
 
 		/* DLCX -> OK */
-		[] BSSAP.receive(tr_DLCX) -> value mgcp_cmd {
+		[g_state == BSC_STATE_WAIT_DLCX] BSSAP.receive(tr_DLCX) -> value mgcp_cmd {
 			/* FIXME: verify if local part of endpoint name matches CIC */
+			g_state := BSC_STATE_WAIT_DISC_IND;
 			BSSAP.send(ts_DLCX_ACK(mgcp_cmd.line.trans_id, g_mgcp_conn_id));
 			}
 
@@ -124,10 +140,17 @@ runs on BSC_MS_ConnHdlr {
 			log("Unhandled DTAP ", l3);
 			}
 
-		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+		[g_state == BSC_STATE_WAIT_DISC_IND] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
 			setverdict(pass);
 			self.stop;
 			}
+
+		/* disconnect in invalid state */
+		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+			setverdict(fail);
+			self.stop;
+			}
+
 
 		[] BSSAP.receive(PDU_BSSAP:?) -> value bssap {
 			log("Received unhandled SCCP-CO: ", bssap);
