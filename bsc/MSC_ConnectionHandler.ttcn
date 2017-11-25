@@ -1,0 +1,154 @@
+module MSC_ConnectionHandler {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from SCCPasp_Types all;
+import from BSSAP_Types all;
+import from BSSMAP_Emulation all;
+import from BSSMAP_Templates all;
+
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from SDP_Types all;
+
+/* this component represents a single subscriber connection at the MSC.
+ * There is a 1:1 mapping between SCCP connections and BSSAP_ConnHdlr components.
+ * We inherit all component variables, ports, functions, ... from BSSAP_ConnHdlr */
+type component MSC_ConnHdlr extends BSSAP_ConnHdlr {
+	/* SCCP Connecction Identifier for the underlying SCCP connection */
+	var integer g_sccp_conn_id;
+
+	var MSC_State g_state := MSC_STATE_NONE;
+	var MgcpEndpoint g_ep_name;
+	var MgcpCallId g_call_id;
+	var MgcpConnectionId g_mgcp_conn_id;
+}
+
+/* Callback function from general BSSMAP_Emulation whenever a new incoming
+ * SCCP connection arrivces. Must create + start a new component */
+private function CreateCallback(ASP_SCCP_N_CONNECT_ind conn_ind, charstring id)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	var MSC_ConnHdlr vc_conn;
+	/* Create a new BSSAP_ConnHdlr component */
+	vc_conn := MSC_ConnHdlr.create(g_bssmap_id & "-Conn-" & int2str(conn_ind.connectionId));
+	/* connect it to the port */
+	connect(vc_conn:BSSAP, self:CLIENT);
+	/* start it */
+	vc_conn.start(MSC_ConnectionHandler.main(conn_ind.connectionId, g_next_e1_ts));
+	/* increment next E1 timeslot */
+	g_next_e1_ts := g_next_e1_ts + 1;
+	return vc_conn;
+}
+
+/* Callback function from general BSSMAP_Emulation whenever a connectionless
+ * BSSMAP message arrives.  Can retunr a PDU_BSSAP that should be sent in return */
+private function UnitdataCallback(PDU_BSSAP bssap)
+runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
+	var template PDU_BSSAP resp := omit;
+
+	if (match(bssap, tr_BSSMAP_Reset)) {
+		resp := ts_BSSMAP_ResetAck;
+	}
+
+	return resp;
+}
+
+const BssmapOps MSC_BssmapOps := {
+	create_cb := refers(CreateCallback),
+	unitdata_cb := refers(UnitdataCallback)
+}
+
+type enumerated MSC_State {
+	MSC_STATE_NONE,
+	MSC_STATE_WAIT_ASS_COMPL,
+	MSC_STATE_WAIT_CRCX_ACK,
+	MSC_STATE_WAIT_MDCX_ACK,
+	MSC_STATE_WAIT_CLEAR_COMPL,
+	MSC_STATE_WAIT_DLCX_ACK
+}
+
+/* main function processing various incoming events */
+function main(integer connection_id, integer e1_timeslot) runs on MSC_ConnHdlr {
+	var MgcpResponse mgcp_rsp;
+	timer T := 5.0;
+
+	g_sccp_conn_id := connection_id;
+	g_call_id := f_mgcp_alloc_call_id();
+	g_ep_name := hex2str(int2hex(e1_timeslot, 1)) & "@mgw";
+
+	/* we just accepted an incoming SCCP connection, start guard timer */
+	T.start;
+
+	while (true) {
+		var PDU_BSSAP bssap;
+		alt {
+		/* new SCCP-level connection indication from BSC */
+		[g_state == MSC_STATE_NONE] BSSAP.receive(tr_BSSMAP_ComplL3) -> value bssap {
+			/* respond with ASSIGNMENT CMD  */
+			g_state := MSC_STATE_WAIT_ASS_COMPL;
+			BSSAP.send(ts_BSSMAP_AssignmentReq(0, e1_timeslot));
+			}
+		[g_state == MSC_STATE_WAIT_ASS_COMPL] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
+			/* FIXME: Send MGCP CRCX */
+			g_state := MSC_STATE_WAIT_CRCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			//template SDP_Message sdp := omit;
+			BSSAP.send(ts_CRCX(trans_id, g_ep_name, "recvonly", g_call_id)); //, sdp));
+			}
+		/*
+		[] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
+		}
+		*/
+
+		/* receive CRCX ACK: transmit MDCX */
+		[g_state == MSC_STATE_WAIT_CRCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
+			/* extract connection ID */
+			g_mgcp_conn_id := f_MgcpResp_extract_conn_id(mgcp_rsp);
+			g_state := MSC_STATE_WAIT_MDCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			BSSAP.send(ts_MDCX(trans_id, g_ep_name, "sendrecv", g_call_id, g_mgcp_conn_id));
+			}
+
+		/* receive MDCX ACK: wait + transmit CLEAR COMMAND */
+		[g_state == MSC_STATE_WAIT_MDCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
+			g_state := MSC_STATE_WAIT_CLEAR_COMPL
+			BSSAP.send(ts_BSSMAP_ClearCommand(9)); /* Cause: call control */
+			}
+
+		/* CLEAR COMPLETE from BSS (response to CLEAR COMMAND) */
+		[g_state == MSC_STATE_WAIT_CLEAR_COMPL] BSSAP.receive(tr_BSSMAP_ClearComplete) {
+			/* send DLCX */
+			g_state := MSC_STATE_WAIT_DLCX_ACK;
+			var MgcpTransId trans_id := f_mgcp_alloc_tid();
+			BSSAP.send(ts_DLCX(trans_id, g_ep_name, g_call_id));
+			}
+
+		[g_state == MSC_STATE_WAIT_DLCX_ACK] BSSAP.receive(tr_DLCX_ACK) {
+			BSSAP.send(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+			setverdict(pass);
+			self.stop;
+			}
+
+		/* TODO: CLEAR REQUEST from BSS */
+
+		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+			setverdict(fail);
+			self.stop;
+			}
+
+		[] BSSAP.receive(PDU_BSSAP:?) -> value bssap {
+			log("Received unhandled SCCP-CO: ", bssap);
+			}
+
+		/* Guard timer has expired, close connection */
+		[] T.timeout {
+			BSSAP.send(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+			setverdict(inconc);
+			self.stop;
+			}
+
+		}
+	}
+}
+
+}
