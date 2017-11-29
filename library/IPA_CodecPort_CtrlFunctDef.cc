@@ -51,6 +51,16 @@ namespace IPA__CodecPort__CtrlFunct {
   {
     return f__IPL4__PROVIDER__getUserData(portRef, connId, userData);
   }
-  
+
+  void f__IPL4__setGetMsgLen(
+    IPA__CodecPort::IPA__CODEC__PT& portRef,
+    const IPL4asp__Types::ConnectionId& connId,
+    Socket__API__Definitions::f__getMsgLen& f,
+    const Socket__API__Definitions::ro__integer& msgLenArgs)
+  {
+    return f__IPL4__PROVIDER__setGetMsgLen(portRef, connId, f, msgLenArgs);
+  }
+
+
 }
 
