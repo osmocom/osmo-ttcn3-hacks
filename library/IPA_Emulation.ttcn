@@ -7,6 +7,7 @@ import from IPL4asp_Types all;
 import from IPL4asp_PortType all;
 import from MTP3asp_Types all;
 import from MTP3asp_PortType all;
+import from RSL_Types all;
 
 import from MGCP_Types all;
 
@@ -26,6 +27,20 @@ type record ASP_IPA_Unitdata {
 	octetstring	payload
 }
 
+type enumerated ASP_IPA_EventUpDown {
+	ASP_IPA_EVENT_DOWN,
+	ASP_IPA_EVENT_UP,
+	ASP_IPA_EVENT_ID_ACK
+}
+
+type union ASP_IPA_Event {
+	ASP_IPA_EventUpDown	up_down
+}
+
+template ASP_IPA_Event t_ASP_IPA_EVT_UD(ASP_IPA_EventUpDown ud) := {
+	up_down := ud
+}
+
 template ASP_IPA_Unitdata t_ASP_IPA_UD(IpaStreamId sid, octetstring pl,
 					template IpaExtStreamId esid := omit) := {
 	streamId := sid,
@@ -33,12 +48,29 @@ template ASP_IPA_Unitdata t_ASP_IPA_UD(IpaStreamId sid, octetstring pl,
 	payload := pl
 }
 
+type record ASP_RSL_Unitdata {
+	IpaStreamId	streamId,
+	RSL_Message	rsl
+};
+
+template ASP_RSL_Unitdata t_ASP_RSL_UD(IpaStreamId sid, template RSL_Message rsl) := {
+	streamId := sid,
+	rsl := valueof(rsl)
+}
+
+template IpaStreamId t_IpaSidRSL := ( IPAC_PROTO_RSL_TRX0, IPAC_PROTO_RSL_TRX1,
+				      IPAC_PROTO_RSL_TRX2, IPAC_PROTO_RSL_TRX3 );
+
 type port IPA_SP_PT message {
-	inout ASP_IPA_Unitdata;
+	inout ASP_IPA_Unitdata, ASP_IPA_Event;
 } with { extension "internal" }
 
 type port IPA_MGCP_PT message {
 	inout MgcpCommand, MgcpResponse;
+} with { extension "internal" }
+
+type port IPA_RSL_PT message {
+	inout ASP_RSL_Unitdata, ASP_IPA_Event;
 } with { extension "internal" }
 
 type component IPA_Emulation_CT {
@@ -48,6 +80,8 @@ type component IPA_Emulation_CT {
 	port MTP3asp_SP_PT MTP3_SP_PORT;
 	/* up-facing port for MGCP */
 	port IPA_MGCP_PT IPA_MGCP_PORT;
+	/* up-facing port for RSL */
+	port IPA_RSL_PT IPA_RSL_PORT;
 	/* up-facing port for other streams */
 	port IPA_SP_PT IPA_SP_PORT;
 
@@ -124,6 +158,11 @@ private template IpaCcmRespPart t_IdRespPart(IpaCcmIdTag tag, charstring payload
 	len := 0,	/* overwritten by codec */
 	tag := tag,
 	data := payload
+}
+
+private function f_send_IPA_EVT(template ASP_IPA_Event evt) runs on IPA_Emulation_CT {
+	IPA_RSL_PORT.send(evt);
+	/* FIXME: to other ports */
 }
 
 /* build IPA CCM ID RESP response from IPA CCM GET */
@@ -239,6 +278,12 @@ private function f_from_asp(ConnectionId connId, ASP_IPA_Unitdata ipa_tx) return
 	return ret;
 }
 
+private function f_from_rsl(ConnectionId connId, ASP_RSL_Unitdata rsl_tx) return IPA_Send {
+	var octetstring payload := enc_RSL_Message(rsl_tx.rsl);
+	var IPA_Send ret := valueof(t_IPA_Send(connId, rsl_tx.streamId, payload));
+	return ret;
+}
+
 function main_client(charstring remote_host, PortNumber remote_port,
 		     charstring local_host, PortNumber local_port,
 		     IPA_CCM_Parameters ccm_pars := c_IPA_default_ccm_pars) runs on IPA_Emulation_CT {
@@ -280,6 +325,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 	var MgcpCommand mgcp_cmd;
 	var MgcpResponse mgcp_rsp;
 	var octetstring payload;
+	var ASP_RSL_Unitdata rsl;
 
 	while (true) {
 		alt {
@@ -296,6 +342,12 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 				MTP3_SP_PORT.send(mtp);
 			} case (IPAC_PROTO_MGCP_OLD) {
 				f_mgcp_to_user(ipa_rx.msg);
+			} case (t_IpaSidRSL) {
+				rsl := {
+					streamId := ipa_rx.streamId,
+					rsl := dec_RSL_Message(ipa_rx.msg)
+				};
+				IPA_RSL_PORT.send(rsl);
 			} case (IPAC_PROTO_OSMO) {
 				select (ipa_rx.streamIdExt) {
 					case (IPAC_PROTO_EXT_MGCP) {
@@ -314,6 +366,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 		[] IPA_PORT.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
 			log("IPA: Connected");
 			g_ipa_conn_id := asp_evt.connOpened.connId;
+			f_send_IPA_EVT(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP));
 			if (g_mode == IPA_MODE_SERVER) {
 				f_ccm_tx(valueof(ts_IPA_ID_GET));
 			}
@@ -322,6 +375,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 		[] IPA_PORT.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
 			log("IPA: Closed");
 			g_ipa_conn_id := -1;
+			f_send_IPA_EVT(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_DOWN));
 			self.stop;
 		}
 
@@ -344,8 +398,13 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
 		}
 
+		/* Received RSL -> down into IPA */
+		[] IPA_RSL_PORT.receive(ASP_RSL_Unitdata:?) -> value rsl {
+			IPA_PORT.send(f_from_rsl(g_ipa_conn_id, rsl));
+		}
 
-		/* Received MISC (RSL/OML/CTRL) -> down into IPA */
+
+		/* Received MISC (OML/CTRL) -> down into IPA */
 		[] IPA_SP_PORT.receive(ASP_IPA_Unitdata: ?) -> value ipa_ud {
 			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
 		}
