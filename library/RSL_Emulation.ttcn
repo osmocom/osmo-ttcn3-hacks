@@ -1,0 +1,332 @@
+module RSL_Emulation {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from GSM_RR_Types all;
+import from RSL_Types all;
+import from IPA_Types all;
+import from IPA_Emulation all;
+
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component RSL_DchanHdlr {
+	/* port facing up towards dedicated channel handler */
+	port RSL_DCHAN_PT RSL;
+	var RslChannelNr g_chan_nr;
+};
+
+type record RSLDC_ChanRqd {
+	OCT1		ra,
+	GsmFrameNumber	fn
+};
+
+template RSLDC_ChanRqd ts_RSLDC_ChanRqd(OCT1 ra, GsmFrameNumber fn) := {
+	ra := ra,
+	fn := fn
+}
+
+type port RSL_DCHAN_PT message {
+	inout RSLDC_ChanRqd, RSL_Message;
+} with { extension "internal" };
+
+/***********************************************************************
+ * Client Component for a single dedicated channel
+ ***********************************************************************/
+
+private function f_rx_or_fail(template RSL_Message exp_rx) runs on RSL_DchanHdlr return RSL_Message
+{
+	var RSL_Message rx_rsl;
+	timer T := 10.0;
+
+	/* request a channel to be established */
+	T.start;
+	alt {
+		[] RSL.receive(exp_rx) -> value rx_rsl {
+			T.stop;
+			return rx_rsl;
+		}
+		[] RSL.receive {
+			setverdict(fail, "Unexpected RSL message on DCHAN");
+			self.stop;
+		}
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for RSL on DCHAN");
+			self.stop;
+		}
+	}
+	/* never reached */
+	return rx_rsl;
+}
+
+/* establish a dedicated channel using 'ra' */
+function f_chan_est(OCT1 ra, octetstring est_l3, template RslLinkId link_id, GsmFrameNumber fn := 23)
+runs on RSL_DchanHdlr {
+	var RSL_Message rx_rsl;
+	var GsmRrMessage rr;
+
+	/* request a channel to be established */
+	RSL.send(ts_RSLDC_ChanRqd(ra, fn));
+	/* expect immediate assignment */
+	rx_rsl := f_rx_or_fail(tr_RSL_IMM_ASSIGN);
+	rr := dec_GsmRrMessage(rx_rsl.ies[1].body.full_imm_ass_info.payload);
+	g_chan_nr := rr.payload.imm_ass.chan_desc.chan_nr;
+	RSL.send(ts_RSL_EST_IND(g_chan_nr, valueof(link_id), est_l3));
+}
+
+function f_deact_chan(RSL_Cause cause) runs on RSL_DchanHdlr
+{
+	var RSL_Message rx_rsl;
+
+	RSL.send(ts_RSL_CONN_FAIL_IND(g_chan_nr, cause));
+	rx_rsl := f_rx_or_fail(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL));
+	/* FIXME RSL.send(ts_RSL_RF_CHAN_REL_ACK()) */
+}
+
+
+
+/***********************************************************************
+ * Main Component
+ ***********************************************************************/
+
+private type record ConnectionData {
+	/* component reference to the client component */
+	RSL_DchanHdlr	comp_ref,
+	/* RSL (dedicated) Channel number we're handling */
+	uint8_t		trx_nr optional,
+	IpaStreamId	stream_id optional,
+	RslChannelNr	chan_nr optional,
+	/* Random Reference */
+	OCT1		ra optional,
+	GsmFrameNumber	ra_fn optional
+};
+
+private function f_cid_by_comp_ref(RSL_DchanHdlr comp_ref)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ispresent(ConnectionTable[i].comp_ref) and 
+		    ConnectionTable[i].comp_ref == comp_ref) {
+			return i;
+		}
+	}
+	log("No Dchan handler for ", comp_ref);
+	return -1;
+}
+
+private function f_cid_by_chan_nr(uint8_t trx_nr, RslChannelNr chan_nr)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ispresent(ConnectionTable[i].chan_nr) and 
+		    ConnectionTable[i].chan_nr == chan_nr and ConnectionTable[i].trx_nr == trx_nr) {
+			return i;
+		}
+	}
+	log("No Dchan handler for ", trx_nr, chan_nr);
+	return -1;
+}
+
+private function f_cid_by_ra_fn(OCT1 ra, GsmFrameNumber fn)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ispresent(ConnectionTable[i].ra) and
+		    ConnectionTable[i].ra == ra and ConnectionTable[i].ra_fn == fn) {
+			return i;
+		}
+	}
+	log("No Dchan handler for ", ra, fn);
+	return -1;
+}
+
+/* create an ew client with given RA and FN */
+private function f_cid_create(OCT1 ra, GsmFrameNumber fn, RSL_DchanHdlr comp_ref)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (not ispresent(ConnectionTable[i].ra)) {
+			ConnectionTable[i].ra := ra;
+			ConnectionTable[i].ra_fn := fn;
+			ConnectionTable[i].comp_ref := comp_ref;
+			return i;
+		}
+	}
+	log("No free entry in conn table for ", ra, fn);
+	return -1;
+}
+
+private function f_cid_clear(integer cid)
+runs on RSL_Emulation_CT {
+	ConnectionTable[cid].ra := omit;
+	ConnectionTable[cid].ra_fn := omit;
+	ConnectionTable[cid].ra_fn := omit;
+	ConnectionTable[cid].trx_nr := omit;
+	ConnectionTable[cid].stream_id := omit;
+	ConnectionTable[cid].chan_nr := omit;
+}
+
+type component RSL_Emulation_CT {
+	/* port facing down towards IPA emulation */
+	port IPA_RSL_PT IPA_PT;
+	/* port facing up towards dedicated channel handler */
+	port RSL_DCHAN_PT CLIENT_PT;
+
+	/* state of all concurrent connections / dedicated channels */
+	var ConnectionData ConnectionTable[64];
+}
+
+
+/* template for an ASP_RSL_Unitdata as we receive it from the IPA_Emulateion component */
+private template ASP_RSL_Unitdata tr_RSL(template RSL_Message rsl, template IpaStreamId sid := ?) := {
+	streamId := sid,
+	rsl := rsl
+}
+
+template RSL_Message tr_RSL_MsgType(template RSL_MessageType msg_type) := {
+	msg_disc := ?,
+	msg_type := msg_type,
+	ies := *
+}
+
+/* Common Channel Management */
+template RSL_Message tr_RSL_MsgTypeC(template RSL_MessageType msg_type) modifies tr_RSL_MsgType := {
+	msg_disc := { RSL_MDISC_CCHAN, ? }
+}
+
+/* RLL */
+template RSL_Message tr_RSL_MsgTypeR(template RSL_MessageType msg_type) modifies tr_RSL_MsgType := {
+	msg_disc := { RSL_MDISC_RLL, true }
+}
+
+/* Dedicated Channel Management */
+template RSL_Message tr_RSL_MsgTypeD(template RSL_MessageType msg_type) modifies tr_RSL_MsgType := {
+	msg_disc := { RSL_MDISC_DCHAN, ? }
+}
+
+/* Dedicated Channel Management */
+template RSL_Message tr_RSL_MsgTypeT(template RSL_MessageType msg_type) modifies tr_RSL_MsgType := {
+	msg_disc := { RSL_MDISC_TRX_MGMT, ? }
+}
+
+
+/* dedicated channel or RLL */
+template RSL_Message tr_RSL_MsgTypeDR(template RSL_MessageType msg_type) modifies tr_RSL_MsgType := {
+	msg_disc := ({RSL_MDISC_DCHAN,?}, {RSL_MDISC_RLL,true})
+}
+
+private function f_trx_by_streamId(IpaStreamId id) return integer {
+	return enum2int(id);
+}
+
+
+function main() runs on RSL_Emulation_CT {
+	var ASP_RSL_Unitdata rx_rsl;
+	var RSL_Message rx_rsl_msg;
+	var RSLDC_ChanRqd chan_rqd;
+	var RSL_DchanHdlr vc_conn;
+	var integer cid;
+	var integer i;
+
+	while (true) {
+		alt {
+		[] IPA_PT.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) {
+			IPA_PT.send(t_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,ts_RSL_RACH_PAGING_IND(23)));
+			}
+		[] IPA_PT.receive(tr_RSL(tr_RSL_IMM_ASSIGN)) -> value rx_rsl {
+			var GsmRrMessage rr;
+			var OCT1 ra;
+			var GsmFrameNumber fn;
+			log("IMM ASS INFO ", rx_rsl.rsl.ies[1].body);
+			rr := dec_GsmRrMessage(rx_rsl.rsl.ies[1].body.full_imm_ass_info.payload);
+			if (ischosen(rr.payload.imm_ass)) {
+				ra := bit2oct(rr.payload.imm_ass.req_ref.ra);
+				fn := 23; //FIXME(rr.payload.imm_ass);
+				/* lookup client based on RA+time, deliver to client */
+				cid := f_cid_by_ra_fn(ra, fn);
+				if (cid == -1) {
+					setverdict(fail, "IMM ASS for unknown DChan");
+				}
+				/* update client with trx_nr */
+				ConnectionTable[cid].trx_nr := f_trx_by_streamId(rx_rsl.streamId);
+				ConnectionTable[cid].stream_id := rx_rsl.streamId;
+				/* update client with chan_nr */
+				ConnectionTable[cid].chan_nr := rr.payload.imm_ass.chan_desc.chan_nr;
+				/* TODO: add timer to time-out ConnectionTable entries which
+				 * never get followed-up to */
+				CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[cid].comp_ref;
+			} else if (ischosen(rr.payload.imm_ass_rej)) {
+				for (i := 0; i < sizeof(rr.payload.imm_ass_rej.payload); i := i + 1) {
+					ra := bit2oct(rr.payload.imm_ass_rej.payload[i].req_ref.ra);
+					fn := 23; //FIXME();
+					/* lookup client based on RA+time, deliver to client */
+					cid := f_cid_by_ra_fn(ra, fn);
+					if (cid != -1) {
+						CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[cid].comp_ref;
+						/* delete ClientTable entry, as it failed */
+						f_cid_clear(cid);
+					}
+				}
+			}
+		}
+
+		[] IPA_PT.receive(tr_RSL(tr_RSL_PAGING_CMD(?, ?))) -> value rx_rsl {
+			log("PAGING IDENTITY ", rx_rsl.rsl.ies[2].body.other);
+			/* broadcast to all clients? */
+			for (i := 0; i < sizeof(ConnectionTable); i := i + 1) {
+				if (ispresent(ConnectionTable[i].comp_ref)) {
+					CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[i].comp_ref;
+				}
+			}
+		}
+
+		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeT(?))) -> value rx_rsl {
+			log("Ingnoring TRX Mgmt ", rx_rsl.rsl);
+		}
+
+		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeC(?))) -> value rx_rsl {
+			log("Ignoring Common Channel Mgmt ", rx_rsl.rsl);
+		}
+
+		/* blindly acknowledge all channel activations */
+		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) -> value rx_rsl {
+			var RslChannelNr chan_nr := rx_rsl.rsl.ies[0].body.chan_nr;
+			IPA_PT.send(t_ASP_RSL_UD(rx_rsl.streamId, ts_RSL_CHAN_ACT_ACK(chan_nr, 23)));
+		}
+
+		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeDR(?))) -> value rx_rsl {
+			/* dispatch to channel based on ChanId */
+			cid := f_cid_by_chan_nr(f_trx_by_streamId(rx_rsl.streamId),
+						rx_rsl.rsl.ies[0].body.chan_nr);
+			if (cid != -1) {
+				CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[cid].comp_ref;
+			} else {
+				setverdict(fail, "RSL for unknown Dchan");
+			}
+		}
+
+		[] IPA_PT.receive {
+			setverdict(fail, "Received unknown primitive from IPA");
+			self.stop;
+		}
+
+		[] CLIENT_PT.receive(RSLDC_ChanRqd:?) -> value chan_rqd sender vc_conn {
+			/* Store the knowledge that this sender has requested a certain RQ+time */
+			f_cid_create(chan_rqd.ra, chan_rqd.fn, vc_conn);
+			IPA_PT.send(t_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
+						 ts_RSL_CHAN_RQD(chan_rqd.ra, chan_rqd.fn)));
+			}
+
+		[] CLIENT_PT.receive(tr_RSL_MsgType(?)) -> value rx_rsl_msg sender vc_conn {
+			/* forward to BSC */
+			cid := f_cid_by_comp_ref(vc_conn);
+			IPA_PT.send(t_ASP_RSL_UD(ConnectionTable[cid].stream_id, rx_rsl_msg));
+			}
+
+		}
+	}
+}
+
+
+}
