@@ -55,5 +55,5 @@ FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn BSSMAP_Emulation.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc"
+FILES="General_Types.ttcn Osmocom_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn BSSMAP_Emulation.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc RLCMAC_CSN1_Types.ttcn GSM_RR_Types.ttcn RSL_Emulation.ttcn"
 gen_links $DIR $FILES
