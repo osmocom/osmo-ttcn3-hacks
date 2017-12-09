@@ -1,5 +1,6 @@
 module BSC_Tests {
 
+import from General_Types all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 import from IPL4asp_Types all;
@@ -18,6 +19,28 @@ import from RSL_Tests all;
 
 const integer NUM_BTS := 1;
 const float T3101_MAX := 12.0;
+
+
+/* BSC specific CTRL helper functions */
+function f_ctrl_get_bts(IPA_CTRL_PT pt, integer bts_nr, charstring suffix) return CtrlValue {
+	return f_ctrl_get(pt, "bts." & int2str(bts_nr) & "." & suffix);
+}
+
+template charstring ts_bts(integer bts_nr) := "bts." & int2str(bts_nr) & ".";
+template charstring ts_bts_trx(integer bts_nr, integer trx_nr ) :=
+	valueof(ts_bts(bts_nr)) & "trx." & int2str(trx_nr) & ".";
+
+function f_ctrl_get_exp_bts(IPA_CTRL_PT pt, integer bts_nr, CtrlVariable suffix, template CtrlValue exp) {
+	f_ctrl_get_exp(pt, valueof(ts_bts(bts_nr)) & suffix, exp);
+}
+
+function f_ctrl_get_exp_trx(IPA_CTRL_PT pt, integer bts_nr, integer trx_nr, CtrlVariable suffix,
+			    template CtrlValue exp)
+{
+	f_ctrl_get_exp(pt, valueof(ts_bts_trx(bts_nr, trx_nr)) & suffix, exp);
+}
+
+
 
 type record BTS_State {
 	IPA_Client rsl
@@ -176,6 +199,7 @@ runs on test_CT {
 }
 
 
+/* verify we get a CHAN_ACT after CHAN RQD */
 testcase TC_chan_act_noreply() runs on test_CT {
 	var BSSAP_N_UNITDATA_ind ud_ind;
 
@@ -184,6 +208,22 @@ testcase TC_chan_act_noreply() runs on test_CT {
 
 	IPA_RSL[0].send(ts_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,ts_RSL_CHAN_RQD('23'O, 23)));
 	f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	setverdict(pass);
+}
+
+/* verify if the "chreq:total" counter increments as expected */
+testcase TC_chan_act_counter() runs on test_CT {
+	var BSSAP_N_UNITDATA_ind ud_ind;
+	var integer chreq_total;
+
+	f_init();
+	f_bssap_reset();
+
+	chreq_total := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total");
+	IPA_RSL[0].send(ts_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,ts_RSL_CHAN_RQD('23'O, 23)));
+	f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total", chreq_total+1);
+
 	setverdict(pass);
 }
 
@@ -256,42 +296,204 @@ testcase TC_chan_act_ack_est_ind_refused() runs on test_CT {
 	setverdict(pass);
 }
 
-
-/* BSC specific CTRL helper functions */
-function f_ctrl_get_bts(IPA_CTRL_PT pt, integer bts_nr, charstring suffix) return CtrlValue {
-	return f_ctrl_get(pt, "bts." & int2str(bts_nr) & "." & suffix);
+type record DchanTuple {
+	integer sccp_conn_id,
+	RslChannelNr rsl_chan_nr
 }
 
-template charstring ts_bts(integer bts_nr) := "bts." & int2str(bts_nr) & ".";
-template charstring ts_bts_trx(integer bts_nr, integer trx_nr ) :=
-	valueof(ts_bts(bts_nr)) & "trx." & int2str(trx_nr) & ".";
+/* helper function to establish a dedicated channel via BTS and MSC */
+function f_est_dchan(OCT1 ra, GsmFrameNumber fn, octetstring l3)
+runs on test_CT return DchanTuple {
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	var RSL_Message rx_rsl;
+	var DchanTuple dt;
 
-function f_ctrl_get_exp_bts(IPA_CTRL_PT pt, integer bts_nr, CtrlVariable suffix, template CtrlValue exp) {
-	f_ctrl_get_exp(pt, valueof(ts_bts(bts_nr)) & suffix, exp);
+	/* Send CHAN RQD and wait for allocation; acknowledge it */
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(ra, fn));
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	dt.rsl_chan_nr := rx_rsl.ies[0].body.chan_nr;
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, fn+1));
+
+	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+
+	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
+	dt.sccp_conn_id := rx_c_ind.connectionId;
+	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
+
+	return dt;
 }
 
-function f_ctrl_get_exp_trx(IPA_CTRL_PT pt, integer bts_nr, integer trx_nr, CtrlVariable suffix,
-			    template CtrlValue exp)
-{
-	f_ctrl_get_exp(pt, valueof(ts_bts_trx(bts_nr, trx_nr)) & suffix, exp);
-}
-
-testcase TC_ctrl() runs on test_CT {
+/* Test behavior of channel release after unilateral RLL REL IND (DISC from MS) */
+testcase TC_chan_rel_rll_rel_ind() runs on test_CT {
+	var RSL_Message rx_rsl;
+	var DchanTuple dt;
 
 	f_init();
 	f_bssap_reset();
 
-	f_ctrl_get(IPA_CTRL[0], "bts.0.location-area-code");
+	dt := f_est_dchan('23'O, 23, '00010203040506'O);
+
+	/* simulate RLL REL IND */
+	f_ipa_tx(0, ts_RSL_REL_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+
+	/* expect BSC to disable the channel */
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	/* respond with CHAN REL ACK */
+	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+
+	/* expect DISC_IND on MSC side */
+	BSSAP.receive(tr_BSSAP_DISC_ind(dt.sccp_conn_id, ?, ?));
+
+	setverdict(pass);
+}
+
+/* Test behavior of channel release after CONN FAIL IND from BTS */
+testcase TC_chan_rel_conn_fail() runs on test_CT {
+	var BSSAP_N_DATA_ind rx_di;
+	var RSL_Message rx_rsl;
+	var DchanTuple dt;
+
+	f_init();
+	f_bssap_reset();
+
+	dt := f_est_dchan('23'O, 23, '00010203040506'O);
+
+	/* simulate CONN FAIL IND */
+	f_ipa_tx(0, ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, 0));
+	/* TODO: different cause values? */
+
+	/* expect BSC to disable the channel */
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	/* respond with CHAN REL ACK */
+	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+
+	/* expect Clear Request from BSC */
+	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearRequest)) -> value rx_di;
+
+	/* Instruct BSC to clear channel */
+	var BssmapCause cause := bit2int(rx_di.userData.pdu.bssmap.clearRequest.cause.causeValue);
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+
+	/* expect Clear Complete from BSC */
+	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete));
+
+	/* release the SCCP connection */
+	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
+
+	/* wait for SCCP emulation to do its job */
+	f_sleep(1.0);
+
+	setverdict(pass);
+}
+
+/* Test behavior of channel release after hard Clear Command from MSC */
+testcase TC_chan_rel_hard_clear() runs on test_CT {
+	var BSSAP_N_DATA_ind rx_di;
+	var RSL_Message rx_rsl;
+	var DchanTuple dt;
+	var RslLinkId main_dcch := valueof(ts_RslLinkID_DCCH(0));
+
+	f_init();
+	f_bssap_reset();
+
+	dt := f_est_dchan('23'O, 23, '00010203040506'O);
+
+	/* Instruct BSC to clear channel */
+	var BssmapCause cause := 0;
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+
+	/* expect Clear Complete from BSC on A */
+	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete)) {
+		/* release the SCCP connection */
+		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
+	}
+
+	/* Clear the queue, it might still contain stuff like IMMEDIATE ASSIGN */
+	IPA_RSL[0].clear;
+	alt {
+	/* ignore DEACTIVATE SACCH (if any) */
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
+					tr_RSL_DEACT_SACCH(dt.rsl_chan_nr))) {
+		repeat;
+	}
+	/* acknowledge RLL release (if any)*/
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
+					tr_RSL_REL_REQ(dt.rsl_chan_nr, ?))) {
+		/* FIXME: Why are we getting this for LinkID SACCH? */
+		f_ipa_tx(0, ts_RSL_REL_CONF(dt.rsl_chan_nr, main_dcch));
+		repeat;
+	}
+	/* Expect RF channel release from BSC on Abis */
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
+						tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL))) {
+		/* respond with CHAN REL ACK */
+		f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+		}
+	}
+
+	setverdict(pass);
+}
+
+
+testcase TC_ctrl_msc_connection_status() runs on test_CT {
+	var charstring ctrl_resp;
+
+	f_init();
+	f_bssap_reset();
+
+	/* See https://osmocom.org/issues/2729 */
+	f_ctrl_get_exp(IPA_CTRL, "msc_connection_status", "connected");
+	setverdict(pass);
+}
+
+testcase TC_ctrl() runs on test_CT {
+	var charstring ctrl_resp;
+
+	f_init();
+	f_bssap_reset();
+
+	/* all below values must match the osmo-bsc.cfg config file used */
+
+	f_ctrl_get_exp(IPA_CTRL, "mcc", "1");
+	f_ctrl_get_exp(IPA_CTRL, "mnc", "1");
+	f_ctrl_get_exp(IPA_CTRL, "short-name", "OsmoBSC");
+	f_ctrl_get_exp(IPA_CTRL, "long-name", "OsmoBSC");
+	f_ctrl_get_exp(IPA_CTRL, "number-of-bts", "1");
+
+	var integer bts_nr := 0;
+	f_ctrl_get_exp_bts(IPA_CTRL, bts_nr, "location-area-code", "1");
+	f_ctrl_get_exp_bts(IPA_CTRL, bts_nr, "cell-identity", "0");
+	f_ctrl_get_exp_bts(IPA_CTRL, bts_nr, "oml-connection-state", "connected");
+	f_ctrl_get_exp_bts(IPA_CTRL, bts_nr, "gprs-mode", "gprs");
+	f_ctrl_get_exp_bts(IPA_CTRL, bts_nr, "rf_state", "operational,unlocked,on");
+	f_ctrl_get_exp_trx(IPA_CTRL, bts_nr, 0, "arfcn", "871");
+	f_ctrl_get_exp_trx(IPA_CTRL, bts_nr, 0, "max-power-reduction", "20");
+
+	var integer uptime := str2int(f_ctrl_get_bts(IPA_CTRL, bts_nr, "oml-uptime"));
+	f_sleep(2.0);
+	if (str2int(f_ctrl_get_bts(IPA_CTRL, bts_nr, "oml-uptime")) < uptime+1) {
+		setverdict(fail, "oml-uptime not incrementing as expected");
+	}
+	/* TODO: Disconnect RSL, imply that OML is disconnected and check for uptime zero? */
+
+	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bsc", 0, "paging:attempted", 0);
+
+	setverdict(pass);
 }
 
 
 
 control {
+	execute( TC_ctrl_msc_connection_status() );
 	execute( TC_ctrl() );
 	execute( TC_chan_act_noreply() );
+	execute( TC_chan_act_counter() );
 	execute( TC_chan_act_ack_noest() );
 	execute( TC_chan_act_ack_est_ind_noreply() );
 	execute( TC_chan_act_ack_est_ind_refused() );
+	execute( TC_chan_rel_rll_rel_ind() );
+	execute( TC_chan_rel_conn_fail() );
+	execute( TC_chan_rel_hard_clear() );
 }
 
 }
