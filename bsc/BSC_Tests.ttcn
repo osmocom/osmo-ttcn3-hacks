@@ -12,6 +12,7 @@ import from IPA_Types all;
 import from RSL_Types all;
 
 import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
 
 import from RSL_Tests all;
 
@@ -19,14 +20,15 @@ const integer NUM_BTS := 1;
 const float T3101_MAX := 12.0;
 
 type record BTS_State {
-	IPA_Client rsl,
-	IPA_Client ctrl
+	IPA_Client rsl
 }
 
 type component test_CT extends BSSAP_Adapter_CT {
 	var BTS_State bts[NUM_BTS];
 	port IPA_RSL_PT IPA_RSL[NUM_BTS];
-	port IPA_CTRL_PT IPA_CTRL[NUM_BTS];
+
+	var IPA_Client ctrl;
+	port IPA_CTRL_PT IPA_CTRL;
 
 	var boolean g_initialized := false;
 	timer T_guard := 30.0;
@@ -83,14 +85,14 @@ runs on test_CT {
 	clnt.vc_IPA := IPA_Emulation_CT.create(clnt.id & "-IPA");
 
 	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
-	connect(clnt.vc_IPA:IPA_CTRL_PORT, self:IPA_CTRL[i]);
+	connect(clnt.vc_IPA:IPA_CTRL_PORT, self:IPA_CTRL);
 
 	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", -1));
 
 	/* wait for IPA CTRL link to connect and send UP */
 	T.start;
 	alt {
-	[] IPA_CTRL[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
+	[] IPA_CTRL.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
 	[] T.timeout {
 		setverdict(fail, "Timeout CTRL waiting for ASP_IPA_EVENT_UP");
 		self.stop;
@@ -98,6 +100,22 @@ runs on test_CT {
 	}
 }
 
+
+function f_wait_oml(integer bts_nr, charstring status, float secs_max) runs on test_CT {
+	timer T := secs_max;
+	T.start;
+	while (true) {
+		if (f_ctrl_get_bts(IPA_CTRL, bts_nr, "oml-connection-state") == status) {
+			T.stop;
+			return;
+		}
+		f_sleep(0.1);
+		if (not T.running) {
+			setverdict(fail, "Timeout waiting for oml-connection-state ", status);
+			self.stop;
+		}
+	}
+}
 
 function f_sleep(float seconds) {
 	timer T := seconds;
@@ -120,12 +138,15 @@ function f_init() runs on test_CT {
 	/* Call a function of our 'parent component' BSSAP_Adapter_CT to start the
 	 * MSC-side BSSAP emulation */
 	f_bssap_init("VirtMSC");
-
-	f_sleep(5.0);
+	f_ipa_ctrl_start(ctrl, mp_bsc_ip, mp_bsc_ctrl_port, 0);
 
 	for (i := 0; i < NUM_BTS; i := i+1) {
+		/* wait until osmo-bts-omldummy has respawned */
+		f_wait_oml(i, "degraded", 5.0);
+		/* start RSL connection */
 		f_ipa_rsl_start(bts[i].rsl, mp_bsc_ip, mp_bsc_rsl_port, i);
-		f_ipa_ctrl_start(bts[i].ctrl, mp_bsc_ip, mp_bsc_ctrl_port, i);
+		/* wait until BSC tells us "connected" */
+		f_wait_oml(i, "connected", 5.0);
 	}
 	f_sleep(0.5);
 
@@ -233,6 +254,26 @@ testcase TC_chan_act_ack_est_ind_refused() runs on test_CT {
 	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
 
 	setverdict(pass);
+}
+
+
+/* BSC specific CTRL helper functions */
+function f_ctrl_get_bts(IPA_CTRL_PT pt, integer bts_nr, charstring suffix) return CtrlValue {
+	return f_ctrl_get(pt, "bts." & int2str(bts_nr) & "." & suffix);
+}
+
+template charstring ts_bts(integer bts_nr) := "bts." & int2str(bts_nr) & ".";
+template charstring ts_bts_trx(integer bts_nr, integer trx_nr ) :=
+	valueof(ts_bts(bts_nr)) & "trx." & int2str(trx_nr) & ".";
+
+function f_ctrl_get_exp_bts(IPA_CTRL_PT pt, integer bts_nr, CtrlVariable suffix, template CtrlValue exp) {
+	f_ctrl_get_exp(pt, valueof(ts_bts(bts_nr)) & suffix, exp);
+}
+
+function f_ctrl_get_exp_trx(IPA_CTRL_PT pt, integer bts_nr, integer trx_nr, CtrlVariable suffix,
+			    template CtrlValue exp)
+{
+	f_ctrl_get_exp(pt, valueof(ts_bts_trx(bts_nr, trx_nr)) & suffix, exp);
 }
 
 testcase TC_ctrl() runs on test_CT {
