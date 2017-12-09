@@ -1,78 +1,148 @@
-module MSC_Simulation {
+module BSSAP_Adapter {
 
-import from IPL4asp_Types all;
+/* This module implements a 'dumb' BSSAP adapter.  It creates the M3UA and SCCP components and stacks a BSSAP
+ * codec port on top.  As a result, it provides the ability to transceive SCCP-User-SAP primitives with
+ * deoded BSSAP payload.  Use this if you want to have full control about what you transmit or receive,
+ * without any automatisms in place.  Allows you to refuse connections or other abnormal behavior. */
 
-import from IPA_Emulation all;
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from M3UA_Types all;
+import from M3UA_Emulation all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
 
 import from SCCP_Types all;
 import from SCCPasp_Types all;
 import from SCCP_Emulation all;
 
-/* 
-import from MobileL3_Types all;
-import from MobileL3_CommonIE_Types all;
-import from L3_Templates all;
+import from SCTPasp_Types all;
+import from SCTPasp_PortType all;
 
-import from BSSAP_Types all;
+import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
-*/
-import from BSSMAP_Emulation all;
 
-import from MGCP_Adapter all;
-
-import from MSC_ConnectionHandler all;
-
-type component MSC_CT {
+type component BSSAP_Adapter_CT {
 	/* component references */
-	var IPA_Emulation_CT vc_IPA;
+	var M3UA_CT vc_M3UA;
 	var SCCP_CT vc_SCCP;
-	var BSSMAP_Emulation_CT vc_BSSMAP;
-	var MGCP_Adapter_CT vc_MGCP_UDP;
 	/* test port to SCCP emulation */
-	port SCCPasp_PT SCCP;
+	port BSSAP_CODEC_PT BSSAP;
+
+	var octetstring g_sio;
+	var MSC_SCCP_MTP3_parameters g_sccp_pars;
+	var SCCP_PAR_Address g_sccp_addr_own, g_sccp_addr_peer;
 }
 
 modulepar {
-	boolean mp_mgcp_uses_udp := false;
+	charstring mp_sccp_service_type := "mtp3_itu";
+
+	SCTP_Association_Address mp_sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" };
+	integer mp_own_pc := 185;	/* 0.23.1 */
+	integer mp_own_ssn := 254;
+
+	integer mp_peer_pc := 187;
+	integer mp_peer_ssn := 254;
 }
 
-function main(charstring local_ip, PortNumber local_port,
-	      MSC_SCCP_MTP3_parameters sccp_pars,
-	      SCCP_PAR_Address sccp_addr_own, charstring id) runs on MSC_CT
+/* construct a SCCP_PAR_Address with just PC + SSN and no GT */
+template (value) SCCP_PAR_Address ts_SccpAddr_PC_SSN(integer pc, integer ssn) := {
+	addressIndicator := {
+		pointCodeIndic := '1'B,
+		ssnIndicator := '1'B,
+		globalTitleIndic := '0000'B,
+		routingIndicator := '1'B
+	},
+	signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, '83'O),
+	//signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, g_sio),
+	subsystemNumber := ssn,
+	globalTitle := omit
+}
+
+private function init_pars() runs on BSSAP_Adapter_CT {
+	g_sio := '83'O;
+	g_sccp_pars := {
+		sio := {
+			ni := substr(oct2bit(g_sio),0,2),
+			prio := substr(oct2bit(g_sio),2,2),
+			si := substr(oct2bit(g_sio),4,4)
+		},
+		opc := mp_own_pc,
+		dpc := mp_peer_pc,
+		sls := 0,
+		sccp_serviceType := mp_sccp_service_type,
+		ssn := mp_own_ssn
+	};
+	g_sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(mp_own_pc, mp_own_ssn));
+	g_sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(mp_peer_pc, mp_peer_ssn));
+}
+
+
+function f_bssap_init(charstring id) runs on BSSAP_Adapter_CT
 {
+	init_pars();
+
 	/* create components */
-	vc_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	vc_M3UA := M3UA_CT.create(id & "-M3UA");
 	vc_SCCP := SCCP_CT.create(id & "-SCCP");
-	vc_BSSMAP := BSSMAP_Emulation_CT.create(id & "-BSSMAP");
 
-	map(vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	map(vc_M3UA:SCTP_PORT, system:sctp);
 
-	/* connect MTP3 service provider (IPA) to lower side of SCCP */
-	connect(vc_IPA:MTP3_SP_PORT, vc_SCCP:MTP3_SCCP_PORT);
+	/* connect MTP3 service provider (M3UA) to lower side of SCCP */
+	connect(vc_M3UA:MTP3_SP_PORT, vc_SCCP:MTP3_SCCP_PORT);
 
 	/* connect BSSNAP dispatcher to upper side of SCCP */
-	connect(vc_BSSMAP:SCCP, vc_SCCP:SCCP_SP_PORT);
+	connect(self:BSSAP, vc_SCCP:SCCP_SP_PORT);
 
-	if (mp_mgcp_uses_udp == false) {
-		/* connect BSSMAP dispatcher to IPA_Emulation MGCP */
-		connect(vc_BSSMAP:MGCP, vc_IPA:IPA_MGCP_PORT);
-	} else {
-		vc_MGCP_UDP := MGCP_Adapter_CT.create(id & "-MGCP_UDP");
-		connect(vc_BSSMAP:MGCP, vc_MGCP_UDP:MGCP);
-		vc_MGCP_UDP.start(MGCP_Adapter.main());
-	}
+	vc_M3UA.start(f_M3UA_Emulation(mp_sctp_addr));
+	vc_SCCP.start(SCCPStart(g_sccp_pars));
+}
 
-	vc_IPA.start(IPA_Emulation.main_server(local_ip, local_port));
-	vc_SCCP.start(SCCPStart(sccp_pars));
-	vc_BSSMAP.start(BSSMAP_Emulation.main(MSC_BssmapOps, id & "-BSSMAP"));
-
-	/* wait until termination of respective components */
-	vc_IPA.done;
-	vc_BSSMAP.done;
-	vc_SCCP.done;
-	if (mp_mgcp_uses_udp) {
-		vc_MGCP_UDP.done;
+private altstep as_reset_ack() runs on BSSAP_Adapter_CT {
+	var BSSAP_N_UNITDATA_ind ud_ind;
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) -> value ud_ind {
+		log("Respoding to inbound RESET with RESET-ACK");
+		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
+			   ts_BSSMAP_ResetAck));
 	}
 }
+
+
+function f_bssap_wait_for_reset() runs on BSSAP_Adapter_CT {
+	var BSSAP_N_UNITDATA_ind ud_ind;
+	timer T := 20.0;
+
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) -> value ud_ind {
+		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
+			   ts_BSSMAP_ResetAck));
+		}
+	[] as_reset_ack();
+	[] BSSAP.receive {
+		repeat;
+		}
+	[] T.timeout {
+		setverdict(fail);
+		}
+	}
+}
+
+function f_bssap_reset() runs on BSSAP_Adapter_CT {
+	timer T := 5.0;
+
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, ts_BSSMAP_Reset(0)));
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_sccp_addr_own, g_sccp_addr_peer, tr_BSSMAP_ResetAck)) {
+		log("Received RESET-ACK in response to RESET, we're ready to go!");
+		}
+	[] as_reset_ack();
+	[] BSSAP.receive { repeat };
+	[] T.timeout { setverdict(fail, "Waiting for RESET-ACK after sending RESET"); }
+	}
+}
+
 
 }

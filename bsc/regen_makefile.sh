@@ -2,7 +2,7 @@
 
 MAIN=BSC_Tests.ttcn
 
-FILES="*.ttcn SCCP_EncDec.cc IPA_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc RTP_EncDec.cc SDP_EncDec.cc *.c MGCP_CodecPort_CtrlFunctDef.cc"
+FILES="*.ttcn IPA_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc SCTPasp_PT.cc RTP_EncDec.cc SDP_EncDec.cc *.c"
 
 ttcn3_makefilegen -l -f $MAIN $FILES
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
