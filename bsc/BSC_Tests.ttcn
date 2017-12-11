@@ -5,6 +5,7 @@ import from Osmocom_Types all;
 import from GSM_Types all;
 import from IPL4asp_Types all;
 
+import from BSSAP_Types all;
 import from BSSAP_Adapter all;
 import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
@@ -14,6 +15,10 @@ import from RSL_Types all;
 
 import from Osmocom_CTRL_Functions all;
 import from Osmocom_CTRL_Types all;
+
+import from MobileL3_CommonIE_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
 
 import from RSL_Tests all;
 
@@ -584,6 +589,162 @@ testcase TC_ctrl() runs on test_CT {
 	setverdict(pass);
 }
 
+function f_bssap_tx_ud(template PDU_BSSAP bssap) runs on test_CT {
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, bssap));
+}
+
+
+/***********************************************************************
+ * Paging Testing
+ ***********************************************************************/
+
+type record Cell_Identity {
+	GsmMcc		mcc,
+	GsmMnc		mnc,
+	GsmLac		lac,
+	GsmCellId	ci
+};
+private const Cell_Identity cid := { '001'H, '001'H, 1, 0 };
+
+
+/* core paging test helper function; used by most paging test cases */
+private function f_pageing_helper(hexstring imsi,
+				  template BSSMAP_FIELD_CellIdentificationList cid_list,
+				  template RSL_ChanNeeded rsl_chneed := omit,
+				  template OCT4 tmsi := omit) runs on test_CT
+{
+	var template BSSMAP_IE_ChannelNeeded bssmap_chneed;
+	var MobileIdentity mi;
+	var template octetstring id_enc; /* FIXME */
+	var RSL_Message rx_rsl;
+	var integer paging_group := hex2int(imsi[lengthof(imsi)-1]);
+
+	f_init();
+	f_bssap_reset();
+
+	/* Clear the queue, it might still contain stuff like BCCH FILLING */
+	IPA_RSL[0].clear;
+
+	if (isvalue(rsl_chneed)) {
+		/* The values of 08.08 3.2.2.36 and 08.58 9.3.40 are luckily identical */
+		bssmap_chneed := ts_BSSMAP_IE_ChanNeeded(int2bit(enum2int(valueof(rsl_chneed)),2));
+	} else {
+		bssmap_chneed := omit;
+	}
+
+	f_bssap_tx_ud(ts_BSSMAP_Paging(imsi, cid_list, tmsi, bssmap_chneed));
+
+/* FIXME: Disabled due to bugs in both GSM_RR_Types and MobileL3_CommonIE_Types IMSI encoder 
+	if (isvalue(tmsi)) {
+		mi := valueof(t_Osmo_MI_TMSI(oct2int(valueof(tmsi))));
+	} else {
+		mi := valueof(ts_Osmo_MI_IMSI(imsi));
+	}
+	id_enc := enc_MobileIdentity(mi);
+*/
+	id_enc := ?;
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_PAGING_CMD(id_enc));
+	/* check channel type, paging group */
+	if (rx_rsl.ies[1].body.paging_group != paging_group) {
+		setverdict(fail, "Paging for wrong paging group");
+	}
+	if (ispresent(rsl_chneed) and
+	    rx_rsl.ies[3].body.chan_needed.chan_needed != valueof(rsl_chneed)) {
+		setverdict(fail, "RSL Channel Needed != BSSMAP Channel Needed");
+	}
+
+	setverdict(pass);
+}
+
+/* PAGING by IMSI + TMSI */
+testcase TC_paging_imsi_nochan() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010123456789'H, cid_list);
+}
+
+/* PAGING by IMSI + TMSI */
+testcase TC_paging_tmsi_nochan() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010100000001'H, cid_list, omit, 'A1B2C301'O);
+}
+
+/* Paging with different "channel needed' values */
+testcase TC_paging_tmsi_any() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010100000002'H, cid_list, RSL_CHANNEED_ANY, 'A1B2C302'O);
+}
+testcase TC_paging_tmsi_sdcch() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010100000003'H, cid_list, RSL_CHANNEED_SDCCH, 'A1B2C303'O);
+}
+testcase TC_paging_tmsi_tch_f() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010000000004'H, cid_list, RSL_CHANNEED_TCH_F, 'A1B2C304'O);
+}
+testcase TC_paging_tmsi_tch_hf() runs on test_CT {
+	var BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := valueof(ts_BSSMAP_CIL_noCell);
+	f_pageing_helper('001010000000005'H, cid_list, RSL_CHANNEED_TCH_ForH, 'A1B2C305'O);
+}
+
+/* Paging by CGI */
+testcase TC_paging_imsi_nochan_cgi() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_CGI := { ts_BSSMAP_CI_CGI(cid.mcc, cid.mnc, cid.lac, cid.ci) } };
+	f_pageing_helper('001010000000006'H, cid_list);
+}
+
+/* Paging by LAC+CI */
+testcase TC_paging_imsi_nochan_lac_ci() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_LAC_CI := { ts_BSSMAP_CI_LAC_CI(cid.lac, cid.ci) } };
+	f_pageing_helper('001010000000007'H, cid_list);
+}
+
+/* Paging by CI */
+testcase TC_paging_imsi_nochan_ci() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_CI := { ts_BSSMAP_CI_CI(cid.ci) } };
+	f_pageing_helper('001010000000008'H, cid_list);
+}
+
+/* Paging by LAI */
+testcase TC_paging_imsi_nochan_lai() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_LAI := { ts_BSSMAP_CI_LAI(cid.mcc, cid.mnc, cid.lac) } };
+	f_pageing_helper('001010000000009'H, cid_list);
+}
+
+/* Paging by LAC */
+testcase TC_paging_imsi_nochan_lac() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_LAC := { ts_BSSMAP_CI_LAC(cid.lac) } };
+	f_pageing_helper('001010000000010'H, cid_list);
+}
+
+/* Paging by "all in BSS" */
+testcase TC_paging_imsi_nochan_all() runs on test_CT {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list;
+	cid_list := { cIl_allInBSS := ''O };
+	f_pageing_helper('001010000000011'H, cid_list);
+}
+
+/* Paging by PLMN+LAC+RNC */
+/* Paging by RNC */
+/* Paging by LAC+RNC */
+
+/* Paging on multiple cells (multiple in one LAC): Verify all of them page */
+/* Paging on multiple cells (multiple entries in list): Verify all of them page */
+/* Verify paging retransmission interval + count */
+/* Verify paging stops after channel establishment */
+/* Verify PCH load */
+/* Test behavior under paging overload */
+/* Verify paging stops after A-RESET */
 
 
 control {
@@ -599,6 +760,20 @@ control {
 	execute( TC_chan_rel_hard_clear() );
 	execute( TC_chan_rel_hard_rlsd() );
 	execute( TC_chan_rel_a_reset() );
+
+	execute( TC_paging_imsi_nochan() );
+	execute( TC_paging_tmsi_nochan() );
+	execute( TC_paging_tmsi_any() );
+	execute( TC_paging_tmsi_sdcch() );
+	execute( TC_paging_tmsi_tch_f() );
+	execute( TC_paging_tmsi_tch_hf() );
+	execute( TC_paging_imsi_nochan_cgi() );
+	execute( TC_paging_imsi_nochan_lac_ci() );
+	execute( TC_paging_imsi_nochan_ci() );
+	execute( TC_paging_imsi_nochan_lai() );
+	execute( TC_paging_imsi_nochan_lac() );
+	execute( TC_paging_imsi_nochan_all() );
+
 }
 
 }
