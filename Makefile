@@ -14,7 +14,11 @@ PARALLEL_MAKE:=-j4
 #	make bsc/all
 #	make bsc	(equivalent to bsc/all)
 
-default: all
+default: deps all
+
+.PHONY: deps
+deps:
+	$(MAKE) -C deps
 
 compile: $(foreach dir,$(SUBDIRS),$(dir)/compile)
 clean: $(foreach dir,$(SUBDIRS),$(dir)/clean)

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-BASEDIR=~/projects/git
+BASEDIR=../deps
 
 gen_links() {
 	DIR=$1
