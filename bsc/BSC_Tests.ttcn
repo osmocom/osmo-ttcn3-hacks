@@ -22,7 +22,7 @@ import from GSM_RR_Types all;
 
 import from RSL_Tests all;
 
-const integer NUM_BTS := 1;
+const integer NUM_BTS := 3;
 const float T3101_MAX := 12.0;
 
 
@@ -88,7 +88,7 @@ runs on test_CT {
 	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
 	connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[i]);
 
-	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", -1, clnt.ccm_pars));
+	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", 10000+i, clnt.ccm_pars));
 
 	/* wait for IPA RSL link to connect and send ID ACK */
 	T.start;
@@ -606,10 +606,21 @@ type record Cell_Identity {
 };
 private const Cell_Identity cid := { '001'H, '001'H, 1, 0 };
 
+type set of integer BtsIdList;
+
+private function f_bts_in_list(integer bts_id, BtsIdList bts_ids) return boolean {
+	for (var integer j := 0; j < sizeof(bts_ids); j := j + 1) {
+		if (bts_id == bts_ids[j]) {
+			return true;
+		}
+	}
+	return false;
+}
 
 /* core paging test helper function; used by most paging test cases */
 private function f_pageing_helper(hexstring imsi,
 				  template BSSMAP_FIELD_CellIdentificationList cid_list,
+				  BtsIdList bts_ids := { 0 },
 				  template RSL_ChanNeeded rsl_chneed := omit,
 				  template OCT4 tmsi := omit) runs on test_CT
 {
@@ -618,12 +629,15 @@ private function f_pageing_helper(hexstring imsi,
 	var template octetstring id_enc; /* FIXME */
 	var RSL_Message rx_rsl;
 	var integer paging_group := hex2int(imsi[lengthof(imsi)-1]);
+	var integer i;
 
 	f_init();
 	f_bssap_reset();
 
 	/* Clear the queue, it might still contain stuff like BCCH FILLING */
-	IPA_RSL[0].clear;
+	for (i := 0; i < sizeof(bts_ids); i := i + 1) {
+		IPA_RSL[bts_ids[i]].clear;
+	}
 
 	if (isvalue(rsl_chneed)) {
 		/* The values of 08.08 3.2.2.36 and 08.58 9.3.40 are luckily identical */
@@ -643,95 +657,116 @@ private function f_pageing_helper(hexstring imsi,
 	id_enc := enc_MobileIdentity(mi);
 */
 	id_enc := ?;
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_PAGING_CMD(id_enc));
-	/* check channel type, paging group */
-	if (rx_rsl.ies[1].body.paging_group != paging_group) {
-		setverdict(fail, "Paging for wrong paging group");
+	for (i := 0; i < sizeof(bts_ids); i := i + 1) {
+		rx_rsl := f_exp_ipa_rx(bts_ids[i], tr_RSL_PAGING_CMD(id_enc));
+		/* check channel type, paging group */
+		if (rx_rsl.ies[1].body.paging_group != paging_group) {
+			setverdict(fail, "Paging for wrong paging group");
+		}
+		if (ispresent(rsl_chneed) and
+		    rx_rsl.ies[3].body.chan_needed.chan_needed != valueof(rsl_chneed)) {
+			setverdict(fail, "RSL Channel Needed != BSSMAP Channel Needed");
+		}
 	}
-	if (ispresent(rsl_chneed) and
-	    rx_rsl.ies[3].body.chan_needed.chan_needed != valueof(rsl_chneed)) {
-		setverdict(fail, "RSL Channel Needed != BSSMAP Channel Needed");
+	/* do a quick check on all not-included BTSs if they received paging */
+	for (i := 0; i < NUM_BTS; i := i + 1) {
+		timer T := 0.1;
+		if (f_bts_in_list(i, bts_ids)) {
+			continue;
+		}
+		T.start;
+		alt {
+		[] IPA_RSL[i].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_PAGING_CMD(id_enc))) {
+			setverdict(fail, "Paging on BTS ", i, " which is not part of ", bts_ids);
+			}
+		[] IPA_RSL[i].receive { repeat; }
+		[] T.timeout { }
+		}
 	}
 
 	setverdict(pass);
 }
 
+const BtsIdList c_BtsId_all := { 0, 1, 2 };
+const BtsIdList c_BtsId_LAC1 := { 0, 1 };
+const BtsIdList c_BtsId_LAC2 := { 2 };
+
 /* PAGING by IMSI + TMSI */
 testcase TC_paging_imsi_nochan() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010123456789'H, cid_list);
+	f_pageing_helper('001010123456789'H, cid_list, c_BtsId_all);
 }
 
 /* PAGING by IMSI + TMSI */
 testcase TC_paging_tmsi_nochan() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010100000001'H, cid_list, omit, 'A1B2C301'O);
+	f_pageing_helper('001010100000001'H, cid_list, c_BtsId_all, omit, 'A1B2C301'O);
 }
 
 /* Paging with different "channel needed' values */
 testcase TC_paging_tmsi_any() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010100000002'H, cid_list, RSL_CHANNEED_ANY, 'A1B2C302'O);
+	f_pageing_helper('001010100000002'H, cid_list, c_BtsId_all, RSL_CHANNEED_ANY, 'A1B2C302'O);
 }
 testcase TC_paging_tmsi_sdcch() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010100000003'H, cid_list, RSL_CHANNEED_SDCCH, 'A1B2C303'O);
+	f_pageing_helper('001010100000003'H, cid_list, c_BtsId_all, RSL_CHANNEED_SDCCH, 'A1B2C303'O);
 }
 testcase TC_paging_tmsi_tch_f() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010000000004'H, cid_list, RSL_CHANNEED_TCH_F, 'A1B2C304'O);
+	f_pageing_helper('001010000000004'H, cid_list, c_BtsId_all, RSL_CHANNEED_TCH_F, 'A1B2C304'O);
 }
 testcase TC_paging_tmsi_tch_hf() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010000000005'H, cid_list, RSL_CHANNEED_TCH_ForH, 'A1B2C305'O);
+	f_pageing_helper('001010000000005'H, cid_list, c_BtsId_all, RSL_CHANNEED_TCH_ForH, 'A1B2C305'O);
 }
 
 /* Paging by CGI */
 testcase TC_paging_imsi_nochan_cgi() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_CGI := { ts_BSSMAP_CI_CGI(cid.mcc, cid.mnc, cid.lac, cid.ci) } };
-	f_pageing_helper('001010000000006'H, cid_list);
+	f_pageing_helper('001010000000006'H, cid_list, { 0 });
 }
 
 /* Paging by LAC+CI */
 testcase TC_paging_imsi_nochan_lac_ci() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_LAC_CI := { ts_BSSMAP_CI_LAC_CI(cid.lac, cid.ci) } };
-	f_pageing_helper('001010000000007'H, cid_list);
+	f_pageing_helper('001010000000007'H, cid_list, { 0 });
 }
 
 /* Paging by CI */
 testcase TC_paging_imsi_nochan_ci() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_CI := { ts_BSSMAP_CI_CI(cid.ci) } };
-	f_pageing_helper('001010000000008'H, cid_list);
+	f_pageing_helper('001010000000008'H, cid_list, { 0 });
 }
 
 /* Paging by LAI */
 testcase TC_paging_imsi_nochan_lai() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_LAI := { ts_BSSMAP_CI_LAI(cid.mcc, cid.mnc, cid.lac) } };
-	f_pageing_helper('001010000000009'H, cid_list);
+	f_pageing_helper('001010000000009'H, cid_list, c_BtsId_LAC1);
 }
 
 /* Paging by LAC */
 testcase TC_paging_imsi_nochan_lac() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_LAC := { ts_BSSMAP_CI_LAC(cid.lac) } };
-	f_pageing_helper('001010000000010'H, cid_list);
+	f_pageing_helper('001010000000010'H, cid_list, c_BtsId_LAC1);
 }
 
 /* Paging by "all in BSS" */
 testcase TC_paging_imsi_nochan_all() runs on test_CT {
 	var template BSSMAP_FIELD_CellIdentificationList cid_list;
 	cid_list := { cIl_allInBSS := ''O };
-	f_pageing_helper('001010000000011'H, cid_list);
+	f_pageing_helper('001010000000011'H, cid_list, c_BtsId_all);
 }
 
 /* Paging by PLMN+LAC+RNC */
@@ -749,7 +784,7 @@ testcase TC_paging_imsi_load() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	timer T := 4.0;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010123456789'H, cid_list);
+	f_pageing_helper('001010123456789'H, cid_list, c_BtsId_all);
 
 	/* tell BSC there is no paging space anymore */
 	f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(0));
@@ -773,7 +808,7 @@ testcase TC_paging_imsi_a_reset() runs on test_CT {
 	var BSSMAP_FIELD_CellIdentificationList cid_list;
 	timer T := 3.0;
 	cid_list := valueof(ts_BSSMAP_CIL_noCell);
-	f_pageing_helper('001010123456789'H, cid_list);
+	f_pageing_helper('001010123456789'H, cid_list, c_BtsId_all);
 
 	/* Perform a BSSMAP Reset and wait for ACK */
 	BSSAP.send(ts_BSSAP_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, ts_BSSMAP_Reset(0)));
@@ -789,6 +824,14 @@ testcase TC_paging_imsi_a_reset() runs on test_CT {
 	T.start;
 	alt {
 	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_PAGING_CMD(?))) {
+		setverdict(fail, "Received PAGING after A-RESET");
+		self.stop;
+		}
+	[] IPA_RSL[1].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_PAGING_CMD(?))) {
+		setverdict(fail, "Received PAGING after A-RESET");
+		self.stop;
+		}
+	[] IPA_RSL[2].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_PAGING_CMD(?))) {
 		setverdict(fail, "Received PAGING after A-RESET");
 		self.stop;
 		}
