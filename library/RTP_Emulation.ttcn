@@ -1,0 +1,209 @@
+module RTP_Emulation {
+
+/* Functionalities that we want this module to imeplement:
+ *  * act as a RTP source that generates a RTP Stream
+ *  * act asaa RTP sink that consumes a RTP Stream
+ *
+ * for all of the above, we want to be able to 
+ *  * specify the payload type
+ *  * specify the interval / sample rate
+ *  * create drop-outs in the stream
+ *  * detect reordered or lost frames
+ *  * validate if the size of the frames matches epectations
+ *  * play back real audio (at least some tones?)
+ *  * enable/disable generation/verification of RTCP
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from RTP_Types all;
+import from RTP_CodecPort all;
+import from RTP_CodecPort_CtrlFunct all;
+
+type component RTP_Emulation_CT {
+	/* down-facing ports for RTP and RTCP codec ports on top of IPL4asp */
+	port RTP_CODEC_PT RTP;
+	var integer g_rtp_conn_id := -1;
+	port RTP_CODEC_PT RTCP;
+	var integer g_rtcp_conn_id := -1;
+
+	/* user-facing port for controlling the binding */
+	port RTPEM_CTRL_PT CTRL;
+
+	/* configurable by user, should be fixed */
+	var INT7b g_tx_payload_type := 0;
+	var integer g_tx_samplerate_hz := 8000;
+	var integer g_tx_duration_ms := 20;
+	var BIT32_BO_LAST g_tx_ssrc := hex2bit('DEADBEEF'H);
+
+	var HostName g_remote_host;
+	var PortNumber g_remote_port;
+	var HostName g_local_host;
+	var PortNumber g_local_port;
+
+	/* state variables, change over time */
+	var boolean g_rx_enabled := false;
+	var LIN2_BO_LAST g_tx_next_seq := 0;
+	var uint32_t g_tx_next_ts := 0;
+
+	var INT7b g_rx_payload_type := 0;
+	var LIN2_BO_LAST g_rx_last_seq;
+	var uint32_t g_rx_last_ts;
+}
+
+type enumerated RtpemMode {
+	RTPEM_MODE_NONE,
+	RTPEM_MODE_TXONLY,
+	RTPEM_MODE_RXONLY,
+	RTPEM_MODE_BIDIR
+};
+
+signature RTPEM_bind(in HostName local_host, inout PortNumber local_port);
+signature RTPEM_connect(in HostName remote_host, in PortNumber remote_port);
+signature RTPEM_mode(in RtpemMode mode);
+
+type port RTPEM_CTRL_PT procedure {
+	inout RTPEM_bind, RTPEM_connect, RTPEM_mode;
+} with { extension "internal" };
+
+template PDU_RTP ts_RTP(BIT32_BO_LAST ssrc, INT7b pt, LIN2_BO_LAST seq, uint32_t ts,
+			octetstring payload, BIT1 marker := '0'B) := {
+	version := 2,
+	padding_ind := '0'B,
+	extension_ind := '0'B,
+	CSRC_count := 0,
+	marker_bit := marker,
+	payload_type := pt,
+	sequence_number := seq,
+	time_stamp := int2bit(ts, 4),
+	SSRC_id := ssrc,
+	CSRCs := omit,
+	ext_header := omit,
+	data := payload
+}
+
+private function f_tx_rtp(octetstring payload, BIT1 marker := '0'B) runs on RTP_Emulation_CT {
+	var PDU_RTP rtp := valueof(ts_RTP(g_tx_ssrc, g_tx_payload_type, g_tx_next_seq,
+					  g_tx_next_ts, payload, marker));
+	RTP.send(t_RTP_Send(g_rtp_conn_id, RTP_messages_union:{rtp:=rtp}));
+	/* increment sequence + timestamp for next transmit */
+	g_tx_next_seq := g_tx_next_seq + 1;
+	g_tx_next_ts := g_tx_next_ts + (g_tx_samplerate_hz mod (1000 mod g_tx_duration_ms));
+}
+
+function f_main() runs on RTP_Emulation_CT
+{
+	var Result res;
+
+	timer T_transmit := 1000.0/int2float(g_tx_duration_ms);
+	var RTP_RecvFrom rx_rtp;
+	var template RTP_RecvFrom tr := {
+		connId := ?,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := ?
+	};
+	var template RTP_RecvFrom tr_rtp := tr;
+	var template RTP_RecvFrom tr_rtcp := tr;
+	tr_rtp.connId := g_rtp_conn_id;
+	tr_rtp.msg := { rtp := ? };
+	tr_rtp.connId := g_rtcp_conn_id;
+	tr_rtcp.msg := { rtcp := ? };
+
+	while (true) {
+	alt {
+		/* control procedures (calls) from the user */
+		[] CTRL.getcall(RTPEM_bind:{?,?}) -> param(g_local_host, g_local_port) {
+			if (g_local_port rem 2 == 1) {
+				//CTRL.raise(RTPEM_bind, "Local Port is not an even port number!");
+				log("Local Port is not an even port number!");
+				continue;
+			}
+			res := RTP_CodecPort_CtrlFunct.f_IPL4_listen(RTP, g_local_host,
+								g_local_port, {udp:={}});
+			g_rtp_conn_id := res.connId;
+			res := RTP_CodecPort_CtrlFunct.f_IPL4_listen(RTP, g_local_host,
+								g_local_port+1, {udp:={}});
+			g_rtcp_conn_id := res.connId;
+			CTRL.reply(RTPEM_bind:{g_local_host, g_local_port});
+		}
+		[] CTRL.getcall(RTPEM_connect:{?,?}) -> param (g_remote_host, g_remote_port) {
+			if (g_remote_port rem 2 == 1) {
+				//CTRL.raise(RTPEM_connect, "Remote Port is not an even number!");
+				log("Remote Port is not an even number!");
+				continue;
+			}
+			res := RTP_CodecPort_CtrlFunct.f_IPL4_connect(RTP, g_remote_host,
+								g_remote_port,
+								g_local_host, g_local_port,
+								g_rtp_conn_id, {udp:={}});
+			res := RTP_CodecPort_CtrlFunct.f_IPL4_connect(RTCP, g_remote_host,
+								g_remote_port+1,
+								g_local_host, g_local_port+1,
+								g_rtcp_conn_id, {udp:={}});
+			CTRL.reply(RTPEM_connect:{g_remote_host, g_remote_port});
+		}
+		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_NONE}) {
+			T_transmit.stop;
+			g_rx_enabled := false;
+		}
+		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_TXONLY}) {
+			/* start transmit timer */
+			T_transmit.start;
+			g_rx_enabled := false;
+		}
+		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_RXONLY}) {
+
+			T_transmit.stop;
+			if (g_rx_enabled == false) {
+				/* flush queues */
+				RTP.clear;
+				RTCP.clear;
+				g_rx_enabled := true;
+			}
+		}
+		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_BIDIR}) {
+			T_transmit.start;
+			if (g_rx_enabled == false) {
+				/* flush queues */
+				RTP.clear;
+				RTCP.clear;
+				g_rx_enabled := true;
+			}
+		}
+
+		/* simply ignore any RTTP/RTCP if receiver not enabled */
+		[g_rx_enabled==false] RTP.receive(tr_rtp) { }
+		[g_rx_enabled==false] RTCP.receive(tr_rtp) { }
+
+		/* process received RTCP/RTP if receiver enabled */
+		[g_rx_enabled] RTP.receive(tr_rtp) -> value rx_rtp {
+			log("RX RTP: ", rx_rtp);
+		}
+		[g_rx_enabled] RTCP.receive(tr_rtcp) -> value rx_rtp {
+			log("RX RTCP: ", rx_rtp);
+		}
+
+		/* transmit if timer has expired */
+		[] T_transmit.timeout {
+			/* send one RTP frame, re-start timer */
+			f_tx_rtp('01020304'O);
+			T_transmit.start;
+		}
+
+		/* fail on any unexpected messages */
+		[] RTP.receive {
+			setverdict(fail, "Received unexpected type from RTP");
+		}
+		[] RTCP.receive {
+			setverdict(fail, "Received unexpected type from RTCP");
+		}
+	}
+	}
+}
+
+
+}
