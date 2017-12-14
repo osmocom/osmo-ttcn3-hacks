@@ -25,6 +25,9 @@ import from RSL_Tests all;
 const integer NUM_BTS := 3;
 const float T3101_MAX := 12.0;
 
+/* make sure to sync this with the osmo-bts.cfg you're using */
+const integer NUM_TCHF_PER_BTS := 5;
+
 
 /* BSC specific CTRL helper functions */
 function f_ctrl_get_bts(IPA_CTRL_PT pt, integer bts_nr, charstring suffix) return CtrlValue {
@@ -329,6 +332,53 @@ testcase TC_chan_act_nack() runs on test_CT {
 	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chan_act:nack", chact_nack+1);
 
 	setverdict(pass);
+}
+
+/* Test for channel exhaustion due to RACH overload */
+testcase TC_chan_exhaustion() runs on test_CT {
+	var ASP_RSL_Unitdata rsl_ud;
+	var integer i;
+	var integer chreq_total, chreq_nochan;
+
+	f_init();
+	f_bssap_reset();
+
+	chreq_total := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total");
+	chreq_nochan := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:no_channel");
+
+	/* expect 5xTCH/F to succeed */
+	for (i := 0; i < NUM_TCHF_PER_BTS; i := i+1) {
+		f_chreq_act_ack('23'O, i);
+	}
+
+	IPA_RSL[0].clear;
+
+	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total", chreq_total+NUM_TCHF_PER_BTS);
+
+	/* now expect additional channel activations to fail */
+	f_ipa_tx(0, ts_RSL_CHAN_RQD('42'O, 42));
+
+	alt {
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
+				tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) {
+		setverdict(fail, "Received CHAN ACT ACK without resources?!?");
+		}
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_IMM_ASSIGN(?))) -> value rsl_ud {
+		var GsmRrMessage rr;
+		/* match on IMM ASS REJ */
+		rr := dec_GsmRrMessage(rsl_ud.rsl.ies[1].body.full_imm_ass_info.payload);
+		if (rr.header.message_type == IMMEDIATE_ASSIGNMENT_REJECT) {
+			f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total",
+						   chreq_total+NUM_TCHF_PER_BTS+1);
+			f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:no_channel",
+						   chreq_nochan+1);
+			setverdict(pass);
+		} else {
+			repeat;
+		}
+		}
+	[] IPA_RSL[0].receive { repeat; }
+	}
 }
 
 
@@ -1003,6 +1053,24 @@ testcase TC_paging_imsi_a_reset() runs on test_CT {
 	}
 }
 
+/* Test RSL link drop causes counter increment */
+testcase TC_rsl_drop_counter() runs on test_CT {
+	var integer rsl_fail;
+
+	f_init();
+	f_bssap_reset();
+
+	rsl_fail := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "rsl_fail");
+
+	bts[0].rsl.vc_IPA.stop;
+
+	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "rsl_fail", rsl_fail+1);
+
+	setverdict(pass);
+}
+
+/* TODO: Test OML link drop causes counter increment */
+
 control {
 	execute( TC_ctrl_msc_connection_status() );
 	execute( TC_ctrl() );
@@ -1012,6 +1080,7 @@ control {
 	execute( TC_chan_act_ack_est_ind_noreply() );
 	execute( TC_chan_act_ack_est_ind_refused() );
 	execute( TC_chan_act_nack() );
+	execute( TC_chan_exhaustion() );
 	execute( TC_chan_rel_rll_rel_ind() );
 	execute( TC_chan_rel_conn_fail() );
 	execute( TC_chan_rel_hard_clear() );
@@ -1037,6 +1106,8 @@ control {
 	execute( TC_paging_imsi_nochan_all() );
 	execute( TC_paging_imsi_a_reset() );
 	execute( TC_paging_imsi_load() );
+
+	execute( TC_rsl_drop_counter() );
 }
 
 }
