@@ -2,23 +2,36 @@ Integration Tests for OsmoBSC which we can perform from TTCN-3
 
 = exhaustion of resources
 
-* send many CHAN RQD (any) and count if all channels get actually allocated
-** verify BTS_CTR_CHREQ_TOTAL reflects number sent on RSL
+x send many CHAN RQD (any) and count if all channels get actually allocated
+xx verify BTS_CTR_CHREQ_TOTAL reflects number sent on RSL
 ** verify how quickly they get released again
 ** verify that CHAN RQD with same RA + FN get only on allocation
-* verify that we get IMM_ASS_REJ once channels are exhausted
-** verify BTS_CTR_CHREQ_NO_CHANNEL increments accordigly
+x verify that we get IMM_ASS_REJ once channels are exhausted
+xx verify BTS_CTR_CHREQ_NO_CHANNEL increments accordigly
 * verify for particular channel type / cause values
 * verify that IMM.ASS.REJ has increasing back-off
 * verify how BSC reacts to AGCH overload (DELETE IND)
 
-
 = paging
 
-* page by TMSI vs. page by IMSI
-* verify if CCCH_LOAD_IND(PCH) slot count is observed
-* verify paging expiration
-* paging with different identity (lac/cgi/...) on A interface -> expect on right BSC(s)
+x page by TMSI vs. page by IMSI
+x verify if CCCH_LOAD_IND(PCH) slot count is observed
+x verify paging expiration
+x paging with different identity (lac/cgi/...) on A interface -> expect on right BSC(s)
+
+= assignment
+
+x CSD call
+x CTM telephony
+x CIC on AoIP
+x missing CodecList IE
+* with no CIC and no AoIP
+* with IPv6 Address in AoIP
+* with LCLS information
+* supported/unsupported/invalid ciphers
+* supported/unsupported/invalid codecs
+* inconsistent channel type + codec + codec-list
+* on full BTS -> fail
 
 = hand-over
 
@@ -27,21 +40,23 @@ Integration Tests for OsmoBSC which we can perform from TTCN-3
 
 = erroneous channel release
 
-* no response to CHAN ACT
-* CONN FAIL IND from BTS
+x no response to CHAN ACT
+x CONN FAIL IND from BTS
 ** verify counter increment of BTS_CTR_CHAN_RF_FAIL
 * no (or late?) response to RF CHAN REL
 * no (or late?) response to RLL RELEASE REQ
-* RLL messages on not-activated channels
+x RLL messages on not-activated channels
 
 = misc
 
 * SMS-CB
-* behavior in case of CHAN ACT NACK
+x behavior in case of CHAN ACT NACK
 * EST REQ for SAPI3 originating from core
 * behavior of BSC in various error cases  (ERR IND)
 ** BTS_CTR_CHAN_RLL_ERR increment on T200_EXPIRED
 * MODE MODIFY with ACK / NACK / no response
+* invalid message type / IE type
+** verify BSSAP CONFUSION is sent in all applicable cases
 
 = IPA voice related
 
@@ -55,11 +70,11 @@ Integration Tests for OsmoBSC which we can perform from TTCN-3
 = counters
 
 * test each and every counter in BSC, validate via CTRL interface
-** RSL/OML failure: drop link, expect BTS_CTR_BTS_xxx_FAIL +1
-** paging
-*** send PAGING from MSC side
-*** expect BSC_CTR_PAGING_ATTEMPTED increase by one
-*** expect BSC_CTR_PAGING_EXPIRED on T3113 expiration
+xx RSL/OML failure: drop link, expect BTS_CTR_BTS_xxx_FAIL +1
+xx paging
+xxx send PAGING from MSC side
+xxx expect BSC_CTR_PAGING_ATTEMPTED increase by one
+xxx expect BSC_CTR_PAGING_EXPIRED on T3113 expiration
 ** BTS_CTR_CODEC_* on CHAN_ACT_ACK
 * new counter ideas
 ** number of SCCP CR timeouts
