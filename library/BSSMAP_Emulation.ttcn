@@ -58,6 +58,11 @@ type component BSSMAP_Emulation_CT {
 	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
 	var ConnectionData ConnectionTable[16];
 
+	/* pending expected incoming connections */
+	var ExpectData ExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port BSSMAPEM_PROC_PT PROC;
+
 	var charstring g_bssmap_id;
 	var integer g_next_e1_ts := 1;
 };
@@ -274,6 +279,8 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 		var PDU_BSSAP bssap;
 		var MgcpCommand mgcp_req;
 		var MgcpResponse mgcp_resp;
+		var BSSAP_ConnHdlr vc_hdlr;
+		var octetstring l3_info;
 
 		alt {
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
@@ -401,6 +408,12 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			CLIENT.send(mgcp_resp) to vc_conn;
 			}
 
+
+		[] PROC.getcall(BSSMAPEM_register:{?,?}) -> param(l3_info, vc_hdlr) {
+			f_create_expect(l3_info, vc_hdlr);
+			PROC.reply(BSSMAPEM_register:{l3_info, vc_hdlr});
+			}
+
 		}
 	}
 }
@@ -410,5 +423,70 @@ private function f_mgcp_ep_extract_cic(charstring inp) return integer {
 	return hex2int(str2hex(local_part));
 
 }
+
+/***********************************************************************
+ * "Expect" Handling (mapping for expected incoming SCCP connections)
+ ***********************************************************************/
+
+/* data about an expected future incoming connection */
+type record ExpectData {
+	/* L3 payload based on which we can match it */
+	octetstring l3_payload optional,
+	/* component reference for this connection */
+	BSSAP_ConnHdlr vc_conn
+}
+
+/* procedure based port to register for incoming connections */
+signature BSSMAPEM_register(in octetstring l3, in BSSAP_ConnHdlr hdlr);
+
+type port BSSMAPEM_PROC_PT procedure {
+	inout BSSMAPEM_register;
+} with { extension "internal" };
+
+/* CreateCallback that can be used as create_cb and will use the expectation table */
+function ExpectedCreateCallback(BSSAP_N_CONNECT_ind conn_ind, charstring id)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	var BSSAP_ConnHdlr ret := null;
+	var octetstring l3_info;
+	var integer i;
+
+	if (not ischosen(conn_ind.userData.pdu.bssmap.completeLayer3Information)) {
+		setverdict(fail, "N-CONNECT.ind with L3 != COMPLETE L3");
+		return ret;
+	}
+	l3_info := conn_ind.userData.pdu.bssmap.completeLayer3Information.layer3Information.layer3info;
+
+	for (i := 0; i < sizeof(ExpectTable); i:= i+1) {
+		if (not ispresent(ExpectTable[i].l3_payload)) {
+			continue;
+		}
+		if (l3_info == ExpectTable[i].l3_payload) {
+			ret := ExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			ExpectTable[i].l3_payload := omit;
+			ExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", l3_info, " handled at ", ret);
+			/* return the component reference */
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for incoming connection ", conn_ind);
+	return ret;
+}
+
+private function f_create_expect(octetstring l3, BSSAP_ConnHdlr hdlr)
+runs on BSSMAP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (not ispresent(ExpectTable[i].l3_payload)) {
+			ExpectTable[i].l3_payload := l3;
+			ExpectTable[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for ", l3, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in ExpectTable");
+}
+
 
 }
