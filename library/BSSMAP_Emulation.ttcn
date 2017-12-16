@@ -3,6 +3,7 @@ module BSSMAP_Emulation {
 import from SCCP_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
+import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
 import from MGCP_Types all;
 import from MGCP_Templates all;
@@ -48,7 +49,7 @@ type record ConnectionData {
 
 type component BSSMAP_Emulation_CT {
 	/* SCCP port on the bottom side, using ASP primitives */
-	port SCCPasp_PT SCCP;
+	port BSSAP_CODEC_PT BSSAP;
 	/* BSSAP port to the per-connection clients */
 	port BSSAP_Conn_PT CLIENT;
 	/* MGCP port */
@@ -228,10 +229,9 @@ runs on BSSMAP_Emulation_CT {
 }
 
 /* handle (optional) userData portion of various primitives and dispatch it to the client */
-private function f_handle_userData(BSSAP_ConnHdlr client, octetstring userdata)
+private function f_handle_userData(BSSAP_ConnHdlr client, PDU_BSSAP bssap)
 runs on BSSMAP_Emulation_CT {
 	/* decode + send decoded BSSAP to client */
-	var PDU_BSSAP bssap := dec_PDU_BSSAP(valueof(userdata));
 
 	/* BSC Side: If this is an assignment command, store CIC */
 	if (ischosen(bssap.pdu.bssmap.assignmentRequest) and
@@ -247,7 +247,7 @@ runs on BSSMAP_Emulation_CT {
 
 /* call-back type, to be provided by specific implementation; called when new SCCP connection
  * arrives */
-type function BssmapCreateCallback(ASP_SCCP_N_CONNECT_ind conn_ind, charstring id)
+type function BssmapCreateCallback(BSSAP_N_CONNECT_ind conn_ind, charstring id)
 runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr;
 
 type function BssmapUnitdataCallback(PDU_BSSAP bssap)
@@ -264,11 +264,11 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 	f_conn_table_init();
 
 	while (true) {
-		var ASP_SCCP_N_UNITDATA_ind ud_ind;
-		var ASP_SCCP_N_CONNECT_ind conn_ind;
-		var ASP_SCCP_N_CONNECT_cfm conn_cfm;
-		var ASP_SCCP_N_DATA_ind data_ind;
-		var ASP_SCCP_N_DISCONNECT_ind disc_ind;
+		var BSSAP_N_UNITDATA_ind ud_ind;
+		var BSSAP_N_CONNECT_ind conn_ind;
+		var BSSAP_N_CONNECT_cfm conn_cfm;
+		var BSSAP_N_DATA_ind data_ind;
+		var BSSAP_N_DISCONNECT_ind disc_ind;
 		var BSSAP_Conn_Req creq;
 		var BSSAP_ConnHdlr vc_conn;
 		var PDU_BSSAP bssap;
@@ -277,32 +277,29 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 
 		alt {
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
-		[] SCCP.receive(ASP_SCCP_N_UNITDATA_ind:?) -> value ud_ind {
+		[] BSSAP.receive(BSSAP_N_UNITDATA_ind:?) -> value ud_ind {
 			/* Connectionless Procedures like RESET */
 			var template PDU_BSSAP resp;
-			bssap := dec_PDU_BSSAP(ud_ind.userData);
-			resp := ops.unitdata_cb.apply(bssap);
+			resp := ops.unitdata_cb.apply(ud_ind.userData);
 			if (isvalue(resp)) {
-				var octetstring resp_ud := enc_PDU_BSSAP(valueof(resp));
-				SCCP.send(t_ASP_N_UNITDATA_req(ud_ind.callingAddress,
-								ud_ind.calledAddress, omit,
-								omit, resp_ud, omit));
+				BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress,
+								ud_ind.calledAddress, resp));
 			}
 			}
 
 		/* SCCP -> Client: new connection from BSC */
-		[] SCCP.receive(ASP_SCCP_N_CONNECT_ind:?) -> value conn_ind {
+		[] BSSAP.receive(BSSAP_N_CONNECT_ind:?) -> value conn_ind {
 			vc_conn := ops.create_cb.apply(conn_ind, id);
 			/* store mapping between client components and SCCP connectionId */
 			f_conn_table_add(vc_conn, conn_ind.connectionId);
 			/* handle user payload */
 			f_handle_userData(vc_conn, conn_ind.userData);
 			/* confirm connection establishment */
-			SCCP.send(t_ASP_N_CONNECT_res(omit, omit, omit, omit, conn_ind.connectionId, omit));
+			BSSAP.send(ts_BSSAP_CONNECT_res(conn_ind.connectionId, omit));
 			}
 
 		/* SCCP -> Client: connection-oriented data in existing connection */
-		[] SCCP.receive(ASP_SCCP_N_DATA_ind:?) -> value data_ind {
+		[] BSSAP.receive(BSSAP_N_DATA_ind:?) -> value data_ind {
 			vc_conn := f_comp_by_conn_id(data_ind.connectionId);
 			if (ispresent(data_ind.userData)) {
 				f_handle_userData(vc_conn, data_ind.userData);
@@ -310,7 +307,7 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			}
 
 		/* SCCP -> Client: disconnect of an existing connection */
-		[] SCCP.receive(ASP_SCCP_N_DISCONNECT_ind:?) -> value disc_ind {
+		[] BSSAP.receive(BSSAP_N_DISCONNECT_ind:?) -> value disc_ind {
 			vc_conn := f_comp_by_conn_id(disc_ind.connectionId);
 			if (ispresent(disc_ind.userData)) {
 				f_handle_userData(vc_conn, disc_ind.userData);
@@ -323,7 +320,7 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			}
 
 		/* SCCP -> Client: connection confirm for outbound connection */
-		[] SCCP.receive(ASP_SCCP_N_CONNECT_cfm:?) -> value conn_cfm {
+		[] BSSAP.receive(BSSAP_N_CONNECT_cfm:?) -> value conn_cfm {
 			/* handle user payload */
 			if (ispresent(conn_cfm.userData)) {
 				f_handle_userData(vc_conn, conn_cfm.userData);
@@ -333,15 +330,14 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 		/* Disconnect request client -> SCCP */
 		[] CLIENT.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ) -> sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
-			SCCP.send(t_ASP_N_DISCONNECT_req(omit, 0, omit, conn_id, omit));
+			BSSAP.send(ts_BSSAP_DISC_req(conn_id, 0));
 			f_conn_table_del(conn_id);
 			}
 
 		/* BSSAP from client -> SCCP */
 		[] CLIENT.receive(BSSAP_Conn_Req:?) -> value creq sender vc_conn {
 			var integer conn_id;
-			/* encode + send to dispatcher */
-			var octetstring userdata := enc_PDU_BSSAP(creq.bssap);
+			/* send to dispatcher */
 
 			if (f_comp_known(vc_conn) == false) {
 				/* unknown client, create new connection */
@@ -350,21 +346,20 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 				/* store mapping between client components and SCCP connectionId */
 				f_conn_table_add(vc_conn, conn_id);
 
-				SCCP.send(t_ASP_N_CONNECT_req(creq.addr_peer, creq.addr_own, omit, omit,
-								userdata, conn_id, omit));
+				BSSAP.send(ts_BSSAP_CONNECT_req(creq.addr_peer, creq.addr_own, conn_id,
+								creq.bssap));
 			} else {
 				/* known client, send via existing connection */
 				conn_id := f_conn_id_by_comp(vc_conn);
-				SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
+				BSSAP.send(ts_BSSAP_DATA_req(conn_id, creq.bssap));
 			}
 
 			}
 
 		[] CLIENT.receive(PDU_BSSAP:?) -> value bssap sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
-			/* encode + send it to dispatcher */
-			var octetstring userdata := enc_PDU_BSSAP(bssap);
-			SCCP.send(t_ASP_N_DATA_req(userdata, conn_id, omit));
+			/* send it to dispatcher */
+			BSSAP.send(ts_BSSAP_DATA_req(conn_id, bssap));
 			}
 
 		/* Handling of MGCP in IPA SCCPLite case.  This predates 3GPP AoIP
