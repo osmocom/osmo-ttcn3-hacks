@@ -2,9 +2,9 @@ module MSC_ConnectionHandler {
 
 import from General_Types all;
 import from Osmocom_Types all;
+import from GSM_Types all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
-import from BSSAP_CodecPort all;
 import from BSSMAP_Emulation all;
 import from BSSMAP_Templates all;
 
@@ -12,33 +12,26 @@ import from MGCP_Types all;
 import from MGCP_Templates all;
 import from SDP_Types all;
 
+import from RSL_Emulation all;
+import from RSL_Types all;
+
+import from MobileL3_Types all;
+import from MobileL3_CommonIE_Types all;
+//import from MobileL3_RRM_Types all;
+import from L3_Templates all;
+
+
 /* this component represents a single subscriber connection at the MSC.
  * There is a 1:1 mapping between SCCP connections and BSSAP_ConnHdlr components.
  * We inherit all component variables, ports, functions, ... from BSSAP_ConnHdlr */
-type component MSC_ConnHdlr extends BSSAP_ConnHdlr {
+type component MSC_ConnHdlr extends BSSAP_ConnHdlr, RSL_DchanHdlr {
 	/* SCCP Connecction Identifier for the underlying SCCP connection */
 	var integer g_sccp_conn_id;
 
-	var MSC_State g_state := MSC_STATE_NONE;
-	var MgcpEndpoint g_ep_name;
-	var MgcpCallId g_call_id;
-	var MgcpConnectionId g_mgcp_conn_id;
-}
+	/* procedure port back to our parent (BSSMAP_Emulation_CT) for control */
+	port BSSMAPEM_PROC_PT BSSMAPEM;
 
-/* Callback function from general BSSMAP_Emulation whenever a new incoming
- * SCCP connection arrivces. Must create + start a new component */
-private function CreateCallback(BSSAP_N_CONNECT_ind conn_ind, charstring id)
-runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
-	var MSC_ConnHdlr vc_conn;
-	/* Create a new BSSAP_ConnHdlr component */
-	vc_conn := MSC_ConnHdlr.create(g_bssmap_id & "-Conn-" & int2str(conn_ind.connectionId));
-	/* connect it to the port */
-	connect(vc_conn:BSSAP, self:CLIENT);
-	/* start it */
-	vc_conn.start(MSC_ConnectionHandler.main(conn_ind.connectionId, g_next_e1_ts));
-	/* increment next E1 timeslot */
-	g_next_e1_ts := g_next_e1_ts + 1;
-	return vc_conn;
+	var MSC_State g_state := MSC_STATE_NONE;
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a connectionless
@@ -47,6 +40,7 @@ private function UnitdataCallback(PDU_BSSAP bssap)
 runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
 	var template PDU_BSSAP resp := omit;
 
+	/* answer all RESET with a RESET ACK */
 	if (match(bssap, tr_BSSMAP_Reset)) {
 		resp := ts_BSSMAP_ResetAck;
 	}
@@ -55,7 +49,7 @@ runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
 }
 
 const BssmapOps MSC_BssmapOps := {
-	create_cb := refers(CreateCallback),
+	create_cb := refers(BSSMAP_Emulation.ExpectedCreateCallback),
 	unitdata_cb := refers(UnitdataCallback)
 }
 
@@ -68,90 +62,102 @@ type enumerated MSC_State {
 	MSC_STATE_WAIT_DLCX_ACK
 }
 
-/* main function processing various incoming events */
-function main(integer connection_id, integer e1_timeslot) runs on MSC_ConnHdlr {
-	var MgcpResponse mgcp_rsp;
-	timer T := 5.0;
-
-	g_sccp_conn_id := connection_id;
-	g_call_id := f_mgcp_alloc_call_id();
-	g_ep_name := hex2str(int2hex(e1_timeslot, 1)) & "@mgw";
-
-	/* we just accepted an incoming SCCP connection, start guard timer */
-	T.start;
-
-	while (true) {
-		var PDU_BSSAP bssap;
-		alt {
-		/* new SCCP-level connection indication from BSC */
-		[g_state == MSC_STATE_NONE] BSSAP.receive(tr_BSSMAP_ComplL3) -> value bssap {
-			/* respond with ASSIGNMENT CMD  */
-			g_state := MSC_STATE_WAIT_ASS_COMPL;
-			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
-			tla := valueof(ts_BSSMAP_IE_AoIP_TLA({ipv4:='01020304'O}, 12345));
-			BSSAP.send(ts_BSSMAP_AssignmentReq(omit, tla));
-			}
-		[g_state == MSC_STATE_WAIT_ASS_COMPL] BSSAP.receive(tr_BSSMAP_AssignmentComplete(*,?)) {
-			/* FIXME: Send MGCP CRCX */
-			g_state := MSC_STATE_WAIT_CRCX_ACK;
-			var MgcpTransId trans_id := f_mgcp_alloc_tid();
-			//template SDP_Message sdp := omit;
-			BSSAP.send(ts_CRCX(trans_id, g_ep_name, "recvonly", g_call_id)); //, sdp));
-			}
-		/*
-		[] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
-		}
-		*/
-
-		/* receive CRCX ACK: transmit MDCX */
-		[g_state == MSC_STATE_WAIT_CRCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
-			/* extract connection ID */
-			g_mgcp_conn_id := f_MgcpResp_extract_conn_id(mgcp_rsp);
-			g_state := MSC_STATE_WAIT_MDCX_ACK;
-			var MgcpTransId trans_id := f_mgcp_alloc_tid();
-			BSSAP.send(ts_MDCX(trans_id, g_ep_name, "sendrecv", g_call_id, g_mgcp_conn_id));
-			}
-
-		/* receive MDCX ACK: wait + transmit CLEAR COMMAND */
-		[g_state == MSC_STATE_WAIT_MDCX_ACK] BSSAP.receive(tr_CRCX_ACK) -> value mgcp_rsp {
-			g_state := MSC_STATE_WAIT_CLEAR_COMPL
-			BSSAP.send(ts_BSSMAP_ClearCommand(9)); /* Cause: call control */
-			}
-
-		/* CLEAR COMPLETE from BSS (response to CLEAR COMMAND) */
-		[g_state == MSC_STATE_WAIT_CLEAR_COMPL] BSSAP.receive(tr_BSSMAP_ClearComplete) {
-			/* send DLCX */
-			g_state := MSC_STATE_WAIT_DLCX_ACK;
-			var MgcpTransId trans_id := f_mgcp_alloc_tid();
-			BSSAP.send(ts_DLCX(trans_id, g_ep_name, g_call_id));
-			}
-
-		[g_state == MSC_STATE_WAIT_DLCX_ACK] BSSAP.receive(tr_DLCX_ACK) {
-			BSSAP.send(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
-			setverdict(pass);
-			self.stop;
-			}
-
-		/* TODO: CLEAR REQUEST from BSS */
-
-		[] BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
-			setverdict(fail);
-			self.stop;
-			}
-
-		[] BSSAP.receive(PDU_BSSAP:?) -> value bssap {
-			log("Received unhandled SCCP-CO: ", bssap);
-			}
-
-		/* Guard timer has expired, close connection */
-		[] T.timeout {
-			BSSAP.send(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
-			setverdict(inconc);
-			self.stop;
-			}
-
-		}
+/* register an expect with the BSSMAP core */
+private function f_create_exp(octetstring l3_enc) runs on MSC_ConnHdlr {
+	BSSMAPEM.call(BSSMAPEM_register:{l3_enc, self}) {
+		[] BSSMAPEM.getreply(BSSMAPEM_register:{?, ?}) {};
 	}
 }
+
+type record TestHdlrParams {
+	OCT1		ra,
+	GsmFrameNumber	fn,
+	hexstring	imsi,
+	RslLinkId	link_id
+};
+
+template (value) TestHdlrParams t_def_TestHdlrPars := {
+	ra := '23'O,
+	fn := 23,
+	imsi := '001019876543210'H,
+	link_id := valueof(ts_RslLinkID_DCCH(0))
+}
+
+function f_create_chan_and_exp(TestHdlrParams pars) runs on MSC_ConnHdlr {
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ('0001'B, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(pars.ra, l3_enc, pars.link_id, pars.fn);
+	f_create_exp(l3_enc);
+}
+
+function f_rsl_reply(template PDU_ML3_MS_NW l3, RSL_Message orig) runs on MSC_ConnHdlr {
+	var RslChannelNr chan_nr := orig.ies[0].body.chan_nr;
+	var RslLinkId link_id := orig.ies[1].body.link_id;
+	RSL.send(ts_RSL_DATA_IND(chan_nr, link_id, enc_PDU_ML3_MS_NW(valueof(l3))));
+}
+
+/* establish a channel fully, expecting an assignment matching 'exp' */
+function f_establish_fully(TestHdlrParams pars, PDU_BSSAP ass_cmd, template PDU_BSSAP exp_ass_cpl)
+runs on MSC_ConnHdlr return PDU_BSSAP {
+	var PDU_BSSAP bssap;
+	var RSL_Message rsl;
+	timer T := 10.0;
+	var boolean exp_compl := ischosen(exp_ass_cpl.pdu.bssmap.assignmentComplete);
+
+	f_create_chan_and_exp(pars);
+	/* we should now have a COMPL_L3 at the MSC */
+
+	BSSAP.receive(tr_BSSMAP_ComplL3);
+	BSSAP.send(ass_cmd);
+	alt {
+	/* if we receive exactly what we expected, always return + pass */
+	[] BSSAP.receive(exp_ass_cpl) -> value bssap {
+		setverdict(pass);
+		return bssap;
+		}
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		log("Rx L3 from net: ", l3);
+		if (ischosen(l3.msgs.rrm.channelModeModify)) {
+			f_rsl_reply(ts_RRM_ModeModifyAck(l3.msgs.rrm.channelModeModify.channelDescription,
+							 l3.msgs.rrm.channelModeModify.channelMode), rsl);
+		}
+		repeat;
+		}
+	[] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
+		RSL.send(ts_RSL_MODE_MODIFY_ACK(g_chan_nr));
+		repeat;
+		}
+	[] RSL.receive(tr_RSL_IPA_CRCX(g_chan_nr)) -> value rsl {
+		RSL.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, 1, 1, 1, 1));
+		repeat;
+		}
+	[] RSL.receive(tr_RSL_IPA_MDCX(g_chan_nr, ?)) -> value rsl{
+		RSL.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, 1, 1, 1, 1));
+		repeat;
+		}
+	[exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
+		setverdict(fail, "Received non-matching ASSIGNMENT COMPLETE");
+		}
+	[exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
+		setverdict(fail, "Received unexpected ASSIGNMENT FAIL");
+		}
+	[not exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
+		setverdict(fail, "Received unexpected ASSIGNMENT COMPLETE");
+		}
+	[not exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentFail) {
+		setverdict(fail, "Received non-matching ASSIGNMENT FAIL");
+		}
+	[] T.timeout {
+		setverdict(inconc, "Timeout waiting for ASSIGNMENT COMPLETE");
+		}
+	}
+
+	self.stop;
+}
+
 
 }
