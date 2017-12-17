@@ -1,4 +1,24 @@
-Integration Tests for OsmoBSC which we can perform from TTCN-3
+Integration Tests for OsmoBSC
+-----------------------------
+
+This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+well as the MSC.
+
+In terms of external entities, you will need to run
+* osmo-mgw in order to properly terminate the MGCP commands by the BSC
+* osmo-stp as STP between the simulated MSC and osmo-bsc
+* 3x osmo-bts-omldummy as this test suite only implements RSL and no OML
+
+The included jenkins.sh script, together with the Dockerfiles from
+http://git.osmocom.org/docker-playground/ can be used to run both the
+osmo-bsc-under-test as well as the extenal entities and the tester.
+
+
+Further Test Ideas
+------------------
+
+This is a random list of things about things possible to test.
+Asterisks '*' are TODO, while 'x' means already implemented.
 
 = exhaustion of resources
 
@@ -28,7 +48,7 @@ x missing CodecList IE
 * with no CIC and no AoIP
 * with IPv6 Address in AoIP
 * with LCLS information
-* supported/unsupported/invalid ciphers
+x supported/unsupported/invalid ciphers
 * supported/unsupported/invalid codecs
 * inconsistent channel type + codec + codec-list
 * on full BTS -> fail
@@ -84,4 +104,8 @@ xxx expect BSC_CTR_PAGING_EXPIRED on T3113 expiration
 
 * changes in BCCH FILLING
 * changes in SACCH FILLING
+
+= dynamic TS switching
+
+* TBD
 
