@@ -21,6 +21,9 @@ import from RTP_Types all;
 import from RTP_CodecPort all;
 import from RTP_CodecPort_CtrlFunct all;
 
+import from IuUP_Types all;
+import from IuUP_Emulation all;
+
 type component RTP_Emulation_CT {
 	/* down-facing ports for RTP and RTCP codec ports on top of IPL4asp */
 	port RTP_CODEC_PT RTP;
@@ -32,7 +35,7 @@ type component RTP_Emulation_CT {
 	port RTPEM_CTRL_PT CTRL;
 
 	/* configurable by user, should be fixed */
-	var RtpemConfig g_cfg := c_default_cfg;
+	var RtpemConfig g_cfg := c_RtpemDefaultCfg;
 
 	var HostName g_remote_host;
 	var PortNumber g_remote_port;
@@ -47,6 +50,8 @@ type component RTP_Emulation_CT {
 	var INT7b g_rx_payload_type := 0;
 	var LIN2_BO_LAST g_rx_last_seq;
 	var uint32_t g_rx_last_ts;
+
+	var IuUP_Entity g_iuup_ent; // := valueof(t_IuUP_Entity(1));
 }
 
 type enumerated RtpemMode {
@@ -61,15 +66,19 @@ type record RtpemConfig {
 	integer tx_samplerate_hz,
 	integer tx_duration_ms,
 	BIT32_BO_LAST tx_ssrc,
-	octetstring tx_fixed_payload optional
+	octetstring tx_fixed_payload optional,
+	boolean iuup_mode,
+	boolean iuup_tx_init
 };
 
-const RtpemConfig c_default_cfg := {
+const RtpemConfig c_RtpemDefaultCfg := {
 	tx_payload_type := 0,
 	tx_samplerate_hz := 8000,
 	tx_duration_ms := 20,
 	tx_ssrc := '11011110101011011011111011101111'B,
-	tx_fixed_payload := '01020304'O
+	tx_fixed_payload := '01020304'O,
+	iuup_mode := false,
+	iuup_tx_init := true
 }
 
 signature RTPEM_bind(in HostName local_host, inout PortNumber local_port);
@@ -98,6 +107,9 @@ template PDU_RTP ts_RTP(BIT32_BO_LAST ssrc, INT7b pt, LIN2_BO_LAST seq, uint32_t
 }
 
 private function f_tx_rtp(octetstring payload, BIT1 marker := '0'B) runs on RTP_Emulation_CT {
+	if (g_cfg.iuup_mode) {
+		payload := f_IuUP_Em_tx_encap(g_iuup_ent, payload);
+	}
 	var PDU_RTP rtp := valueof(ts_RTP(g_cfg.tx_ssrc, g_cfg.tx_payload_type, g_tx_next_seq,
 					  g_tx_next_ts, payload, marker));
 	RTP.send(t_RTP_Send(g_rtp_conn_id, RTP_messages_union:{rtp:=rtp}));
@@ -127,6 +139,8 @@ function f_main() runs on RTP_Emulation_CT
 	tr_rtp.msg := { rtp := ? };
 	tr_rtp.connId := g_rtcp_conn_id;
 	tr_rtcp.msg := { rtcp := ? };
+
+	g_iuup_ent := valueof(t_IuUP_Entity(g_cfg.iuup_tx_init));
 
 	while (true) {
 	alt {
@@ -164,11 +178,13 @@ function f_main() runs on RTP_Emulation_CT
 		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_NONE}) {
 			T_transmit.stop;
 			g_rx_enabled := false;
+			CTRL.reply(RTPEM_mode:{RTPEM_MODE_NONE});
 		}
 		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_TXONLY}) {
 			/* start transmit timer */
 			T_transmit.start;
 			g_rx_enabled := false;
+			CTRL.reply(RTPEM_mode:{RTPEM_MODE_TXONLY});
 		}
 		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_RXONLY}) {
 
@@ -179,6 +195,7 @@ function f_main() runs on RTP_Emulation_CT
 				RTCP.clear;
 				g_rx_enabled := true;
 			}
+			CTRL.reply(RTPEM_mode:{RTPEM_MODE_RXONLY});
 		}
 		[] CTRL.getcall(RTPEM_mode:{RTPEM_MODE_BIDIR}) {
 			T_transmit.start;
@@ -188,9 +205,12 @@ function f_main() runs on RTP_Emulation_CT
 				RTCP.clear;
 				g_rx_enabled := true;
 			}
+			CTRL.reply(RTPEM_mode:{RTPEM_MODE_BIDIR});
 		}
 		[] CTRL.getcall(RTPEM_configure:{?}) -> param (cfg) {
 			g_cfg := cfg;
+			g_iuup_ent.cfg.active_init := g_cfg.iuup_tx_init;
+			CTRL.reply(RTPEM_configure:{cfg});
 		}
 
 		/* simply ignore any RTTP/RTCP if receiver not enabled */
@@ -200,6 +220,9 @@ function f_main() runs on RTP_Emulation_CT
 		/* process received RTCP/RTP if receiver enabled */
 		[g_rx_enabled] RTP.receive(tr_rtp) -> value rx_rtp {
 			log("RX RTP: ", rx_rtp);
+			if (g_cfg.iuup_mode) {
+				rx_rtp.msg.rtp.data := f_IuUP_Em_rx_decaps(g_iuup_ent, rx_rtp.msg.rtp.data);
+			}
 		}
 		[g_rx_enabled] RTCP.receive(tr_rtcp) -> value rx_rtp {
 			log("RX RTCP: ", rx_rtp);
