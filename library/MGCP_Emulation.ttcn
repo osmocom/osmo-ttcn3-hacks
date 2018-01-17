@@ -1,0 +1,149 @@
+module MGCP_Emulation {
+
+import from MGCP_CodecPort all;
+import from MGCP_CodecPort_CtrlFunct all;
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+
+type component MGCP_ConnHdlr {
+	port MGCP_Conn_PT MGCP;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port MGCP_Conn_PT message {
+	inout MgcpCommand, MgcpResponse;
+} with { extension "internal" };
+
+
+type component MGCP_Emulation_CT {
+	/* Port facing to the UDP SUT */
+	port MGCP_CODEC_PT MGCP;
+	/* All MGCP_ConnHdlr MGCP ports connect here
+	 * MGCP_Emulation_CT.main needs to figure out what messages
+	 * to send where with CLIENT.send() to vc_conn */
+	port MGCP_Conn_PT CLIENT;
+	/* currently tracked connections */
+//	var ConnectionData ConnectionTable[16];
+	/* pending expected CRCX */
+	var ExpectData ExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port MGCPEM_PROC_PT PROC;
+
+	var charstring g_mgcp_id;
+}
+
+type function MGCPCreateCallback(MgcpCommand cmd, charstring id)
+runs on MGCP_Emulation_CT return MGCP_ConnHdlr;
+
+type record MGCPOps {
+	MGCPCreateCallback create_cb
+}
+
+type record MGCP_conn_parameters {
+	charstring callagent_ip,
+	uint16_t callagent_udp_port,
+	charstring mgw_ip,
+	uint16_t mgw_udp_port
+}
+
+function main(MGCP_conn_parameters p, charstring id) runs on MGCP_Emulation_CT {
+	var Result res;
+	g_mgcp_id := id;
+	//f_conn_table_init();
+
+	map(self:MGCP, system:MGCP_CODEC_PT);
+	res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.mgw_ip,
+p.mgw_udp_port,
+		p.callagent_ip, p.callagent_udp_port, 0, { udp:={} });
+	
+	
+	while (true) {
+		alt {
+		[] CLIENT.receive(MgcpCommand:?) {
+			}
+		[] MGCP.receive(MGCP_RecvFrom:?) {
+			}
+		}
+	}
+}
+
+/* "Expect" Handling */
+
+/*  */
+type union ExpectCriteria {
+	MgcpConnectionId connid,
+	MgcpEndpoint endpoint,
+	MgcpTransId transid
+}
+
+type record ExpectData {
+	ExpectCriteria crit optional,
+	MGCP_ConnHdlr vc_conn optional
+}
+
+signature MGCPEM_register(in MgcpCommand cmd, in MGCP_ConnHdlr hdlr);
+
+type port MGCPEM_PROC_PT procedure {
+	inout MGCPEM_register;
+} with { extension "internal" };
+
+function f_get_mgcp_by_crit(ExpectCriteria crit)
+return template MgcpCommand {
+	template MgcpCommand ret := {
+	};
+
+	return ret;
+}
+
+/* Function that can be used as create_cb and will usse the expect table */
+function ExpectedCreateCallback(MgcpCommand cmd, charstring id)
+runs on MGCP_Emulation_CT return MGCP_ConnHdlr {
+	var MGCP_ConnHdlr ret := null;
+	var template MgcpCommand mgcpcmd;
+	var integer i;
+
+	/* Ensure cmd is a CRCX? */
+
+	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (not ispresent(ExpectTable[i].vc_conn)) {
+			continue;
+		}
+		mgcpcmd := f_get_mgcp_by_crit(ExpectTable[i].crit);
+		if (match(cmd, mgcpcmd)) {
+			ret := ExpectTable[i].vc_conn;
+			/* Release this entry */
+			ExpectTable[i].crit := omit;
+			ExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", cmd, " handled at ", ret);
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for CRCX", cmd);
+	return ret;
+}
+
+private function f_create_expect(ExpectCriteria crit, MGCP_ConnHdlr hdlr)
+runs on MGCP_Emulation_CT {
+	var integer i;
+
+	/* Check an entry like this is not already presnt */
+	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (crit == ExpectTable[i].crit) {
+			setverdict(fail, "Crit already present", crit);
+			self.stop;
+		}
+	}
+	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (not ispresent(ExpectTable[i].crit)) {
+			ExpectTable[i].crit := crit;
+			ExpectTable[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for ", crit, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in ExpectTable")
+}
+
+}
