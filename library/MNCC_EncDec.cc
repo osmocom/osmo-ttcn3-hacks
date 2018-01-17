@@ -218,6 +218,11 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 
 	in_mncc = (struct gsm_mncc *) ttcn_buffer.get_read_data();
 
+	sign.set_implicit_omit();
+	hello.set_implicit_omit();
+	data.set_implicit_omit();
+	rtp.set_implicit_omit();
+
 	switch (in_mncc->msg_type) {
 	case MNCC_SOCKET_HELLO:
 		in_hello = (const struct gsm_mncc_hello *) in_mncc;
