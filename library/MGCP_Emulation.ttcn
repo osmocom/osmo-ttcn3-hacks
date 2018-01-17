@@ -33,6 +33,7 @@ type component MGCP_Emulation_CT {
 	port MGCPEM_PROC_PT PROC;
 
 	var charstring g_mgcp_id;
+	var integer g_mgcp_conn_id := -1;
 }
 
 type function MGCPCreateCallback(MgcpCommand cmd, charstring id)
@@ -49,6 +50,19 @@ type record MGCP_conn_parameters {
 	uint16_t mgw_udp_port
 }
 
+function tr_MGCP_RecvFrom_R(template MgcpMessage msg)
+runs on MGCP_Emulation_CT return template MGCP_RecvFrom {
+	var template MGCP_RecvFrom mrf := {
+		connId := g_mgcp_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
 function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_Emulation_CT {
 	var Result res;
 	g_mgcp_id := id;
@@ -60,12 +74,32 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 p.mgw_udp_port,
 		p.callagent_ip, p.callagent_udp_port, 0, { udp:={} });
 	
+	g_mgcp_conn_id := res.connId;
 	
 	while (true) {
+		var MGCP_ConnHdlr vc_conn;
+		var ExpectCriteria crit;
+		var MGCP_RecvFrom mrf;
+		var MgcpMessage msg;
+		var MgcpCommand cmd;
+		var MgcpResponse resp;
+
 		alt {
-		[] CLIENT.receive(MgcpCommand:?) {
+		/* MGCP from client */
+		[] CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
+			/* Pass message through */
+			msg.response := resp;
+			MGCP.send(t_MGCP_Send(g_mgcp_conn_id, msg));
 			}
-		[] MGCP.receive(MGCP_RecvFrom:?) {
+		[] MGCP.receive(tr_MGCP_RecvFrom_R(?)) -> value mrf {
+			if (ischosen(mrf.msg.command)) {
+				cmd := mrf.msg.command;
+				vc_conn := ops.create_cb.apply(cmd, id);
+				f_handle_userData(vc_conn, cmd);
+			} else {
+				setverdict(fail, "Received unexpected MGCP response: ", mrf.msg.response);
+				self.stop;
+			}
 			}
 		[] PROC.getcall(MGCPEM_register:{?,?}) -> param(crit, vc_conn) {
 			f_create_expect(crit, vc_conn);
@@ -73,6 +107,11 @@ p.mgw_udp_port,
 			}
 		}
 	}
+}
+
+private function f_handle_userData(MGCP_ConnHdlr conn, MgcpCommand cmd)
+runs on MGCP_Emulation_CT {
+	CLIENT.send(cmd) to conn;
 }
 
 /* "Expect" Handling */
