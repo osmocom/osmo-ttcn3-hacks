@@ -1,0 +1,384 @@
+module MNCC_Emulation {
+
+/* MNCC Emulation, runs on top of MNCC_CodecPort.  It multiplexes/demultiplexes
+ * the individual calls, so there can be separate TTCN-3 components handling
+ * each of the calls
+ *
+ * The MNCC_Emulation.main() function processes MNCC primitives from the MNCC
+ * socket via the MNCC_CodecPort, and dispatches them to the per-connection components.
+ *
+ * Outbound MNCC connections are initiated by sending a MNCC_Call_Req primitive
+ * to the component running the MNCC_Emulation.main() function.
+ *
+ * For each new inbound connections, the MnccOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that inbound
+ * connection is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound call, it can
+ * do so by registering an "expect" with the expected destination phone number.  This is e.g. useful
+ * if you are simulating BSC + MNCC, and first trigger a connection from BSC side in a
+ * component which then subsequently should also handle the MNCC emulation.
+ *
+ * Inbound Unit Data messages (such as are dispatched to the MnccOps.unitdata_cb() callback,
+ * which is registered with an argument to the main() function below.
+ *
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from Osmocom_Types all;
+import from MNCC_CodecPort all;
+import from MNCC_Types all;
+import from UD_Types all;
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component MNCC_ConnHdlr {
+	/* ports towards MNCC Emulator core / call dispatchar */
+	port MNCC_Conn_PT MNCC;
+	port MNCCEM_PROC_PT MNCC_PROC;
+}
+
+/* Auxiliary primitive that can happen on the port between per-connection client and this dispatcher */
+type enumerated MNCC_Conn_Prim {
+	/* MNCC tell us that connection was released */
+	MNCC_CONN_PRIM_DISC_IND,
+	/* we tell MNCC to release connection */
+	MNCC_CONN_PRIM_DISC_REQ
+}
+
+type record MNCC_Conn_Req {
+	MNCC_PDU		mncc
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port MNCC_Conn_PT message {
+	inout MNCC_PDU, MNCC_Conn_Prim, MNCC_Conn_Req;
+} with { extension "internal" };
+
+
+/* represents a single MNCC call */
+type record ConnectionData {
+	/* reference to the instance of the per-connection component */
+	MNCC_ConnHdlr	comp_ref,
+	integer		mncc_call_id
+}
+
+type component MNCC_Emulation_CT {
+	/* UNIX DOMAIN socket on the bottom side, using primitives */
+	port MNCC_CODEC_PT MNCC;
+	/* MNCC port to the per-connection clients */
+	port MNCC_Conn_PT MNCC_CLIENT;
+
+	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
+	var ConnectionData MnccCallTable[16];
+
+	/* pending expected incoming connections */
+	var ExpectData MnccExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port MNCCEM_PROC_PT MNCC_PROC;
+
+	var integer g_mncc_ud_id;
+};
+
+private function f_call_id_known(uint32_t mncc_call_id)
+runs on MNCC_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].mncc_call_id == mncc_call_id){
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(MNCC_ConnHdlr client)
+runs on MNCC_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* resolve component reference by connection ID */
+private function f_comp_by_call_id(uint32_t mncc_call_id)
+runs on MNCC_Emulation_CT return MNCC_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].mncc_call_id == mncc_call_id) {
+			return MnccCallTable[i].comp_ref;
+		}
+	}
+	log("MNCC Call table not found by MNCC Call ID ", mncc_call_id);
+	setverdict(fail);
+	self.stop;
+}
+
+/* resolve connection ID by component reference */
+private function f_call_id_by_comp(MNCC_ConnHdlr client)
+runs on MNCC_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].comp_ref == client) {
+			return MnccCallTable[i].mncc_call_id;
+		}
+	}
+	log("MNCC Call table not found by component ", client);
+	setverdict(fail);
+	self.stop;
+}
+
+private function f_gen_call_id()
+runs on MNCC_Emulation_CT return integer {
+	var uint32_t call_id;
+
+	do {
+		call_id := float2int(rnd()*4294967296.0);
+	} while (f_call_id_known(call_id) == true);
+
+	return call_id;
+}
+
+private function f_call_table_init()
+runs on MNCC_Emulation_CT {
+	for (var integer i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		MnccCallTable[i].comp_ref := null;
+		MnccCallTable[i].mncc_call_id := -1;
+	}
+}
+
+private function f_call_table_add(MNCC_ConnHdlr comp_ref, uint32_t mncc_call_id)
+runs on MNCC_Emulation_CT {
+	for (var integer i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].mncc_call_id == -1) {
+			MnccCallTable[i].comp_ref := comp_ref;
+			MnccCallTable[i].mncc_call_id := mncc_call_id;
+			log("Added conn table entry ", i, comp_ref, mncc_call_id);
+			return;
+		}
+	}
+	log("MNCC Call table full!");
+	setverdict(fail);
+	self.stop;
+}
+
+private function f_call_table_del(uint32_t mncc_call_id)
+runs on MNCC_Emulation_CT {
+	for (var integer i := 0; i < sizeof(MnccCallTable); i := i+1) {
+		if (MnccCallTable[i].mncc_call_id == mncc_call_id) {
+			log("Deleted conn table entry ", i,
+			    MnccCallTable[i].comp_ref, mncc_call_id);
+			MnccCallTable[i].mncc_call_id := -1;
+			MnccCallTable[i].comp_ref := null;
+			return
+		}
+	}
+	log("MNCC Call table attempt to delete non-existant ", mncc_call_id);
+	setverdict(fail);
+	self.stop;
+}
+
+
+function f_connect(charstring sock) runs on MNCC_Emulation_CT {
+	var UD_connect_result res;
+	timer T := 5.0;
+
+	T.start;
+	MNCC.send(UD_connect:{sock, -1});
+	alt {
+	[] MNCC.receive(UD_connect_result:?) -> value res {
+		if (ispresent(res.result) and ispresent(res.result.result_code) and res.result.result_code == ERROR) {
+			setverdict(fail, "Error connecting to MNCC socket", res);
+			self.stop;
+		} else {
+			g_mncc_ud_id := res.id;
+		}
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout connecting to MNCC socket");
+		self.stop;
+		}
+	}
+}
+
+/* call-back type, to be provided by specific implementation; called when new SCCP connection
+ * arrives */
+type function MnccCreateCallback(MNCC_PDU conn_ind, charstring id)
+runs on MNCC_Emulation_CT return MNCC_ConnHdlr;
+
+type function MnccUnitdataCallback(MNCC_PDU mncc)
+runs on MNCC_Emulation_CT return template MNCC_PDU;
+
+type record MnccOps {
+	MnccCreateCallback create_cb,
+	MnccUnitdataCallback unitdata_cb
+}
+
+function main(MnccOps ops, charstring id, charstring sock) runs on MNCC_Emulation_CT {
+
+	f_connect(sock);
+	f_call_table_init();
+
+	while (true) {
+		var MNCC_send_data sd;
+		var MNCC_Conn_Req creq;
+		var MNCC_ConnHdlr vc_conn;
+		var MNCC_PDU mncc;
+		var MNCC_ConnHdlr vc_hdlr;
+		var charstring dest_nr;
+
+		alt {
+		/* MNCC -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
+		[] MNCC.receive(t_SD_MNCC_MSGT(g_mncc_ud_id, MNCC_SOCKET_HELLO)) -> value sd {
+			/* Connectionless Procedures like HELLO */
+			var template MNCC_PDU resp;
+			resp := ops.unitdata_cb.apply(sd.data);
+			if (isvalue(resp)) {
+				MNCC.send(t_SD_MNCC(g_mncc_ud_id, resp));
+			}
+			}
+
+		/* MNCC -> Client: Release Indication / confirmation */
+		[] MNCC.receive(t_SD_MNCC_MSGT(g_mncc_ud_id, (MNCC_REL_IND, MNCC_REL_CNF))) -> value sd {
+			var uint32_t call_id := f_mncc_get_call_id(sd.data);
+			/* forward to respective client */
+			vc_conn := f_comp_by_call_id(call_id);
+			MNCC_CLIENT.send(sd.data) to vc_conn;
+			/* remove from call table */
+			f_call_table_del(call_id);
+			}
+
+		/* MNCC -> Client: call related messages */
+		[] MNCC.receive(t_SD_MNCC_MSGT(g_mncc_ud_id, ?)) -> value sd {
+			var uint32_t call_id := f_mncc_get_call_id(sd.data);
+
+			if (f_call_id_known(call_id)) {
+				vc_conn := f_comp_by_call_id(call_id);
+				MNCC_CLIENT.send(sd.data) to vc_conn;
+			} else {
+				/* TODO: Only accept this for SETUP.req? */
+				vc_conn := ops.create_cb.apply(sd.data, id)
+				/* store mapping between client components and SCCP connectionId */
+				f_call_table_add(vc_conn, call_id);
+				/* handle user payload */
+				MNCC_CLIENT.send(sd.data) to vc_conn;
+			}
+			}
+
+		/* Client -> MNCC Socket: RELEASE.ind or RELEASE.cnf: forward + drop call table entry */
+		[] MNCC_CLIENT.receive(MNCC_PDU:{msg_type := (MNCC_REL_IND, MNCC_REL_CNF), u:=?}) -> value mncc sender vc_conn {
+			var integer call_id := f_call_id_by_comp(vc_conn);
+			/* forward to MNCC socket */
+			MNCC.send(t_SD_MNCC(g_mncc_ud_id, mncc));
+			/* remove from call table */
+			f_call_table_del(call_id);
+			}
+
+		/* Client -> MNCC Socket: Normal message */
+		[] MNCC_CLIENT.receive(MNCC_PDU:?) -> value mncc sender vc_conn {
+			/* forward to MNCC socket */
+			MNCC.send(t_SD_MNCC(g_mncc_ud_id, mncc));
+			}
+
+
+		/* Client -> us: procedure call to register expect */
+		[] MNCC_PROC.getcall(MNCCEM_register:{?,?}) -> param(dest_nr, vc_hdlr) {
+			f_create_expect(dest_nr, vc_hdlr);
+			MNCC_PROC.reply(MNCCEM_register:{dest_nr, vc_hdlr});
+			}
+
+		}
+	}
+}
+
+private function f_mgcp_ep_extract_cic(charstring inp) return integer {
+	var charstring local_part := regexp(inp, "(*)@*", 0);
+	return hex2int(str2hex(local_part));
+
+}
+
+/***********************************************************************
+ * "Expect" Handling (mapping for expected incoming MNCC calls from IUT)
+ ***********************************************************************/
+
+/* data about an expected future incoming connection */
+type record ExpectData {
+	/* destination number based on which we can match it */
+	charstring dest_number optional,
+	/* component reference for this connection */
+	MNCC_ConnHdlr vc_conn
+}
+
+/* procedure based port to register for incoming calls */
+signature MNCCEM_register(in charstring dest_nr, in MNCC_ConnHdlr hdlr);
+
+type port MNCCEM_PROC_PT procedure {
+	inout MNCCEM_register;
+} with { extension "internal" };
+
+/* CreateCallback that can be used as create_cb and will use the expectation table */
+function ExpectedCreateCallback(MNCC_PDU conn_ind, charstring id)
+runs on MNCC_Emulation_CT return MNCC_ConnHdlr {
+	var MNCC_ConnHdlr ret := null;
+	var charstring dest_number;
+	var integer i;
+
+	if (not ischosen(conn_ind.u.signal) or conn_ind.msg_type != MNCC_SETUP_IND) {
+		setverdict(fail, "MNCC ExpectedCreateCallback needs MNCC_SETUP_IND");
+		return ret;
+	}
+	dest_number := conn_ind.u.signal.called.number;
+
+	for (i := 0; i < sizeof(MnccExpectTable); i:= i+1) {
+		if (not ispresent(MnccExpectTable[i].dest_number)) {
+			continue;
+		}
+		if (dest_number == MnccExpectTable[i].dest_number) {
+			ret := MnccExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			MnccExpectTable[i].dest_number := omit;
+			MnccExpectTable[i].vc_conn := null;
+			log("Found MnccExpect[", i, "] for ", dest_number, " handled at ", ret);
+			/* return the component reference */
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find MnccExpect for incoming call ", dest_number);
+	return ret;
+}
+
+/* server/emulation side function to create expect */
+private function f_create_expect(charstring dest_number, MNCC_ConnHdlr hdlr)
+runs on MNCC_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(MnccExpectTable); i := i+1) {
+		if (not ispresent(MnccExpectTable[i].dest_number)) {
+			MnccExpectTable[i].dest_number := dest_number;
+			MnccExpectTable[i].vc_conn := hdlr;
+			log("Created MnccExpect[", i, "] for ", dest_number, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in MnccMnccExpectTable");
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_mncc_expect(charstring dest_number) runs on MNCC_ConnHdlr {
+	MNCC_PROC.call(MNCCEM_register:{dest_number, self}) {
+		[] MNCC_PROC.getreply(MNCCEM_register:{?,?}) {};
+	}
+}
+
+function DummyUnitdataCallback(MNCC_PDU mncc)
+runs on MNCC_Emulation_CT return template MNCC_PDU {
+	log("Ignoring MNCC ", mncc);
+	return omit;
+}
+
+}
