@@ -1,0 +1,201 @@
+module BSC_ConnectionHandler {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from SCCPasp_Types all;
+import from BSSAP_Types all;
+import from BSSMAP_Emulation all;
+import from BSSMAP_Templates all;
+
+import from GSUP_Types all;
+import from GSUP_Emulation all;
+
+import from MNCC_Types all;
+import from MNCC_Emulation all;
+
+import from MobileL3_Types all;
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_MM_Types all;
+import from L3_Templates all;
+
+/* this component represents a single subscriber connection */
+type component BSC_ConnHdlr extends BSSAP_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr {
+	var BSC_ConnHdlrPars g_pars;
+}
+
+type record BSC_ConnHdlrPars {
+	SCCP_PAR_Address sccp_addr_own,
+	SCCP_PAR_Address sccp_addr_peer,
+	BSSMAP_IE_CellIdentifier cell_id,
+	hexstring imsi,
+	hexstring msisdn
+};
+
+
+/* Callback function from general BSSMAP_Emulation whenever a connectionless
+ * BSSMAP message arrives. Canreturn a PDU_BSSAPthat should be sent in return */
+private function BscUnitdataCallback(PDU_BSSAP bssap)
+runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
+	var template PDU_BSSAP resp := omit;
+
+	log("BSSMAP_BscUnitdataCallback");
+	/* answer all RESET with RESET ACK */
+	if (match(bssap, tr_BSSMAP_Reset)){
+		log("BSSMAP_BscUnitdataCallback: Responding to RESET with RESET-ACK");
+		resp := ts_BSSMAP_ResetAck;
+	}
+
+	/* FIXME: Handle paging, etc. */
+	return resp;
+}
+
+const BssmapOps BSC_BssmapOps := {
+	/* Create call-back for inbound connections from MSC (hand-over) */
+	create_cb := refers(BSSMAP_Emulation.ExpectedCreateCallback),
+	unitdata_cb := refers(BscUnitdataCallback),
+	decode_dtap := true,
+	role_ms := true
+}
+
+
+private function MnccUnitdataCallback(MNCC_PDU mncc)
+runs on MNCC_Emulation_CT return template MNCC_PDU {
+	log("Ignoring MNCC", mncc);
+	return omit;
+}
+
+const MnccOps BCC_MnccOps := {
+	create_cb := refers(MNCC_Emulation.ExpectedCreateCallback),
+	unitdata_cb := refers(MnccUnitdataCallback)
+}
+
+
+
+template BSSAP_Conn_Req ts_BSSAP_Conn_Req(SCCP_PAR_Address peer, SCCP_PAR_Address own, PDU_BSSAP bssap) := {
+	addr_peer := peer,
+	addr_own := own,
+	bssap := bssap
+};
+
+template (value) MobileStationClassmark1_V ts_CM1(BIT1 a5_1_unavail := '0'B, BIT2 rev := '10'B) := {
+	rf_PowerCapability := '010'B,
+	a5_1 := a5_1_unavail,
+	esind := '1'B,
+	revisionLevel := rev,
+	spare1_1 := '0'B
+}
+
+/* Encode 'l3' and ask BSSMAP_Emulation to create new connection with COMPL L3 INFO */
+function f_bssap_compl_l3(PDU_ML3_MS_NW l3)
+runs on BSC_ConnHdlr {
+	log("Sending COMPL L3: ", l3);
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3);
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_peer, g_pars.sccp_addr_own,
+				     valueof(ts_BSSMAP_ComplL3(g_pars.cell_id, l3_enc))));
+}
+
+/* helper function to fully establish a dedicated channel */
+function f_establish_fully(MobileIdentityLV mi, boolean expect_auth)
+runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ('0001'B, mi));
+	var PDU_DTAP_MT dtap_mt;
+
+	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
+	f_bssap_compl_l3(l3_info);
+
+	if (expect_auth) {
+		/* FIXME */
+	}
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC));
+}
+
+/* build a PDU_ML3_MS_NW containing a Location Update by IMSI */
+function f_build_lu_imsi(hexstring imsi) return PDU_ML3_MS_NW
+{
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(imsi));
+	return f_build_lu(mi);
+}
+private function f_build_lu(MobileIdentityLV mi) return PDU_ML3_MS_NW
+{
+	var LocationAreaIdentification_V old_lai := { '62F220'O, '9999'O };
+	var PDU_ML3_MS_NW l3_info := valueof(ts_ML3_MO_LU_Req(valueof(ts_ML3_IE_LuType_Attach),
+							      old_lai, mi, valueof(ts_CM1)));
+	return l3_info;
+}
+
+function f_perform_lu(boolean expect_auth, boolean expect_tmsi)
+runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi)
+	var PDU_DTAP_MT dtap_mt;
+
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
+	f_bssap_compl_l3(l3_lu);
+
+	if (expect_auth) {
+		/* FIXME */
+	}
+
+	/* Expect MSC to perform LU with HLR */
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	GSUP.receive(tr_GSUP_ISD_RES(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
+
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) -> value dtap_mt {
+		var PDU_ML3_LocationUpdateAccept lu_acc := dtap_mt.dtap.msgs.mm.locationUpdateAccept;
+		if (expect_tmsi) {
+			if (not ispresent(lu_acc.mobileIdentityTLV) or
+			    not ischosen(lu_acc.mobileIdentityTLV.mobileIdentityLV.mobileIdentityV.oddEvenInd_identity.tmsi_ptmsi)) {
+				setverdict(fail, "Expected TMSI but no TMSI was allocated");
+				self.stop;
+			} else {
+				BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_TmsiRealloc_Cmpl));
+			}
+		} else {
+			if (ispresent(lu_acc.mobileIdentityTLV) and
+			    ischosen(lu_acc.mobileIdentityTLV.mobileIdentityLV.mobileIdentityV.oddEvenInd_identity.tmsi_ptmsi)) {
+				setverdict(fail, "Expected no TMSI but TMSI was allocated");
+				self.stop;
+			}
+		}
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(fail, "Expected LU ACK, but received LU REJ");
+		self.stop;
+		}
+	}
+	/* FIXME: there could be pending SMS or other common procedures by the MSC, let's ignore them */
+	BSSAP.receive(tr_BSSMAP_ClearCommand);
+	BSSAP.send(ts_BSSMAP_ClearComplete);
+	BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	setverdict(pass);
+}
+
+function f_foo() runs on BSC_ConnHdlr{
+	/* SCCP CC handled by BSSMAP_Emulation_CT.main() */
+	/* Expect auth, if enabled */
+
+	/* TODO: ISD */
+	/* Expect encr, if enabled */
+	/* Expect encr, if enabled */
+	/* Expect ASS CMD, if chan_type != requested */
+	/* Send ASS CMPL in successful case */
+
+	/* Expect AoIP port/ip information for RTP stream */
+	/* Expect MSC-originated MGCP to our simulated MGW */
+	/* Verify Counters via CTRL */
+	/* re-configure MSC behaviour via VTY */
+}
+
+
+
+
+
+}
+
+

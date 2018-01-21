@@ -16,112 +16,106 @@ import from SCCP_Emulation all;
 import from SCTPasp_Types all;
 import from SCTPasp_PortType all;
 
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from MNCC_Emulation all;
+
+import from GSUP_Emulation all;
+import from GSUP_Types all;
+import from IPA_Emulation all;
+
 import from BSSAP_Types all;
+import from BSSAP_Adapter all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from BSSMAP_Emulation all;
+import from BSC_ConnectionHandler all;
 
-type component MTC_CT {
-	/* M3UA emulation component */
-	var M3UA_CT vc_M3UA;
-	/* SCCP emulation component */
-	var SCCP_CT vc_SCCP;
-	/* test port to SCCP emulation */
-	port SCCPasp_PT SCCP;
+import from MobileL3_Types all;
+import from MobileL3_CommonIE_Types all;
+import from L3_Templates all;
 
-	var octetstring g_sio;
-	var MSC_SCCP_MTP3_parameters g_sccp_pars;
-	var SCCP_PAR_Address g_sccp_addr_own, g_sccp_addr_peer;
 
+type component MTC_CT extends BSSAP_Adapter_CT, CTRL_Adapter_CT {
 	var boolean g_initialized := false;
+
+	/* no 'adapter_CT' for MNCC or GSUP */
+	var MNCC_Emulation_CT vc_MNCC;
+	var GSUP_Emulation_CT vc_GSUP;
+	var IPA_Emulation_CT vc_GSUP_IPA;
+
+	/* only to get events from IPA underneath GSUP */
+	port IPA_CTRL_PT GSUP_IPA_EVENT;
 }
 
 modulepar {
-	charstring mp_sccp_service_type := "mtp3_itu";
+	/* remote parameters of IUT */
+	charstring mp_msc_ip := "127.0.0.1";
+	integer mp_msc_ctrl_port := 4255;
+	integer mp_msc_vty_port := 4254;
 
-	SCTP_Association_Address mp_sctp_addr := { 22905, "127.0.0.1", 2905, "127.0.0.1" };
-	integer mp_own_pc := 196;
-	integer mp_own_ssn := 254;
+	/* local parameters of emulated HLR */
+	charstring mp_hlr_ip := "127.0.0.1";
+	integer mp_hlr_port := 4222;
 
-	integer mp_peer_pc := 185;	/* 0.23.1 */
-	integer mp_peer_ssn := 254;
+	charstring mp_msc_mncc := "/tmp/mncc";
 }
 
 
-/* construct a SCCP_PAR_Address with just PC + SSN and no GT */
-template (value) SCCP_PAR_Address ts_SccpAddr_PC_SSN(integer pc, integer ssn) := {
-	addressIndicator := {
-		pointCodeIndic := '1'B,
-		ssnIndicator := '1'B,
-		globalTitleIndic := '0000'B,
-		routingIndicator := '1'B
-	},
-	signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, '83'O),
-	//signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, g_sio),
-	subsystemNumber := ssn,
-	globalTitle := omit
+function f_init_mncc(charstring id) runs on MTC_CT {
+	id := id & "-MNCC";
+	var MnccOps ops := {
+		create_cb := refers(MNCC_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(MNCC_Emulation.DummyUnitdataCallback)
+	}
+
+	vc_MNCC := MNCC_Emulation_CT.create(id);
+	map(vc_MNCC:MNCC, system:MNCC_CODEC_PT);
+	vc_MNCC.start(MNCC_Emulation.main(ops, id, mp_msc_mncc));
 }
 
-function init_pars() runs on MTC_CT {
-	g_sio := '83'O;
-	g_sccp_pars := {
-		sio := {
-			ni := substr(oct2bit(g_sio),0,2),
-			prio := substr(oct2bit(g_sio),2,2),
-			si := substr(oct2bit(g_sio),4,4)
-		},
-		opc := mp_own_pc,
-		dpc := mp_peer_pc,
-		sls := 0,
-		sccp_serviceType := mp_sccp_service_type,
-		ssn := mp_own_ssn
-	};
-	g_sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(mp_own_pc, mp_own_ssn));
-	g_sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(mp_peer_pc, mp_peer_ssn));
+function f_init_gsup(charstring id) runs on MTC_CT {
+	id := id & "-GSUP";
+	var GsupOps ops := {
+		create_cb := refers(GSUP_Emulation.ExpectedCreateCallback)
+	}
+
+	vc_GSUP_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	vc_GSUP := GSUP_Emulation_CT.create(id);
+
+	map(vc_GSUP_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_GSUP:GSUP, vc_GSUP_IPA:IPA_GSUP_PORT);
+	/* we use this hack to get events like ASP_IPA_EVENT_UP */
+	connect(vc_GSUP_IPA:IPA_CTRL_PORT, self:GSUP_IPA_EVENT);
+
+	vc_GSUP.start(GSUP_Emulation.main(ops, id));
+	vc_GSUP_IPA.start(IPA_Emulation.main_server(mp_hlr_ip, mp_hlr_port));
+
+	/* wait for incoming connection to GSUP port before proceeding */
+	timer T := 10.0;
+	T.start;
+	alt {
+		[] GSUP_IPA_EVENT.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP)) { }
+		[] T.timeout {
+			setverdict(inconc, "No connection to GSUP Port");
+			self.stop
+		}
+	}
 }
 
-function init() runs on MTC_CT {
+function f_init() runs on MTC_CT {
 
 	if (g_initialized == true) {
 		return;
 	}
 	g_initialized := true;
 
-	init_pars();
-
-	/* Create components */
-	vc_M3UA := M3UA_CT.create;
-	vc_SCCP := SCCP_CT.create;
-
-	/* connect system SCTP port to M3UA lower side */
-	map(vc_M3UA:SCTP_PORT, system:sctp);
-
-	/* connect MTP3 service provider to SCCP MTP3 port */
-	connect(vc_M3UA:MTP3_SP_PORT, vc_SCCP:MTP3_SCCP_PORT);
-
-	/* connect test suite to SCCP service provider port */
-	connect(self:SCCP, vc_SCCP:SCCP_SP_PORT);
-
-	vc_M3UA.start(f_M3UA_Emulation(mp_sctp_addr));
-	vc_SCCP.start(SCCPStart(g_sccp_pars));
-
-}
-
-function terminate() runs on MTC_CT {
-
-	disconnect(self:SCCP, vc_SCCP:SCCP_SP_PORT);
-	disconnect(vc_M3UA:MTP3_SP_PORT, vc_SCCP:MTP3_SCCP_PORT);
-	unmap(vc_M3UA:SCTP_PORT, system:sctp);
-
-	all component.stop;
-
-	self.stop;
-}
-
-testcase TC_nothing() runs on MTC_CT {
-	init();
-
-	timer T := 30.0;
-	T.start;
-	T.timeout;
-
+	f_bssap_init("MSC_Test", BSC_BssmapOps);
+	f_ipa_ctrl_start(mp_msc_ip, mp_msc_ctrl_port);
+	f_init_mncc("MSC_Test");
+	f_init_gsup("MSC_Test");
 }
 
 template PDU_BSSAP ts_BSSAP_BSSMAP := {
@@ -290,31 +284,189 @@ modifies ts_BSSAP_BSSMAP := {
 //	enc_PDU_BSSAP
 
 function f_send_BSSAP_UNITDATA(template PDU_BSSAP bssap) runs on MTC_CT {
-	SCCP.send(t_ASP_N_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, '00000001'B, '00000001'B,
-					enc_PDU_BSSAP(valueof(bssap)), omit))
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, bssap))
 }
 
-testcase TC_reset() runs on MTC_CT {
-	init();
+type function void_fn(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr;
 
-	timer T := 2.0;
+function f_gen_imsi(hexstring prefix, integer suffix) return hexstring {
+	var integer suffix_len := 15 - lengthof(prefix);
+	suffix_len := suffix_len-1; /* FIXME: fix odd IMSI length */
+	return prefix & int2hex(suffix, suffix_len);
+}
+
+function f_gen_msisdn(hexstring prefix, integer suffix) return hexstring {
+	var integer suffix_len := 12 - lengthof(prefix);
+	return prefix & int2hex(suffix, suffix_len);
+}
+
+/* FIXME: move into BSC_ConnectionHandler? */
+function f_start_handler(void_fn fn, charstring id, integer imsi_suffix) runs on MTC_CT return BSC_ConnHdlr {
+	var BSC_ConnHdlr vc_conn;
+	var BSC_ConnHdlrPars pars := {
+		sccp_addr_own := g_sccp_addr_own,
+		sccp_addr_peer := g_sccp_addr_peer,
+		cell_id := valueof(ts_CellId_CGI('262'H, '042'H, 23, 42)),
+		imsi := f_gen_imsi('26242'H, imsi_suffix),
+		msisdn := f_gen_msisdn('491239999'H, imsi_suffix)
+	};
+
+	vc_conn := BSC_ConnHdlr.create(id);
+	/* BSSMAP part / A interface */
+	connect(vc_conn:BSSAP, vc_BSSMAP:CLIENT);
+	connect(vc_conn:BSSAP_PROC, vc_BSSMAP:PROC);
+	/* MNCC part */
+	connect(vc_conn:MNCC, vc_MNCC:MNCC_CLIENT);
+	connect(vc_conn:MNCC_PROC, vc_MNCC:MNCC_PROC);
+	/* GSUP part */
+	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
+	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	vc_conn.start(derefers(fn)(id, pars));
+	return vc_conn;
+}
+
+function f_sleep(float seconds) {
+	timer T := seconds;
 	T.start;
 	T.timeout;
+}
 
-	f_send_BSSAP_UNITDATA(ts_BSSMAP_Reset(0));
+private function f_tc_lu_imsi_noauth_tmsi(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	f_perform_lu(false, true);
+}
+
+testcase TC_lu_imsi_noauth_tmsi() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_tmsi), testcasename(), 1);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_noauth_notmsi(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	f_perform_lu(false, false);
+}
+
+testcase TC_lu_imsi_noauth_notmsi() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_notmsi), testcasename(), 2);
+	vc_conn.done;
+}
+
+/* Do LU by IMSI, refuse it on GSUP and expect LU REJ back to MS */
+private function f_tc_lu_imsi_reject(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi);
+
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_ERR(g_pars.imsi, 23));
+	alt {
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej(int2oct(23,1)))) { }
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) {
+			setverdict(fail, "Expecting LU REJ, but got ACCEPT");
+			self.stop;
+		}
+	}
+	BSSAP.receive(tr_BSSMAP_ClearCommand);
+	BSSAP.send(ts_BSSMAP_ClearComplete);
+	BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	setverdict(pass);
+}
+testcase TC_lu_imsi_reject() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_reject), testcasename(), 3);
+	vc_conn.done;
+}
+
+/* Do LU by IMSI, timeout on GSUP */
+private function f_tc_lu_imsi_timeout_gsup(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi);
+
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	/* Normally the HLR would need to respond here, but we decide to force a timeout here */
+	alt {
+		/* FIXME: Expect specific reject cause */
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) { }
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) {
+			setverdict(fail, "Expecting LU REJ, but got ACCEPT");
+			self.stop;
+		}
+	}
+	BSSAP.receive(tr_BSSMAP_ClearCommand);
+	BSSAP.send(ts_BSSMAP_ClearComplete);
+	BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	setverdict(pass);
+}
+testcase TC_lu_imsi_timeout_gsup() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_timeout_gsup), testcasename(), 4);
+	vc_conn.done;
+}
+
+
+/* Send CM SERVICE REQ for IMSI that has never performed LU before */
+private function f_tc_cmserv_imsi_unknown(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var BSSMAP_IE_CellIdentifier cell_id := valueof(ts_CellId_CGI('262'H, '042'H, 23, 42));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ('0001'B, mi));
+
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
+	f_bssap_compl_l3(l3_info);
+
+	timer T := 10.0;
 	T.start;
 	alt {
-		//[] SCCP.receive(tr_BSSMAP_ResetAck) { }
-		[] T.timeout { setverdict(fail); }
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_REJ)) { }
+	//[] BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC)) { }
+	[] BSSAP.receive { setverdict(fail, "Received unexpected BSSAP"); }
+	[] GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi)) {
+		setverdict(fail, "Unexpected GSUP UL REQ");
+		}
+	[] T.timeout { setverdict(inconc, "Timeout waiting for CM SERV REQ"); }
 	}
 
-	terminate();
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive { setverdict(fail, "Received unexpected BSSAP"); }
+	[] T.timeout { setverdict(inconc, "Timeout waiting for CM SERV REQ"); }
+	}
 }
+testcase TC_cmserv_imsi_unknown() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_cmserv_imsi_unknown), testcasename(), 5);
+	vc_conn.done;
+}
+
+
 
 
 control {
-	execute( TC_reset() );
-	execute( TC_nothing() );
+	execute( TC_cmserv_imsi_unknown() );
+	execute( TC_lu_imsi_noauth_tmsi() );
+	//execute( TC_lu_imsi_noauth_notmsi() );
+	execute( TC_lu_imsi_reject() );
+	execute( TC_lu_imsi_timeout_gsup() );
 }
 
 

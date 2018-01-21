@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 BASEDIR=../deps
 
@@ -17,6 +17,15 @@ gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
+FILES="Socket_API_Definitions.ttcn"
+gen_links $DIR $FILES
+
+# Required by MGCP and IPA
+DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
+FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
 # required by M3UA_Emulation
@@ -52,7 +61,21 @@ DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.SDP/src
+FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
+SDP_parser.y lex.SDP_parse_.c"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.RTP/src
+FILES="RTP_EncDec.cc RTP_Types.ttcn"
+gen_links $DIR $FILES
+
 
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h"
+FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h MNCC_Emulation.ttcn "
+FILES+="IPA_Types.ttcn IPA_Emulation.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc RSL_Types.ttcn GSUP_Types.ttcn GSUP_Emulation.ttcn "
+FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn L3_Templates.ttcn L3_Templates.ttcn "
+FILES+="BSSMAP_Emulation.ttcn BSSAP_CodecPort.ttcn BSSMAP_Templates.ttcn BSSAP_Adapter.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn IPA_Emulation.ttcn "
+FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
+FILES+="MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 gen_links $DIR $FILES
