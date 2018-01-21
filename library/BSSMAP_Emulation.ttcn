@@ -22,7 +22,7 @@ module BSSMAP_Emulation {
  * Inbound Unit Data messages (such as are dispatched to the BssmapOps.unitdata_cb() callback,
  * which is registered with an argument to the main() function below.
  *
- * (C) 2017 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2017-2018 by Harald Welte <laforge@gnumonks.org>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -30,6 +30,7 @@ module BSSMAP_Emulation {
  */
 
 
+import from General_Types all;
 import from SCCP_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
@@ -38,6 +39,7 @@ import from BSSMAP_Templates all;
 import from MGCP_Types all;
 import from MGCP_Templates all;
 import from IPA_Emulation all;
+import from MobileL3_Types all;
 
 /* General "base class" component definition, of which specific implementations
  * derive themselves by means of the "extends" feature */
@@ -62,9 +64,42 @@ type record BSSAP_Conn_Req {
 	PDU_BSSAP		bssap
 }
 
+/* similar to PDU_BSSAP with DTAP, but DTAP is already decoded! */
+type record PDU_DTAP_MO {
+	OCT1			dlci optional,
+	PDU_ML3_MS_NW		dtap
+}
+
+/* similar to PDU_BSSAP with DTAP, but DTAP is already decoded! */
+type record PDU_DTAP_MT {
+	OCT1			dlci optional,
+	PDU_ML3_NW_MS		dtap
+}
+
+template PDU_DTAP_MT ts_PDU_DTAP_MT(template PDU_ML3_NW_MS dtap, template OCT1 dlci := omit) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+template PDU_DTAP_MO ts_PDU_DTAP_MO(template PDU_ML3_MS_NW dtap, template OCT1 dlci := '00'O) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+template PDU_DTAP_MT tr_PDU_DTAP_MT(template PDU_ML3_NW_MS dtap, template OCT1 dlci := *) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+template PDU_DTAP_MO tr_PDU_DTAP_MO(template PDU_ML3_MS_NW dtap, template OCT1 dlci := *) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+
 /* port between individual per-connection components and this dispatcher */
 type port BSSAP_Conn_PT message {
-	inout PDU_BSSAP, BSSAP_Conn_Prim, BSSAP_Conn_Req, MgcpCommand, MgcpResponse;
+	inout PDU_BSSAP, PDU_DTAP_MO, PDU_DTAP_MT, BSSAP_Conn_Prim, BSSAP_Conn_Req, MgcpCommand, MgcpResponse;
 } with { extension "internal" };
 
 
@@ -97,6 +132,7 @@ type component BSSMAP_Emulation_CT {
 
 	var charstring g_bssmap_id;
 	var integer g_next_e1_ts := 1;
+	var BssmapOps g_bssmap_ops;
 };
 
 private function f_conn_id_known(integer sccp_conn_id)
@@ -279,7 +315,25 @@ runs on BSSMAP_Emulation_CT {
 		f_comp_store_cic(client, cic);
 	}
 
-	CLIENT.send(bssap) to client;
+	if (ischosen(bssap.pdu.dtap) and g_bssmap_ops.decode_dtap) {
+		if (g_bssmap_ops.role_ms) {
+			/* we are the MS, so any message to us must be MT */
+			var PDU_DTAP_MT mt := {
+				dlci := bssap.dlci,
+				dtap := dec_PDU_ML3_NW_MS(bssap.pdu.dtap)
+			};
+			CLIENT.send(mt) to client;
+		} else {
+			/* we are the Network, so any message to us must be MO */
+			var PDU_DTAP_MO mo := {
+				dlci := bssap.dlci,
+				dtap := dec_PDU_ML3_MS_NW(bssap.pdu.dtap)
+			};
+			CLIENT.send(mo) to client;
+		}
+	} else {
+		CLIENT.send(bssap) to client;
+	}
 }
 
 /* call-back type, to be provided by specific implementation; called when new SCCP connection
@@ -292,12 +346,15 @@ runs on BSSMAP_Emulation_CT return template PDU_BSSAP;
 
 type record BssmapOps {
 	BssmapCreateCallback create_cb,
-	BssmapUnitdataCallback unitdata_cb
+	BssmapUnitdataCallback unitdata_cb,
+	boolean decode_dtap,
+	boolean role_ms
 }
 
 function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 
 	g_bssmap_id := id;
+	g_bssmap_ops := ops;
 	f_conn_table_init();
 	f_expect_table_init();
 
@@ -310,6 +367,8 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 		var BSSAP_Conn_Req creq;
 		var BSSAP_ConnHdlr vc_conn;
 		var PDU_BSSAP bssap;
+		var PDU_DTAP_MO dtap_mo;
+		var PDU_DTAP_MT dtap_mt;
 		var MgcpCommand mgcp_req;
 		var MgcpResponse mgcp_resp;
 		var BSSAP_ConnHdlr vc_hdlr;
@@ -401,6 +460,23 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			/* send it to dispatcher */
 			BSSAP.send(ts_BSSAP_DATA_req(conn_id, bssap));
 			}
+
+		[g_bssmap_ops.role_ms] CLIENT.receive(PDU_DTAP_MO:?) -> value dtap_mo sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_ML3_MS_NW(dtap_mo.dtap);
+			bssap := valueof(ts_BSSAP_DTAP(l3_enc, dtap_mo.dlci));
+			BSSAP.send(ts_BSSAP_DATA_req(conn_id, bssap));
+			}
+
+		[not g_bssmap_ops.role_ms] CLIENT.receive(PDU_DTAP_MT:?) -> value dtap_mt sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_ML3_NW_MS(dtap_mt.dtap);
+			bssap := valueof(ts_BSSAP_DTAP(l3_enc, dtap_mo.dlci));
+			BSSAP.send(ts_BSSAP_DATA_req(conn_id, bssap));
+			}
+
 
 		/* Handling of MGCP in IPA SCCPLite case.  This predates 3GPP AoIP
 		 * and uses a MGCP session in parallel to BSSAP.  BSSAP uses CIC
