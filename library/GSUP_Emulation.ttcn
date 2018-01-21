@@ -1,0 +1,291 @@
+module GSUP_Emulation {
+
+/* GSUP Emulation, runs on top of IPA_Emulation.  It multiplexes/demultiplexes
+ * the individual calls, so there can be separate TTCN-3 components handling
+ * each of the calls
+ *
+ * The GSUP_Emulation.main() function processes GSUP primitives from the IPA/GSUP
+ * socket via the IPA_Emulation, and dispatches them to the per-connection components.
+ *
+ * Outbound GSUP connections are initiated by sending a FIXME primitive
+ * to the component running the GSUP_Emulation.main() function.
+ *
+ * For each new inbound connections, the GsupOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that inbound
+ * connection is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound call, it can
+ * do so by registering an "expect" with the expected destination phone number.  This is e.g. useful
+ * if you are simulating BSC + HUL, and first trigger a connection from BSC side in a
+ * component which then subsequently should also handle the GSUP emulation.
+ *
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from Osmocom_Types all;
+import from GSUP_Types all;
+import from IPA_Emulation all;
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component GSUP_ConnHdlr {
+	/* ports towards GSUP Emulator core / call dispatchar */
+	port GSUP_Conn_PT GSUP;
+	port GSUPEM_PROC_PT GSUP_PROC;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port GSUP_Conn_PT message {
+	inout GSUP_PDU;
+} with { extension "internal" };
+
+
+/* represents a single GSUP call */
+type record ConnectionData {
+	/* reference to the instance of the per-connection component */
+	GSUP_ConnHdlr	comp_ref,
+	charstring	imsi
+}
+
+type component GSUP_Emulation_CT {
+	/* UNIX DOMAIN socket on the bottom side, using primitives */
+	port IPA_GSUP_PT GSUP;
+	/* GSUP port to the per-connection clients */
+	port GSUP_Conn_PT GSUP_CLIENT;
+
+	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
+	var ConnectionData GsupImsiTable[16];
+
+	/* pending expected incoming connections */
+	var ExpectData GsupExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port GSUPEM_PROC_PT GSUP_PROC;
+};
+
+private function f_imsi_known(charstring imsi)
+runs on GSUP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].imsi == imsi) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(GSUP_ConnHdlr client)
+runs on GSUP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* resolve component reference by connection ID */
+private function f_comp_by_imsi(charstring imsi)
+runs on GSUP_Emulation_CT return GSUP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].imsi == imsi) {
+			return GsupImsiTable[i].comp_ref;
+		}
+	}
+	log("GSUP IMSI table not found by IMSI ", imsi);
+	setverdict(fail);
+	self.stop;
+}
+
+/* resolve connection ID by component reference */
+private function f_imsi_by_comp(GSUP_ConnHdlr client)
+runs on GSUP_Emulation_CT return charstring {
+	for (var integer i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].comp_ref == client) {
+			return GsupImsiTable[i].imsi;
+		}
+	}
+	log("GSUP IMSI table not found by component ", client);
+	setverdict(fail);
+	self.stop;
+}
+
+private function f_imsi_table_init()
+runs on GSUP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		GsupImsiTable[i].comp_ref := null;
+		GsupImsiTable[i].imsi := "";
+	}
+}
+
+private function f_imsi_table_add(GSUP_ConnHdlr comp_ref, charstring imsi)
+runs on GSUP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].imsi == "") {
+			GsupImsiTable[i].comp_ref := comp_ref;
+			GsupImsiTable[i].imsi := imsi;
+			log("Added IMSI table entry ", i, comp_ref, imsi);
+			return;
+		}
+	}
+	log("GSUP IMSI table full!");
+	setverdict(fail);
+	self.stop;
+}
+
+private function f_imsi_table_del(charstring imsi)
+runs on GSUP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(GsupImsiTable); i := i+1) {
+		if (GsupImsiTable[i].imsi == imsi) {
+			log("Deleted GSUP IMSI table entry ", i,
+			    GsupImsiTable[i].comp_ref, imsi);
+			GsupImsiTable[i].imsi := "";
+			GsupImsiTable[i].comp_ref := null;
+			return
+		}
+	}
+	log("GSUP IMSI table attempt to delete non-existant ", imsi);
+	setverdict(fail);
+	self.stop;
+}
+
+
+/* call-back type, to be provided by specific implementation; called when new SCCP connection
+ * arrives */
+type function GsupCreateCallback(GSUP_PDU gsup, charstring id)
+runs on GSUP_Emulation_CT return GSUP_ConnHdlr;
+
+type record GsupOps {
+	GsupCreateCallback create_cb
+}
+
+function main(GsupOps ops, charstring id) runs on GSUP_Emulation_CT {
+
+	f_imsi_table_init();
+
+	while (true) {
+		var GSUP_ConnHdlr vc_conn;
+		var GSUP_ConnHdlr vc_hdlr;
+		var GSUP_PDU gsup;
+		var charstring imsi;
+
+		alt {
+
+		[] GSUP.receive(ASP_IPA_Event:{up_down:=ASP_IPA_EVENT_ID_ACK}) { repeat; }
+		[] GSUP.receive(ASP_IPA_Event:{up_down:=ASP_IPA_EVENT_UP}) { repeat; }
+		[] GSUP.receive(ASP_IPA_Event:{up_down:=ASP_IPA_EVENT_DOWN}) {
+			setverdict(fail, "GSUP Connection Lost");
+			self.stop;
+			}
+
+		/* GSUP -> Client: call related messages */
+		[] GSUP.receive(GSUP_PDU:?) -> value gsup {
+			imsi := hex2str(gsup.ies[0].val.imsi);
+
+			if (f_imsi_known(imsi)) {
+				vc_conn := f_comp_by_imsi(imsi);
+				GSUP_CLIENT.send(gsup) to vc_conn;
+			} else {
+				/* TODO: Only accept this for SETUP.req? */
+				vc_conn := ops.create_cb.apply(gsup, id)
+				/* store mapping between client components and SCCP connectionId */
+				f_imsi_table_add(vc_conn, imsi);
+				/* handle user payload */
+				GSUP_CLIENT.send(gsup) to vc_conn;
+			}
+			}
+
+		[] GSUP.receive { repeat; }
+
+		/* Client -> GSUP Socket: Normal message */
+		[] GSUP_CLIENT.receive(GSUP_PDU:?) -> value gsup sender vc_conn {
+			/* forward to GSUP socket */
+			GSUP.send(gsup);
+			}
+
+
+		/* Client -> us: procedure call to register expect */
+		[] GSUP_PROC.getcall(GSUPEM_register:{?,?}) -> param(imsi, vc_hdlr) {
+			f_create_expect(imsi, vc_hdlr);
+			GSUP_PROC.reply(GSUPEM_register:{imsi, vc_hdlr});
+			}
+
+		}
+	}
+}
+
+/***********************************************************************
+ * "Expect" Handling (mapping for expected incoming GSUP calls from IUT)
+ ***********************************************************************/
+
+/* data about an expected future incoming connection */
+type record ExpectData {
+	/* destination number based on which we can match it */
+	charstring imsi optional,
+	/* component reference for this connection */
+	GSUP_ConnHdlr vc_conn
+}
+
+/* procedure based port to register for incoming calls */
+signature GSUPEM_register(in charstring imsi, in GSUP_ConnHdlr hdlr);
+
+type port GSUPEM_PROC_PT procedure {
+	inout GSUPEM_register;
+} with { extension "internal" };
+
+/* CreateCallback that can be used as create_cb and will use the expectation table */
+function ExpectedCreateCallback(GSUP_PDU gsup, charstring id)
+runs on GSUP_Emulation_CT return GSUP_ConnHdlr {
+	var GSUP_ConnHdlr ret := null;
+	var charstring imsi;
+	var integer i;
+
+	imsi := hex2str(gsup.ies[0].val.imsi);
+
+	for (i := 0; i < sizeof(GsupExpectTable); i:= i+1) {
+		if (not ispresent(GsupExpectTable[i].imsi)) {
+			continue;
+		}
+		if (imsi == GsupExpectTable[i].imsi) {
+			ret := GsupExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			GsupExpectTable[i].imsi := omit;
+			GsupExpectTable[i].vc_conn := null;
+			log("Found GsupExpect[", i, "] for ", imsi, " handled at ", ret);
+			/* return the component reference */
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find GsupExpect for incoming imsi ", imsi);
+	return ret;
+}
+
+/* server/emulation side function to create expect */
+private function f_create_expect(charstring imsi, GSUP_ConnHdlr hdlr)
+runs on GSUP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(GsupExpectTable); i := i+1) {
+		if (not ispresent(GsupExpectTable[i].imsi)) {
+			GsupExpectTable[i].imsi := imsi;
+			GsupExpectTable[i].vc_conn := hdlr;
+			log("Created GsupExpect[", i, "] for ", imsi, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in GsupExpectTable");
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_gsup_expect(charstring imsi) runs on GSUP_ConnHdlr {
+	GSUP_PROC.call(GSUPEM_register:{imsi, self}) {
+		[] GSUP_PROC.getreply(GSUPEM_register:{?,?}) {};
+	}
+}
+
+}
