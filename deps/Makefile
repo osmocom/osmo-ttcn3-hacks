@@ -1,6 +1,7 @@
 
 ECLIPSEGIT:=https://github.com/eclipse
 ECLIPSEGIT2:=git://git.eclipse.org/gitroot/titan
+OSMOGITHUB:=https://github.com/osmocom
 
 ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.ICMP \
@@ -20,8 +21,7 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.TELNETasp \
-			titan.TestPorts.UDPasp \
-			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
+			titan.TestPorts.UDPasp
 
 ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.M2PA \
@@ -40,7 +40,9 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0
 
-ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS)
+OSMOGITHUB_REPOS=	titan.TestPorts.UNIX_DOMAIN_SOCKETasp
+
+ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 
 all: $(ALL_REPOS)
 
@@ -65,3 +67,6 @@ $(foreach dir,$(ECLIPSEGIT_REPOS), \
 
 $(foreach dir,$(ECLIPSEGIT2_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(ECLIPSEGIT2))))
+
+$(foreach dir,$(OSMOGITHUB_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(OSMOGITHUB))))
