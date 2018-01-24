@@ -70,9 +70,12 @@ DIR=$BASEDIR/titan.ProtocolModules.RTP/src
 FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
+FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
+gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h MNCC_Emulation.ttcn "
+FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h MNCC_Emulation.ttcn Osmocom_VTY_Functions.ttcn "
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc RSL_Types.ttcn GSUP_Types.ttcn GSUP_Emulation.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn L3_Templates.ttcn L3_Templates.ttcn "
 FILES+="BSSMAP_Emulation.ttcn BSSAP_CodecPort.ttcn BSSMAP_Templates.ttcn BSSAP_Adapter.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn IPA_Emulation.ttcn "
