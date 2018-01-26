@@ -285,6 +285,10 @@ type record CallParameters {
 	PortNumber bss_rtp_port optional,		/* BSS Side RTP Port */
 	HostName mss_rtp_ip optional,			/* MSS Side RTP IP */
 	PortNumber mss_rtp_port optional,		/* MSS Side RTP Port */
+	HostName mgw_rtp_ip_bss,			/* BSS-facing MGW RTP IP */
+	PortNumber mgw_rtp_port_bss,			/* BSS-facing MGW RTP Port */
+	HostName mgw_rtp_ip_mss,			/* MSS-facing MGW RTP IP */
+	PortNumber mgw_rtp_port_mss,			/* MSS-facing MGW RTP Port */
 	uint7_t rtp_payload_type,			/* dynamic RTP payload type */
 	charstring rtp_sdp_format,			/* AMR/8000 or the like */
 
@@ -302,10 +306,14 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	bearer_cap := valueof(ts_Bcap_voice),
 	mncc_callref := omit,
 	mncc_bearer_cap := valueof(ts_MNCC_bcap_voice),
-	bss_rtp_ip := "1.1.1.1",
-	bss_rtp_port := 0,//
+	bss_rtp_ip := "9.8.7.6",
+	bss_rtp_port := 9000,
 	mss_rtp_ip := omit,
 	mss_rtp_port := omit,
+	mgw_rtp_ip_bss := "1.1.1.1",
+	mgw_rtp_port_bss := 10000,
+	mgw_rtp_ip_mss := "1.1.1.1",
+	mgw_rtp_port_mss := 11000,
 	rtp_payload_type := 98,
 	rtp_sdp_format := "AMR/8000",
 	mgcp_call_id := omit,
@@ -342,13 +350,14 @@ runs on BSC_ConnHdlr {
 		MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
 		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
 		};
+	/* First MGCP CRCX (for BSS/RAN side) */
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
 		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
 		/* TODO: dynamic EP allocation case */
 		cpars.mgcp_ep := mgcp_cmd.line.ep;
-		var SDP_Message sdp := valueof(ts_SDP(cpars.bss_rtp_ip, cpars.bss_rtp_ip,
+		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_bss, cpars.mgw_rtp_ip_bss,
 							hex2str(cpars.mgcp_call_id), "42",
-							cpars.bss_rtp_port,
+							cpars.mgw_rtp_port_bss,
 							{ int2str(cpars.rtp_payload_type) },
 							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 										cpars.rtp_sdp_format)),
@@ -356,22 +365,37 @@ runs on BSC_ConnHdlr {
 		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp));
 		}
 	}
+	/* Second MGCP CRCX (this time for MSS/CN side) */
+	MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+							hex2str(cpars.mgcp_call_id), "42",
+							cpars.mgw_rtp_port_mss,
+							{ int2str(cpars.rtp_payload_type) },
+							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+										cpars.rtp_sdp_format)),
+							  valueof(ts_SDP_ptime(20)) }));
+		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+	}
 
 	/* Alerting */
 	MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id)));
 
-	alt {
-	/* FIXME: expect AoIP IP/Port to match what we returned in CRCX_ACK above */
-	[] BSSAP.receive(tr_BSSMAP_AssignmentReq) {
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+		valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
+	interleave {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {}
+	/* expect AoIP IP/Port to match what we returned in CRCX_ACK above */
+	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
 		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
 		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
 		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla));
 		}
 	}
 
-	/* Answer. This causes TCH assignment in case of "late assignment" */
-	MNCC.send(ts_MNCC_SETUP_COMPL_req(cpars.mncc_callref));
+	/* Answer. MNCC_SETUP_RSP -> CONNECT to MS; CONNECT_ACK from MS */
+	MNCC.send(ts_MNCC_SETUP_rsp(cpars.mncc_callref));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CONNECT(cpars.transaction_id)));
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT_ACK(cpars.transaction_id)));
 
 	f_sleep(3.0);
 
