@@ -116,6 +116,12 @@ type record ConnectionData {
 	integer		cic optional
 }
 
+type record ImsiMapping {
+	BSSAP_ConnHdlr	comp_ref,
+	hexstring	imsi optional,
+	OCT4		tmsi
+}
+
 type component BSSMAP_Emulation_CT {
 	/* SCCP port on the bottom side, using ASP primitives */
 	port BSSAP_CODEC_PT BSSAP;
@@ -129,6 +135,10 @@ type component BSSMAP_Emulation_CT {
 
 	/* pending expected incoming connections */
 	var ExpectData ExpectTable[8];
+
+	/* tables for mapping inbound unitdata (like paging) */
+	var ImsiMapping ImsiTable[16];
+
 	/* procedure based port to register for incoming connections */
 	port BSSMAPEM_PROC_PT PROC;
 
@@ -270,6 +280,11 @@ runs on BSSMAP_Emulation_CT {
 		ConnectionTable[i].mgcp_trans_id := omit;
 		ConnectionTable[i].cic := omit;
 	}
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		ImsiTable[i].comp_ref := null;
+		ImsiTable[i].imsi := omit;
+		ImsiTable[i].tmsi := 'FFFFFFFF'O;
+	}
 }
 
 private function f_conn_table_add(BSSAP_ConnHdlr comp_ref, integer sccp_conn_id)
@@ -301,6 +316,17 @@ runs on BSSMAP_Emulation_CT {
 	log("BSSMAP Connection table attempt to delete non-existant ", sccp_conn_id);
 	setverdict(fail);
 	self.stop;
+}
+
+private function f_imsi_table_find(hexstring imsi, template OCT4 tmsi)
+runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr {
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (ImsiTable[i].imsi == imsi or
+		    isvalue(tmsi) and match(ImsiTable[i].tmsi, tmsi)) {
+			return ImsiTable[i].comp_ref;
+		}
+	}
+	return null;
 }
 
 /* handle (optional) userData portion of various primitives and dispatch it to the client */
@@ -346,6 +372,27 @@ runs on BSSMAP_Emulation_CT return BSSAP_ConnHdlr;
 type function BssmapUnitdataCallback(PDU_BSSAP bssap)
 runs on BSSMAP_Emulation_CT return template PDU_BSSAP;
 
+/* handle common Unitdata such as Paging */
+private function CommonBssmapUnitdataCallback(PDU_BSSAP bssap)
+runs on BSSMAP_Emulation_CT return template PDU_BSSAP {
+	if (match(bssap, tr_BSSMAP_Paging)) {
+		var BSSAP_ConnHdlr client := null;
+		client := f_imsi_table_find(bssap.pdu.bssmap.paging.iMSI.digits,
+					   bssap.pdu.bssmap.paging.tMSI.tmsiOctets);
+		if (isvalue(client)) {
+			log("CommonBssmapUnitdataCallback: IMSI/TMSI found in table, dispatching to ",
+				client);
+			CLIENT.send(bssap) to client;
+			return omit;
+		}
+		log("CommonBssmapUnitdataCallback: IMSI/TMSI not found in table");
+	} else {
+		log("CommonBssmapUnitdataCallback: Not a paging message");
+	}
+	/* ELSE: handle in user callback */
+	return g_bssmap_ops.unitdata_cb.apply(bssap);
+}
+
 type record BssmapOps {
 	BssmapCreateCallback create_cb,
 	BssmapUnitdataCallback unitdata_cb,
@@ -375,13 +422,15 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 		var MgcpResponse mgcp_resp;
 		var BSSAP_ConnHdlr vc_hdlr;
 		var octetstring l3_info;
+		var hexstring imsi;
+		var OCT4 tmsi;
 
 		alt {
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
 		[] BSSAP.receive(BSSAP_N_UNITDATA_ind:?) -> value ud_ind {
 			/* Connectionless Procedures like RESET */
 			var template PDU_BSSAP resp;
-			resp := ops.unitdata_cb.apply(ud_ind.userData);
+			resp := CommonBssmapUnitdataCallback(ud_ind.userData);
 			if (isvalue(resp)) {
 				BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress,
 								ud_ind.calledAddress, resp));
@@ -528,6 +577,12 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			PROC.reply(BSSMAPEM_register:{l3_info, vc_hdlr});
 			}
 
+		[] PROC.getcall(BSSMAPEM_register_imsi:{?,?,?}) -> param(imsi, tmsi, vc_hdlr) {
+			f_create_imsi(imsi, tmsi, vc_hdlr);
+			PROC.reply(BSSMAPEM_register_imsi:{imsi, tmsi, vc_hdlr});
+			}
+
+
 		}
 	}
 }
@@ -553,8 +608,11 @@ type record ExpectData {
 /* procedure based port to register for incoming connections */
 signature BSSMAPEM_register(in octetstring l3, in BSSAP_ConnHdlr hdlr);
 
+/* procedure based port to register for incoming IMSI/TMSI */
+signature BSSMAPEM_register_imsi(in hexstring imsi, in OCT4 tmsi, in BSSAP_ConnHdlr hdlr);
+
 type port BSSMAPEM_PROC_PT procedure {
-	inout BSSMAPEM_register;
+	inout BSSMAPEM_register, BSSMAPEM_register_imsi;
 } with { extension "internal" };
 
 /* CreateCallback that can be used as create_cb and will use the expectation table */
@@ -602,11 +660,36 @@ runs on BSSMAP_Emulation_CT {
 	setverdict(fail, "No space left in ExpectTable");
 }
 
+private function f_create_imsi(hexstring imsi, OCT4 tmsi, BSSAP_ConnHdlr hdlr)
+runs on BSSMAP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (not ispresent(ImsiTable[i].imsi)) {
+			ImsiTable[i].imsi := imsi;
+			ImsiTable[i].tmsi := tmsi;
+			ImsiTable[i].comp_ref := hdlr;
+			log("Created IMSI[", i, "] for ", imsi, tmsi, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in ImsiTable");
+	self.stop;
+}
+
+
 private function f_expect_table_init()
 runs on BSSMAP_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
 		ExpectTable[i].l3_payload := omit;
 	}
 }
+
+/* helper function for clients to register their IMSI/TMSI */
+function f_bssmap_register_imsi(hexstring imsi, OCT4 tmsi)
+runs on BSSAP_ConnHdlr {
+	BSSAP_PROC.call(BSSMAPEM_register_imsi:{imsi, tmsi, self}) {
+		[] BSSAP_PROC.getreply(BSSMAPEM_register_imsi:{?,?,?}) {};
+	}
+}
+
 
 }
