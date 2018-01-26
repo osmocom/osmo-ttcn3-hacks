@@ -1311,6 +1311,147 @@ testcase TC_mo_crcx_ran_reject() runs on MTC_CT {
 }
 
 
+/* helper function to start a MT call: MNCC SETUP; Paging; DChan est.; DTAP SETUP */
+private function f_mt_call_start(inout CallParameters cpars) runs on BSC_ConnHdlr {
+	var MNCC_PDU mncc;
+	var MgcpCommand mgcp_cmd;
+	var OCT4 tmsi;
+
+	f_perform_lu(false, true, true, false);
+	if (isvalue(g_pars.tmsi)) {
+		tmsi := g_pars.tmsi;
+	} else {
+		tmsi := 'FFFFFFFF'O;
+	}
+	f_bssmap_register_imsi(g_pars.imsi, tmsi);
+
+	/* Allocate call reference and send SETUP via MNCC to MSC */
+	cpars.mncc_callref := f_rnd_int(2147483648);
+	MNCC.send(ts_MNCC_SETUP_req(cpars.mncc_callref, hex2str(g_pars.msisdn),
+				    hex2str(cpars.called_party), hex2str(g_pars.imsi)));
+
+	/* MSC->BSC: expect PAGING from MSC */
+	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	/* MS -> MSC: PAGING RESPONSE */
+	f_establish_fully_pag(valueof(ts_MI_IMSI_LV(g_pars.imsi)), false, false);
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	/* MSC->MS: SETUP */
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_SETUP(cpars.transaction_id, *, cpars.called_party)));
+}
+
+/* Test MT Call */
+private function f_tc_mt_crcx_ran_reject(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
+	var MNCC_PDU mncc;
+	var MgcpCommand mgcp_cmd;
+
+	f_mt_call_start(cpars);
+
+	/* MS->MSC: CALL CONFIRMED */
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CALL_CONF(cpars.transaction_id)));
+
+	MNCC.receive(tr_MNCC_CALL_CONF_ind(cpars.mncc_callref));
+
+	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
+	cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
+	cpars.mgcp_ep := mgcp_cmd.line.ep;
+	/* Respond to CRCX with error */
+	var MgcpResponse mgcp_rsp := {
+		line := {
+			code := "542",
+			trans_id := mgcp_cmd.line.trans_id,
+			string := "FORCED_FAIL"
+		},
+		params := omit,
+		sdp := omit
+	}
+	MGCP.send(mgcp_rsp);
+
+	timer T := 30.0;
+	T.start;
+	alt {
+	[] T.timeout { setverdict(fail, "Timeout waiting for channel release"); self.stop; }
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		BSSAP.send(ts_BSSMAP_ClearComplete);
+		BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+		setverdict(pass);
+		}
+	[] BSSAP.receive { repeat; }
+	[] MNCC.receive { repeat; }
+	[] GSUP.receive { repeat; }
+	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+		MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+		f_create_mgcp_delete_ep(cpars.mgcp_ep);
+		repeat;
+		}
+	[] MGCP.receive { repeat; }
+	}
+}
+testcase TC_mt_crcx_ran_reject() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_mt_crcx_ran_reject), testcasename(), 29);
+	vc_conn.done;
+}
+
+
+/* Test MT Call T310 timer */
+private function f_tc_mt_t310(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
+	var MNCC_PDU mncc;
+	var MgcpCommand mgcp_cmd;
+
+	f_mt_call_start(cpars);
+
+	/* MS->MSC: CALL CONFIRMED */
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CALL_CONF(cpars.transaction_id)));
+	MNCC.receive(tr_MNCC_CALL_CONF_ind(cpars.mncc_callref));
+
+	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
+	cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
+	cpars.mgcp_ep := mgcp_cmd.line.ep;
+	/* FIXME: Respond to CRCX */
+
+	/* old libosmocore T310 default timeout is 180s. so let's wait 190 */
+	timer T := 190.0;
+	T.start;
+	alt {
+	[] T.timeout { setverdict(fail, "Timeout waiting for T310"); self.stop; }
+	[] MNCC.receive(tr_MNCC_DISC_ind(cpars.mncc_callref)) {
+		MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
+		}
+	}
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
+	/* FIXME: We're sending this with TIflag 0: allocated by sender, which is wrong */
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
+
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		BSSAP.send(ts_BSSMAP_ClearComplete);
+		BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+		setverdict(pass);
+		}
+	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+		MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+		f_create_mgcp_delete_ep(cpars.mgcp_ep);
+		repeat;
+		}
+	}
+}
+testcase TC_mt_t310() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_mt_t310), testcasename(), 30);
+	vc_conn.done;
+}
+
 
 
 /* TODO:
