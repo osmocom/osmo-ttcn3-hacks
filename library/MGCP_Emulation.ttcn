@@ -36,6 +36,8 @@ import from IPL4asp_Types all;
 
 type component MGCP_ConnHdlr {
 	port MGCP_Conn_PT MGCP;
+	/* procedure based port to register for incoming connections */
+	port MGCPEM_PROC_PT MGCP_PROC;
 	var MgcpConnectionId mgcp_conn_id;
 }
 
@@ -44,6 +46,11 @@ type port MGCP_Conn_PT message {
 	inout MgcpCommand, MgcpResponse;
 } with { extension "internal" };
 
+/* represents a single MGCP Connection */
+type record ConnectionData {
+	MGCP_ConnHdlr	comp_ref,
+	MgcpConnectionId conn_id optional
+};
 
 type component MGCP_Emulation_CT {
 	/* Port facing to the UDP SUT */
@@ -51,13 +58,13 @@ type component MGCP_Emulation_CT {
 	/* All MGCP_ConnHdlr MGCP ports connect here
 	 * MGCP_Emulation_CT.main needs to figure out what messages
 	 * to send where with CLIENT.send() to vc_conn */
-	port MGCP_Conn_PT CLIENT;
+	port MGCP_Conn_PT MGCP_CLIENT;
 	/* currently tracked connections */
-//	var ConnectionData ConnectionTable[16];
+	var ConnectionData MgcpConnectionTable[16];
 	/* pending expected CRCX */
-	var ExpectData ExpectTable[8];
+	var ExpectData MgcpExpectTable[8];
 	/* procedure based port to register for incoming connections */
-	port MGCPEM_PROC_PT PROC;
+	port MGCPEM_PROC_PT MGCP_PROC;
 
 	var charstring g_mgcp_id;
 	var integer g_mgcp_conn_id := -1;
@@ -66,15 +73,19 @@ type component MGCP_Emulation_CT {
 type function MGCPCreateCallback(MgcpCommand cmd, charstring id)
 runs on MGCP_Emulation_CT return MGCP_ConnHdlr;
 
+type function MGCPUnitdataCallback(MgcpMessage msg)
+runs on MGCP_Emulation_CT return template MgcpMessage;
+
 type record MGCPOps {
-	MGCPCreateCallback create_cb
+	MGCPCreateCallback create_cb,
+	MGCPUnitdataCallback unitdata_cb
 }
 
 type record MGCP_conn_parameters {
-	charstring callagent_ip,
-	uint16_t callagent_udp_port,
-	charstring mgw_ip,
-	uint16_t mgw_udp_port
+	HostName callagent_ip,
+	PortNumber callagent_udp_port,
+	HostName mgw_ip,
+	PortNumber mgw_udp_port
 }
 
 function tr_MGCP_RecvFrom_R(template MgcpMessage msg)
@@ -90,19 +101,94 @@ runs on MGCP_Emulation_CT return template MGCP_RecvFrom {
 	return mrf;
 }
 
+private function f_conn_id_known(MgcpConnectionId conn_id)
+runs on MGCP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
+		if (MgcpConnectionTable[i].conn_id == conn_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(MGCP_ConnHdlr client)
+runs on MGCP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
+		if (MgcpConnectionTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_conn_id(MgcpConnectionId conn_id)
+runs on MGCP_Emulation_CT return MGCP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
+		if (MgcpConnectionTable[i].conn_id == conn_id) {
+			return MgcpConnectionTable[i].comp_ref;
+		}
+	}
+	log("MGCP Connection Table not found by Connection Id", conn_id);
+	setverdict(fail);
+	self.stop;
+}
+
+private function f_conn_id_by_comp(MGCP_ConnHdlr client)
+runs on MGCP_Emulation_CT return MgcpConnectionId {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
+		if (MgcpConnectionTable[i].comp_ref == client) {
+			return MgcpConnectionTable[i].conn_id;
+		}
+	}
+	log("MGCP Connection Table not found by component ", client);
+	setverdict(fail);
+	self.stop;
+}
+
+/* TODO: move this to MGCP_Types? */
+function f_mgcp_conn_id(MgcpMessage msg) return hexstring {
+	var MgcpParameterList params;
+	var integer i;
+	if (ischosen(msg.command)) {
+		params := msg.command.params;
+	} else {
+		params := msg.response.params;
+	}
+	for (i := 0; i < lengthof(params); i := i+1) {
+		if (params[i].code == "I") {
+			return str2hex(params[i].val);
+		}
+	}
+	return ''H;
+}
+
+private function f_conn_table_init()
+runs on MGCP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
+		MgcpConnectionTable[i].comp_ref := null;
+		MgcpConnectionTable[i].conn_id := omit;
+	}
+}
+
 function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_Emulation_CT {
 	var Result res;
 	g_mgcp_id := id;
-	//f_conn_table_init();
+	f_conn_table_init();
 	f_expect_table_init();
 
 	map(self:MGCP, system:MGCP_CODEC_PT);
-	res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.mgw_ip,
-p.mgw_udp_port,
-		p.callagent_ip, p.callagent_udp_port, 0, { udp:={} });
-	
+	if (p.callagent_udp_port == -1) {
+		res := MGCP_CodecPort_CtrlFunct.f_IPL4_listen(MGCP, p.mgw_ip, p.mgw_udp_port, { udp:={} });
+	} else {
+		res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.callagent_ip, p.callagent_udp_port, p.mgw_ip, p.mgw_udp_port, -1, { udp:={} });
+	}
+
 	g_mgcp_conn_id := res.connId;
-	
+
 	while (true) {
 		var MGCP_ConnHdlr vc_conn;
 		var ExpectCriteria crit;
@@ -113,32 +199,48 @@ p.mgw_udp_port,
 
 		alt {
 		/* MGCP from client */
-		[] CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
+		[] MGCP_CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
 			/* Pass message through */
 			msg.response := resp;
+			/* TODO: check which ConnectionID client has allocated + store in table? */
 			MGCP.send(t_MGCP_Send(g_mgcp_conn_id, msg));
 			}
 		[] MGCP.receive(tr_MGCP_RecvFrom_R(?)) -> value mrf {
+			if (p.callagent_udp_port == -1) {
+				/* we aren't yet connected to the remote side port, let's fix this */
+				p.callagent_udp_port := mrf.remPort;
+				MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.callagent_ip, p.callagent_udp_port, p.mgw_ip, p.mgw_udp_port, g_mgcp_conn_id, { udp:={} });
+			}
 			if (ischosen(mrf.msg.command)) {
 				cmd := mrf.msg.command;
-				vc_conn := ops.create_cb.apply(cmd, id);
-				f_handle_userData(vc_conn, cmd);
+				if (match(cmd, tr_MgcpCommand_CO)) {
+					/* connection-oriented MGCP */
+					if (cmd.line.verb == "CRCX") {
+						/* TODO: allocate ConnectionID here + store in Table? */
+						vc_conn := ops.create_cb.apply(cmd, id);
+					} else {
+						var MgcpConnectionId conn_id := f_mgcp_conn_id(mrf.msg);
+						vc_conn := f_comp_by_conn_id(conn_id);
+					}
+					MGCP_CLIENT.send(cmd) to vc_conn;
+				} else {
+					/* connectionless MGCP, i.e. messages without ConnectionId */
+					var template MgcpMessage r := ops.unitdata_cb.apply(mrf.msg);
+					if (isvalue(r)) {
+						MGCP.send(t_MGCP_Send(g_mgcp_conn_id, r));
+					}
+				}
 			} else {
 				setverdict(fail, "Received unexpected MGCP response: ", mrf.msg.response);
 				self.stop;
 			}
 			}
-		[] PROC.getcall(MGCPEM_register:{?,?}) -> param(crit, vc_conn) {
+		[] MGCP_PROC.getcall(MGCPEM_register:{?,?}) -> param(crit, vc_conn) {
 			f_create_expect(crit, vc_conn);
-			PROC.reply(MGCPEM_register:{crit, vc_conn});
+			MGCP_PROC.reply(MGCPEM_register:{crit, vc_conn});
 			}
 		}
 	}
-}
-
-private function f_handle_userData(MGCP_ConnHdlr conn, MgcpCommand cmd)
-runs on MGCP_Emulation_CT {
-	CLIENT.send(cmd) to conn;
 }
 
 /* "Expect" Handling */
@@ -163,8 +265,25 @@ type port MGCPEM_PROC_PT procedure {
 
 function f_get_mgcp_by_crit(ExpectCriteria crit)
 return template MgcpCommand {
-	template MgcpCommand ret := {
-	};
+	var template MgcpCommand ret := {
+		line := {
+			verb := ?,
+			trans_id := ?,
+			ep := ?,
+			ver := ?
+		},
+		params := *,
+		sdp := *
+	}
+	if (ispresent(crit.connid)) {
+		ret.params := { *, ts_MgcpParConnectionId(crit.connid), * };
+	}
+	if (ispresent(crit.endpoint)) {
+		ret.line.ep := crit.endpoint;
+	}
+	if (ispresent(crit.transid)) {
+		ret.line.trans_id := crit.transid;
+	}
 
 	return ret;
 }
@@ -178,20 +297,20 @@ runs on MGCP_Emulation_CT return MGCP_ConnHdlr {
 
 	/* Ensure cmd is a CRCX? */
 
-	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
-		if (not ispresent(ExpectTable[i].crit)) {
+	for (i := 0; i < sizeof(MgcpExpectTable); i := i+1) {
+		if (not ispresent(MgcpExpectTable[i].crit)) {
 			continue;
 		}
 		/* FIXME: Ignore criteria for now */
-//		mgcpcmd := f_get_mgcp_by_crit(ExpectTable[i].crit);
-//		if (match(cmd, mgcpcmd)) {
-			ret := ExpectTable[i].vc_conn;
+		mgcpcmd := f_get_mgcp_by_crit(MgcpExpectTable[i].crit);
+		if (match(cmd, mgcpcmd)) {
+			ret := MgcpExpectTable[i].vc_conn;
 			/* Release this entry */
-			ExpectTable[i].crit := omit;
-			ExpectTable[i].vc_conn := null;
+			MgcpExpectTable[i].crit := omit;
+			MgcpExpectTable[i].vc_conn := null;
 			log("Found Expect[", i, "] for ", cmd, " handled at ", ret);
 			return ret;
-//		}
+		}
 	}
 	setverdict(fail, "Couldn't find Expect for CRCX", cmd);
 	return ret;
@@ -202,29 +321,43 @@ runs on MGCP_Emulation_CT {
 	var integer i;
 
 	/* Check an entry like this is not already presnt */
-	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
-		if (crit == ExpectTable[i].crit) {
+	for (i := 0; i < sizeof(MgcpExpectTable); i := i+1) {
+		if (crit == MgcpExpectTable[i].crit) {
 			setverdict(fail, "Crit already present", crit);
 			self.stop;
 		}
 	}
-	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
-		if (not ispresent(ExpectTable[i].crit)) {
-			ExpectTable[i].crit := crit;
-			ExpectTable[i].vc_conn := hdlr;
+	for (i := 0; i < sizeof(MgcpExpectTable); i := i+1) {
+		if (not ispresent(MgcpExpectTable[i].crit)) {
+			MgcpExpectTable[i].crit := crit;
+			MgcpExpectTable[i].vc_conn := hdlr;
 			log("Created Expect[", i, "] for ", crit, " to be handled at ", hdlr);
 			return;
 		}
 	}
-	setverdict(fail, "No space left in ExpectTable")
+	setverdict(fail, "No space left in MgcpExpectTable")
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_mgcp_expect(ExpectCriteria dest_number) runs on MGCP_ConnHdlr {
+	MGCP_PROC.call(MGCPEM_register:{dest_number, self}) {
+		[] MGCP_PROC.getreply(MGCPEM_register:{?,?}) {};
+	}
 }
 
 private function f_expect_table_init()
 runs on MGCP_Emulation_CT {
 	var integer i;
-	for (i := 0; i < sizeof(ExpectTable); i := i + 1) {
-		ExpectTable[i].crit := omit;
+	for (i := 0; i < sizeof(MgcpExpectTable); i := i + 1) {
+		MgcpExpectTable[i].crit := omit;
 	}
 }
+
+function DummyUnitdataCallback(MgcpMessage msg)
+runs on MGCP_Emulation_CT return template MgcpMessage {
+	log("Ignoring MGCP ", msg);
+	return omit;
+}
+
 
 }
