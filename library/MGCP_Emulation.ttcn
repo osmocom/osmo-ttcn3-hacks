@@ -38,7 +38,6 @@ type component MGCP_ConnHdlr {
 	port MGCP_Conn_PT MGCP;
 	/* procedure based port to register for incoming connections */
 	port MGCPEM_PROC_PT MGCP_PROC;
-	var MgcpConnectionId mgcp_conn_id;
 }
 
 /* port between individual per-connection components and this dispatcher */
@@ -46,11 +45,14 @@ type port MGCP_Conn_PT message {
 	inout MgcpCommand, MgcpResponse;
 } with { extension "internal" };
 
-/* represents a single MGCP Connection */
-type record ConnectionData {
+/* represents a single MGCP Endpoint */
+type record EndpointData {
 	MGCP_ConnHdlr	comp_ref,
-	MgcpConnectionId conn_id optional
+	MgcpEndpoint	endpoint optional
 };
+
+/* pending CRCX with their transaction ID */
+type set of MgcpTransId MgcpTransIds;
 
 type component MGCP_Emulation_CT {
 	/* Port facing to the UDP SUT */
@@ -60,7 +62,8 @@ type component MGCP_Emulation_CT {
 	 * to send where with CLIENT.send() to vc_conn */
 	port MGCP_Conn_PT MGCP_CLIENT;
 	/* currently tracked connections */
-	var ConnectionData MgcpConnectionTable[16];
+	var EndpointData MgcpEndpointTable[16];
+	var MgcpTransIds MgcpPendingTrans := {};
 	/* pending expected CRCX */
 	var ExpectData MgcpExpectTable[8];
 	/* procedure based port to register for incoming connections */
@@ -101,11 +104,11 @@ runs on MGCP_Emulation_CT return template MGCP_RecvFrom {
 	return mrf;
 }
 
-private function f_conn_id_known(MgcpConnectionId conn_id)
+private function f_ep_known(MgcpEndpoint ep)
 runs on MGCP_Emulation_CT return boolean {
 	var integer i;
-	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
-		if (MgcpConnectionTable[i].conn_id == conn_id) {
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (MgcpEndpointTable[i].endpoint == ep) {
 			return true;
 		}
 	}
@@ -115,69 +118,113 @@ runs on MGCP_Emulation_CT return boolean {
 private function f_comp_known(MGCP_ConnHdlr client)
 runs on MGCP_Emulation_CT return boolean {
 	var integer i;
-	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
-		if (MgcpConnectionTable[i].comp_ref == client) {
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (MgcpEndpointTable[i].comp_ref == client) {
 			return true;
 		}
 	}
 	return false;
 }
 
-private function f_comp_by_conn_id(MgcpConnectionId conn_id)
+private function f_comp_by_ep(MgcpEndpoint ep)
 runs on MGCP_Emulation_CT return MGCP_ConnHdlr {
 	var integer i;
-	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
-		if (MgcpConnectionTable[i].conn_id == conn_id) {
-			return MgcpConnectionTable[i].comp_ref;
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (MgcpEndpointTable[i].endpoint == ep) {
+			return MgcpEndpointTable[i].comp_ref;
 		}
 	}
-	log("MGCP Connection Table not found by Connection Id", conn_id);
+	log("MGCP Endpoint Table not found by Endpoint", ep);
 	setverdict(fail);
 	self.stop;
 }
 
-private function f_conn_id_by_comp(MGCP_ConnHdlr client)
-runs on MGCP_Emulation_CT return MgcpConnectionId {
+private function f_ep_by_comp(MGCP_ConnHdlr client)
+runs on MGCP_Emulation_CT return MgcpEndpoint {
 	var integer i;
-	for (i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
-		if (MgcpConnectionTable[i].comp_ref == client) {
-			return MgcpConnectionTable[i].conn_id;
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (MgcpEndpointTable[i].comp_ref == client) {
+			return MgcpEndpointTable[i].endpoint;
 		}
 	}
-	log("MGCP Connection Table not found by component ", client);
+	log("MGCP Endpoint Table not found by component ", client);
 	setverdict(fail);
 	self.stop;
+}
+
+private function f_ep_table_add(MGCP_ConnHdlr comp_ref, MgcpEndpoint ep)
+runs on MGCP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (not isvalue(MgcpEndpointTable[i].endpoint)) {
+			MgcpEndpointTable[i].endpoint := ep;
+			MgcpEndpointTable[i].comp_ref := comp_ref;
+			return;
+		}
+	}
+	setverdict(fail, "MGCP Endpoint Table full!");
+	self.stop;
+}
+
+private function f_ep_table_del(MGCP_ConnHdlr comp_ref, MgcpEndpoint ep)
+runs on MGCP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		if (MgcpEndpointTable[i].comp_ref == comp_ref and
+		    MgcpEndpointTable[i].endpoint == ep) {
+			MgcpEndpointTable[i].endpoint := omit;
+			MgcpEndpointTable[i].comp_ref := null;
+			return;
+		}
+	}
+	setverdict(fail, "MGCP Endpoint Table: Couldn't find to-be-deleted entry!");
+	self.stop;
+}
+
+
+/* Check if the given transaction ID is a pending CRCX. If yes, return true + remove */
+private function f_trans_id_was_pending(MgcpTransId trans_id)
+runs on MGCP_Emulation_CT return boolean {
+	for (var integer i := 0; i < lengthof(MgcpPendingTrans); i := i+1) {
+		if (MgcpPendingTrans[i] == trans_id) {
+			/* Remove from list */
+			var MgcpTransIds OldPendingTrans := MgcpPendingTrans;
+			MgcpPendingTrans := {}
+			for (var integer j := 0; j < lengthof(OldPendingTrans); j := j+1) {
+				if (j != i) {
+					MgcpPendingTrans := MgcpPendingTrans & {OldPendingTrans[j]};
+				}
+			}
+			return true;
+		}
+	}
+	return false;
 }
 
 /* TODO: move this to MGCP_Types? */
-function f_mgcp_conn_id(MgcpMessage msg) return hexstring {
+function f_mgcp_ep(MgcpMessage msg) return MgcpEndpoint {
 	var MgcpParameterList params;
 	var integer i;
 	if (ischosen(msg.command)) {
-		params := msg.command.params;
+		return msg.command.line.ep;
 	} else {
-		params := msg.response.params;
+		/* FIXME */
+		return "null@none";
 	}
-	for (i := 0; i < lengthof(params); i := i+1) {
-		if (params[i].code == "I") {
-			return str2hex(params[i].val);
-		}
-	}
-	return ''H;
 }
 
-private function f_conn_table_init()
+private function f_ep_table_init()
 runs on MGCP_Emulation_CT {
-	for (var integer i := 0; i < sizeof(MgcpConnectionTable); i := i+1) {
-		MgcpConnectionTable[i].comp_ref := null;
-		MgcpConnectionTable[i].conn_id := omit;
+	for (var integer i := 0; i < sizeof(MgcpEndpointTable); i := i+1) {
+		MgcpEndpointTable[i].comp_ref := null;
+		MgcpEndpointTable[i].endpoint := omit;
 	}
 }
 
 function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_Emulation_CT {
 	var Result res;
 	g_mgcp_id := id;
-	f_conn_table_init();
+	f_ep_table_init();
 	f_expect_table_init();
 
 	map(self:MGCP, system:MGCP_CODEC_PT);
@@ -196,12 +243,19 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 		var MgcpMessage msg;
 		var MgcpCommand cmd;
 		var MgcpResponse resp;
+		var MgcpEndpoint ep;
 
 		alt {
 		/* MGCP from client */
 		[] MGCP_CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
+			msg := {
+				response := resp
+			};
+			/* If this is the resposne to a pending CRCX, extract Endpoint and store in table */
+			if (f_trans_id_was_pending(resp.line.trans_id)) {
+				f_ep_table_add(vc_conn, f_mgcp_ep(msg));
+			}
 			/* Pass message through */
-			msg.response := resp;
 			/* TODO: check which ConnectionID client has allocated + store in table? */
 			MGCP.send(t_MGCP_Send(g_mgcp_conn_id, msg));
 			}
@@ -213,21 +267,25 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 			}
 			if (ischosen(mrf.msg.command)) {
 				cmd := mrf.msg.command;
-				if (match(cmd, tr_MgcpCommand_CO)) {
-					/* connection-oriented MGCP */
-					if (cmd.line.verb == "CRCX") {
-						/* TODO: allocate ConnectionID here + store in Table? */
-						vc_conn := ops.create_cb.apply(cmd, id);
-					} else {
-						var MgcpConnectionId conn_id := f_mgcp_conn_id(mrf.msg);
-						vc_conn := f_comp_by_conn_id(conn_id);
-					}
+				if (f_ep_known(cmd.line.ep)) {
+					vc_conn := f_comp_by_ep(cmd.line.ep);
 					MGCP_CLIENT.send(cmd) to vc_conn;
 				} else {
-					/* connectionless MGCP, i.e. messages without ConnectionId */
-					var template MgcpMessage r := ops.unitdata_cb.apply(mrf.msg);
-					if (isvalue(r)) {
-						MGCP.send(t_MGCP_Send(g_mgcp_conn_id, r));
+					if (cmd.line.verb == "CRCX") {
+						vc_conn := ops.create_cb.apply(cmd, id);
+						if (true /* non-wildcard EP */) {
+							f_ep_table_add(vc_conn, cmd.line.ep);
+						} else {
+							/* add this transaction to list of pending transactions */
+							MgcpPendingTrans := MgcpPendingTrans & {cmd.line.trans_id};
+						}
+						MGCP_CLIENT.send(cmd) to vc_conn;
+					} else {
+						/* connectionless MGCP, i.e. messages without ConnectionId */
+						var template MgcpMessage r := ops.unitdata_cb.apply(mrf.msg);
+						if (isvalue(r)) {
+							MGCP.send(t_MGCP_Send(g_mgcp_conn_id, r));
+						}
 					}
 				}
 			} else {
@@ -239,7 +297,12 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 			f_create_expect(crit, vc_conn);
 			MGCP_PROC.reply(MGCPEM_register:{crit, vc_conn});
 			}
+		[] MGCP_PROC.getcall(MGCPEM_delete_ep:{?,?}) -> param(ep, vc_conn) {
+			f_ep_table_del(vc_conn, ep);
+			MGCP_PROC.reply(MGCPEM_delete_ep:{ep, vc_conn});
+			}
 		}
+
 	}
 }
 
@@ -258,9 +321,10 @@ type record ExpectData {
 }
 
 signature MGCPEM_register(in ExpectCriteria cmd, in MGCP_ConnHdlr hdlr);
+signature MGCPEM_delete_ep(in MgcpEndpoint ep, in MGCP_ConnHdlr hdlr);
 
 type port MGCPEM_PROC_PT procedure {
-	inout MGCPEM_register;
+	inout MGCPEM_register, MGCPEM_delete_ep;
 } with { extension "internal" };
 
 function f_get_mgcp_by_crit(ExpectCriteria crit)
@@ -294,8 +358,6 @@ runs on MGCP_Emulation_CT return MGCP_ConnHdlr {
 	var MGCP_ConnHdlr ret := null;
 	var template MgcpCommand mgcpcmd;
 	var integer i;
-
-	/* Ensure cmd is a CRCX? */
 
 	for (i := 0; i < sizeof(MgcpExpectTable); i := i+1) {
 		if (not ispresent(MgcpExpectTable[i].crit)) {
@@ -344,6 +406,14 @@ function f_create_mgcp_expect(ExpectCriteria dest_number) runs on MGCP_ConnHdlr 
 		[] MGCP_PROC.getreply(MGCPEM_register:{?,?}) {};
 	}
 }
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_mgcp_delete_ep(MgcpEndpoint ep) runs on MGCP_ConnHdlr {
+	MGCP_PROC.call(MGCPEM_delete_ep:{ep, self}) {
+		[] MGCP_PROC.getreply(MGCPEM_delete_ep:{?,?}) {};
+	}
+}
+
 
 private function f_expect_table_init()
 runs on MGCP_Emulation_CT {
