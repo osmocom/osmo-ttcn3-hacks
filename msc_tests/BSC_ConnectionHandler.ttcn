@@ -27,6 +27,13 @@ type component BSC_ConnHdlr extends BSSAP_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr
 	var BSC_ConnHdlrPars g_pars;
 }
 
+type record AuthVector {
+	OCT16 rand,
+	OCT4 sres,
+	OCT8 kc
+	/* FIXME: 3G elements */
+}
+
 type record BSC_ConnHdlrPars {
 	SCCP_PAR_Address sccp_addr_own,
 	SCCP_PAR_Address sccp_addr_peer,
@@ -37,7 +44,7 @@ type record BSC_ConnHdlrPars {
 	OCT4 tmsi optional,
 	BSSMAP_IE_ClassmarkInformationType2 cm2,
 	BSSMAP_IE_ClassmarkInformationType3 cm3 optional,
-	octetstring kc optional
+	AuthVector vec optional
 };
 
 
@@ -103,7 +110,7 @@ runs on BSC_ConnHdlr {
 }
 
 /* helper function to fully establish a dedicated channel */
-function f_establish_fully(MobileIdentityLV mi, boolean expect_auth)
+function f_establish_fully(MobileIdentityLV mi, boolean expect_auth, boolean expect_ciph)
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
 	var PDU_DTAP_MT dtap_mt;
@@ -111,10 +118,13 @@ runs on BSC_ConnHdlr {
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
 	f_bssap_compl_l3(l3_info);
 
-	if (expect_auth) {
-		/* FIXME */
+	f_mm_common(expect_auth, expect_ciph);
+	if (expect_ciph) {
+		/* implicit CM SERVICE ACCEPT? */
+	} else {
+		/* explicit CM SERVICE ACCEPT */
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC));
 	}
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC));
 }
 
 /* build a PDU_ML3_MS_NW containing a Location Update by IMSI */
@@ -141,13 +151,6 @@ private function f_build_lu(MobileIdentityLV mi) return PDU_ML3_MS_NW
 	return l3_info;
 }
 
-type record AuthVector {
-	OCT16 rand,
-	OCT4 sres,
-	OCT8 kc
-	/* FIXME: 3G elements */
-}
-
 private function f_rnd_oct(integer len) return octetstring {
 	var integer i;
 	var octetstring res;
@@ -165,12 +168,32 @@ function f_gen_auth_vec_2g() return AuthVector {
 	return vec;
 }
 
+
+function f_mm_common(boolean expect_auth, boolean expect_ciph) runs on BSC_ConnHdlr
+{
+	if (expect_auth) {
+		g_pars.vec := f_gen_auth_vec_2g();
+		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
+									 g_pars.vec.sres,
+									 g_pars.vec.kc));
+		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
+		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_MM_AUTH_REQ(g_pars.vec.rand)));
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MT_MM_AUTH_RESP_2G(g_pars.vec.sres)));
+	}
+
+	if (expect_ciph) {
+		BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc));
+		BSSAP.send(ts_BSSMAP_CipherModeCompl('02'O));
+	}
+}
+
 function f_perform_lu(boolean expect_auth, boolean expect_tmsi, boolean send_early_cm,
 		      boolean expect_ciph := false)
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi)
 	var PDU_DTAP_MT dtap_mt;
-	var AuthVector vec;
 
 	/* tell GSUP dispatcher to send this IMSI to us */
 	f_create_gsup_expect(hex2str(g_pars.imsi));
@@ -182,21 +205,7 @@ runs on BSC_ConnHdlr {
 		BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
 	}
 
-	if (expect_auth) {
-		vec := f_gen_auth_vec_2g();
-		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(vec.rand, vec.sres, vec.kc));
-		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
-		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
-
-		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_MM_AUTH_REQ(vec.rand)));
-		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MT_MM_AUTH_RESP_2G(vec.sres)));
-	}
-
-	if (expect_ciph) {
-		BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, vec.kc));
-		g_pars.kc := vec.kc;
-		BSSAP.send(ts_BSSMAP_CipherModeCompl('02'O));
-	}
+	f_mm_common(expect_auth, expect_ciph);
 
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
