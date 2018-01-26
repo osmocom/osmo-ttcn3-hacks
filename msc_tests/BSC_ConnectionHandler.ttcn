@@ -2,7 +2,9 @@ module BSC_ConnectionHandler {
 
 import from General_Types all;
 import from Osmocom_Types all;
+import from Native_Functions all;
 import from GSM_Types all;
+import from IPL4asp_Types all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
 import from BSSMAP_Emulation all;
@@ -16,10 +18,13 @@ import from MNCC_Emulation all;
 
 import from MGCP_Types all;
 import from MGCP_Emulation all;
+import from MGCP_Templates all;
+import from SDP_Types all;
 
 import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_MM_Types all;
+import from MobileL3_CC_Types all;
 import from L3_Templates all;
 
 /* this component represents a single subscriber connection */
@@ -261,6 +266,138 @@ function f_foo() runs on BSC_ConnHdlr{
 	/* re-configure MSC behaviour via VTY */
 }
 
+/* parameters related to a (MO?) voice call */
+type record CallParameters {
+	boolean expect_auth,				/* do we expect AUTHENTICATE from network */
+	boolean expect_ciph,				/* do we expect CIPHER MODE from network */
+
+	/* CC related parameters */
+	hexstring called_party,				/* whom are we calling */
+	integer transaction_id optional,		/* which TS 04.08 CC transaction ID to use */
+	BearerCapability_TLV bearer_cap,		/* which bearer capabilities to claim */
+
+	/* MNCC related parameters */
+	uint32_t mncc_callref optional,			/* call reference on the MNCC side */
+	MNCC_bearer_cap mncc_bearer_cap optional,	/* MNCC-side bearer capabilities */
+
+	/* RTP related parameters */
+	HostName bss_rtp_ip optional,			/* BSS Side RTP IP */
+	PortNumber bss_rtp_port optional,		/* BSS Side RTP Port */
+	HostName mss_rtp_ip optional,			/* MSS Side RTP IP */
+	PortNumber mss_rtp_port optional,		/* MSS Side RTP Port */
+	uint7_t rtp_payload_type,			/* dynamic RTP payload type */
+	charstring rtp_sdp_format,			/* AMR/8000 or the like */
+
+	MgcpCallId mgcp_call_id optional,			/* MGCP Call ID; CallAgent allocated */
+	MgcpEndpoint mgcp_ep optional			/* MGCP Endpoint, CallAgent or MGW allocated */,
+	MgcpConnectionId mgcp_connection_id_bss,	/* MGCP Connection ID BSS Side */
+	MgcpConnectionId mgcp_connection_id_mss		/* MGCP Connection ID MSS Side */
+}
+
+template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
+	expect_auth := false,
+	expect_ciph := false,
+	called_party := called,
+	transaction_id := tid,
+	bearer_cap := valueof(ts_Bcap_voice),
+	mncc_callref := omit,
+	mncc_bearer_cap := valueof(ts_MNCC_bcap_voice),
+	bss_rtp_ip := "1.1.1.1",
+	bss_rtp_port := 0,//
+	mss_rtp_ip := omit,
+	mss_rtp_port := omit,
+	rtp_payload_type := 98,
+	rtp_sdp_format := "AMR/8000",
+	mgcp_call_id := omit,
+	mgcp_ep := omit,
+	mgcp_connection_id_bss := '0'H,//
+	mgcp_connection_id_mss := '0'H //
+};
+
+
+function f_mo_call(inout CallParameters cpars)
+runs on BSC_ConnHdlr {
+
+	var MobileIdentityLV mi;
+	var MNCC_PDU mncc;
+	var MgcpCommand mgcp_cmd;
+
+	/* If we have a TMSI, use TMSI instead of IMSI */
+	if (ispresent(g_pars.tmsi)) {
+		mi := valueof(ts_MI_TMSI_LV(g_pars.tmsi));
+	} else {
+		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	}
+	f_establish_fully(mi, cpars.expect_auth, cpars.expect_ciph);
+
+	/* Create MNCC and MGCP expect */
+	f_create_mncc_expect(hex2str(cpars.called_party));
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
+	interleave {
+	[] MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc {
+		cpars.mncc_callref := mncc.u.signal.callref;
+		/* Call Proceeding */
+		MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
+		};
+	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
+		/* TODO: dynamic EP allocation case */
+		cpars.mgcp_ep := mgcp_cmd.line.ep;
+		var SDP_Message sdp := valueof(ts_SDP(cpars.bss_rtp_ip, cpars.bss_rtp_ip,
+							hex2str(cpars.mgcp_call_id), "42",
+							cpars.bss_rtp_port,
+							{ int2str(cpars.rtp_payload_type) },
+							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+										cpars.rtp_sdp_format)),
+							  valueof(ts_SDP_ptime(20)) }));
+		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp));
+		}
+	}
+
+	/* Alerting */
+	MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id)));
+
+	alt {
+	/* FIXME: expect AoIP IP/Port to match what we returned in CRCX_ACK above */
+	[] BSSAP.receive(tr_BSSMAP_AssignmentReq) {
+		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
+		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla));
+		}
+	}
+
+	/* Answer. This causes TCH assignment in case of "late assignment" */
+	MNCC.send(ts_MNCC_SETUP_COMPL_req(cpars.mncc_callref));
+
+	f_sleep(3.0);
+
+	/* Hangup by "B" side */
+	MNCC.send(ts_MNCC_DISC_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
+
+	/* Release of call */
+	MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(42))));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
+
+	/* clearing of radio channel */
+	interleave {
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		BSSAP.send(ts_BSSMAP_ClearComplete);
+		BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+		}
+	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+		/* TODO: For one or all connections on EP? */
+		MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+		f_create_mgcp_delete_ep(cpars.mgcp_ep);
+		}
+	}
+	setverdict(pass);
+}
 
 
 
