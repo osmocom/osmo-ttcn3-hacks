@@ -17,7 +17,6 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
-			titan.TestPorts.SCTPasp \
 			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.TELNETasp \
@@ -41,7 +40,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0
 
-OSMOGITHUB_REPOS=	
+OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 
