@@ -40,6 +40,13 @@ type record AuthVector {
 	/* FIXME: 3G elements */
 }
 
+type record BSC_ConnHdlrNetworkPars {
+	OCT1	kc_support,
+	boolean expect_tmsi,
+	boolean	expect_auth,
+	boolean	expect_ciph
+}
+
 type record BSC_ConnHdlrPars {
 	SCCP_PAR_Address sccp_addr_own,
 	SCCP_PAR_Address sccp_addr_peer,
@@ -50,7 +57,8 @@ type record BSC_ConnHdlrPars {
 	OCT4 tmsi optional,
 	BSSMAP_IE_ClassmarkInformationType2 cm2,
 	BSSMAP_IE_ClassmarkInformationType3 cm3 optional,
-	AuthVector vec optional
+	AuthVector vec optional,
+	BSC_ConnHdlrNetworkPars net
 };
 
 /* altstep for the global guard timer */
@@ -133,7 +141,7 @@ runs on BSC_ConnHdlr {
 }
 
 /* helper function to fully establish a dedicated channel */
-function f_establish_fully(MobileIdentityLV mi, boolean expect_auth, boolean expect_ciph)
+function f_establish_fully(MobileIdentityLV mi)
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
 	var PDU_DTAP_MT dtap_mt;
@@ -141,8 +149,8 @@ runs on BSC_ConnHdlr {
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
 	f_bssap_compl_l3(l3_info);
 
-	f_mm_common(expect_auth, expect_ciph);
-	if (expect_ciph) {
+	f_mm_common();
+	if (g_pars.net.expect_ciph) {
 		/* implicit CM SERVICE ACCEPT? */
 	} else {
 		/* explicit CM SERVICE ACCEPT */
@@ -151,7 +159,7 @@ runs on BSC_ConnHdlr {
 }
 
 /* helper function to fully establish a dedicated channel */
-function f_establish_fully_pag(MobileIdentityLV mi, boolean expect_auth, boolean expect_ciph)
+function f_establish_fully_pag(MobileIdentityLV mi)
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_info := valueof(ts_PAG_RESP(mi));
 	var PDU_DTAP_MT dtap_mt;
@@ -159,7 +167,7 @@ runs on BSC_ConnHdlr {
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
 	f_bssap_compl_l3(l3_info);
 
-	f_mm_common(expect_auth, expect_ciph);
+	f_mm_common();
 }
 
 
@@ -205,9 +213,9 @@ function f_gen_auth_vec_2g() return AuthVector {
 }
 
 
-function f_mm_common(boolean expect_auth, boolean expect_ciph) runs on BSC_ConnHdlr
+function f_mm_common() runs on BSC_ConnHdlr
 {
-	if (expect_auth) {
+	if (g_pars.net.expect_auth) {
 		g_pars.vec := f_gen_auth_vec_2g();
 		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
 									 g_pars.vec.sres,
@@ -219,14 +227,13 @@ function f_mm_common(boolean expect_auth, boolean expect_ciph) runs on BSC_ConnH
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MT_MM_AUTH_RESP_2G(g_pars.vec.sres)));
 	}
 
-	if (expect_ciph) {
+	if (g_pars.net.expect_ciph) {
 		BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc));
 		BSSAP.send(ts_BSSMAP_CipherModeCompl('02'O));
 	}
 }
 
-function f_perform_lu(boolean expect_auth, boolean expect_tmsi, boolean send_early_cm,
-		      boolean expect_ciph := false)
+function f_perform_lu(boolean send_early_cm)
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi)
 	var PDU_DTAP_MT dtap_mt;
@@ -241,7 +248,7 @@ runs on BSC_ConnHdlr {
 		BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
 	}
 
-	f_mm_common(expect_auth, expect_ciph);
+	f_mm_common();
 
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
@@ -252,7 +259,7 @@ runs on BSC_ConnHdlr {
 	alt {
 	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) -> value dtap_mt {
 		var PDU_ML3_LocationUpdateAccept lu_acc := dtap_mt.dtap.msgs.mm.locationUpdateAccept;
-		if (expect_tmsi) {
+		if (g_pars.net.expect_tmsi) {
 			if (not ispresent(lu_acc.mobileIdentityTLV) or
 			    not ischosen(lu_acc.mobileIdentityTLV.mobileIdentityLV.mobileIdentityV.oddEvenInd_identity.tmsi_ptmsi)) {
 				setverdict(fail, "Expected TMSI but no TMSI was allocated");
@@ -299,9 +306,6 @@ function f_foo() runs on BSC_ConnHdlr{
 
 /* parameters related to a (MO?) voice call */
 type record CallParameters {
-	boolean expect_auth,				/* do we expect AUTHENTICATE from network */
-	boolean expect_ciph,				/* do we expect CIPHER MODE from network */
-
 	/* CC related parameters */
 	hexstring called_party,				/* whom are we calling */
 	integer transaction_id optional,		/* which TS 04.08 CC transaction ID to use */
@@ -330,8 +334,6 @@ type record CallParameters {
 }
 
 template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
-	expect_auth := false,
-	expect_ciph := false,
 	called_party := called,
 	transaction_id := tid,
 	bearer_cap := valueof(ts_Bcap_voice),
@@ -367,7 +369,7 @@ runs on BSC_ConnHdlr {
 	} else {
 		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
 	}
-	f_establish_fully(mi, cpars.expect_auth, cpars.expect_ciph);
+	f_establish_fully(mi);
 
 	/* Create MNCC and MGCP expect */
 	f_create_mncc_expect(hex2str(cpars.called_party));
