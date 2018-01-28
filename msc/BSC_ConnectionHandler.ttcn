@@ -55,11 +55,57 @@ type record BSC_ConnHdlrPars {
 	hexstring imsi,
 	hexstring msisdn,
 	OCT4 tmsi optional,
+	MobileStationClassmark1_V cm1,
 	BSSMAP_IE_ClassmarkInformationType2 cm2,
 	BSSMAP_IE_ClassmarkInformationType3 cm3 optional,
 	AuthVector vec optional,
 	BSC_ConnHdlrNetworkPars net
 };
+
+/* get a one-octet bitmaks of supported algorithms based on Classmark information */
+function f_alg_mask_from_cm(BSSMAP_IE_ClassmarkInformationType2 cm2) return OCT1 {
+	var BIT8 res := '00000001'B;	/* A5/0 always supported */
+
+	if (cm2.a5_1 == '0'B) {
+		res := res or4b '00000010'B;
+	}
+	if (cm2.classmarkInformationType2_oct5.a5_2 == '1'B ) {
+		res := res or4b '00000100'B;
+	}
+	if (cm2.classmarkInformationType2_oct5.a5_3 == '1'B) {
+		res := res or4b '00001000'B;
+	}
+	/* TODO: CM3 for A5/4 and beyond */
+	return bit2oct(res);
+}
+
+/* determine the best algorithm available within the bit-mask */
+function f_best_alg_from_mask(OCT1 alg_in) return OCT1 {
+	var BIT8 alg := oct2bit(alg_in);
+	var BIT8 ordered_algs[8] := {
+		'10000000'B, '01000000'B, '00100000'B, '00010000'B,
+		'00001000'B,	/* A5/3 */
+		'00000010'B,	/* A5/1 */
+		'00000100'B,	/* A5/2 */
+		'00000001'B 	/* A5/0 */ }
+	for (var integer i := 0; i < sizeof(ordered_algs); i := i+1) {
+		if (alg and4b ordered_algs[i] != '00000000'B) {
+			return bit2oct(ordered_algs[i]);
+		}
+	}
+	return '00'O;
+}
+
+/* return an integer like '1' for A5/1 based on a mask (with only one bit set */
+function f_alg_from_mask(OCT1 mask_in) return integer {
+	var BIT8 mask := oct2bit(mask_in);
+	for (var integer i := 0; i < 8; i := i+1) {
+		if (mask and4b ('00000001'B << i) != '00000000'B) {
+			return i;
+		}
+	}
+	return -1;
+}
 
 /* altstep for the global guard timer */
 private altstep as_Tguard() runs on BSC_ConnHdlr {
@@ -172,26 +218,26 @@ runs on BSC_ConnHdlr {
 
 
 /* build a PDU_ML3_MS_NW containing a Location Update by IMSI */
-function f_build_lu_imsi(hexstring imsi) return PDU_ML3_MS_NW
+function f_build_lu_imsi(hexstring imsi) runs on BSC_ConnHdlr return PDU_ML3_MS_NW
 {
 	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(imsi));
 	return f_build_lu(mi);
 }
-function f_build_lu_imei(hexstring imei) return PDU_ML3_MS_NW
+function f_build_lu_imei(hexstring imei) runs on BSC_ConnHdlr return PDU_ML3_MS_NW
 {
 	var MobileIdentityLV mi := valueof(ts_MI_IMEI_LV(imei));
 	return f_build_lu(mi);
 }
-function f_build_lu_tmsi(OCT4 tmsi) return PDU_ML3_MS_NW
+function f_build_lu_tmsi(OCT4 tmsi) runs on BSC_ConnHdlr return PDU_ML3_MS_NW
 {
 	var MobileIdentityLV mi := valueof(ts_MI_TMSI_LV(tmsi));
 	return f_build_lu(mi);
 }
-private function f_build_lu(MobileIdentityLV mi) return PDU_ML3_MS_NW
+private function f_build_lu(MobileIdentityLV mi) runs on BSC_ConnHdlr return PDU_ML3_MS_NW
 {
 	var LocationAreaIdentification_V old_lai := { '62F220'O, '9999'O };
 	var PDU_ML3_MS_NW l3_info := valueof(ts_ML3_MO_LU_Req(valueof(ts_ML3_IE_LuType_Attach),
-							      old_lai, mi, valueof(ts_CM1)));
+							      old_lai, mi, g_pars.cm1));
 	return l3_info;
 }
 
@@ -213,7 +259,7 @@ function f_gen_auth_vec_2g() return AuthVector {
 }
 
 
-function f_mm_common() runs on BSC_ConnHdlr
+function f_mm_auth() runs on BSC_ConnHdlr
 {
 	if (g_pars.net.expect_auth) {
 		g_pars.vec := f_gen_auth_vec_2g();
@@ -226,10 +272,26 @@ function f_mm_common() runs on BSC_ConnHdlr
 		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_MM_AUTH_REQ(g_pars.vec.rand)));
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MT_MM_AUTH_RESP_2G(g_pars.vec.sres)));
 	}
+}
 
+function f_mm_common() runs on BSC_ConnHdlr
+{
+	f_mm_auth();
 	if (g_pars.net.expect_ciph) {
-		BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc));
-		BSSAP.send(ts_BSSMAP_CipherModeCompl('02'O));
+		var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2);
+		var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
+		alt {
+		[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) {
+			var OCT1 a5_chosen := f_best_alg_from_mask(a5_intersect);
+			var integer a5_nr := f_alg_from_mask(a5_chosen);
+			BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(a5_nr+1, 1)));
+			}
+		[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
+			setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
+			self.stop;
+			}
+		}
+		/* FIXME: Send the best available algorithm */
 	}
 }
 
