@@ -31,6 +31,7 @@ import from IPA_Emulation all;
 type component RSL_DchanHdlr {
 	/* port facing up towards dedicated channel handler */
 	port RSL_DCHAN_PT RSL;
+	port RSLEM_PROC_PT RSL_PROC;
 	var RslChannelNr g_chan_nr;
 };
 
@@ -46,6 +47,12 @@ template RSLDC_ChanRqd ts_RSLDC_ChanRqd(OCT1 ra, GsmFrameNumber fn) := {
 
 type port RSL_DCHAN_PT message {
 	inout RSLDC_ChanRqd, RSL_Message;
+} with { extension "internal" };
+
+signature RSLEM_register(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
+
+type port RSLEM_PROC_PT procedure {
+	inout RSLEM_register;
 } with { extension "internal" };
 
 /***********************************************************************
@@ -163,7 +170,8 @@ private function f_cid_create(OCT1 ra, GsmFrameNumber fn, RSL_DchanHdlr comp_ref
 runs on RSL_Emulation_CT return integer {
 	var integer i;
 	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
-		if (not ispresent(ConnectionTable[i].ra)) {
+		if (not ispresent(ConnectionTable[i].ra) and
+		    not ispresent(ConnectionTable[i].trx_nr)) {
 			ConnectionTable[i].ra := ra;
 			ConnectionTable[i].ra_fn := fn;
 			ConnectionTable[i].comp_ref := comp_ref;
@@ -174,14 +182,52 @@ runs on RSL_Emulation_CT return integer {
 	return -1;
 }
 
+/* create an ew client with given RA and FN */
+private function f_cid_create_cnr(uint8_t trx_nr, RslChannelNr chan_nr,  RSL_DchanHdlr comp_ref)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (not ispresent(ConnectionTable[i].ra) and
+		    not ispresent(ConnectionTable[i].trx_nr)) {
+			ConnectionTable[i].stream_id := f_streamId_by_trx(trx_nr);
+			ConnectionTable[i].trx_nr := trx_nr;
+			ConnectionTable[i].chan_nr := chan_nr;
+			ConnectionTable[i].comp_ref := comp_ref;
+			return i;
+		}
+	}
+	log("No free entry in conn table for ", trx_nr, chan_nr, comp_ref);
+	return -1;
+}
+
+
+/* create an ew client with given RA and FN */
+private function f_cid_delete_cnr(IpaStreamId stream_id, RslChannelNr chan_nr,  RSL_DchanHdlr comp_ref)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == null) {
+			continue;
+		}
+		if (ConnectionTable[i].stream_id == stream_id and
+		    ConnectionTable[i].chan_nr == chan_nr and
+		    ConnectionTable[i].comp_ref == comp_ref) {
+			f_cid_clear(i);
+		}
+	}
+	log("Unable to find entry to delete for ", stream_id, chan_nr, comp_ref);
+	return -1;
+}
+
+
 private function f_cid_clear(integer cid)
 runs on RSL_Emulation_CT {
 	ConnectionTable[cid].ra := omit;
 	ConnectionTable[cid].ra_fn := omit;
-	ConnectionTable[cid].ra_fn := omit;
 	ConnectionTable[cid].trx_nr := omit;
 	ConnectionTable[cid].stream_id := omit;
 	ConnectionTable[cid].chan_nr := omit;
+	ConnectionTable[cid].comp_ref := null;
 }
 
 type component RSL_Emulation_CT {
@@ -189,6 +235,7 @@ type component RSL_Emulation_CT {
 	port IPA_RSL_PT IPA_PT;
 	/* port facing up towards dedicated channel handler */
 	port RSL_DCHAN_PT CLIENT_PT;
+	port RSLEM_PROC_PT RSL_PROC;
 
 	/* state of all concurrent connections / dedicated channels */
 	var ConnectionData ConnectionTable[64];
@@ -205,12 +252,24 @@ private function f_trx_by_streamId(IpaStreamId id) return integer {
 	return enum2int(id);
 }
 
+private function f_streamId_by_trx(uint8_t trx_nr) return IpaStreamId {
+	select (trx_nr) {
+	case (0) { return IPAC_PROTO_RSL_TRX0; }
+	case (1) { return IPAC_PROTO_RSL_TRX1; }
+	case (2) { return IPAC_PROTO_RSL_TRX2; }
+	case (3) { return IPAC_PROTO_RSL_TRX3; }
+	}
+	self.stop;
+}
+
 
 function main() runs on RSL_Emulation_CT {
 	var ASP_RSL_Unitdata rx_rsl;
 	var RSL_Message rx_rsl_msg;
 	var RSLDC_ChanRqd chan_rqd;
 	var RSL_DchanHdlr vc_conn;
+	var RslChannelNr chan_nr;
+	var uint8_t trx_nr;
 	var integer cid;
 	var integer i;
 
@@ -236,6 +295,7 @@ function main() runs on RSL_Emulation_CT {
 				cid := f_cid_by_ra_fn(ra, fn);
 				if (cid == -1) {
 					setverdict(fail, "IMM ASS for unknown DChan");
+					self.stop;
 				}
 				/* update client with trx_nr */
 				ConnectionTable[cid].trx_nr := f_trx_by_streamId(rx_rsl.streamId);
@@ -280,7 +340,7 @@ function main() runs on RSL_Emulation_CT {
 
 		/* blindly acknowledge all channel activations */
 		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) -> value rx_rsl {
-			var RslChannelNr chan_nr := rx_rsl.rsl.ies[0].body.chan_nr;
+			chan_nr := rx_rsl.rsl.ies[0].body.chan_nr;
 			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl.streamId, ts_RSL_CHAN_ACT_ACK(chan_nr, 23)));
 		}
 
@@ -313,6 +373,12 @@ function main() runs on RSL_Emulation_CT {
 			IPA_PT.send(ts_ASP_RSL_UD(ConnectionTable[cid].stream_id, rx_rsl_msg));
 			}
 
+		/* explicit registration, e.g. in (non-immediate) assignment case */
+		[] RSL_PROC.getcall(RSLEM_register:{?,?,?}) -> param(trx_nr, chan_nr, vc_conn) {
+			f_cid_create_cnr(trx_nr, chan_nr, vc_conn);
+			RSL_PROC.reply(RSLEM_register:{trx_nr, chan_nr, vc_conn});
+			}
+
 		}
 	}
 }
@@ -324,6 +390,13 @@ runs on RSL_Emulation_CT {
 	/* Initialize the ConnectionTable */
 	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
 		f_cid_clear(i);
+	}
+}
+
+/* client/conn_hdlr side function to use procedure port to register stream_id/chan_nr */
+function f_rslem_register(uint8_t trx_nr, RslChannelNr chan_nr) runs on RSL_DchanHdlr {
+	RSL_PROC.call(RSLEM_register:{trx_nr, chan_nr, self}) {
+		[] RSL_PROC.getreply(RSLEM_register:{?,?,?}) {};
 	}
 }
 
