@@ -10,6 +10,8 @@
 # unstable, so far tested with TITAN 6.1.0, 6.2.0 and 6.3.0
 #
 
+test -x "$(which ttcn3_makefilegen 2>/dev/null)" || { echo "ERROR: ttcn3_makefilegen not in PATH"; exit 1; }
+
 ttcn3_makefilegen -l -f $*
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
 sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan /' Makefile
