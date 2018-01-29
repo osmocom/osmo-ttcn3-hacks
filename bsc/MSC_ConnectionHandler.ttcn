@@ -8,6 +8,9 @@ import from BSSAP_Types all;
 import from BSSMAP_Emulation all;
 import from BSSMAP_Templates all;
 
+import from IPL4asp_Types all;
+import from Native_Functions all;
+
 import from MGCP_Types all;
 import from MGCP_Templates all;
 import from MGCP_Emulation all;
@@ -18,8 +21,197 @@ import from RSL_Types all;
 
 import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
-//import from MobileL3_RRM_Types all;
+import from MobileL3_RRM_Types all;
 import from L3_Templates all;
+
+
+/***********************************************************************
+ * Media related handling
+ ***********************************************************************/
+
+/* Tuple containing host/ip and port */
+type record HostPort {
+	HostName	host,
+	PortNumber	port_nr
+};
+
+/* State encapsulating one MGCP Connection */
+type record MgcpConnState {
+	boolean crcx_seen,
+	MgcpConnectionId conn_id,
+	charstring mime_type,		/* e.g. AMR */
+	integer sample_rate,		/* 8000 */
+	integer ptime,			/* 20 */
+	uint7_t rtp_pt,			/* RTP Payload Type */
+	HostPort mgw,			/* MGW side */
+	HostPort peer			/* CA side */
+};
+
+/* BTS media state */
+type record BtsMediaState {
+	boolean ipa_crcx_seen,
+	uint16_t conn_id,
+	uint7_t rtp_pt,
+	HostPort bts,
+	HostPort peer
+};
+
+type record MediaState {
+	MgcpEndpoint	mgcp_ep,
+	MgcpConnState	mgcp_conn[2],
+	BtsMediaState	bts
+};
+
+function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, HostName mgw) {
+	/* BTS Side */
+	g_media.bts := {
+		ipa_crcx_seen := false,
+		conn_id := nr,
+		rtp_pt := 0,
+		bts := {
+			host := bts,
+			port_nr := 9000 + nr*2
+		},
+		peer := -
+	}
+
+	//g_media.mgcp_ep := int2str(i) & "@mgw";
+
+	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
+		g_media.mgcp_conn[i].mime_type := "AMR";
+		g_media.mgcp_conn[i].sample_rate := 8000;
+		g_media.mgcp_conn[i].ptime := 20;
+		g_media.mgcp_conn[i].rtp_pt := 98;
+		g_media.mgcp_conn[i].crcx_seen := false;
+		g_media.mgcp_conn[i].conn_id := f_mgcp_alloc_conn_id();
+	}
+
+	g_media.mgcp_conn[0].mgw := {
+		host := mgw,
+		port_nr := 10000 + nr*2
+	}
+	g_media.mgcp_conn[1].mgw := {
+		host := mgw,
+		port_nr := 11000 + nr*2
+	}
+}
+
+private function f_get_free_mgcp_conn() runs on MSC_ConnHdlr return integer {
+	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
+		if (not g_media.mgcp_conn[i].crcx_seen) {
+			return i;
+		}
+	}
+	setverdict(fail, "Only 2 Connections per EP!");
+	self.stop;
+	return -1;
+}
+
+private function f_get_mgcp_conn(MgcpConnectionId cid) runs on MSC_ConnHdlr return integer {
+	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
+		if (g_media.mgcp_conn[i].conn_id == cid and g_media.mgcp_conn[i].crcx_seen) {
+			return i;
+		}
+	}
+	setverdict(fail, "No Connection for ID ", cid);
+	self.stop;
+	return -1;
+}
+
+
+/* altstep for handling of IPA + MGCP media related commands. Can be activated by a given
+ * test case if it expects to see media related handling (i.e. voice calls */
+altstep as_Media() runs on MSC_ConnHdlr {
+	var RSL_Message rsl;
+	var MgcpCommand mgcp_cmd;
+	var RSL_IE_Body ie;
+	[not g_media.bts.ipa_crcx_seen] RSL.receive(tr_RSL_IPA_CRCX(g_chan_nr)) -> value rsl {
+		/* Extract parameters from request + use in response */
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			g_media.bts.rtp_pt := ie.ipa_rtp_pt;
+		}
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
+			g_media.bts.rtp_pt := ie.ipa_rtp_pt2;
+		}
+		RSL.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, g_media.bts.conn_id,
+						oct2int(f_inet_addr(g_media.bts.bts.host)),
+						g_media.bts.bts.port_nr,
+						g_media.bts.rtp_pt));
+		g_media.bts.ipa_crcx_seen := true;
+		repeat;
+		}
+	[g_media.bts.ipa_crcx_seen] RSL.receive(tr_RSL_IPA_MDCX(g_chan_nr, ?)) -> value rsl{
+		/* Extract conn_id, ip, port, rtp_pt2 from request + use in response */
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_CONN_ID, ie);
+		if (g_media.bts.conn_id != ie.ipa_conn_id) {
+			setverdict(fail, "IPA MDCX for unknown ConnId", rsl);
+			self.stop;
+		}
+		/* mandatory */
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_IP, ie);
+		g_media.bts.peer.host := f_inet_ntoa(int2oct(ie.ipa_remote_ip, 4));
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_PORT, ie);
+		g_media.bts.peer.port_nr := ie.ipa_remote_port;
+		/* optional */
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			g_media.bts.rtp_pt := ie.ipa_rtp_pt;
+		}
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
+			g_media.bts.rtp_pt := ie.ipa_rtp_pt2;
+		}
+		RSL.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, g_media.bts.conn_id,
+						oct2int(f_inet_addr(g_media.bts.peer.host)),
+						g_media.bts.peer.port_nr,
+						g_media.bts.rtp_pt));
+		//g_media.ipa_mdcx_seen := true;
+		repeat;
+		}
+	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		var SDP_Message sdp;
+		var integer cid := f_get_free_mgcp_conn();
+		if (isvalue(mgcp_cmd.sdp)) {
+			sdp := mgcp_cmd.sdp;
+			g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
+			g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
+		}
+		var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
+		sdp := valueof(ts_SDP(mgcp_conn.mgw.host, mgcp_conn.mgw.host, "foo", "21",
+					mgcp_conn.mgw.port_nr, { int2str(mgcp_conn.rtp_pt) },
+				{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
+							mgcp_conn.mime_type & "/" &
+							int2str(mgcp_conn.sample_rate))),
+				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
+		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
+		g_media.mgcp_conn[cid].crcx_seen := true;
+		repeat;
+		}
+	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+		var SDP_Message sdp;
+		var integer cid := f_get_mgcp_conn(f_MgcpCmd_extract_conn_id(mgcp_cmd));
+		if (isvalue(mgcp_cmd.sdp)) {
+			sdp := mgcp_cmd.sdp;
+			g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
+			g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
+		} else {
+			setverdict(fail, "MDCX has no [recognizable] SDP");
+			/* HACK HACK HACK */
+			g_media.mgcp_conn[cid].peer.host := "8.8.8.8";
+			g_media.mgcp_conn[cid].peer.port_nr := 2342;
+		}
+		var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
+		sdp := valueof(ts_SDP(mgcp_conn.peer.host, mgcp_conn.peer.host, "foo", "21",
+					mgcp_conn.peer.port_nr, { int2str(mgcp_conn.rtp_pt) },
+				{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
+							mgcp_conn.mime_type & "/" &
+							int2str(mgcp_conn.sample_rate))),
+				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
+		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
+		//mgcp_mdcx_seen := true;
+		repeat;
+	}
+}
+
+
 
 
 /* this component represents a single subscriber connection at the MSC.
@@ -32,7 +224,12 @@ type component MSC_ConnHdlr extends BSSAP_ConnHdlr, RSL_DchanHdlr, MGCP_ConnHdlr
 	/* procedure port back to our parent (BSSMAP_Emulation_CT) for control */
 	port BSSMAPEM_PROC_PT BSSMAPEM;
 
-	var MSC_State g_state := MSC_STATE_NONE;
+	var MediaState g_media;
+}
+
+/* initialize all parameters */
+function f_MscConnHdlr_init(integer i, HostName bts, HostName mgw) runs on MSC_ConnHdlr {
+	f_MediaState_init(g_media, i, bts, mgw);
 }
 
 /* Callback function from general BSSMAP_Emulation whenever a connectionless
@@ -58,15 +255,6 @@ const BssmapOps MSC_BssmapOps := {
 
 const MGCPOps MSC_MGCPOps := {
 	create_cb := refers(MGCP_Emulation.ExpectedCreateCallback)
-}
-
-type enumerated MSC_State {
-	MSC_STATE_NONE,
-	MSC_STATE_WAIT_ASS_COMPL,
-	MSC_STATE_WAIT_CRCX_ACK,
-	MSC_STATE_WAIT_MDCX_ACK,
-	MSC_STATE_WAIT_CLEAR_COMPL,
-	MSC_STATE_WAIT_DLCX_ACK
 }
 
 /* register an expect with the BSSMAP core */
@@ -149,69 +337,196 @@ runs on MSC_ConnHdlr {
 	}
 }
 
-/* establish a channel fully, expecting an assignment matching 'exp' */
-function f_establish_fully(TestHdlrParams pars, PDU_BSSAP ass_cmd, template PDU_BSSAP exp_ass_cpl)
-runs on MSC_ConnHdlr return PDU_BSSAP {
-	var PDU_BSSAP bssap;
+/* Convert from Ericsson ChanDesc2 format to Osmocom RslChannelNr format */
+function f_ChDesc2RslChanNr(ChannelDescription2_V ch_desc, out RslChannelNr chan_nr, out GsmArfcn arfcn) {
+	var BIT5 inp := ch_desc.channelTypeandTDMAOffset;
+
+	chan_nr.tn := bit2int(ch_desc.timeslotNumber);
+
+	if (match(inp, '00001'B)) { /* TCH/F */
+		chan_nr.u.ch0 := RSL_CHAN_NR_Bm_ACCH;
+	}
+	else if (match(inp, '0001?'B)) { /* TCH/H */
+		chan_nr.u.lm.sub_chan := bit2int(substr(inp, 4, 1));
+	}
+	else if (match(inp, '001??'B)) { /* SDCCH/4 */
+		chan_nr.u.sdcch4.sub_chan := bit2int(substr(inp, 3, 2));
+	}
+	else if (match(inp, '01???'B)) { /* SDCCH/8 */
+		chan_nr.u.sdcch8.sub_chan := bit2int(substr(inp, 2, 3));
+	}
+	else {
+		setverdict(fail, "Unknown ChDesc!");
+		self.stop;
+	}
+
+	if (ch_desc.octet3 and4b '10'O == '10'O) {
+		setverdict(fail, "No support for Hopping");
+		self.stop;
+	} else {
+		var OCT2 concat := ch_desc.octet3 & ch_desc.octet4;
+		arfcn := oct2int(concat);
+	}
+}
+
+type record AssignmentState {
+	/* global */
+	boolean voice_call,
+	boolean is_assignment,
+	/* Assignment related bits */
+	boolean rr_ass_cmpl_seen,
+	RslChannelNr old_chan_nr,
+	/* Modify related bits */
+	boolean rr_modify_seen,
+	boolean rsl_modify_seen
+}
+
+template (value) AssignmentState ts_AssignmentStateInit := {
+	voice_call := false,
+	is_assignment := false,
+	rr_ass_cmpl_seen := false,
+	old_chan_nr := -,
+	rr_modify_seen := false,
+	rsl_modify_seen := false
+}
+
+altstep as_assignment(inout AssignmentState st) runs on MSC_ConnHdlr {
 	var RSL_Message rsl;
-	var MgcpCommand cmd;
-	timer T := 10.0;
-	var boolean exp_compl := ischosen(exp_ass_cpl.pdu.bssmap.assignmentComplete);
-	var boolean crcx_seen := false;
-	var boolean rr_modify_seen := false;
-	var ExpectCriteria mgcpcrit := {
-		connid := omit,
-		endpoint := omit,
-		transid := omit
-	};
-	var SDP_Message sdp;
+	[not st.rr_ass_cmpl_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		log("Rx L3 from net: ", l3);
+		if (ischosen(l3.msgs.rrm.assignmentCommand)) {
+			var RslChannelNr new_chan_nr;
+			var GsmArfcn arfcn;
+			f_ChDesc2RslChanNr(l3.msgs.rrm.assignmentCommand.descrOf1stChAfterTime,
+					   new_chan_nr, arfcn);
+			/* FIXME: Determine TRX NR by ARFCN, instead of hard-coded TRX0! */
 
-	mgcp_conn_id := f_mgcp_alloc_conn_id();
-	f_create_chan_and_exp(pars);
-	/* we should now have a COMPL_L3 at the MSC */
-
-	BSSAP.receive(tr_BSSMAP_ComplL3);
-	f_create_mgcp_expect(mgcpcrit);
-	BSSAP.send(ass_cmd);
-	MGCP.receive(tr_CRCX) -> value cmd;
-	sdp := valueof(ts_SDP("127.0.0.1", "127.0.0.1", "foo", "21", 1000, { "98" },
-		{valueof(ts_SDP_rtpmap(98, "AMR/8000")),
-		valueof(ts_SDP_ptime(20)) } ));
-	MGCP.send(ts_CRCX_ACK(cmd.line.trans_id, mgcp_conn_id, sdp))
-
-	alt {
-	/* if we receive exactly what we expected, always return + pass */
-	[] BSSAP.receive(exp_ass_cpl) -> value bssap {
-		setverdict(pass);
-		return bssap;
+			/* register our component for this channel number at the RSL Emulation */
+			f_rslem_register(0, new_chan_nr);
+			var PDU_ML3_MS_NW l3_tx := valueof(ts_RRM_AssignmentComplete('00'O));
+			/* send assignment complete over the new channel */
+			RSL.send(ts_RSL_DATA_IND(new_chan_nr, valueof(ts_RslLinkID_DCCH(0)),
+						 enc_PDU_ML3_MS_NW(l3_tx)));
+			/* by default, send via the new channel from now */
+			st.old_chan_nr := g_chan_nr;
+			g_chan_nr := new_chan_nr;
+			st.rr_ass_cmpl_seen := true;
+			repeat;
+		} else {
+			setverdict(fail, "Unexpected L3 received", l3);
+			self.stop;
 		}
-	[rr_modify_seen == false] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		}
+	[st.rr_ass_cmpl_seen] RSL.receive(tr_RSL_REL_REQ(st.old_chan_nr, tr_RslLinkID_DCCH(0))) {
+		RSL.send(ts_RSL_REL_CONF(st.old_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+		repeat;
+		}
+	[st.rr_ass_cmpl_seen] RSL.receive(tr_RSL_RF_CHAN_REL(st.old_chan_nr)) {
+		RSL.send(ts_RSL_RF_CHAN_REL_ACK(st.old_chan_nr));
+		/* FIXME: unregister for old channel number in RSL emulation */
+		//f_rslem_unregister(0, st.old_chan_nr);
+		repeat;
+		}
+}
+
+altstep as_modify(inout AssignmentState st) runs on MSC_ConnHdlr {
+	/* no assignment, just mode modify */
+	var RSL_Message rsl;
+
+	[st.voice_call and not st.rr_modify_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
 		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
 		log("Rx L3 from net: ", l3);
 		if (ischosen(l3.msgs.rrm.channelModeModify)) {
 			f_rsl_reply(ts_RRM_ModeModifyAck(l3.msgs.rrm.channelModeModify.channelDescription,
 							 l3.msgs.rrm.channelModeModify.channelMode), rsl);
-			rr_modify_seen := true;
+			st.rr_modify_seen := true;
 		}
 		repeat;
 		}
-	[rr_modify_seen] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
+	[st.voice_call and st.rr_modify_seen] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
 		RSL.send(ts_RSL_MODE_MODIFY_ACK(g_chan_nr));
+		st.rsl_modify_seen := true;
 		repeat;
 		}
-	[crcx_seen == false] RSL.receive(tr_RSL_IPA_CRCX(g_chan_nr)) -> value rsl {
-		RSL.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, 1, 1, 1, 1));
-		crcx_seen := true;
-		repeat;
-		}
-	/* mgw CRCX goes here */
+}
 
-	[crcx_seen] RSL.receive(tr_RSL_IPA_MDCX(g_chan_nr, ?)) -> value rsl{
-		RSL.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, 1, 1, 1, 1));
-		repeat;
+/* Determine if given rsl_chan_nr is compatible with given BSSMAP ChannelType */
+function f_channel_compatible(BSSMAP_IE_ChannelType bssmap, RslChannelNr rsl_chan_nr)
+return boolean {
+	select (bssmap.speechOrDataIndicator) {
+		case ('0011'B) { /* Signalling */
+			/* all channels support signalling */
+			return true;
+			}
+		case else { /* Speech, Speech+CTM or CSD */
+			select (bssmap.channelRateAndType) {
+				case ('08'O) { /* TCH/F */
+					select (rsl_chan_nr) {
+						case (t_RslChanNr_Bm(?)) { return true; }
+					}
+				}
+				case ('09'O) { /* TCH/H */
+					select (rsl_chan_nr) {
+						case (t_RslChanNr_Lm(?, ?)) { return true; }
+					}
+				}
+				case else { /* full or half-rate */
+					select (rsl_chan_nr) {
+						case (t_RslChanNr_Bm(?)) { return true; }
+						case (t_RslChanNr_Lm(?, ?)) { return true; }
+					}
+				}
+			}
 		}
-	/* mgw MGCX goes here */
+	}
+	return false;
+}
 
+/* establish a channel fully, expecting an assignment matching 'exp' */
+function f_establish_fully(TestHdlrParams pars, PDU_BSSAP ass_cmd, template PDU_BSSAP exp_ass_cpl)
+runs on MSC_ConnHdlr return PDU_BSSAP {
+	var PDU_BSSAP bssap;
+	timer T := 10.0;
+	var boolean exp_compl := ischosen(exp_ass_cpl.pdu.bssmap.assignmentComplete);
+	var ExpectCriteria mgcpcrit := {
+		connid := omit,
+		endpoint := omit,
+		transid := omit
+	};
+	var AssignmentState st := valueof(ts_AssignmentStateInit);
+	/* if the channel type is SIGNAL, we're not handling a voice call */
+	if (ass_cmd.pdu.bssmap.assignmentRequest.channelType.speechOrDataIndicator != '0011'B) {
+		st.voice_call := true;
+	}
+	/* determine if the current channel can support the given service or not */
+	if (not f_channel_compatible(ass_cmd.pdu.bssmap.assignmentRequest.channelType, g_chan_nr)) {
+		st.is_assignment := true;
+	}
+
+	f_MediaState_init(g_media, 1, "127.0.0.2", "127.0.0.3");
+
+	f_create_chan_and_exp(pars);
+	/* we should now have a COMPL_L3 at the MSC */
+	BSSAP.receive(tr_BSSMAP_ComplL3);
+	f_create_mgcp_expect(mgcpcrit);
+	BSSAP.send(ass_cmd);
+
+	T.start;
+	alt {
+	/* assignment related bits */
+	[st.is_assignment] as_assignment(st);
+
+	/* modify related bits */
+	[not st.is_assignment] as_modify(st);
+
+	/* voice call related bits (IPA CRCX/MDCX + MGCP) */
+	[st.voice_call] as_Media();
+
+	/* if we receive exactly what we expected, always return + pass */
+	[] BSSAP.receive(exp_ass_cpl) -> value bssap {
+		setverdict(pass);
+		}
 	[exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
 		setverdict(fail, "Received non-matching ASSIGNMENT COMPLETE");
 		}
@@ -228,8 +543,11 @@ runs on MSC_ConnHdlr return PDU_BSSAP {
 		setverdict(inconc, "Timeout waiting for ASSIGNMENT COMPLETE");
 		}
 	}
-
-	self.stop;
+	log("g_media ", g_media);
+	if (not isbound(bssap)) {
+		self.stop;
+	}
+	return bssap;
 }
 
 
