@@ -7,11 +7,27 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
 
 #include <Charstring.hh>
 #include <Octetstring.hh>
 
 namespace Native__Functions {
+
+OCTETSTRING f__inet6__addr(const CHARSTRING& in)
+{
+	char buf[INET6_ADDRSTRLEN];
+	TTCN_Buffer ttcn_buffer(in);
+	int ret;
+
+	ret = inet_pton(AF_INET6, (const char *)ttcn_buffer.get_data(), buf);
+	if(ret < 1)
+		fprintf(stderr, "inet_pton failed: %d %s\n", ret, strerror(errno));
+
+	return OCTETSTRING(16, (const unsigned char *)&buf[0]);
+}
 
 OCTETSTRING f__inet__addr(const CHARSTRING& in)
 {
