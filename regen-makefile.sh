@@ -20,5 +20,9 @@ sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan /' Makefile
 sed -i -e 's/CPPFLAGS = -D$(PLATFORM) -I$(TTCN3_DIR)\/include/CPPFLAGS = -D$(PLATFORM) -DMAKEDEPEND_RUN -I$(TTCN3_DIR)\/include -I\/usr\/include\/titan/' Makefile
 
 # for TITAN 6.3.0
-sed -i -e 's/TTCN3_DIR = $/TTCN3_DIR = \/usr/' Makefile
+if cat /etc/issue | grep "Arch Linux" >/dev/null 2>&1; then
+        sed -i -e 's/TTCN3_DIR = $/TTCN3_DIR = \/usr\/ttcn3/' Makefile
+else
+        sed -i -e 's/TTCN3_DIR = $/TTCN3_DIR = \/usr/' Makefile
+fi
 sed -i -e 's/\/bin\/compiler/\/bin\/ttcn3_compiler/' Makefile
