@@ -155,8 +155,8 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 			mncc.fields |= MNCC_F_SIGNAL;
 		}
 		if (in_sig.keypad().is_value()) {
-			const INTEGER &kpd = in_sig.keypad();
-			mncc.signal = kpd;
+			const CHARSTRING &kpd = in_sig.keypad();
+			mncc.signal = (int) kpd[0].get_char();
 			mncc.fields |= MNCC_F_KEYPAD;
 		}
 		mncc.more = in_sig.more();
@@ -292,8 +292,10 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 			sign.ssversion() = CHARSTRING(in_mncc->ssversion.info);
 		if (in_mncc->fields & MNCC_F_CCCAP)
 			sign.cccap() = MNCC__cccap(in_mncc->cccap.dtmf, in_mncc->cccap.pcp);
-		if (in_mncc->fields & MNCC_F_KEYPAD)
-			sign.keypad() = in_mncc->keypad;
+		if (in_mncc->fields & MNCC_F_KEYPAD) {
+			char kpd[2] = { (char) in_mncc->keypad, 0 };
+			sign.keypad() = CHARSTRING(kpd);
+		}
 		if (in_mncc->fields & MNCC_F_SIGNAL)
 			sign.signal() = in_mncc->signal;
 
