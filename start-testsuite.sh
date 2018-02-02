@@ -15,4 +15,8 @@ if [ $# -gt 1 ]; then
 	CFG=$2
 fi
 
-LD_LIBRARY_PATH=`dirname $SUITE`:/usr/lib/titan:/usr/ttcn3/lib ttcn3_start $SUITE $CFG
+if [ $# -gt 2 ]; then
+	TEST=$3
+fi
+
+LD_LIBRARY_PATH=`dirname $SUITE`:/usr/lib/titan:/usr/ttcn3/lib ttcn3_start $SUITE $CFG $TEST
