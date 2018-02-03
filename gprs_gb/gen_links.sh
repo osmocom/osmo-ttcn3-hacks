@@ -34,4 +34,5 @@ gen_links $DIR $FILES
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc L1CTL_Types.ttcn L1CTL_PortType.ttcn LAPDm_RAW_PT.ttcn LAPDm_Types.ttcn "
 FILES+="NS_Types.ttcn NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
+FILES+="BSSGP_Emulation.ttcn BSSGP_Helper.cc BSSGP_Helper_Functions.ttcn BSSGP_Types.ttcn "
 gen_links $DIR $FILES
