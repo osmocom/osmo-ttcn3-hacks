@@ -31,8 +31,17 @@ DIR=$BASEDIR/titan.TestPorts.UNIX_DOMAIN_SOCKETasp/src
 FILES="UD_PT.cc  UD_PT.hh  UD_PortType.ttcn  UD_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.NS_v7.3.0/src
+FILES="NS_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
+FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
+gen_links $DIR $FILES
+
+
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc L1CTL_Types.ttcn L1CTL_PortType.ttcn LAPDm_RAW_PT.ttcn LAPDm_Types.ttcn "
-FILES+="NS_Types.ttcn NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
-FILES+="BSSGP_Emulation.ttcn BSSGP_Helper.cc BSSGP_Helper_Functions.ttcn BSSGP_Types.ttcn "
+FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
+FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 gen_links $DIR $FILES
