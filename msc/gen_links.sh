@@ -16,7 +16,7 @@ FILES="UD_PT.cc  UD_PT.hh  UD_PortType.ttcn  UD_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h"
+FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src

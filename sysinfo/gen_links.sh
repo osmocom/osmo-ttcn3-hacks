@@ -12,7 +12,7 @@ gen_links() {
 }
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCConversion.hh TCCInterface.cc TCCInterface_ip.h"
+FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
