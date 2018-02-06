@@ -31,6 +31,7 @@ module BSSMAP_Emulation {
 
 
 import from General_Types all;
+import from Osmocom_Types all;
 import from SCCP_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
@@ -113,7 +114,9 @@ type record ConnectionData {
 	/* most recent MGCP transaction ID (Used on MSC side) */
 	MgcpTransId	mgcp_trans_id optional,
 	/* CIC that has been used for voice of this channel (BSC side) */
-	integer		cic optional
+	integer		cic optional,
+	/* array of N(SD) values for MO DTAP messages, indexed by discriminator */
+	uint2_t		n_sd[4]
 }
 
 type record ImsiMapping {
@@ -261,6 +264,19 @@ runs on BSSMAP_Emulation_CT return integer {
 	self.stop;
 }
 
+/* resolve ConnectionTable index component reference */
+private function f_idx_by_comp(BSSAP_ConnHdlr client)
+runs on BSSMAP_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return i;
+		}
+	}
+	log("BSSMAP Connection table not found by component ", client);
+	setverdict(fail);
+	self.stop;
+}
+
 private function f_gen_conn_id()
 runs on BSSMAP_Emulation_CT return integer {
 	var integer conn_id;
@@ -279,6 +295,7 @@ runs on BSSMAP_Emulation_CT {
 		ConnectionTable[i].sccp_conn_id := -1;
 		ConnectionTable[i].mgcp_trans_id := omit;
 		ConnectionTable[i].cic := omit;
+		ConnectionTable[i].n_sd := { 0, 0, 0, 0 };
 	}
 	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
 		ImsiTable[i].comp_ref := null;
@@ -293,6 +310,7 @@ runs on BSSMAP_Emulation_CT {
 		if (ConnectionTable[i].sccp_conn_id == -1) {
 			ConnectionTable[i].comp_ref := comp_ref;
 			ConnectionTable[i].sccp_conn_id := sccp_conn_id;
+			ConnectionTable[i].n_sd := { 0, 0, 0, 0 };
 			log("Added conn table entry ", i, comp_ref, sccp_conn_id);
 			return;
 		}
@@ -402,6 +420,32 @@ type record BssmapOps {
 	boolean role_ms
 }
 
+template BIT4 t_ML3_DISC_CC_MM_SS := ('0011'B, '0101'B, '1011'B);
+
+/* patch N(SD) into enc_l3, according to 24.007 11.2.3.2 */
+function f_ML3_patch_seq(inout ConnectionData cd, in PDU_ML3_MS_NW dtap, inout octetstring enc_l3) {
+	var uint2_t seq_nr;
+	if (ischosen(dtap.msgs.cc) or ischosen(dtap.msgs.mm) or ischosen(dtap.msgs.ss)) {
+		seq_nr := cd.n_sd[0];
+		cd.n_sd[0] := (cd.n_sd[0] + 1) mod 4;
+	} else if (ischosen(dtap.msgs.gcc)) {
+		seq_nr := cd.n_sd[1];
+		cd.n_sd[1] := (cd.n_sd[1] + 1) mod 2;
+	} else if (ischosen(dtap.msgs.bcc)) {
+		seq_nr := cd.n_sd[2];
+		cd.n_sd[2] := (cd.n_sd[2] + 1) mod 2;
+	} else if (ischosen(dtap.msgs.loc)) {
+		seq_nr := cd.n_sd[3];
+		cd.n_sd[3] := (cd.n_sd[3] + 1) mod 2;
+	} else {
+		/* no sequence number to patch */
+		return;
+	}
+	log("patching N(SD)=", seq_nr, " into dtap ", enc_l3);
+	enc_l3[1] := (enc_l3[1] and4b '3f'O) or4b bit2oct(int2bit(seq_nr, 8) << 6);
+	log("patched enc_l3: ", enc_l3);
+}
+
 function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 
 	g_bssmap_id := id;
@@ -509,6 +553,13 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 				BSSAP.send(ts_BSSAP_DATA_req(conn_id, creq.bssap));
 			}
 
+			if (g_bssmap_ops.role_ms) {
+				/* we have just sent the first MM message, increment the counter */
+				var integer idx := f_idx_by_comp(vc_conn);
+				ConnectionTable[idx].n_sd[0] := 1;
+				log("patch: N(SD) for ConnIdx ", idx, " set to 1");
+			}
+
 			}
 
 		[] CLIENT.receive(PDU_BSSAP:?) -> value bssap sender vc_conn {
@@ -518,11 +569,13 @@ function main(BssmapOps ops, charstring id) runs on BSSMAP_Emulation_CT {
 			}
 
 		[g_bssmap_ops.role_ms] CLIENT.receive(PDU_DTAP_MO:?) -> value dtap_mo sender vc_conn {
-			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			var integer idx := f_idx_by_comp(vc_conn);
 			/* convert from decoded DTAP to encoded DTAP */
 			var octetstring l3_enc := enc_PDU_ML3_MS_NW(dtap_mo.dtap);
+			/* patch correct L3 send sequence number N(SD) into l3_enc */
+			f_ML3_patch_seq(ConnectionTable[idx], dtap_mo.dtap, l3_enc);
 			bssap := valueof(ts_BSSAP_DTAP(l3_enc, dtap_mo.dlci));
-			BSSAP.send(ts_BSSAP_DATA_req(conn_id, bssap));
+			BSSAP.send(ts_BSSAP_DATA_req(ConnectionTable[idx].sccp_conn_id, bssap));
 			}
 
 		[not g_bssmap_ops.role_ms] CLIENT.receive(PDU_DTAP_MT:?) -> value dtap_mt sender vc_conn {
