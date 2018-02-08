@@ -24,144 +24,91 @@ import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
 import from BSSMAP_Emulation all;
 
-type component BSSAP_Adapter_CT {
+type record BSSAP_Adapter {
 	/* component references */
-	var M3UA_CT vc_M3UA;
-	var SCCP_CT vc_SCCP;
-	/* test port to SCCP emulation */
-	port BSSAP_CODEC_PT BSSAP;
+	M3UA_CT vc_M3UA,
+	SCCP_CT vc_SCCP,
 
-	var octetstring g_sio;
-	var MSC_SCCP_MTP3_parameters g_sccp_pars;
-	var SCCP_PAR_Address g_sccp_addr_own, g_sccp_addr_peer;
+	MSC_SCCP_MTP3_parameters sccp_pars,
+	SCCP_PAR_Address sccp_addr_own,
+	SCCP_PAR_Address sccp_addr_peer,
 
 	/* handler mode */
-	var BSSMAP_Emulation_CT vc_BSSMAP;
+	BSSMAP_Emulation_CT vc_BSSMAP
 }
 
-modulepar {
-	charstring mp_sccp_service_type := "mtp3_itu";
-
-	SCTP_Association_Address mp_sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" };
-	integer mp_own_pc := 185;	/* 0.23.1 */
-	integer mp_own_ssn := 254;
-
-	integer mp_peer_pc := 187;
-	integer mp_peer_ssn := 254;
-}
+type record BSSAP_Configuration {
+	charstring sccp_service_type,
+	SCTP_Association_Address sctp_addr,
+	integer own_pc,
+	integer own_ssn,
+	integer peer_pc,
+	integer peer_ssn,
+	octetstring sio
+};
 
 /* construct a SCCP_PAR_Address with just PC + SSN and no GT */
-template (value) SCCP_PAR_Address ts_SccpAddr_PC_SSN(integer pc, integer ssn) := {
+template (value) SCCP_PAR_Address ts_SccpAddr_PC_SSN(integer pc, integer ssn, octetstring sio,
+							charstring sccp_srv_type) := {
 	addressIndicator := {
 		pointCodeIndic := '1'B,
 		ssnIndicator := '1'B,
 		globalTitleIndic := '0000'B,
 		routingIndicator := '1'B
 	},
-	signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, '83'O),
-	//signPointCode := SCCP_SPC_int2bit(pc, mp_sccp_service_type, g_sio),
+	signPointCode := SCCP_SPC_int2bit(pc, sccp_srv_type, sio),
 	subsystemNumber := ssn,
 	globalTitle := omit
 }
 
-private function init_pars() runs on BSSAP_Adapter_CT {
-	g_sio := '83'O;
-	g_sccp_pars := {
+private function init_pars(inout BSSAP_Adapter ba, in BSSAP_Configuration cfg) {
+	ba.sccp_pars := {
 		sio := {
-			ni := substr(oct2bit(g_sio),0,2),
-			prio := substr(oct2bit(g_sio),2,2),
-			si := substr(oct2bit(g_sio),4,4)
+			ni := substr(oct2bit(cfg.sio),0,2),
+			prio := substr(oct2bit(cfg.sio),2,2),
+			si := substr(oct2bit(cfg.sio),4,4)
 		},
-		opc := mp_own_pc,
-		dpc := mp_peer_pc,
+		opc := cfg.own_pc,
+		dpc := cfg.peer_pc,
 		sls := 0,
-		sccp_serviceType := mp_sccp_service_type,
-		ssn := mp_own_ssn
+		sccp_serviceType := cfg.sccp_service_type,
+		ssn := cfg.own_ssn
 	};
-	g_sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(mp_own_pc, mp_own_ssn));
-	g_sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(mp_peer_pc, mp_peer_ssn));
+	ba.sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(cfg.own_pc, cfg.own_ssn, cfg.sio, cfg.sccp_service_type));
+	ba.sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(cfg.peer_pc, cfg.peer_ssn, cfg.sio, cfg.sccp_service_type));
 }
 
 
-function f_bssap_init(charstring id, template BssmapOps ops) runs on BSSAP_Adapter_CT
-{
-	init_pars();
+function f_bssap_init(inout BSSAP_Adapter ba, in BSSAP_Configuration cfg, charstring id,
+			template BssmapOps ops) {
+	init_pars(ba, cfg);
+	ops.sccp_addr_local := ba.sccp_addr_own;
+	ops.sccp_addr_peer := ba.sccp_addr_peer;
 
 	/* create components */
-	vc_M3UA := M3UA_CT.create(id & "-M3UA");
-	vc_SCCP := SCCP_CT.create(id & "-SCCP");
+	ba.vc_M3UA := M3UA_CT.create(id & "-M3UA");
+	ba.vc_SCCP := SCCP_CT.create(id & "-SCCP");
 	if (isvalue(ops)) {
-		vc_BSSMAP := BSSMAP_Emulation_CT.create(id & "-BSSMAP");
+		ba.vc_BSSMAP := BSSMAP_Emulation_CT.create(id & "-BSSMAP");
 	}
 
-	map(vc_M3UA:SCTP_PORT, system:sctp);
+	map(ba.vc_M3UA:SCTP_PORT, system:sctp);
 
 	/* connect MTP3 service provider (M3UA) to lower side of SCCP */
-	connect(vc_M3UA:MTP3_SP_PORT, vc_SCCP:MTP3_SCCP_PORT);
-	/* connect ourselves to upper side of SCCP */
-	connect(self:BSSAP, vc_SCCP:SCCP_SP_PORT);
+	connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
 
-	vc_M3UA.start(f_M3UA_Emulation(mp_sctp_addr));
-	vc_SCCP.start(SCCPStart(g_sccp_pars));
+	ba.vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr));
+	ba.vc_SCCP.start(SCCPStart(ba.sccp_pars));
 
 	if (isvalue(ops)) {
 		timer T := 5.0;
 		T.start;
-		T.timeout;
-		/* Perform reset procedure */
-		f_bssap_reset();
-		/* disconect ourselves */
-		disconnect(self:BSSAP, vc_SCCP:SCCP_SP_PORT);
+		//T.timeout;
+		log("Connecting BSSMAP Emulation to SCCP_SP_PORT and starting emulation");
 		/* connect BSSNAP component to upposer side of SCCP */
-		connect(vc_BSSMAP:BSSAP, vc_SCCP:SCCP_SP_PORT);
+		connect(ba.vc_BSSMAP:BSSAP, ba.vc_SCCP:SCCP_SP_PORT);
 		/* start the BSSMAP emulation */
-		vc_BSSMAP.start(BSSMAP_Emulation.main(valueof(ops), ""));
-	}
-}
-
-private altstep as_reset_ack() runs on BSSAP_Adapter_CT {
-	var BSSAP_N_UNITDATA_ind ud_ind;
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) -> value ud_ind {
-		log("Respoding to inbound RESET with RESET-ACK");
-		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
-			   ts_BSSMAP_ResetAck));
-		repeat;
-	}
-}
-
-
-function f_bssap_wait_for_reset() runs on BSSAP_Adapter_CT {
-	var BSSAP_N_UNITDATA_ind ud_ind;
-	timer T := 20.0;
-
-	T.start;
-	alt {
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) -> value ud_ind {
-		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
-			   ts_BSSMAP_ResetAck));
-		}
-	[] as_reset_ack();
-	[] BSSAP.receive {
-		repeat;
-		}
-	[] T.timeout {
-		setverdict(fail);
-		}
-	}
-}
-
-function f_bssap_reset() runs on BSSAP_Adapter_CT {
-	timer T := 5.0;
-
-	BSSAP.send(ts_BSSAP_UNITDATA_req(g_sccp_addr_peer, g_sccp_addr_own, ts_BSSMAP_Reset(0)));
-	T.start;
-	alt {
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_sccp_addr_own, g_sccp_addr_peer, tr_BSSMAP_ResetAck)) {
-		log("Received RESET-ACK in response to RESET, we're ready to go!");
-		}
-	[] as_reset_ack();
-	[] BSSAP.receive { repeat };
-	[] T.timeout { setverdict(fail, "Waiting for RESET-ACK after sending RESET"); }
+		ba.vc_BSSMAP.start(BSSMAP_Emulation.main(valueof(ops), ""));
 	}
 }
 
