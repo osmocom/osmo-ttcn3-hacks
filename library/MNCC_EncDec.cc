@@ -71,14 +71,15 @@ static MNCC__number dec_number(const struct gsm_mncc_number *num)
 
 OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 {
-	const MNCC__PDU__Signal& in_sig = in.u().signal();
 	struct gsm_mncc mncc;
 	OCTETSTRING ret_val;
 
 	memset(&mncc, 0, sizeof(mncc));
 	mncc.msg_type = in.msg__type();
 
-	if (in_sig.is_value()) {
+	switch (in.u().get_selection()) {
+	case MNCC__MsgUnion::ALT_signal: {
+		const MNCC__PDU__Signal& in_sig = in.u().signal();
 		mncc.callref = in_sig.callref();
 		if (in_sig.bearer__cap().is_value()) {
 			enc_bcap(&mncc.bearer_cap, in_sig.bearer__cap());
@@ -170,13 +171,16 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		mncc.lchan_type = in_sig.lchan__type();
 		mncc.lchan_mode = in_sig.lchan__mode();
 		ret_val = OCTETSTRING(sizeof(mncc), (uint8_t *)&mncc);
-	} else if (in.u().data().is_value()) {
+		}
+		break;
+	case MNCC__MsgUnion::ALT_data:
 		struct gsm_data_frame data;
 		memset(&data, 0, sizeof(data));
 		data.msg_type = in.msg__type();
 		ret_val = OCTETSTRING(sizeof(data), (uint8_t *)&data);
 		ret_val = ret_val & in.u().data().data();
-	} else if (in.u().rtp().is_value()) {
+		break;
+	case MNCC__MsgUnion::ALT_rtp:
 		struct gsm_mncc_rtp rtp;
 		memset(&rtp, 0, sizeof(rtp));
 		rtp.msg_type = in.msg__type();
@@ -186,7 +190,8 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		rtp.payload_type = in.u().rtp().payload__type();
 		rtp.payload_msg_type = in.u().rtp().payload__msg__type();
 		ret_val = OCTETSTRING(sizeof(rtp), (uint8_t *) &rtp);
-	} else if (in.u().hello().is_value()) {
+		break;
+	case MNCC__MsgUnion::ALT_hello:
 		struct gsm_mncc_hello hello;
 		memset(&hello, 0, sizeof(hello));
 		hello.msg_type = in.msg__type();
@@ -198,6 +203,7 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		hello.emergency_offset = in.u().hello().emergency__offset();
 		hello.lchan_type_offset = in.u().hello().lchan__type__offset();
 		ret_val = OCTETSTRING(sizeof(hello), (uint8_t *) &hello);
+		break;
 	}
 
 	return ret_val;
