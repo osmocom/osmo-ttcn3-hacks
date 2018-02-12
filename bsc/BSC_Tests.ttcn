@@ -28,6 +28,7 @@ import from BSSAP_Adapter all;
 import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
 import from IPA_Emulation all;
+import from IPA_CodecPort all;
 import from IPA_Types all;
 import from RSL_Types all;
 import from RSL_Emulation all;
@@ -64,6 +65,7 @@ type component test_CT extends CTRL_Adapter_CT {
 	var BTS_State bts[NUM_BTS];
 	/* array of per-BTS RSL test ports */
 	port IPA_RSL_PT IPA_RSL[NUM_BTS];
+	port IPA_CODEC_PT IPA; /* Required for compilation of TC_rsl_unknown_unit_id() */
 
 	var MGCP_Emulation_CT vc_MGCP;
 	port TELNETasp_PT BSCVTY;
@@ -83,6 +85,8 @@ type component test_CT extends CTRL_Adapter_CT {
 modulepar {
 	/* IP address at which the BSC can be reached */
 	charstring mp_bsc_ip := "127.0.0.1";
+	/* port number to which to establish the IPA OML connections */
+	integer mp_bsc_oml_port := 3002;
 	/* port number to which to establish the IPA RSL connections */
 	integer mp_bsc_rsl_port := 3003;
 	/* port number to which to establish the IPA CTRL connection */
@@ -1258,6 +1262,66 @@ testcase TC_rsl_drop_counter() runs on test_CT {
 
 /* TODO: Test OML link drop causes counter increment */
 
+/* The body of TC_rsl_unknown_unit_id() and TC_oml_unknown_unit_id() tests. */
+function f_ipa_unknown_unit_id(integer mp_bsc_ipa_port) runs on test_CT return boolean {
+	timer T := 10.0;
+
+	bts[0].rsl.id := "IPA-0-RSL";
+	bts[0].rsl.vc_IPA := IPA_Emulation_CT.create(bts[0].rsl.id & "-IPA");
+	bts[0].rsl.ccm_pars := c_IPA_default_ccm_pars;
+	bts[0].rsl.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
+	bts[0].rsl.ccm_pars.unit_id := "0/0/0"; /* value which is unknown at BTS */
+
+	/* Call a function of our 'parent component' BSSAP_Adapter_CT to start the
+	 * MSC-side BSSAP emulation */
+	f_bssap_init(g_bssap, mp_bssap_cfg, "VirtMSC", omit);
+
+	f_ipa_ctrl_start(mp_bsc_ip, mp_bsc_ctrl_port);
+
+	f_init_mgcp("VirtMSC");
+
+	/* start RSL/OML connection (XXX re-uses RSL port/protocol definitions for OML) */
+	map(bts[0].rsl.vc_IPA:IPA_PORT, system:IPA);
+	connect(bts[0].rsl.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[0]);
+	bts[0].rsl.vc_IPA.start(IPA_Emulation.main_client(mp_bsc_ip, mp_bsc_ipa_port, "", 10000, bts[0].rsl.ccm_pars));
+
+	/* wait for IPA OML link to connect and then disconnect */
+	T.start;
+	alt {
+	[] IPA_RSL[0].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_DOWN}) {
+		T.stop;
+		return true;
+	}
+	[] IPA_RSL[0].receive { repeat }
+	[] T.timeout {
+		self.stop;
+		return false;
+		}
+	}
+
+	return false;
+}
+
+/* BSC should close an RSL connection from a BTS with unknown unit ID (OS#2714). */
+testcase TC_rsl_unknown_unit_id() runs on test_CT {
+	if (f_ipa_unknown_unit_id(mp_bsc_rsl_port)) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Timeout RSL waiting for connection to close");
+	}
+}
+
+
+/* BSC should close an RSL connection from a BTS with unknown unit ID (OS#2714). */
+testcase TC_oml_unknown_unit_id() runs on test_CT {
+	if (f_ipa_unknown_unit_id(mp_bsc_oml_port)) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Timeout OML waiting for connection to close");
+	}
+}
+
+
 /***********************************************************************
  * "New world" test cases using RSL_Emulation + BSSMAP_Emulation
  ***********************************************************************/
@@ -1686,6 +1750,9 @@ control {
 	execute( TC_paging_counter() );
 
 	execute( TC_rsl_drop_counter() );
+	execute( TC_rsl_unknown_unit_id() );
+
+	execute( TC_oml_unknown_unit_id() );
 
 	execute( TC_classmark() );
 	execute( TC_unsol_ass_fail() );
