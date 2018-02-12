@@ -1277,6 +1277,8 @@ function f_start_handler(void_fn fn, charstring id) runs on test_CT return MSC_C
 	connect(vc_conn:MGCP_PROC, vc_MGCP:MGCP_PROC);
 	connect(vc_conn:RSL, bts[0].rsl.vc_RSL:CLIENT_PT);
 	connect(vc_conn:RSL_PROC, bts[0].rsl.vc_RSL:RSL_PROC);
+	connect(vc_conn:RSL1, bts[1].rsl.vc_RSL:CLIENT_PT);
+	connect(vc_conn:RSL1_PROC, bts[1].rsl.vc_RSL:RSL_PROC);
 	connect(vc_conn:BSSAP, g_bssap.vc_BSSMAP:CLIENT);
 	connect(vc_conn:MGCP, vc_MGCP:MGCP_CLIENT);
 	vc_conn.start(derefers(fn)(id));
@@ -1553,6 +1555,71 @@ testcase TC_err_84_unknown_msg() runs on test_CT {
 	vc_conn.done;
 }
 
+/* execute a "bts <0-255> trx <0-255> timeslot <0-7> sub-slot <0-7>" command on given Dchan */
+private function f_vty_ss_action(charstring suffix, integer bts_nr, integer trx_nr, RslChannelNr chan_nr)
+runs on MSC_ConnHdlr {
+	/* FIXME: resolve those from component-global state */
+	var integer ts_nr := chan_nr.tn;
+	var integer ss_nr;
+	if (ischosen(chan_nr.u.ch0)) {
+		ss_nr := 0;
+	} else if (ischosen(chan_nr.u.lm)) {
+		ss_nr := chan_nr.u.lm.sub_chan;
+	} else if (ischosen(chan_nr.u.sdcch4)) {
+		ss_nr := chan_nr.u.sdcch4.sub_chan;
+	} else if (ischosen(chan_nr.u.sdcch8)) {
+		ss_nr := chan_nr.u.sdcch8.sub_chan;
+	} else {
+		setverdict(fail, "Invalid ChanNr ", chan_nr);
+		self.stop;
+	}
+
+	var charstring cmd := "bts "&int2str(bts_nr)&" trx "&int2str(trx_nr)&
+				" timeslot "&int2str(ts_nr)&" sub-slot "&int2str(ss_nr)&" ";
+	f_vty_transceive(BSCVTY, cmd & suffix);
+}
+
+private function f_vty_handover(integer bts_nr, integer trx_nr, RslChannelNr chan_nr,
+				integer new_bts_nr)
+runs on MSC_ConnHdlr {
+	f_vty_ss_action("handover " & int2str(new_bts_nr), bts_nr, trx_nr, chan_nr);
+}
+
+/* intra-BSC hand-over between BTS0 and BTS1 */
+private function f_tc_ho_int(charstring id) runs on MSC_ConnHdlr {
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	var template PDU_BSSAP exp_compl := tr_BSSMAP_AssignmentComplete(omit, ?);
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla := valueof(ts_BSSMAP_IE_AoIP_TLA4('01020304'O, 2342));
+	var PDU_BSSAP ass_cmd := valueof(ts_BSSMAP_AssignmentReq(omit, tla));
+	const OCT8 kc := '0001020304050607'O;
+
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(pars, ass_cmd, exp_compl);
+
+	var HandoverState hs := {
+		rr_ho_cmpl_seen := false,
+		handover_done := false,
+		old_chan_nr := -
+	};
+	/* issue hand-over command on VTY */
+	f_vty_handover(0, 0, g_chan_nr, 1);
+	/* temporarily suspend DChan processing on BTS1 to avoid race with RSLEM_register */
+	f_rslem_suspend(RSL1_PROC);
+	alt {
+	[] as_handover(hs);
+	/* FIXME: somehow determine that the hand-over has completed, by MGCP MDCX? */
+	}
+}
+
+testcase TC_ho_int() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(2, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_int), testcasename());
+	vc_conn.done;
+}
 
 
 control {
@@ -1623,6 +1690,7 @@ control {
 	execute( TC_unsol_ho_fail() );
 	execute( TC_err_82_short_msg() );
 	execute( TC_err_84_unknown_msg() );
+	execute( TC_ho_int() );
 }
 
 }

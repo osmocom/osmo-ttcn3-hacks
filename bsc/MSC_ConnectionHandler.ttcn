@@ -62,7 +62,8 @@ type record BtsMediaState {
 type record MediaState {
 	MgcpEndpoint	mgcp_ep,
 	MgcpConnState	mgcp_conn[2],
-	BtsMediaState	bts
+	BtsMediaState	bts,
+	BtsMediaState	bts1 /* only during hand-over */
 };
 
 function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, HostName mgw) {
@@ -73,6 +74,17 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 		rtp_pt := 0,
 		bts := {
 			host := bts,
+			port_nr := 9000 + nr*2
+		},
+		peer := -
+	}
+
+	g_media.bts1 := {
+		ipa_crcx_seen := false,
+		conn_id := nr,
+		rtp_pt := 0,
+		bts := {
+			host := bts, /* FIXME */
 			port_nr := 9000 + nr*2
 		},
 		peer := -
@@ -166,9 +178,54 @@ altstep as_Media() runs on MSC_ConnHdlr {
 						oct2int(f_inet_addr(g_media.bts.peer.host)),
 						g_media.bts.peer.port_nr,
 						g_media.bts.rtp_pt));
-		//g_media.ipa_mdcx_seen := true;
+		//g_media.bts.ipa_mdcx_seen := true;
 		repeat;
 		}
+
+	/* on second (new) BTS during hand-over */
+	[not g_media.bts1.ipa_crcx_seen] RSL1.receive(tr_RSL_IPA_CRCX(g_chan_nr)) -> value rsl {
+		/* Extract parameters from request + use in response */
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			g_media.bts1.rtp_pt := ie.ipa_rtp_pt;
+		}
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
+			g_media.bts1.rtp_pt := ie.ipa_rtp_pt2;
+		}
+		RSL1.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, g_media.bts1.conn_id,
+						oct2int(f_inet_addr(g_media.bts1.bts.host)),
+						g_media.bts1.bts.port_nr,
+						g_media.bts1.rtp_pt));
+		g_media.bts1.ipa_crcx_seen := true;
+		repeat;
+		}
+	/* on second (new) BTS during hand-over */
+	[g_media.bts1.ipa_crcx_seen] RSL1.receive(tr_RSL_IPA_MDCX(g_chan_nr, ?)) -> value rsl{
+		/* Extract conn_id, ip, port, rtp_pt2 from request + use in response */
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_CONN_ID, ie);
+		if (g_media.bts1.conn_id != ie.ipa_conn_id) {
+			setverdict(fail, "IPA MDCX for unknown ConnId", rsl);
+			self.stop;
+		}
+		/* mandatory */
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_IP, ie);
+		g_media.bts1.peer.host := f_inet_ntoa(int2oct(ie.ipa_remote_ip, 4));
+		f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_PORT, ie);
+		g_media.bts1.peer.port_nr := ie.ipa_remote_port;
+		/* optional */
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			g_media.bts1.rtp_pt := ie.ipa_rtp_pt;
+		}
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
+			g_media.bts1.rtp_pt := ie.ipa_rtp_pt2;
+		}
+		RSL1.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, g_media.bts1.conn_id,
+						oct2int(f_inet_addr(g_media.bts1.peer.host)),
+						g_media.bts1.peer.port_nr,
+						g_media.bts1.rtp_pt));
+		//g_media.bts1.ipa_mdcx_seen := true;
+		repeat;
+		}
+
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
 		var SDP_Message sdp;
 		var integer cid := f_get_free_mgcp_conn();
@@ -219,7 +276,7 @@ altstep as_Media() runs on MSC_ConnHdlr {
 							int2str(mgcp_conn.sample_rate))),
 				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
 		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
-		//mgcp_mdcx_seen := true;
+		//g_media.mgcp_mdcx_seen := true;
 		repeat;
 	}
 }
@@ -634,6 +691,62 @@ runs on MSC_ConnHdlr return PDU_BSSAP {
 	}
 	return bssap;
 }
+
+type record HandoverState {
+	/* Assignment related bits */
+	boolean rr_ho_cmpl_seen,
+	boolean handover_done,
+	RslChannelNr old_chan_nr
+};
+
+altstep as_handover(inout HandoverState st) runs on MSC_ConnHdlr {
+	var RSL_Message rsl;
+	[not st.rr_ho_cmpl_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		log("Rx L3 from net: ", l3);
+		if (ischosen(l3.msgs.rrm.handoverCommand)) {
+			var RslChannelNr new_chan_nr;
+			var GsmArfcn arfcn;
+			f_ChDesc2RslChanNr(l3.msgs.rrm.handoverCommand.channelDescription2,
+					   new_chan_nr, arfcn);
+			/* FIXME: Determine TRX NR by ARFCN, instead of hard-coded TRX0! */
+
+			/* register our component for this channel number at the RSL Emulation */
+			f_rslem_register(0, new_chan_nr, RSL1_PROC);
+
+			/* resume processing of RSL DChan messages, which was temporarily suspended
+			 * before performing a hand-over */
+			f_rslem_resume(RSL1_PROC);
+
+			/* send handover complete over the new channel */
+			var PDU_ML3_MS_NW l3_tx := valueof(ts_RRM_HandoverComplete('00'O));
+			RSL1.send(ts_RSL_DATA_IND(new_chan_nr, valueof(ts_RslLinkID_DCCH(0)),
+						  enc_PDU_ML3_MS_NW(l3_tx)));
+			/* by default, send via the new channel from now */
+			st.old_chan_nr := g_chan_nr;
+			g_chan_nr := new_chan_nr;
+			st.rr_ho_cmpl_seen := true;
+			repeat;
+		} else {
+			setverdict(fail, "Unexpected L3 received", l3);
+			self.stop;
+		}
+		}
+	[st.rr_ho_cmpl_seen] as_Media();
+	[st.rr_ho_cmpl_seen] RSL.receive(tr_RSL_REL_REQ(st.old_chan_nr, tr_RslLinkID_DCCH(0))) {
+		RSL.send(ts_RSL_REL_CONF(st.old_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+		repeat;
+		}
+	[st.rr_ho_cmpl_seen] RSL.receive(tr_RSL_RF_CHAN_REL(st.old_chan_nr)) {
+		RSL.send(ts_RSL_RF_CHAN_REL_ACK(st.old_chan_nr));
+		/* unregister for old channel number in RSL emulation */
+		/* FIXME: Determine TRX NR by ARFCN, instead of hard-coded TRX0! */
+		f_rslem_unregister(0, st.old_chan_nr);
+		st.handover_done := true;
+		repeat;
+		}
+}
+
 
 
 }
