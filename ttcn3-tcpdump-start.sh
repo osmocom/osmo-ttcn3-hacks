@@ -19,6 +19,6 @@ if [ "$(id -u)" = "0" ]; then
 else
 	CMD="sudo /usr/sbin/tcpdump"
 fi
-$CMD -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >/dev/null 2>&1 &
+$CMD -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.log 2>&1 &
 PID=$!
 echo $PID > $PIDFILE
