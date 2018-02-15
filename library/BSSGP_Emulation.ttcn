@@ -1,253 +1,256 @@
 module BSSGP_Emulation {
-	import from NS_Types all;
-	import from NS_Emulation all;
-	import from BSSGP_Types all;
-	import from Osmocom_Gb_Types all;
-	import from IPL4asp_Types all;
 
-	type record BssgpStatusIndication {
-		Nsei		nsei,
-		BssgpBvci	bvci,
-		BvcState	state
-	}
+import from NS_Types all;
+import from NS_Emulation all;
+import from BSSGP_Types all;
+import from Osmocom_Gb_Types all;
+import from IPL4asp_Types all;
 
-	template BssgpStatusIndication t_BssgpStsInd(template Nsei nsei, template BssgpBvci bvci, template BvcState state) := {
-		nsei := nsei,
+type record BssgpStatusIndication {
+	Nsei		nsei,
+	BssgpBvci	bvci,
+	BvcState	state
+}
+
+template BssgpStatusIndication t_BssgpStsInd(template Nsei nsei, template BssgpBvci bvci, template BvcState state) := {
+	nsei := nsei,
+	bvci := bvci,
+	state := state
+}
+
+type enumerated BvcState {
+	BVC_S_BLOCKED,
+	BVC_S_UNBLOCKED
+};
+
+/* port from our (internal) point of view */
+type port BSSGP_SP_PT message {
+	in	PDU_BSSGP;
+	out	PDU_BSSGP,
+		NsStatusIndication,
+		BssgpStatusIndication,
+		ASP_Event;
+} with { extension "internal" };
+
+/* port from the user point of view */
+type port BSSGP_PT message {
+	in	ASP_Event,
+		NsStatusIndication,
+		BssgpStatusIndication,
+		PDU_BSSGP;
+	out	PDU_BSSGP;
+} with { extension "internal" };
+
+function BssgpStart(boolean sgsn_role := false) runs on BSSGP_CT {
+	g_sgsn_role := sgsn_role
+	f_init();
+	f_ScanEvents();
+}
+
+private function f_init() runs on BSSGP_CT {
+	/* Connect the UDP socket */
+	f_change_state(BVC_S_BLOCKED);
+}
+
+type component BSSGP_CT {
+	/* UDP port towards the bottom (IUT) */
+	port NS_PT BSCP;
+	/* NS-User SAP towards the user */
+	port BSSGP_SP_PT BSSGP_SP;
+
+	var boolean g_sgsn_role := true;
+	var BvcState g_ptp_bvc_state := BVC_S_BLOCKED;
+	timer g_T1 := 15.0;
+	timer g_T2 := 60.0;
+}
+
+modulepar {
+	Nsvci mp_nsei := 96;
+	Nsvci mp_bvci := 196;
+	BssgpCellId mp_cellid := { ra_id := { lai := { mcc_mnc := '26242F'H, lac := 13135}, rac := 0 }, cell_id := 20960 };
+};
+
+function f_BnsUdReq(template PDU_BSSGP pdu, BssgpBvci bvci := mp_bvci) return NsUnitdataRequest {
+	var NsUnitdataRequest udr := {
 		bvci := bvci,
-		state := state
+		nsei := mp_nsei,
+		/* for some weird reason we get "Dynamic test case error: Text encoder: Encoding an
+		 * unbound integer value." when trying to send the reocrd rather than the octetstring */
+		//sdu := omit,
+		//bssgp := valueof(pdu)
+		sdu := enc_PDU_BSSGP(valueof(pdu)),
+		bssgp := omit
+	}
+	return udr;
+}
+
+function f_BnsUdInd(template PDU_BSSGP pdu, template BssgpBvci bvci := mp_bvci) return template NsUnitdataIndication {
+	var template NsUnitdataIndication udi := {
+		bvci := bvci,
+		nsei := mp_nsei,
+		sdu := *,
+		bssgp := pdu
+	}
+	return udi;
+}
+
+private function f_change_state(BvcState new_state) runs on BSSGP_CT {
+	log("BSSGP State Transition: ", g_ptp_bvc_state, " -> ", new_state);
+	g_ptp_bvc_state := new_state;
+	BSSGP_SP.send(t_BssgpStsInd(mp_nsei, mp_bvci, g_ptp_bvc_state));
+}
+
+private function f_sendReset() runs on BSSGP_CT {
+	var PDU_BSSGP pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, mp_bvci, mp_cellid));
+	log("PDU: ", pdu);
+	log("ENC: ", enc_PDU_BSSGP(pdu));
+
+	/* BVC-RESET is always sent via the SIGNALLING BVCI, see Table 5.4.1 */
+	BSCP.send(f_BnsUdReq(pdu, 0));
+	g_T2.start;
+	//f_change_state(BVC_S_WAIT_RESET);
+}
+
+private function f_sendUnblock() runs on BSSGP_CT {
+	BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK(mp_bvci), 0));
+	g_T1.start;
+}
+
+private function f_sendBlock(BssgpCause cause) runs on BSSGP_CT {
+	BSCP.send(f_BnsUdReq(t_BVC_BLOCK(mp_bvci, cause), 0));
+	g_T1.start;
+}
+
+private function f_sendStatus(BssgpCause cause, PDU_BSSGP pdu) runs on BSSGP_CT {
+	/* FIXME: Make sure correct Signaling or PTP BVCI is used! */
+	BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(mp_bvci, cause, pdu)));
+}
+
+altstep as_allstate() runs on BSSGP_CT {
+	var NsUnitdataIndication udi;
+	var NsStatusIndication nsi;
+	var ASP_Event evt;
+
+	/* Respond to BLOCK for wrong NSVCI */
+	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(?, ?), 0)) -> value udi {
+		log("Rx BVC-BLOCK for unknown BVCI");
+		f_sendStatus(BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp);
 	}
 
-	type enumerated BvcState {
-		BVC_S_BLOCKED,
-		BVC_S_UNBLOCKED
-	};
-
-	/* port from our (internal) point of view */
-	type port BSSGP_SP_PT message {
-		in	PDU_BSSGP;
-		out	PDU_BSSGP,
-			NsStatusIndication,
-			BssgpStatusIndication,
-			ASP_Event;
-	} with { extension "internal" };
-
-	/* port from the user point of view */
-	type port BSSGP_PT message {
-		in	ASP_Event,
-			NsStatusIndication,
-			BssgpStatusIndication,
-			PDU_BSSGP;
-		out	PDU_BSSGP;
-	} with { extension "internal" };
-
-	function BssgpStart(boolean sgsn_role := false) runs on BSSGP_CT {
-		g_sgsn_role := sgsn_role
-		f_init();
-		f_ScanEvents();
+	/* Respond to RESET with correct BVCI/CellID */
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, mp_bvci, mp_cellid), 0)) -> value udi {
+		log("Rx BVC-RESET for Our BVCI=", mp_bvci);
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(mp_bvci, mp_cellid), 0));
+		f_change_state(BVC_S_UNBLOCKED);
 	}
 
-	private function f_init() runs on BSSGP_CT {
-		/* Connect the UDP socket */
-		f_change_state(BVC_S_BLOCKED);
+	/* Respond to RESET for signalling BVCI 0 */
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, mp_cellid), 0)) -> value udi {
+		log("Rx BVC-RESET for Signaling BVCI=0");
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(0, mp_cellid), 0));
 	}
 
-	type component BSSGP_CT {
-		/* UDP port towards the bottom (IUT) */
-		port NS_PT BSCP;
-		/* NS-User SAP towards the user */
-		port BSSGP_SP_PT BSSGP_SP;
-
-		var boolean g_sgsn_role := true;
-		var BvcState g_ptp_bvc_state := BVC_S_BLOCKED;
-		timer g_T1 := 15.0;
-		timer g_T2 := 60.0;
+	/* Respond to RESET with wrong NSEI/NSVCI */
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, ?, ?), 0)) -> value udi {
+		log("Rx BVC-RESET for unknown BVCI");
+		f_sendStatus(BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp);
 	}
 
-	modulepar {
-		Nsvci mp_nsei := 96;
-		Nsvci mp_bvci := 196;
-		BssgpCellId mp_cellid := { ra_id := { lai := { mcc_mnc := '26242F'H, lac := 13135}, rac := 0 }, cell_id := 20960 };
-	};
-
-	function f_BnsUdReq(template PDU_BSSGP pdu, BssgpBvci bvci := mp_bvci) return NsUnitdataRequest {
-		var NsUnitdataRequest udr := {
-			bvci := bvci,
-			nsei := mp_nsei,
-			/* for some weird reason we get "Dynamic test case error: Text encoder: Encoding an
-			 * unbound integer value." when trying to send the reocrd rather than the octetstring */
-			//sdu := omit,
-			//bssgp := valueof(pdu)
-			sdu := enc_PDU_BSSGP(valueof(pdu)),
-			bssgp := omit
-		}
-		return udr;
+	/* default case of handling unknown PDUs */
+	[] BSCP.receive(f_BnsUdInd(?, ?)) -> value udi {
+		log("Rx Unexpected BSSGP PDU ", udi.bssgp," in state ", g_ptp_bvc_state);
+		f_sendStatus(BSSGP_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, udi.bssgp);
 	}
-
-	function f_BnsUdInd(template PDU_BSSGP pdu, template BssgpBvci bvci := mp_bvci) return template NsUnitdataIndication {
-		var template NsUnitdataIndication udi := {
-			bvci := bvci,
-			nsei := mp_nsei,
-			sdu := *,
-			bssgp := pdu
-		}
-		return udi;
-	}
-
-	private function f_change_state(BvcState new_state) runs on BSSGP_CT {
-		log("BSSGP State Transition: ", g_ptp_bvc_state, " -> ", new_state);
-		g_ptp_bvc_state := new_state;
-		BSSGP_SP.send(t_BssgpStsInd(mp_nsei, mp_bvci, g_ptp_bvc_state));
-	}
-
-	private function f_sendReset() runs on BSSGP_CT {
-		var PDU_BSSGP pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, mp_bvci, mp_cellid));
-		log("PDU: ", pdu);
-		log("ENC: ", enc_PDU_BSSGP(pdu));
-
-		/* BVC-RESET is always sent via the SIGNALLING BVCI, see Table 5.4.1 */
-		BSCP.send(f_BnsUdReq(pdu, 0));
-		g_T2.start;
-		//f_change_state(BVC_S_WAIT_RESET);
-	}
-
-	private function f_sendUnblock() runs on BSSGP_CT {
-		BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK(mp_bvci), 0));
-		g_T1.start;
-	}
-
-	private function f_sendBlock(BssgpCause cause) runs on BSSGP_CT {
-		BSCP.send(f_BnsUdReq(t_BVC_BLOCK(mp_bvci, cause), 0));
-		g_T1.start;
-	}
-
-	private function f_sendStatus(BssgpCause cause, PDU_BSSGP pdu) runs on BSSGP_CT {
-		/* FIXME: Make sure correct Signaling or PTP BVCI is used! */
-		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(mp_bvci, cause, pdu)));
-	}
-
-	altstep as_allstate() runs on BSSGP_CT {
-		var NsUnitdataIndication udi;
-		var NsStatusIndication nsi;
-		var ASP_Event evt;
-
-		/* Respond to BLOCK for wrong NSVCI */
-		[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(?, ?), 0)) -> value udi {
-			log("Rx BVC-BLOCK for unknown BVCI");
-			f_sendStatus(BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp);
-		}
-
-		/* Respond to RESET with correct BVCI/CellID */
-		[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, mp_bvci, mp_cellid), 0)) -> value udi {
-			log("Rx BVC-RESET for Our BVCI=", mp_bvci);
-			BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(mp_bvci, mp_cellid), 0));
-			f_change_state(BVC_S_UNBLOCKED);
-		}
-
-		/* Respond to RESET for signalling BVCI 0 */
-		[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, mp_cellid), 0)) -> value udi {
-			log("Rx BVC-RESET for Signaling BVCI=0");
-			BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(0, mp_cellid), 0));
-		}
-
-		/* Respond to RESET with wrong NSEI/NSVCI */
-		[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, ?, ?), 0)) -> value udi {
-			log("Rx BVC-RESET for unknown BVCI");
-			f_sendStatus(BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp);
-		}
-
-		/* default case of handling unknown PDUs */
-		[] BSCP.receive(f_BnsUdInd(?, ?)) -> value udi {
-			log("Rx Unexpected BSSGP PDU ", udi.bssgp," in state ", g_ptp_bvc_state);
-			f_sendStatus(BSSGP_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, udi.bssgp);
-		}
-		/* Forwarding of ASP_Event and NsStatusIndication to user */
-		[] BSCP.receive(ASP_Event:?) -> value evt { BSSGP_SP.send(evt); }
-		[] BSCP.receive(NsStatusIndication:?) -> value nsi { 
-			/* if we just became NS-unblocked, send a BCC-RESET */
-			if (nsi.old_state != NSE_S_ALIVE_UNBLOCKED and nsi.new_state == NSE_S_ALIVE_UNBLOCKED) {
-				if (g_sgsn_role == false) {
-					f_sendReset();
-				}
-				/* Idea: We coudl send BVC-UNBLOCK here like some SGSN do */
+	/* Forwarding of ASP_Event and NsStatusIndication to user */
+	[] BSCP.receive(ASP_Event:?) -> value evt { BSSGP_SP.send(evt); }
+	[] BSCP.receive(NsStatusIndication:?) -> value nsi { 
+		/* if we just became NS-unblocked, send a BCC-RESET */
+		if (nsi.old_state != NSE_S_ALIVE_UNBLOCKED and nsi.new_state == NSE_S_ALIVE_UNBLOCKED) {
+			if (g_sgsn_role == false) {
+				f_sendReset();
 			}
-			BSSGP_SP.send(nsi);
+			/* Idea: We coudl send BVC-UNBLOCK here like some SGSN do */
 		}
+		BSSGP_SP.send(nsi);
 	}
+}
 
-	private function f_ScanEvents() runs on BSSGP_CT {
-		var NsUnitdataIndication udi;
-		var PDU_BSSGP bs_pdu;
-		var default d;
+private function f_ScanEvents() runs on BSSGP_CT {
+	var NsUnitdataIndication udi;
+	var PDU_BSSGP bs_pdu;
+	var default d;
 
 
-		log("matching against ", tr_BVC_RESET(?, mp_bvci, mp_cellid));
+	log("matching against ", tr_BVC_RESET(?, mp_bvci, mp_cellid));
 
-		d := activate(as_allstate());
+	d := activate(as_allstate());
 
-		while (true) {
-		if (g_ptp_bvc_state == BVC_S_BLOCKED) {
-			alt {
-				[] g_T1.timeout {
-					f_sendUnblock();
-				}
-				[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK_ACK(mp_bvci), 0)) {
-					g_T1.stop;
-					f_change_state(BVC_S_UNBLOCKED);
-				}
-				[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, omit), 0)) {
-					f_sendUnblock();
-				}
+	while (true) {
+	if (g_ptp_bvc_state == BVC_S_BLOCKED) {
+		alt {
+			[] g_T1.timeout {
+				f_sendUnblock();
 			}
-		} else if (g_ptp_bvc_state == BVC_S_UNBLOCKED) {
-			alt {
-				/* bogus unblock, just respond with ACK */
-				[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK(mp_bvci), 0)) -> value udi {
-					BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK_ACK(mp_bvci), 0));
-				}
-				/* Respond to BLOCK with BLOCK-ACK + change state */
-				[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(mp_bvci, ?), 0)) -> value udi {
-					BSCP.send(f_BnsUdReq(t_BVC_BLOCK_ACK(mp_bvci), 0));
-					g_T1.stop;
-					f_change_state(BVC_S_BLOCKED);
-				}
-				[] g_T1.timeout {
-					f_sendBlock(BSSGP_CAUSE_OM_INTERVENTION);
-				}
-				[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK_ACK(mp_bvci), 0)) -> value udi {
-					g_T1.stop;
-					f_change_state(BVC_S_BLOCKED);
-				}
-				[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, mp_cellid), 0)) -> value udi {
-					g_T2.stop;
-					f_change_state(BVC_S_UNBLOCKED);
-				}
+			[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK_ACK(mp_bvci), 0)) {
+				g_T1.stop;
+				f_change_state(BVC_S_UNBLOCKED);
+			}
+			[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, omit), 0)) {
+				f_sendUnblock();
+			}
+		}
+	} else if (g_ptp_bvc_state == BVC_S_UNBLOCKED) {
+		alt {
+			/* bogus unblock, just respond with ACK */
+			[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK(mp_bvci), 0)) -> value udi {
+				BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK_ACK(mp_bvci), 0));
+			}
+			/* Respond to BLOCK with BLOCK-ACK + change state */
+			[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(mp_bvci, ?), 0)) -> value udi {
+				BSCP.send(f_BnsUdReq(t_BVC_BLOCK_ACK(mp_bvci), 0));
+				g_T1.stop;
+				f_change_state(BVC_S_BLOCKED);
+			}
+			[] g_T1.timeout {
+				f_sendBlock(BSSGP_CAUSE_OM_INTERVENTION);
+			}
+			[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK_ACK(mp_bvci), 0)) -> value udi {
+				g_T1.stop;
+				f_change_state(BVC_S_BLOCKED);
+			}
+			[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, mp_cellid), 0)) -> value udi {
+				g_T2.stop;
+				f_change_state(BVC_S_UNBLOCKED);
+			}
 
-				/* simply acknowledge all Flow Control Messages */
+			/* simply acknowledge all Flow Control Messages */
 /*
-				[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_BVC)) {
-					BSCP.send(f_BnsUdReq(t_BVC_FC_BVC_ACK));
-				}
-				[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_MS)) {
-					BSCP.send(f_BnsUdReq(t_BVC_FC_MS_ACK));
-				}
+			[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_BVC)) {
+				BSCP.send(f_BnsUdReq(t_BVC_FC_BVC_ACK));
+			}
+			[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_MS)) {
+				BSCP.send(f_BnsUdReq(t_BVC_FC_MS_ACK));
+			}
 */
 
-				/* BSSGP-UNITDATA PDUs from network to NS-UNITDATA.ind to user */
-				[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_DL_UD)) -> value udi {
-					BSSGP_SP.send(udi.bssgp);
-				}
-				[g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_UL_UD)) -> value udi {
-					BSSGP_SP.send(udi.bssgp);
-				}
-				/* pass virtually any PDU from user to NS-UNITDATA PDU on network */
-				[] BSSGP_SP.receive(PDU_BSSGP:?) -> value bs_pdu {
-					BSCP.send(f_BnsUdReq(bs_pdu));
-				}
-
+			/* BSSGP-UNITDATA PDUs from network to NS-UNITDATA.ind to user */
+			[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_DL_UD)) -> value udi {
+				BSSGP_SP.send(udi.bssgp);
 			}
-		}
+			[g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_UL_UD)) -> value udi {
+				BSSGP_SP.send(udi.bssgp);
+			}
+			/* pass virtually any PDU from user to NS-UNITDATA PDU on network */
+			[] BSSGP_SP.receive(PDU_BSSGP:?) -> value bs_pdu {
+				BSCP.send(f_BnsUdReq(bs_pdu));
+			}
 
-		} /* while */
-		//deactivate(d);
+		}
 	}
+
+	} /* while */
+	//deactivate(d);
+}
+
+
 }
