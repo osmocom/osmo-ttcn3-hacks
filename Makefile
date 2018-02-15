@@ -20,6 +20,10 @@ default: deps all
 deps:
 	$(MAKE) -C deps
 
+.PHONY: deps-update
+deps-update:
+	$(MAKE) -C deps update
+
 compile: $(foreach dir,$(SUBDIRS),$(dir)/compile)
 clean: $(foreach dir,$(SUBDIRS),$(dir)/clean)
 all: $(foreach dir,$(SUBDIRS),$(dir)/all)
