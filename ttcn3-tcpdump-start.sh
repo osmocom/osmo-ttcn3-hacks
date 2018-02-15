@@ -22,3 +22,13 @@ fi
 $CMD -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.log 2>&1 &
 PID=$!
 echo $PID > $PIDFILE
+
+# Wait until tcpdump creates the pcap file to give it some time to start listenting.
+# Timeout is 10 seconds.
+i=0
+while [ ! -f "$TTCN3_PCAP_PATH/$TESTCASE.pcap" ] && [ $i -lt 10 ]
+do
+	echo "Waiting for tcpdump to start... $i"
+	sleep 1
+	i=$((i+1))
+done
