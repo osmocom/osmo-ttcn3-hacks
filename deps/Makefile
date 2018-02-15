@@ -58,7 +58,11 @@ $(1)/update: $(1)
 	(cd $(1) && git remote set-url origin $(2)/$(1) && git fetch && git checkout -f -B master origin/master)
 
 .PHONY: $(1)/clean
-$(1)/clean:
+$(1)/clean: $(1)
+	(cd $(1) && git checkout -f -B master && git reset --hard)
+
+.PHONY: $(1)/distclean
+$(1)/distclean:
 	@rm -rf $(1)
 endef
 
