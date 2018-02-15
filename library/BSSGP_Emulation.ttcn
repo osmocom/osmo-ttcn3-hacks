@@ -1,10 +1,22 @@
 module BSSGP_Emulation {
 
+import from General_Types all;
+import from Osmocom_Types all;
 import from NS_Types all;
 import from NS_Emulation all;
 import from BSSGP_Types all;
 import from Osmocom_Gb_Types all;
 import from IPL4asp_Types all;
+
+import from MobileL3_GMM_SM_Types all;
+import from MobileL3_Types all;
+
+import from LLC_Types all;
+import from LLC_Templates all;
+
+/***********************************************************************
+ * Communication between Client Components and Main Component
+ ***********************************************************************/
 
 type record BssgpStatusIndication {
 	Nsei		nsei,
@@ -25,11 +37,15 @@ type enumerated BvcState {
 
 /* port from our (internal) point of view */
 type port BSSGP_SP_PT message {
-	in	PDU_BSSGP;
-	out	PDU_BSSGP,
+	in	PDU_BSSGP,
+		PDU_L3_MS_SGSN,
+		PDU_L3_SGSN_MS;
+	out	BssgpDecoded,
 		NsStatusIndication,
 		BssgpStatusIndication,
-		ASP_Event;
+		ASP_Event,
+		PDU_L3_MS_SGSN,
+		PDU_L3_SGSN_MS;
 } with { extension "internal" };
 
 /* port from the user point of view */
@@ -37,12 +53,37 @@ type port BSSGP_PT message {
 	in	ASP_Event,
 		NsStatusIndication,
 		BssgpStatusIndication,
-		PDU_BSSGP;
-	out	PDU_BSSGP;
+		BssgpDecoded,
+		PDU_L3_MS_SGSN,
+		PDU_L3_SGSN_MS;
+	out	PDU_BSSGP,
+		PDU_L3_SGSN_MS,
+		PDU_L3_MS_SGSN;
 } with { extension "internal" };
 
-function BssgpStart(boolean sgsn_role := false) runs on BSSGP_CT {
-	g_sgsn_role := sgsn_role
+signature BSSGP_register_client(hexstring imsi, OCT4 tlli, BssgpCellId cell_id);
+signature BSSGP_unregister_client(hexstring imsi);
+
+type port BSSGP_PROC_PT procedure {
+	inout BSSGP_register_client, BSSGP_unregister_client;
+} with { extension "internal" };
+
+
+/***********************************************************************
+ * Client Component for a single MS/TLLI
+ ***********************************************************************/
+
+type component BSSGP_Client_CT {
+	port BSSGP_PT BSSGP;
+	port BSSGP_PROC_PT BSSGP_PROC;
+};
+
+/***********************************************************************
+ * Main Component
+ ***********************************************************************/
+
+function BssgpStart(BssgpConfig cfg) runs on BSSGP_CT {
+	g_cfg := cfg;
 	f_init();
 	f_ScanEvents();
 }
@@ -57,23 +98,53 @@ type component BSSGP_CT {
 	port NS_PT BSCP;
 	/* NS-User SAP towards the user */
 	port BSSGP_SP_PT BSSGP_SP;
+	port BSSGP_PROC_PT BSSGP_PROC;
 
-	var boolean g_sgsn_role := true;
+	var BssgpConfig g_cfg;
+
 	var BvcState g_ptp_bvc_state := BVC_S_BLOCKED;
 	timer g_T1 := 15.0;
 	timer g_T2 := 60.0;
+
+	var ClientEntity ClientTable[16];
 }
 
-modulepar {
-	Nsvci mp_nsei := 96;
-	Nsvci mp_bvci := 196;
-	BssgpCellId mp_cellid := { ra_id := { lai := { mcc_mnc := '26242F'H, lac := 13135}, rac := 0 }, cell_id := 20960 };
+type record ClientEntity {
+	OCT4 tlli,
+	OCT4 tlli_old optional,
+	hexstring imsi,
+	BssgpCellId cell_id,
+	BSSGP_Client_CT comp_ref,
+	/* LLC entities, one for each SAPI */
+	LLC_Entity llc[16]
 };
 
-function f_BnsUdReq(template PDU_BSSGP pdu, BssgpBvci bvci := mp_bvci) return NsUnitdataRequest {
+type record LLC_Entity {
+	boolean sgsn_role,
+	/* N(U) on transmit side for next PDU */
+	uint9_t n_u_tx_next,
+	/* N(U) on receive side, last PDU */
+	uint9_t n_u_rx_last optional
+};
+
+private template LLC_Entity t_LLC_init(boolean sgsn_role := false) := {
+	sgsn_role := sgsn_role,
+	n_u_tx_next := 0,
+	n_u_rx_last := -
+}
+
+type record BssgpConfig {
+	Nsvci nsei,
+	Nsvci bvci,
+	BssgpCellId cell_id,
+	boolean sgsn_role
+};
+
+function f_BnsUdReq(template PDU_BSSGP pdu, BssgpBvci bvci)
+runs on BSSGP_CT return NsUnitdataRequest {
 	var NsUnitdataRequest udr := {
 		bvci := bvci,
-		nsei := mp_nsei,
+		nsei := g_cfg.nsei,
 		/* for some weird reason we get "Dynamic test case error: Text encoder: Encoding an
 		 * unbound integer value." when trying to send the reocrd rather than the octetstring */
 		//sdu := omit,
@@ -84,10 +155,11 @@ function f_BnsUdReq(template PDU_BSSGP pdu, BssgpBvci bvci := mp_bvci) return Ns
 	return udr;
 }
 
-function f_BnsUdInd(template PDU_BSSGP pdu, template BssgpBvci bvci := mp_bvci) return template NsUnitdataIndication {
+function f_BnsUdInd(template PDU_BSSGP pdu, template BssgpBvci bvci)
+runs on BSSGP_CT return template NsUnitdataIndication {
 	var template NsUnitdataIndication udi := {
 		bvci := bvci,
-		nsei := mp_nsei,
+		nsei := g_cfg.nsei,
 		sdu := *,
 		bssgp := pdu
 	}
@@ -97,11 +169,15 @@ function f_BnsUdInd(template PDU_BSSGP pdu, template BssgpBvci bvci := mp_bvci) 
 private function f_change_state(BvcState new_state) runs on BSSGP_CT {
 	log("BSSGP State Transition: ", g_ptp_bvc_state, " -> ", new_state);
 	g_ptp_bvc_state := new_state;
-	BSSGP_SP.send(t_BssgpStsInd(mp_nsei, mp_bvci, g_ptp_bvc_state));
+	for (var integer i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].comp_ref)) {
+			BSSGP_SP.send(t_BssgpStsInd(g_cfg.nsei, g_cfg.bvci, g_ptp_bvc_state)) to ClientTable[i].comp_ref;
+		}
+	}
 }
 
 private function f_sendReset() runs on BSSGP_CT {
-	var PDU_BSSGP pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, mp_bvci, mp_cellid));
+	var PDU_BSSGP pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, g_cfg.bvci, g_cfg.cell_id));
 	log("PDU: ", pdu);
 	log("ENC: ", enc_PDU_BSSGP(pdu));
 
@@ -112,24 +188,177 @@ private function f_sendReset() runs on BSSGP_CT {
 }
 
 private function f_sendUnblock() runs on BSSGP_CT {
-	BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK(mp_bvci), 0));
+	BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK(g_cfg.bvci), 0));
 	g_T1.start;
 }
 
 private function f_sendBlock(BssgpCause cause) runs on BSSGP_CT {
-	BSCP.send(f_BnsUdReq(t_BVC_BLOCK(mp_bvci, cause), 0));
+	BSCP.send(f_BnsUdReq(t_BVC_BLOCK(g_cfg.bvci, cause), 0));
 	g_T1.start;
 }
 
 private function f_sendStatus(BssgpCause cause, PDU_BSSGP pdu) runs on BSSGP_CT {
 	/* FIXME: Make sure correct Signaling or PTP BVCI is used! */
-	BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(mp_bvci, cause, pdu)));
+	BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(g_cfg.bvci, cause, pdu), g_cfg.bvci));
+}
+
+/* attempt to extract the TLLI from a BSSGP PDU */
+function f_bssgp_get_tlli(PDU_BSSGP bssgp) return template OCT4 {
+	if (ischosen(bssgp.pDU_BSSGP_DL_UNITDATA)) {
+		return bssgp.pDU_BSSGP_DL_UNITDATA.tLLI_current;
+	} else if (ischosen(bssgp.pDU_BSSGP_UL_UNITDATA)) {
+		return bssgp.pDU_BSSGP_UL_UNITDATA.tLLI;
+	} else if (ischosen(bssgp.pDU_BSSGP_RA_CAPABILITY)) {
+		return bssgp.pDU_BSSGP_RA_CAPABILITY.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RA_CAPABILITY_UPDATE)) {
+		return bssgp.pDU_BSSGP_RA_CAPABILITY_UPDATE.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RA_CAPABILITY_UPDATE_ACK)) {
+		return bssgp.pDU_BSSGP_RA_CAPABILITY_UPDATE_ACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RADIO_STATUS)) {
+		return bssgp.pDU_BSSGP_RADIO_STATUS.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_SUSPEND)) {
+		return bssgp.pDU_BSSGP_SUSPEND.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_SUSPEND_ACK)) {
+		return bssgp.pDU_BSSGP_SUSPEND_ACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_SUSPEND_NACK)) {
+		return bssgp.pDU_BSSGP_SUSPEND_NACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RESUME)) {
+		return bssgp.pDU_BSSGP_RESUME.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RESUME_ACK)) {
+		return bssgp.pDU_BSSGP_RESUME_ACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_RESUME_NACK)) {
+		return bssgp.pDU_BSSGP_RESUME_NACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_FLUSH_LL)) {
+		return bssgp.pDU_BSSGP_FLUSH_LL.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_FLUSH_LL_ACK)) {
+		return bssgp.pDU_BSSGP_FLUSH_LL_ACK.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_LLC_DISCARDED)) {
+		return bssgp.pDU_BSSGP_LLC_DISCARDED.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_LLC_DISCARDED)) {
+		return bssgp.pDU_BSSGP_LLC_DISCARDED.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_PAGING_CS) and
+		   isvalue(bssgp.pDU_BSSGP_PAGING_CS.tLLI)) {
+		return bssgp.pDU_BSSGP_PAGING_CS.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_FLOW_CONTROL_MS)) {
+		return bssgp.pDU_BSSGP_FLOW_CONTROL_MS.tLLI.tLLI_Value;
+	} else if (ischosen(bssgp.pDU_BSSGP_FLOW_CONTROL_MS_ACK)) {
+		return bssgp.pDU_BSSGP_FLOW_CONTROL_MS_ACK.tLLI.tLLI_Value;
+	}
+	/* TODO: Handover, PFC, LCS */
+	return omit;
+}
+
+/*
+private function f_tbl_init() runs on BSSGP_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ImsiTable); i := i+1) {
+		ImsiTable[i] := -;
+	}
+
+	for (i := 0; i < sizeof(TlliTable); i := i+1) {
+		TlliTable[i] := -;
+	}
+}
+*/
+
+private function f_tbl_client_add(hexstring imsi, OCT4 tlli, BssgpCellId cell_id, BSSGP_Client_CT vc_conn)
+runs on BSSGP_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (not isbound(ClientTable[i].comp_ref)) {
+			log("Adding Client IMSI=", imsi, ", TLLI=", tlli, ", index=", i);
+			ClientTable[i] := {
+				tlli := tlli,
+				tlli_old := omit,
+				imsi := imsi,
+				cell_id := cell_id,
+				comp_ref := vc_conn,
+				llc := -
+			};
+			for (var integer j := 0; j < sizeof(ClientTable[i].llc); j := j+1) {
+				ClientTable[i].llc[j] := valueof(t_LLC_init(g_cfg.sgsn_role));
+			}
+			return;
+		}
+	}
+	setverdict(fail, "Client Table full");
+	self.stop;
+}
+
+private function f_tbl_client_del(hexstring imsi, BSSGP_Client_CT vc_conn) runs on BSSGP_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].imsi) and ClientTable[i].imsi == imsi) {
+			if (ClientTable[i].comp_ref != vc_conn) {
+				setverdict(fail, "Cannot unregister IMSI ", imsi, " registred to ",
+					   ClientTable[i].comp_ref, " from ", vc_conn);
+				self.stop;
+			}
+			log("Removing Client IMSI=", imsi, ", index=", i);
+			ClientTable[i] := { -, omit, -, -, - };
+			return;
+		}
+	}
+	setverdict(fail, "Could not find client for IMSI ", imsi);
+	self.stop;
+}
+
+private function f_tbl_comp_by_imsi(hexstring imsi) runs on BSSGP_CT return BSSGP_Client_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].imsi) and isbound(ClientTable[i].comp_ref)
+		    and ClientTable[i].imsi == imsi) {
+			return ClientTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "Couldn't find Component for IMSI ", imsi);
+	self.stop;
+}
+
+private function f_tbl_comp_by_tlli(OCT4 tlli) runs on BSSGP_CT return BSSGP_Client_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].comp_ref) and
+		    (isbound(ClientTable[i].tlli) and (ClientTable[i].tlli == tlli or
+		     isbound(ClientTable[i].tlli_old) and ClientTable[i].tlli_old == tlli) )) {
+			return ClientTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "Couldn't find Component for TLLI ", tlli);
+	self.stop;
+}
+
+private function f_tbl_idx_by_comp(BSSGP_Client_CT comp_ref) runs on BSSGP_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].comp_ref) and ClientTable[i].comp_ref == comp_ref) {
+			return i;
+		}
+	}
+	setverdict(fail, "Couldn't find Client for Component ", comp_ref);
+	self.stop;
+}
+
+private function f_tbl_tlli_by_comp(BSSGP_Client_CT comp_ref) runs on BSSGP_CT return OCT4 {
+	var integer i;
+	for (i := 0; i < sizeof(ClientTable); i := i+1) {
+		if (isbound(ClientTable[i].tlli) and isbound(ClientTable[i].comp_ref)
+		    and ClientTable[i].comp_ref == comp_ref) {
+			return ClientTable[i].tlli;
+		}
+	}
+	setverdict(fail, "Couldn't find TLLI for Component ", comp_ref);
+	self.stop;
 }
 
 altstep as_allstate() runs on BSSGP_CT {
+	var BSSGP_Client_CT vc_conn;
 	var NsUnitdataIndication udi;
 	var NsStatusIndication nsi;
 	var ASP_Event evt;
+	var hexstring imsi;
+	var OCT4 tlli;
+	var BssgpCellId cell_id;
 
 	/* Respond to BLOCK for wrong NSVCI */
 	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(?, ?), 0)) -> value udi {
@@ -138,16 +367,16 @@ altstep as_allstate() runs on BSSGP_CT {
 	}
 
 	/* Respond to RESET with correct BVCI/CellID */
-	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, mp_bvci, mp_cellid), 0)) -> value udi {
-		log("Rx BVC-RESET for Our BVCI=", mp_bvci);
-		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(mp_bvci, mp_cellid), 0));
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, g_cfg.bvci, g_cfg.cell_id), 0)) -> value udi {
+		log("Rx BVC-RESET for Our BVCI=", g_cfg.bvci);
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(g_cfg.bvci, g_cfg.cell_id), 0));
 		f_change_state(BVC_S_UNBLOCKED);
 	}
 
 	/* Respond to RESET for signalling BVCI 0 */
-	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, mp_cellid), 0)) -> value udi {
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, g_cfg.cell_id), 0)) -> value udi {
 		log("Rx BVC-RESET for Signaling BVCI=0");
-		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(0, mp_cellid), 0));
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(0, g_cfg.cell_id), 0));
 	}
 
 	/* Respond to RESET with wrong NSEI/NSVCI */
@@ -162,95 +391,258 @@ altstep as_allstate() runs on BSSGP_CT {
 		f_sendStatus(BSSGP_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, udi.bssgp);
 	}
 	/* Forwarding of ASP_Event and NsStatusIndication to user */
-	[] BSCP.receive(ASP_Event:?) -> value evt { BSSGP_SP.send(evt); }
+	[] BSCP.receive(ASP_Event:?) -> value evt {
+		for (var integer i := 0; i < sizeof(ClientTable); i := i+1) {
+			if (isbound(ClientTable[i].comp_ref)) {
+				BSSGP_SP.send(evt) to ClientTable[i].comp_ref;
+			}
+		}
+		}
 	[] BSCP.receive(NsStatusIndication:?) -> value nsi { 
 		/* if we just became NS-unblocked, send a BCC-RESET */
 		if (nsi.old_state != NSE_S_ALIVE_UNBLOCKED and nsi.new_state == NSE_S_ALIVE_UNBLOCKED) {
-			if (g_sgsn_role == false) {
+			if (g_cfg.sgsn_role == false) {
 				f_sendReset();
 			}
-			/* Idea: We coudl send BVC-UNBLOCK here like some SGSN do */
+			/* Idea: We could send BVC-UNBLOCK here like some SGSN do */
 		}
-		BSSGP_SP.send(nsi);
+		for (var integer i := 0; i < sizeof(ClientTable); i := i+1) {
+			if (isbound(ClientTable[i].comp_ref)) {
+				BSSGP_SP.send(nsi) to ClientTable[i].comp_ref;
+			}
+		}
+	}
+
+	[] BSSGP_PROC.getcall(BSSGP_register_client:{?,?,?}) -> param(imsi, tlli, cell_id) sender vc_conn {
+		f_tbl_client_add(imsi, tlli, cell_id, vc_conn);
+		BSSGP_PROC.reply(BSSGP_register_client:{imsi, tlli, cell_id});
+		}
+	[] BSSGP_PROC.getcall(BSSGP_unregister_client:{?}) -> param(imsi) sender vc_conn {
+		f_tbl_client_del(imsi, vc_conn);
+		BSSGP_PROC.reply(BSSGP_unregister_client:{imsi});
+		}
+}
+
+altstep as_blocked() runs on BSSGP_CT {
+	[] g_T1.timeout {
+		f_sendUnblock();
+	}
+	[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK_ACK(g_cfg.bvci), 0)) {
+		g_T1.stop;
+		f_change_state(BVC_S_UNBLOCKED);
+	}
+	[not g_cfg.sgsn_role] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(g_cfg.bvci, omit), 0)) {
+		f_sendUnblock();
 	}
 }
 
-private function f_ScanEvents() runs on BSSGP_CT {
+altstep as_unblocked() runs on BSSGP_CT {
+	var BSSGP_Client_CT vc_conn;
 	var NsUnitdataIndication udi;
 	var PDU_BSSGP bs_pdu;
-	var default d;
+	var PDU_L3_MS_SGSN l3_mo;
+	var PDU_L3_SGSN_MS l3_mt;
 
+	/* bogus unblock, just respond with ACK */
+	[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK(g_cfg.bvci), 0)) -> value udi {
+		BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK_ACK(g_cfg.bvci), 0));
+	}
+	/* Respond to BLOCK with BLOCK-ACK + change state */
+	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(g_cfg.bvci, ?), 0)) -> value udi {
+		BSCP.send(f_BnsUdReq(t_BVC_BLOCK_ACK(g_cfg.bvci), 0));
+		g_T1.stop;
+		f_change_state(BVC_S_BLOCKED);
+	}
+	[] g_T1.timeout {
+		f_sendBlock(BSSGP_CAUSE_OM_INTERVENTION);
+	}
+	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK_ACK(g_cfg.bvci), 0)) -> value udi {
+		g_T1.stop;
+		f_change_state(BVC_S_BLOCKED);
+	}
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(g_cfg.bvci, g_cfg.cell_id), 0)) -> value udi {
+		g_T2.stop;
+		f_change_state(BVC_S_UNBLOCKED);
+	}
 
-	log("matching against ", tr_BVC_RESET(?, mp_bvci, mp_cellid));
-
-	d := activate(as_allstate());
-
-	while (true) {
-	if (g_ptp_bvc_state == BVC_S_BLOCKED) {
-		alt {
-			[] g_T1.timeout {
-				f_sendUnblock();
-			}
-			[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK_ACK(mp_bvci), 0)) {
-				g_T1.stop;
-				f_change_state(BVC_S_UNBLOCKED);
-			}
-			[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, omit), 0)) {
-				f_sendUnblock();
-			}
-		}
-	} else if (g_ptp_bvc_state == BVC_S_UNBLOCKED) {
-		alt {
-			/* bogus unblock, just respond with ACK */
-			[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK(mp_bvci), 0)) -> value udi {
-				BSCP.send(f_BnsUdReq(t_BVC_UNBLOCK_ACK(mp_bvci), 0));
-			}
-			/* Respond to BLOCK with BLOCK-ACK + change state */
-			[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(mp_bvci, ?), 0)) -> value udi {
-				BSCP.send(f_BnsUdReq(t_BVC_BLOCK_ACK(mp_bvci), 0));
-				g_T1.stop;
-				f_change_state(BVC_S_BLOCKED);
-			}
-			[] g_T1.timeout {
-				f_sendBlock(BSSGP_CAUSE_OM_INTERVENTION);
-			}
-			[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK_ACK(mp_bvci), 0)) -> value udi {
-				g_T1.stop;
-				f_change_state(BVC_S_BLOCKED);
-			}
-			[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(mp_bvci, mp_cellid), 0)) -> value udi {
-				g_T2.stop;
-				f_change_state(BVC_S_UNBLOCKED);
-			}
-
-			/* simply acknowledge all Flow Control Messages */
+	/* simply acknowledge all Flow Control Messages */
 /*
-			[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_BVC)) {
-				BSCP.send(f_BnsUdReq(t_BVC_FC_BVC_ACK));
-			}
-			[g_sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_MS)) {
-				BSCP.send(f_BnsUdReq(t_BVC_FC_MS_ACK));
-			}
+	[g_cfg.sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_BVC), g_cfg.bvci) {
+		BSCP.send(f_BnsUdReq(t_BVC_FC_BVC_ACK), g_cfg.bvci);
+	}
+	[g_cfg.sgsn_role] BSCP.receive(f_BnsUdInd(t_BVC_FC_MS), g_cfg.bvci) {
+		BSCP.send(f_BnsUdReq(t_BVC_FC_MS_ACK), g_cfg.bvci);
+	}
 */
 
-			/* BSSGP-UNITDATA PDUs from network to NS-UNITDATA.ind to user */
-			[not g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_DL_UD)) -> value udi {
-				BSSGP_SP.send(udi.bssgp);
-			}
-			[g_sgsn_role] BSCP.receive(f_BnsUdInd(tr_BSSGP_UL_UD)) -> value udi {
-				BSSGP_SP.send(udi.bssgp);
-			}
-			/* pass virtually any PDU from user to NS-UNITDATA PDU on network */
-			[] BSSGP_SP.receive(PDU_BSSGP:?) -> value bs_pdu {
-				BSCP.send(f_BnsUdReq(bs_pdu));
-			}
+	/* FIXME: CS PAGING: dispatch by IMSI */
 
+	/* PS PAGING: dispatch by IMSI */
+	[] BSCP.receive(f_BnsUdInd(tr_BSSGP_PS_PAGING(g_cfg.bvci), g_cfg.bvci)) -> value udi {
+		var hexstring imsi := udi.bssgp.pDU_BSSGP_PAGING_PS.iMSI.digits
+		vc_conn := f_tbl_comp_by_imsi(imsi);
+		BSSGP_SP.send(f_dec_bssgp(udi.bssgp)) to vc_conn;
+	}
+
+	/* Any other BSSGP message: If it has TLLi, route to component; otherwise broadcast */
+	[] BSCP.receive(f_BnsUdInd(?, g_cfg.bvci)) -> value udi {
+		var BssgpDecoded dec := f_dec_bssgp(udi.bssgp);
+		var template OCT4 tlli := f_bssgp_get_tlli(udi.bssgp);
+		if (isvalue(tlli)) {
+			vc_conn := f_tbl_comp_by_tlli(valueof(tlli));
+			BSSGP_SP.send(dec) to vc_conn;
+		} else {
+			log("No TLLI: Broadcasting ", dec);
+			/* broadcast this message to all components */
+			// TITAN DOESN'T DO THIS, *SIGH*: "BSSGP_SP.send(dec) to all component;"
+			for (var integer i := 0; i < sizeof(ClientTable); i := i+1) {
+				if (isbound(ClientTable[i].comp_ref)) {
+					BSSGP_SP.send(dec) to ClientTable[i].comp_ref;
+				}
+			}
 		}
 	}
 
-	} /* while */
-	//deactivate(d);
+	/* pass virtually any PDU from user to NS-UNITDATA PDU on network */
+	[] BSSGP_SP.receive(PDU_BSSGP:?) -> value bs_pdu sender vc_conn {
+		BSCP.send(f_BnsUdReq(bs_pdu, g_cfg.bvci));
+	}
+
+	[not g_cfg.sgsn_role] BSSGP_SP.receive(PDU_L3_MS_SGSN:?) -> value l3_mo sender vc_conn {
+		var integer idx := f_tbl_idx_by_comp(vc_conn);
+		var octetstring l3_enc := enc_PDU_L3_MS_SGSN(l3_mo);
+		var BIT4 sapi := f_llc_sapi_by_l3_mo(l3_mo);
+		var integer n_u := f_llc_get_n_u_tx(ClientTable[idx].llc[bit2int(sapi)]);
+		var octetstring llc_enc := enc_PDU_LLC(valueof(ts_LLC_UI(l3_enc, sapi, '0'B, n_u)));
+		BSCP.send(f_BnsUdReq(ts_BSSGP_UL_UD(ClientTable[idx].tlli, ClientTable[idx].cell_id, llc_enc), g_cfg.bvci));
+	}
+
+	[g_cfg.sgsn_role] BSSGP_SP.receive(PDU_L3_SGSN_MS:?) -> value l3_mt sender vc_conn {
+		var integer idx := f_tbl_idx_by_comp(vc_conn);
+		var octetstring l3_enc := enc_PDU_L3_SGSN_MS(l3_mt);
+		var BIT4 sapi := f_llc_sapi_by_l3_mt(l3_mt);
+		var integer n_u := f_llc_get_n_u_tx(ClientTable[idx].llc[bit2int(sapi)]);
+		var octetstring llc_enc := enc_PDU_LLC(valueof(ts_LLC_UI(l3_enc, sapi, '1'B, n_u)));
+		//BSCP.send(f_BnsUdReq(ts_BSSGP_DL_UD(ClientTable[idx].tlli, ClientTable[idx].cell_id, llc_enc)), g_cfg.bvci);
+	}
 }
+
+private function f_llc_get_n_u_tx(inout LLC_Entity llc) return uint9_t {
+	var uint9_t ret := llc.n_u_tx_next;
+	llc.n_u_tx_next := llc.n_u_tx_next + 1;
+	return ret;
+}
+
+private function f_llc_sapi_by_l3_mo(PDU_L3_MS_SGSN l3_mo) return BIT4 {
+	if (ischosen(l3_mo.msgs.gprs_mm)) {
+		return c_LLC_SAPI_LLGMM;
+	} else if (ischosen(l3_mo.msgs.gprs_sm)) {
+		return c_LLC_SAPI_LLSM;
+	} else if (ischosen(l3_mo.msgs.sms)) {
+		return c_LLC_SAPI_LLSMS;
+	}
+	setverdict(fail, "No LLC SAPI for ", l3_mo);
+	self.stop;
+}
+
+private function f_llc_sapi_by_l3_mt(PDU_L3_SGSN_MS l3_mt) return BIT4 {
+	if (ischosen(l3_mt.msgs.gprs_mm)) {
+		return c_LLC_SAPI_LLGMM;
+	} else if (ischosen(l3_mt.msgs.gprs_sm)) {
+		return c_LLC_SAPI_LLSM;
+	} else if (ischosen(l3_mt.msgs.sms)) {
+		return c_LLC_SAPI_LLSMS;
+	}
+	setverdict(fail, "No LLC SAPI for ", l3_mt);
+	self.stop;
+}
+
+
+
+private function f_ScanEvents() runs on BSSGP_CT {
+	log("matching against ", tr_BVC_RESET(?, g_cfg.bvci, g_cfg.cell_id));
+
+	while (true) {
+		alt {
+		[g_ptp_bvc_state == BVC_S_BLOCKED] as_blocked();
+		[g_ptp_bvc_state == BVC_S_UNBLOCKED] as_unblocked();
+		[] as_allstate();
+		}
+	} /* while */
+}
+
+/* PDU_BSSGP enhanced with LLC and possibly L3 decoded payloads */
+type record BssgpDecoded {
+	PDU_BSSGP bssgp,
+	PDU_LLC llc optional,
+	PDU_L3_MS_SGSN l3_mo optional,
+	PDU_L3_SGSN_MS l3_mt optional
+}
+
+/* Decode a PDU_BSSGP into a BssgpDecoded (i.e. with LLC/L3 decoded, as applicable) */
+private function f_dec_bssgp(PDU_BSSGP bssgp) runs on BSSGP_CT return BssgpDecoded {
+	var BssgpDecoded dec := {
+		bssgp := bssgp,
+		llc := omit,
+		l3_mo := omit,
+		l3_mt := omit
+	};
+
+	/* Decode LLC, if it is a PDU that contains LLC */
+	if (ischosen(bssgp.pDU_BSSGP_DL_UNITDATA)) {
+		dec.llc := dec_PDU_LLC(bssgp.pDU_BSSGP_DL_UNITDATA.lLC_PDU.lLC_PDU);
+	} else if (ischosen(bssgp.pDU_BSSGP_UL_UNITDATA)) {
+		dec.llc := dec_PDU_LLC(bssgp.pDU_BSSGP_UL_UNITDATA.lLC_PDU.lLC_PDU);
+	}
+
+	/* Decode L3, if it is a LLC PDU containing L3 */
+	if (isvalue(dec.llc) and match(dec.llc, tr_LLC_UI_L3)) {
+		if (g_cfg.sgsn_role) {
+			dec.l3_mo := dec_PDU_L3_MS_SGSN(dec.llc.pDU_LLC_UI.information_field_UI);
+		} else {
+			dec.l3_mt := dec_PDU_L3_SGSN_MS(dec.llc.pDU_LLC_UI.information_field_UI);
+		}
+	}
+	return dec;
+}
+
+function f_bssgp_client_register(hexstring imsi, OCT4 tlli, BssgpCellId cell_id, BSSGP_PROC_PT PT := BSSGP_PROC)
+runs on BSSGP_Client_CT {
+	PT.call(BSSGP_register_client:{imsi, tlli, cell_id}) {
+		[] PT.getreply(BSSGP_register_client:{imsi, tlli, cell_id}) {};
+	}
+}
+
+function f_bssgp_client_unregister(hexstring imsi, BSSGP_PROC_PT PT := BSSGP_PROC)
+runs on BSSGP_Client_CT {
+	PT.call(BSSGP_unregister_client:{imsi}) {
+		[] PT.getreply(BSSGP_unregister_client:{imsi}) {};
+	}
+}
+
+template BssgpDecoded tr_BD_BSSGP(template PDU_BSSGP bg) := {
+	bssgp := bg,
+	llc := *,
+	l3_mo := *,
+	l3_mt := *
+}
+
+
+template BssgpDecoded tr_BD_L3_MT(template PDU_L3_SGSN_MS mt) := {
+	bssgp := ?,
+	llc := ?,
+	l3_mo := omit,
+	l3_mt := mt
+}
+
+template BssgpDecoded tr_BD_L3_MO(template PDU_L3_MS_SGSN mo) := {
+	bssgp := ?,
+	llc := ?,
+	l3_mo := mo,
+	l3_mt := omit
+}
+
+
 
 
 }

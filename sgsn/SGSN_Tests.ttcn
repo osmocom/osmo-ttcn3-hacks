@@ -6,33 +6,181 @@ import from NS_Types all;
 import from NS_Emulation all;
 import from BSSGP_Types all;
 import from BSSGP_Emulation all;
+import from Osmocom_Gb_Types all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_GMM_SM_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
+import from L3_Common all;
+
+import from GSUP_Emulation all;
+import from GSUP_Types all;
+import from IPA_Emulation all;
+
+modulepar {
+	/* IP/port on which we run our internal GSUP/HLR emulation */
+	charstring mp_hlr_ip := "127.0.0.1";
+	integer mp_hlr_port := 4222;
+};
+
+type record GbInstance {
+	NS_CT vc_NS,
+	BSSGP_CT vc_BSSGP,
+	BssgpConfig cfg
+};
 
 type component test_CT {
-	var NS_CT vc_NS;
+	var GbInstance g_gb[3];
 
-	var BSSGP_CT vc_BSSGP;
-	port BSSGP_PT BSSGP;
+	var GSUP_Emulation_CT vc_GSUP;
+	var IPA_Emulation_CT vc_GSUP_IPA;
+	/* only to get events from IPA underneath GSUP */
+	port IPA_CTRL_PT GSUP_IPA_EVENT;
 
 	var boolean g_initialized := false;
 };
+
+type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr {
+	var BSSGP_ConnHdlrPars g_pars;
+}
+
+type record SGSN_ConnHdlrNetworkPars {
+	boolean expect_ptmsi,
+	boolean expect_auth,
+	boolean expect_ciph
+};
+
+type record BSSGP_ConnHdlrPars {
+	/* IMEI of the simulated ME */
+	hexstring imei,
+	/* IMEI of the simulated MS */
+	hexstring imsi,
+	/* MSISDN of the simulated MS (probably unused) */
+	hexstring msisdn,
+	/* P-TMSI allocated to the simulated MS */
+	OCT4 p_tmsi optional,
+	/* TLLI of the simulated MS */
+	OCT4 tlli,
+	RoutingAreaIdentificationV ra optional,
+	BssgpCellId bssgp_cell_id,
+	AuthVector vec optional,
+	SGSN_ConnHdlrNetworkPars net
+};
+
+
+private function f_init_gb(inout GbInstance gb) runs on test_CT {
+	gb.vc_NS := NS_CT.create;
+	gb.vc_BSSGP := BSSGP_CT.create;
+	/* connect lower end of BSSGP emulation with NS upper port */
+	connect(gb.vc_BSSGP:BSCP, gb.vc_NS:NS_SP);
+	/* connect lower end of NS emulation to NS codec port (on top of IPL4) */
+	map(gb.vc_NS:NSCP, system:NS_CODEC_PORT);
+
+	gb.vc_NS.start(NSStart());
+	gb.vc_BSSGP.start(BssgpStart(gb.cfg));
+}
+
+private function f_init_gsup(charstring id) runs on test_CT {
+	id := id & "-GSUP";
+	var GsupOps ops := {
+		create_cb := refers(GSUP_Emulation.ExpectedCreateCallback)
+	};
+
+	vc_GSUP_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	vc_GSUP := GSUP_Emulation_CT.create(id);
+
+	map(vc_GSUP_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_GSUP:GSUP, vc_GSUP_IPA:IPA_GSUP_PORT);
+	/* we use this hack to get events like ASP_IPA_EVENT_UP */
+	connect(vc_GSUP_IPA:IPA_CTRL_PORT, self:GSUP_IPA_EVENT);
+
+	vc_GSUP.start(GSUP_Emulation.main(ops, id));
+	vc_GSUP_IPA.start(IPA_Emulation.main_server(mp_hlr_ip, mp_hlr_port));
+
+	/* wait for incoming connection to GSUP port before proceeding */
+	timer T := 10.0;
+	T.start;
+	alt {
+		[] GSUP_IPA_EVENT.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP)) { }
+		[] T.timeout {
+			setverdict(fail, "No connection to GSUP Port");
+			self.stop;
+		}
+	}
+}
 
 function f_init() runs on test_CT {
 	if (g_initialized == true) {
 		return;
 	}
 	g_initialized := true;
+	g_gb[0].cfg := {
+		nsei := 96,
+		bvci := 196,
+		cell_id := {
+			ra_id := {
+				lai := {
+					mcc_mnc := '26242F'H, lac := 13135},
+					rac := 0
+				},
+			cell_id := 20960
+		},
+		sgsn_role := false
+	};
 
-	vc_NS := NS_CT.create;
-	vc_BSSGP := BSSGP_CT.create;
-	/* connect our BSSGP port to upper end of BSSGP emulation */
-	connect(self:BSSGP, vc_BSSGP:BSSGP_SP);
-	/* connect lower end of BSSGP emulation with NS upper port */
-	connect(vc_BSSGP:BSCP, vc_NS:NS_SP);
-	/* connect lower end of NS emulation to NS codec port (on top of IPL4) */
-	map(vc_NS:NSCP, system:NS_CODEC_PORT);
+	f_init_gb(g_gb[0]);
+	f_init_gsup("SGSN_Test");
+}
 
-	vc_NS.start(NSStart());
-	vc_BSSGP.start(BssgpStart(false));
+type function void_fn(charstring id) runs on BSSGP_ConnHdlr;
+
+/* helper function to create, connect and start a BSSGP_ConnHdlr component */
+function f_start_handler(void_fn fn, charstring id, GbInstance gb, integer imsi_suffix)
+runs on test_CT return BSSGP_ConnHdlr {
+	var BSSGP_ConnHdlr vc_conn;
+	var SGSN_ConnHdlrNetworkPars net_pars := {
+		expect_ptmsi := true,
+		expect_auth := true,
+		expect_ciph := false
+	};
+	var BSSGP_ConnHdlrPars pars := {
+		imei := f_gen_imei(imsi_suffix),
+		imsi := f_gen_imsi(imsi_suffix),
+		msisdn := f_gen_msisdn(imsi_suffix),
+		p_tmsi := omit,
+		tlli := 'FFFFFFFF'O,
+		ra := omit,
+		bssgp_cell_id := gb.cfg.cell_id,
+		vec := omit,
+		net := net_pars
+	};
+
+	vc_conn := BSSGP_ConnHdlr.create(id);
+	connect(vc_conn:BSSGP, gb.vc_BSSGP:BSSGP_SP);
+	connect(vc_conn:BSSGP_PROC, gb.vc_BSSGP:BSSGP_PROC);
+
+	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
+	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+/* first function called in every ConnHdlr */
+private function f_handler_init(void_fn fn, charstring id, BSSGP_ConnHdlrPars pars)
+runs on BSSGP_ConnHdlr {
+	/* do some common stuff like setting up g_pars */
+	g_pars := pars;
+
+	/* register with BSSGP core */
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, g_pars.bssgp_cell_id);
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* call the user-supplied test case function */
+	fn.apply(id);
+	f_bssgp_client_unregister(g_pars.imsi);
 }
 
 /* TODO:
@@ -59,8 +207,86 @@ testcase TC_wait_ns_up() runs on test_CT {
 	f_sleep(20.0);
 }
 
+altstep as_mm_identity() runs on BSSGP_ConnHdlr {
+	var MobileIdentityLV mi;
+	[] BSSGP.receive(tr_BD_L3_MT(tr_GMM_ID_REQ('001'B))) {
+		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+		BSSGP.send(ts_GMM_ID_RESP(mi));
+		repeat;
+	}
+	[] BSSGP.receive(tr_BD_L3_MT(tr_GMM_ID_REQ('010'B))) {
+		mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
+		BSSGP.send(ts_GMM_ID_RESP(mi));
+		repeat;
+	}
+}
 
-//control { }
+function f_gmm_auth () runs on BSSGP_ConnHdlr {
+	var BssgpDecoded bd;
+	var PDU_L3_MS_SGSN l3_mo;
+	var PDU_L3_SGSN_MS l3_mt;
+	var default di := activate(as_mm_identity());
+	if (g_pars.net.expect_auth) {
+		g_pars.vec := f_gen_auth_vec_2g();
+		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
+									 g_pars.vec.sres,
+									 g_pars.vec.kc));
+		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
+		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+		BSSGP.receive(tr_BD_L3_MT(tr_GMM_AUTH_REQ(g_pars.vec.rand))) -> value bd;
+		l3_mt := bd.l3_mt;
+		var BIT4 ac_ref := l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.acReferenceNumber.valueField;
+		l3_mo := valueof(ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres));
+		if (ispresent(l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest) and
+		    l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest.valueField == '001'B) {
+			l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
+						valueof(ts_MI_IMEISV_TLV(g_pars.imei & '0'H));
+		}
+		BSSGP.send(l3_mo);
+	}
+	deactivate(di);
+}
+
+private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
+	var MobileIdentityLV mi;
+	var RoutingAreaIdentificationV old_ra := { '2'H, '6'H, '2'H, 'F'H, '4'H, '2'H, '2342'O, '00'O };
+
+	if (ispresent(g_pars.p_tmsi)) {
+		mi := valueof(ts_MI_TMSI_LV(g_pars.p_tmsi));
+	} else {
+		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	}
+
+	BSSGP.send(ts_GMM_ATTACH_REQ(mi, old_ra, false, false, omit, omit));
+	f_gmm_auth();
+	/* Expect MSC to perform LU with HLR */
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	GSUP.receive(tr_GSUP_ISD_RES(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
+
+	BSSGP.receive(tr_BD_L3_MT(tr_GMM_ATTACH_ACCEPT(?, ?, ?)));
+	BSSGP.send(ts_GMM_ATTACH_COMPL);
+/*
+	alt {
+	[] as_mm_identity();
+	}
+*/
+	f_sleep(5.0);
+}
+
+testcase TC_attach() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_attach), testcasename(), g_gb[0], 1);
+	vc_conn.done;
+}
+
+
+control {
+	execute( TC_wait_ns_up() );
+}
 
 
 

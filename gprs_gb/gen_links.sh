@@ -39,9 +39,17 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
 FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
+FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.LLC_v7.1.0/src
+FILES="LLC_EncDec.cc LLC_Types.ttcn"
+gen_links $DIR $FILES
 
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc L1CTL_Types.ttcn L1CTL_PortType.ttcn LAPDm_RAW_PT.ttcn LAPDm_Types.ttcn "
 FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
+FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 gen_links $DIR $FILES

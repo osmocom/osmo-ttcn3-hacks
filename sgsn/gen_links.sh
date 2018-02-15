@@ -55,13 +55,22 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
 FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.LLC_v7.1.0/src
+FILES="LLC_EncDec.cc LLC_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
+FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
 FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
+FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 # IPA_Emulation + dependencies
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn
-IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn MGCP_Types.ttcn RSL_Types.ttcn "
+IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn GSUP_Emulation.ttcn MGCP_Types.ttcn RSL_Types.ttcn "
 gen_links $DIR $FILES
