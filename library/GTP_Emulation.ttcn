@@ -1,0 +1,257 @@
+module GTP_Emulation {
+
+import from IPL4asp_Types all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GTPC_Types all;
+import from GTPU_Types all;
+import from GTP_CodecPort all;
+import from GTP_CodecPort_CtrlFunct all;
+
+/***********************************************************************
+ * Main Emulation Component
+ ***********************************************************************/
+
+const integer GTP0_PORT := 3386;
+const integer GTP1C_PORT := 2123;
+const integer GTP1U_PORT := 2152;
+
+type record GtpEmulationCfg {
+	HostName gtpc_bind_ip,
+	PortNumber gtpc_bind_port,
+	HostName gtpu_bind_ip,
+	PortNumber gtpu_bind_port,
+	boolean sgsn_role
+};
+
+type component GTP_Emulation_CT {
+	/* Communication with underlying GTP CodecPort */
+	port GTPC_PT GTPC;
+	port GTPU_PT GTPU;
+
+	/* Communication with Clients */
+	port GTPEM_PT CLIENT;
+	port GTPEM_PROC_PT CLIENT_PROC;
+
+	/* Configuration by the user */
+	var GtpEmulationCfg g_gtp_cfg;
+
+	/* State */
+	var integer g_gtpc_id, g_gtpu_id;
+	var OCT1 g_restart_ctr;
+	var uint16_t g_c_seq_nr, g_u_seq_nr;
+	var TidTableRec TidTable[16];
+	var ImsiTableRec ImsiTable[16];
+};
+
+type record TidTableRec {
+	OCT4 teid,
+	GTP_ConnHdlr vc_conn
+};
+
+type record ImsiTableRec {
+	hexstring imsi,
+	GTP_ConnHdlr vc_conn
+};
+
+private function f_comp_by_teid(OCT4 teid) runs on GTP_Emulation_CT return GTP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+			return TidTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for TEID ", teid);
+	self.stop;
+}
+
+private function f_comp_by_imsi(hexstring imsi) runs on GTP_Emulation_CT return GTP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (isbound(ImsiTable[i].imsi) and ImsiTable[i].imsi == imsi) {
+			return ImsiTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for IMSI ", imsi);
+	self.stop;
+}
+
+private function f_tid_tbl_add(OCT4 teid, GTP_ConnHdlr vc_conn) runs on GTP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (not isbound(TidTable[i].teid)) {
+			TidTable[i].teid := teid;
+			TidTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	setverdict(fail, "No Space in TidTable for ", teid);
+	self.stop;
+}
+
+private function f_imsi_tbl_add(hexstring imsi, GTP_ConnHdlr vc_conn) runs on GTP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (not isbound(ImsiTable[i].imsi)) {
+			ImsiTable[i].imsi := imsi;
+			ImsiTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	setverdict(fail, "No Space in IMSI Table for ", imsi);
+	self.stop;
+}
+
+function f_gtpc_extract_imsi(PDU_GTPC gtp) return template (omit) hexstring {
+	if (ischosen(gtp.gtpc_pdu.createPDPContextRequest)) {
+		return gtp.gtpc_pdu.createPDPContextRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestSGSN)) {
+		return gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestSGSN.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestGGSN)) {
+		return gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestGGSN.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestCGW)) {
+		return gtp.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestCGW.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.pdu_NotificationRequest)) {
+		return gtp.gtpc_pdu.pdu_NotificationRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.sendRouteingInformationForGPRSRequest)) {
+		return gtp.gtpc_pdu.sendRouteingInformationForGPRSRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.sendRouteingInformationForGPRSResponse)) {
+		return gtp.gtpc_pdu.sendRouteingInformationForGPRSResponse.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.failureReportRequest)) {
+		return gtp.gtpc_pdu.failureReportRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.noteMS_GPRSPresentRequest)) {
+		return gtp.gtpc_pdu.noteMS_GPRSPresentRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.identificationResponse) ){
+		return gtp.gtpc_pdu.identificationResponse.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.sgsn_ContextRequest)) {
+		return gtp.gtpc_pdu.sgsn_ContextRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.sgsn_ContextResponse)) {
+		return gtp.gtpc_pdu.sgsn_ContextResponse.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.forwardRelocationRequest)) {
+		return gtp.gtpc_pdu.forwardRelocationRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.relocationCancelRequest)) {
+		return gtp.gtpc_pdu.relocationCancelRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.uERegistrationQueryRequest)) {
+		return gtp.gtpc_pdu.uERegistrationQueryRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.uERegistrationQueryResponse)) {
+		return gtp.gtpc_pdu.uERegistrationQueryResponse.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.mBMSNotificationRequest)) {
+		return gtp.gtpc_pdu.mBMSNotificationRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.createMBMSContextRequest)) {
+		return gtp.gtpc_pdu.createMBMSContextRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.deleteMBMSContextRequest)) {
+		return gtp.gtpc_pdu.deleteMBMSContextRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.mS_InfoChangeNotificationRequest)) {
+		return gtp.gtpc_pdu.mS_InfoChangeNotificationRequest.imsi.digits;
+	} else if (ischosen(gtp.gtpc_pdu.mS_InfoChangeNotificationResponse)) {
+		return gtp.gtpc_pdu.mS_InfoChangeNotificationResponse.imsi.digits;
+	} else {
+		return omit;
+	}
+}
+
+private function f_init(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
+	var Result res;
+
+	map(self:GTPC, system:GTPC);
+	res := GTP_CodecPort_CtrlFunct.f_IPL4_listen(GTPC, cfg.gtpc_bind_ip,
+						     cfg.gtpc_bind_port, {udp:={}});
+	g_gtpc_id := res.connId;
+
+	map(self:GTPU, system:GTPU);
+	res := GTP_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, cfg.gtpu_bind_ip,
+						     cfg.gtpu_bind_port, {udp:={}});
+	g_gtpu_id := res.connId;
+
+	g_restart_ctr := f_rnd_octstring(1);
+	g_c_seq_nr := f_rnd_int(65535);
+	g_u_seq_nr := f_rnd_int(65535);
+	g_gtp_cfg := cfg;
+}
+
+function main(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
+	var Gtp1cUnitdata g1c_ud;
+	var Gtp1uUnitdata g1u_ud;
+	var GTP_ConnHdlr vc_conn;
+	var hexstring imsi;
+	var OCT4 teid;
+
+	f_init(cfg);
+
+	while (true) {
+	alt {
+	/* route inbound GTP-C based on IMSI or TEID */
+	[] GTPC.receive(Gtp1cUnitdata:?) -> value g1c_ud {
+		var template hexstring imsi_t := f_gtpc_extract_imsi(g1c_ud.gtpc);
+		if (isvalue(imsi_t)) {
+			vc_conn := f_comp_by_imsi(valueof(imsi_t));
+		} else {
+			vc_conn := f_comp_by_teid(g1c_ud.gtpc.teid);
+		}
+		CLIENT.send(g1c_ud) to vc_conn;
+		}
+	[] GTPU.receive(Gtp1uUnitdata:?) -> value g1u_ud {
+		vc_conn := f_comp_by_teid(g1u_ud.gtpu.teid);
+		CLIENT.send(g1u_ud) to vc_conn;
+		}
+
+	/* transparently forward any GTP-C / GTP-U from clients to peer[s] */
+	[] CLIENT.receive(Gtp1cUnitdata:?) -> value g1c_ud sender vc_conn {
+		GTPC.send(g1c_ud);
+		}
+	[] CLIENT.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
+		GTPU.send(g1u_ud);
+		}
+
+
+	[] CLIENT_PROC.getcall(GTPEM_register_imsi:{?}) -> param(imsi) sender vc_conn {
+		f_imsi_tbl_add(imsi, vc_conn);
+		CLIENT_PROC.reply(GTPEM_register_imsi:{imsi});
+		}
+
+	[] CLIENT_PROC.getcall(GTPEM_register_teid:{?}) -> param(teid) sender vc_conn {
+		f_tid_tbl_add(teid, vc_conn);
+		CLIENT_PROC.reply(GTPEM_register_teid:{teid});
+		}
+
+	}
+	}
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+type port GTPEM_PT message {
+	inout Gtp1cUnitdata, Gtp1uUnitdata;
+} with { extension "internal" };
+
+signature GTPEM_register_imsi(hexstring imsi);
+signature GTPEM_register_teid(OCT4 teid);
+
+type port GTPEM_PROC_PT procedure {
+	inout GTPEM_register_imsi, GTPEM_register_teid;
+} with { extension "internal" };
+
+/***********************************************************************
+ * Client Compoennt
+ ***********************************************************************/
+
+type component GTP_ConnHdlr {
+	port GTPEM_PT GTP;
+	port GTPEM_PROC_PT GTP_PROC;
+};
+
+function f_gtp_register_imsi(hexstring imsi) runs on GTP_ConnHdlr {
+	GTP_PROC.call(GTPEM_register_imsi:{imsi}) {
+		[] GTP_PROC.getreply(GTPEM_register_imsi:{imsi});
+	}
+}
+
+function f_gtp_register_teid(OCT4 teid) runs on GTP_ConnHdlr {
+	GTP_PROC.call(GTPEM_register_teid:{teid}) {
+		[] GTP_PROC.getreply(GTPEM_register_teid:{teid});
+	}
+}
+
+}
