@@ -18,13 +18,21 @@ import from GSUP_Emulation all;
 import from GSUP_Types all;
 import from IPA_Emulation all;
 
+import from GTP_Emulation all;
+import from GTP_Templates all;
+import from GTP_CodecPort all;
+import from GTPC_Types all;
+import from GTPU_Types all;
+
 import from TELNETasp_PortType all;
 import from Osmocom_VTY_Functions all;
+
 
 modulepar {
 	/* IP/port on which we run our internal GSUP/HLR emulation */
 	charstring mp_hlr_ip := "127.0.0.1";
 	integer mp_hlr_port := 4222;
+	charstring mp_ggsn_ip := "127.0.0.2";
 };
 
 type record GbInstance {
@@ -41,12 +49,14 @@ type component test_CT {
 	/* only to get events from IPA underneath GSUP */
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
 
+	var GTP_Emulation_CT vc_GTP;
+
 	port TELNETasp_PT SGSNVTY;
 
 	var boolean g_initialized := false;
 };
 
-type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr {
+type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr, GTP_ConnHdlr {
 	var BSSGP_ConnHdlrPars g_pars;
 	timer g_Tguard;
 }
@@ -118,6 +128,21 @@ private function f_init_gsup(charstring id) runs on test_CT {
 	}
 }
 
+private function f_init_gtp(charstring id) runs on test_CT {
+	id := id & "-GTP";
+
+	var GtpEmulationCfg gtp_cfg := {
+		gtpc_bind_ip := mp_ggsn_ip,
+		gtpc_bind_port := GTP1C_PORT,
+		gtpu_bind_ip := mp_ggsn_ip,
+		gtpu_bind_port := GTP1U_PORT,
+		sgsn_role := false
+	};
+
+	vc_GTP := GTP_Emulation_CT.create(id);
+	vc_GTP.start(GTP_Emulation.main(gtp_cfg));
+}
+
 private function f_init_vty() runs on test_CT {
 	map(self:SGSNVTY, system:SGSNVTY);
 	f_vty_set_prompts(SGSNVTY);
@@ -147,6 +172,7 @@ function f_init() runs on test_CT {
 
 	f_init_gb(g_gb[0]);
 	f_init_gsup("SGSN_Test");
+	f_init_gtp("SGSN_Test");
 	f_init_vty();
 }
 
@@ -184,6 +210,9 @@ runs on test_CT return BSSGP_ConnHdlr {
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
 
+	connect(vc_conn:GTP, vc_GTP:CLIENT);
+	connect(vc_conn:GTP_PROC, vc_GTP:CLIENT_PROC);
+
 	vc_conn.start(f_handler_init(fn, id, pars));
 	return vc_conn;
 }
@@ -205,6 +234,8 @@ runs on BSSGP_ConnHdlr {
 	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, g_pars.bssgp_cell_id);
 	/* tell GSUP dispatcher to send this IMSI to us */
 	f_create_gsup_expect(hex2str(g_pars.imsi));
+	/* tell GTP dispatcher to send this IMSI to us */
+	f_gtp_register_imsi(g_pars.imsi);
 
 	g_Tguard.start(pars.t_guard);
 	activate(as_Tguard());
@@ -349,9 +380,12 @@ private function f_mi_get_lv() runs on BSSGP_ConnHdlr return MobileIdentityLV {
 }
 
 private function f_gmm_gsup_lu_isd() runs on BSSGP_ConnHdlr {
+	var GSUP_PDU gsup;
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
-	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	gsup := valueof(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	gsup.ies := gsup.ies & { valueof(ts_GSUP_IE_PdpInfo(char2oct("*"), '0121'O, ''O)) };
+	GSUP.send(gsup);
 	GSUP.receive(tr_GSUP_ISD_RES(g_pars.imsi));
 	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
 }
@@ -720,7 +754,146 @@ testcase TC_detach_poweroff() runs on test_CT {
 	vc_conn.done;
 }
 
+type record PdpActPars {
+	BIT3			tid,
+	BIT4			nsapi,
+	BIT4			sapi,
+	QoSV			qos,
+	PDPAddressV		addr,
+	octetstring		apn optional,
+	ProtocolConfigOptionsV	pco optional,
+	OCT1			exp_rej_cause optional,
 
+	OCT4			ggsn_tei_c,
+	OCT4			ggsn_tei_u,
+	octetstring		ggsn_ip_c,
+	octetstring		ggsn_ip_u,
+
+	GtpPeer			sgsn,
+	OCT4			sgsn_tei_c optional,
+	OCT4			sgsn_tei_u optional
+};
+
+function f_pdp_ctx_act(PdpActPars apars) runs on BSSGP_ConnHdlr {
+	var boolean exp_rej := ispresent(apars.exp_rej_cause);
+	var Gtp1cUnitdata g_ud;
+
+	BSSGP.send(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
+				     apars.apn, apars.pco));
+	if (not exp_rej) {
+		GTP.receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
+			var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+			var GTPC_PDUs gtpc_rx := g_ud.gtpc.gtpc_pdu;
+			apars.sgsn_tei_c := gtpc_rx.createPDPContextRequest.teidControlPlane.teidControlPlane;
+			apars.sgsn_tei_u := gtpc_rx.createPDPContextRequest.teidDataI.teidDataI;
+			var OCT1 cause := int2oct(128, 1);
+			GTP.send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
+							apars.sgsn_tei_c, cause,
+							apars.ggsn_tei_c, apars.ggsn_tei_u,
+							apars.nsapi,
+							apars.ggsn_ip_c, apars.ggsn_ip_u));
+		}
+	}
+	alt {
+	[exp_rej] BSSGP.receive(tr_BD_L3(tr_SM_ACT_PDP_REJ(apars.tid, apars.exp_rej_cause))) {
+		setverdict(pass);
+		}
+	[exp_rej] BSSGP.receive(tr_BD_L3(tr_SM_ACT_PDP_ACCEPT)) {
+		setverdict(fail, "Unexpected PDP CTX ACT ACC");
+		}
+	[not exp_rej] BSSGP.receive(tr_BD_L3(tr_SM_ACT_PDP_REJ(apars.tid, ?))) {
+		setverdict(fail, "Unexpected PDP CTX ACT FAIL");
+		}
+	[not exp_rej] BSSGP.receive(tr_BD_L3(tr_SM_ACT_PDP_ACCEPT(apars.tid, apars.sapi))) {
+		setverdict(pass);
+		}
+	}
+}
+
+/* Table 10.5.156/3GPP TS 24.008 */
+template (value) QoSV t_QosDefault := {
+	reliabilityClass := '011'B, /* unacknowledged GTP+LLC, acknowledged RLC */
+	delayClass := '100'B,	/* best effort */
+	spare1 := '00'B,
+	precedenceClass := '010'B, /* normal */
+	spare2 := '0'B,
+	peakThroughput := '0000'B, /* subscribed */
+	meanThroughput := '00000'B, /* subscribed */
+	spare3 := '000'B,
+	deliverErroneusSDU := omit,
+	deliveryOrder := omit,
+	trafficClass := omit,
+	maxSDUSize := omit,
+	maxBitrateUplink := omit,
+	maxBitrateDownlink := omit,
+	sduErrorRatio := omit,
+	residualBER := omit,
+	trafficHandlingPriority := omit,
+	transferDelay := omit,
+	guaranteedBitRateUplink := omit,
+	guaranteedBitRateDownlink := omit,
+	sourceStatisticsDescriptor := omit,
+	signallingIndication := omit,
+	spare4 := omit,
+	maxBitrateDownlinkExt := omit,
+	guaranteedBitRateDownlinkExt := omit,
+	maxBitrateUplinkExt := omit,
+	guaranteedBitRateUplinkExt := omit,
+	maxBitrateDownlinkExt2 := omit,
+	guaranteedBitRateDownlinkExt2 := omit,
+	maxBitrateUplinkExt2 := omit,
+	guaranteedBitRateUplinkExt2 := omit
+}
+
+/* 10.5.6.4 / 3GPP TS 24.008 */
+template (value) PDPAddressV t_AddrIPv4dyn := {
+	pdpTypeOrg := '0001'B, /* IETF */
+	spare := '0000'B,
+	pdpTypeNum := '21'O, /* IPv4 */
+	addressInfo := omit
+}
+template (value) PDPAddressV t_AddrIPv6dyn := {
+	pdpTypeOrg := '0001'B, /* IETF */
+	spare := '0000'B,
+	pdpTypeNum := '53'O, /* IPv6 */
+	addressInfo := omit
+}
+
+template (value) PdpActPars t_PdpActPars := {
+	tid := '000'B,
+	nsapi := '0101'B, /* < 5 are reserved */
+	sapi := '0011'B, /* 3/5/9/11 */
+	qos := t_QosDefault,
+	addr := t_AddrIPv4dyn,
+	apn := omit,
+	pco := omit,
+	exp_rej_cause := omit,
+
+	/* FIXME: make below dynamic !! */
+	ggsn_tei_c := '00010000'O,
+	ggsn_tei_u := '00020000'O,
+	ggsn_ip_c := '7F000001'O,
+	ggsn_ip_u := '7F000001'O,
+
+	sgsn := { },
+	sgsn_tei_c := omit,
+	sgsn_tei_u := omit
+}
+
+private function f_TC_attach_pdp_act(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars);
+
+	/* first perform regular attach */
+	f_TC_attach(id);
+
+	f_pdp_ctx_act(apars);
+}
+testcase TC_attach_pdp_act() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_pdp_act), testcasename(), g_gb[0], 17);
+	vc_conn.done;
+}
 
 
 control {
@@ -739,6 +912,7 @@ control {
 	execute( TC_detach_unknown_poweroff() );
 	execute( TC_detach_nopoweroff() );
 	execute( TC_detach_poweroff() );
+	execute( TC_attach_pdp_act() );
 }
 
 
