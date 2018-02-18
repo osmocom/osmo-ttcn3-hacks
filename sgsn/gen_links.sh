@@ -59,6 +59,11 @@ DIR=$BASEDIR/titan.ProtocolModules.LLC_v7.1.0/src
 FILES="LLC_EncDec.cc LLC_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.SNDCP_v7.0.0/src
+FILES="SNDCP_Types.ttcn"
+gen_links $DIR $FILES
+
+
 DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
 gen_links $DIR $FILES
