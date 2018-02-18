@@ -783,29 +783,31 @@ type record PdpActPars {
 	octetstring		sgsn_ip_u optional		/* SGSN IP USer */
 };
 
+
+private function f_process_gtp_ctx_act_req(inout PdpActPars apars, PDU_GTPC gtpc) runs on BSSGP_ConnHdlr {
+	var GTPC_PDUs gtpc_rx := gtpc.gtpc_pdu;
+	apars.sgsn_tei_c := gtpc_rx.createPDPContextRequest.teidControlPlane.teidControlPlane;
+	apars.sgsn_tei_u := gtpc_rx.createPDPContextRequest.teidDataI.teidDataI;
+	apars.sgsn_ip_c := gtpc_rx.createPDPContextRequest.sgsn_addr_signalling.addressf;
+	apars.sgsn_ip_u := gtpc_rx.createPDPContextRequest.sgsn_addr_traffic.addressf;
+	f_gtp_register_teid(apars.ggsn_tei_c);
+	f_gtp_register_teid(apars.ggsn_tei_u);
+}
+
 function f_pdp_ctx_act(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
 	var boolean exp_rej := ispresent(apars.exp_rej_cause);
 	var Gtp1cUnitdata g_ud;
 
 	BSSGP.send(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco));
-	if (not exp_rej) {
-		GTP.receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
-			var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
-			var GTPC_PDUs gtpc_rx := g_ud.gtpc.gtpc_pdu;
-			apars.sgsn_tei_c := gtpc_rx.createPDPContextRequest.teidControlPlane.teidControlPlane;
-			apars.sgsn_tei_u := gtpc_rx.createPDPContextRequest.teidDataI.teidDataI;
-			apars.sgsn_ip_c := gtpc_rx.createPDPContextRequest.sgsn_addr_signalling.addressf;
-			apars.sgsn_ip_u := gtpc_rx.createPDPContextRequest.sgsn_addr_traffic.addressf;
-			f_gtp_register_teid(apars.ggsn_tei_c);
-			f_gtp_register_teid(apars.ggsn_tei_u);
-			var OCT1 cause := int2oct(128, 1);
-			GTP.send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
-							apars.sgsn_tei_c, cause,
-							apars.ggsn_tei_c, apars.ggsn_tei_u,
-							apars.nsapi,
-							apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id));
-		}
+	GTP.receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
+		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP.send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
+						apars.sgsn_tei_c, apars.gtp_resp_cause,
+						apars.ggsn_tei_c, apars.ggsn_tei_u,
+						apars.nsapi,
+						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id));
 	}
 	alt {
 	[exp_rej] BSSGP.receive(tr_BD_L3_MT(tr_SM_ACT_PDP_REJ(apars.tid, apars.exp_rej_cause))) {
@@ -820,6 +822,7 @@ function f_pdp_ctx_act(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
 	[not exp_rej] BSSGP.receive(tr_BD_L3_MT(tr_SM_ACT_PDP_ACCEPT(apars.tid, apars.sapi))) {
 		setverdict(pass);
 		}
+	[] as_xid(apars);
 	}
 }
 
@@ -1035,6 +1038,24 @@ testcase TC_attach_pdp_act_user() runs on test_CT {
 	vc_conn.done;
 }
 
+/* ATTACH + PDP CTX ACT; reject from GGSN */
+private function f_TC_attach_pdp_act_ggsn_reject(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	apars.gtp_resp_cause := int2oct(199, 1);	/* no resources available */
+	apars.exp_rej_cause := '1a'O;			/* insufficient resources */
+
+	/* first perform regular attach */
+	f_TC_attach(id);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars);
+}
+testcase TC_attach_pdp_act_ggsn_reject() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_pdp_act_ggsn_reject), testcasename(), g_gb[0], 20);
+	vc_conn.done;
+}
 
 
 control {
@@ -1056,6 +1077,7 @@ control {
 	execute( TC_attach_pdp_act() );
 	execute( TC_pdp_act_unattached() );
 	execute( TC_attach_pdp_act_user() );
+	execute( TC_attach_pdp_act_ggsn_reject() );
 }
 
 
