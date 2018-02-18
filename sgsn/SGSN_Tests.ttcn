@@ -2,6 +2,7 @@ module SGSN_Tests {
 
 import from General_Types all;
 import from Osmocom_Types all;
+import from Native_Functions all;
 import from NS_Types all;
 import from NS_Emulation all;
 import from BSSGP_Types all;
@@ -781,7 +782,7 @@ type record PdpActPars {
 	octetstring		sgsn_ip_u optional
 };
 
-function f_pdp_ctx_act(PdpActPars apars) runs on BSSGP_ConnHdlr {
+function f_pdp_ctx_act(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
 	var boolean exp_rej := ispresent(apars.exp_rej_cause);
 	var Gtp1cUnitdata g_ud;
 
@@ -795,6 +796,8 @@ function f_pdp_ctx_act(PdpActPars apars) runs on BSSGP_ConnHdlr {
 			apars.sgsn_tei_u := gtpc_rx.createPDPContextRequest.teidDataI.teidDataI;
 			apars.sgsn_ip_c := gtpc_rx.createPDPContextRequest.sgsn_addr_signalling.addressf;
 			apars.sgsn_ip_u := gtpc_rx.createPDPContextRequest.sgsn_addr_traffic.addressf;
+			f_gtp_register_teid(apars.ggsn_tei_c);
+			f_gtp_register_teid(apars.ggsn_tei_u);
 			var OCT1 cause := int2oct(128, 1);
 			GTP.send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
 							apars.sgsn_tei_c, cause,
@@ -868,7 +871,7 @@ template (value) PDPAddressV t_AddrIPv6dyn := {
 	addressInfo := omit
 }
 
-template (value) PdpActPars t_PdpActPars := {
+template (value) PdpActPars t_PdpActPars(charstring ggsn_ip) := {
 	tid := '000'B,
 	nsapi := '0101'B, /* < 5 are reserved */
 	sapi := '0011'B, /* 3/5/9/11 */
@@ -882,8 +885,8 @@ template (value) PdpActPars t_PdpActPars := {
 	/* FIXME: make below dynamic !! */
 	ggsn_tei_c := '00010000'O,
 	ggsn_tei_u := '00020000'O,
-	ggsn_ip_c := '7F000002'O,
-	ggsn_ip_u := '7F000002'O,
+	ggsn_ip_c := f_inet_addr(ggsn_ip),
+	ggsn_ip_u := f_inet_addr(ggsn_ip),
 
 	sgsn_tei_c := omit,
 	sgsn_tei_u := omit,
@@ -891,8 +894,87 @@ template (value) PdpActPars t_PdpActPars := {
 	sgsn_ip_u := omit
 }
 
+template (value) GtpPeer ts_GtpPeerU(octetstring ip) := {
+	connId := 1,
+	remName := f_inet_ntoa(ip),
+	remPort := GTP1U_PORT
+}
+
+template (value) GtpPeer ts_GtpPeerC(octetstring ip) := {
+	connId := 1,
+	remName := f_inet_ntoa(ip),
+	remPort := GTP1C_PORT
+}
+
+private function f_gtpu_send(inout PdpActPars apars, octetstring payload) runs on BSSGP_ConnHdlr {
+	var GtpPeer peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
+	GTP.send(ts_GTP1U_GPDU(peer, 0 /*seq*/, apars.sgsn_tei_u, payload));
+}
+
+private altstep as_xid(PdpActPars apars) runs on BSSGP_ConnHdlr {
+	[] BSSGP.receive(tr_BD_LLC(tr_LLC_XID(?, apars.sapi))) {
+		repeat;
+	}
+}
+
+template PDU_SN tr_SN_UD(template BIT4 nsapi, template octetstring payload) := {
+	pDU_SN_UNITDATA := {
+		nsapi := nsapi,
+		moreBit := ?,
+		snPduType := '1'B,
+		firstSegmentIndicator := ?,
+		spareBit := ?,
+		pcomp := ?,
+		dcomp := ?,
+		npduNumber := ?,
+		segmentNumber := ?,
+		npduNumberContinued := ?,
+		dataSegmentSnUnitdataPdu := payload
+	}
+}
+
+/* simple case: single segment, no compression */
+template (value) PDU_SN ts_SN_UD(BIT4 nsapi, octetstring payload) := {
+	pDU_SN_UNITDATA := {
+		nsapi := nsapi,
+		moreBit := '0'B,
+		snPduType := '1'B,
+		firstSegmentIndicator := '1'B,
+		spareBit := '0'B,
+		pcomp := '0000'B,
+		dcomp := '0000'B,
+		npduNumber := '0000'B,
+		segmentNumber := '0000'B,
+		npduNumberContinued := '00'O,
+		dataSegmentSnUnitdataPdu := payload
+	}
+}
+
+/* Transceive given 'payload' as MT message from GTP -> OsmoSGSN -> Gb */
+private function f_gtpu_xceive_mt(inout PdpActPars apars, octetstring payload) runs on BSSGP_ConnHdlr {
+	/* Send PDU via GTP from our simulated GGSN to the SGSN */
+	f_gtpu_send(apars, payload);
+	/* Expect PDU via BSSGP/LLC on simulated PCU from SGSN */
+	alt {
+	[] as_xid(apars);
+	[] BSSGP.receive(tr_BD_SNDCP(apars.sapi, tr_SN_UD(apars.nsapi, payload)));
+	}
+}
+
+private function f_gtpu_xceive_mo(inout PdpActPars apars, octetstring payload) runs on BSSGP_ConnHdlr {
+	/* Send PDU via SNDCP/LLC/BSSGP/NS via simulated MS/PCU to the SGSN */
+	var GtpPeer peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
+	var PDU_SN sndcp := valueof(ts_SN_UD(apars.nsapi, payload));
+	BSSGP.send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, 0));
+	f_gtpu_send(apars, payload);
+	/* Expect PDU via GTP from SGSN on simulated GGSN */
+	alt {
+	[] GTP.receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload));
+	}
+}
+
 private function f_TC_attach_pdp_act(charstring id) runs on BSSGP_ConnHdlr {
-	var PdpActPars apars := valueof(t_PdpActPars);
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
 
 	/* first perform regular attach */
 	f_TC_attach(id);
@@ -908,7 +990,7 @@ testcase TC_attach_pdp_act() runs on test_CT {
 
 /* PDP Context activation for not-attached subscriber; expect fail */
 private function f_TC_pdp_act_unattached(charstring id) runs on BSSGP_ConnHdlr {
-	var PdpActPars apars := valueof(t_PdpActPars);
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
 	BSSGP.send(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco));
 	alt {
@@ -932,6 +1014,25 @@ testcase TC_pdp_act_unattached() runs on test_CT {
 	vc_conn.done;
 }
 
+/* ATTACH + PDP CTX ACT + user plane traffic */
+private function f_TC_attach_pdp_act_user(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	/* first perform regular attach */
+	f_TC_attach(id);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars);
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100));
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200));
+}
+testcase TC_attach_pdp_act_user() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_pdp_act_user), testcasename(), g_gb[0], 19);
+	vc_conn.done;
+}
+
 
 
 control {
@@ -952,6 +1053,7 @@ control {
 	execute( TC_detach_poweroff() );
 	execute( TC_attach_pdp_act() );
 	execute( TC_pdp_act_unattached() );
+	execute( TC_attach_pdp_act_user() );
 }
 
 
