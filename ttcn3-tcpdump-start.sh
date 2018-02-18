@@ -20,7 +20,7 @@ if [ "$(id -u)" = "0" ]; then
 else
 	CMD="sudo $TCPDUMP"
 fi
-$CMD -U -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.log 2>&1 &
+$CMD -U -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
 PID=$!
 echo $PID > $PIDFILE
 
