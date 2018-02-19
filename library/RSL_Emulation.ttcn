@@ -52,6 +52,11 @@ type port RSL_DCHAN_PT message {
 	inout RSLDC_ChanRqd, RSL_Message;
 } with { extension "internal" };
 
+type port RSL_CCHAN_PT message {
+	inout ASP_RSL_Unitdata;
+} with { extension "internal" };
+
+
 signature RSLEM_register(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_unregister(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_suspend(boolean suspend);
@@ -242,6 +247,9 @@ type component RSL_Emulation_CT {
 	port RSL_DCHAN_PT CLIENT_PT;
 	port RSLEM_PROC_PT RSL_PROC;
 
+	/* port for Common Channel / TRX Management */
+	port RSL_CCHAN_PT CCHAN_PT;
+
 	/* state of all concurrent connections / dedicated channels */
 	var ConnectionData ConnectionTable[64];
 }
@@ -268,7 +276,7 @@ private function f_streamId_by_trx(uint8_t trx_nr) return IpaStreamId {
 }
 
 
-function main() runs on RSL_Emulation_CT {
+function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 	var ASP_RSL_Unitdata rx_rsl;
 	var RSL_Message rx_rsl_msg;
 	var RSLDC_ChanRqd chan_rqd;
@@ -286,10 +294,10 @@ function main() runs on RSL_Emulation_CT {
 		alt {
 		[] IPA_PT.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) {
 			}
-		[] IPA_PT.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) {
+		[bts_role] IPA_PT.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) {
 			IPA_PT.send(ts_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,ts_RSL_PAGING_LOAD_IND(23)));
 			}
-		[] IPA_PT.receive(tr_RSL(tr_RSL_IMM_ASSIGN)) -> value rx_rsl {
+		[bts_role] IPA_PT.receive(tr_RSL(tr_RSL_IMM_ASSIGN)) -> value rx_rsl {
 			var GsmRrMessage rr;
 			var OCT1 ra;
 			var GsmFrameNumber fn;
@@ -327,7 +335,7 @@ function main() runs on RSL_Emulation_CT {
 			}
 		}
 
-		[] IPA_PT.receive(tr_RSL(tr_RSL_PAGING_CMD(?, ?))) -> value rx_rsl {
+		[bts_role] IPA_PT.receive(tr_RSL(tr_RSL_PAGING_CMD(?, ?))) -> value rx_rsl {
 			log("PAGING IDENTITY ", rx_rsl.rsl.ies[2].body.other);
 			/* broadcast to all clients? */
 			for (i := 0; i < sizeof(ConnectionTable); i := i + 1) {
@@ -337,16 +345,20 @@ function main() runs on RSL_Emulation_CT {
 			}
 		}
 
+		/* Forward common channel management to the special port for it */
 		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeT(?))) -> value rx_rsl {
-			log("Ingnoring TRX Mgmt ", rx_rsl.rsl);
+			log("Forwarding TRX Mgmt ", rx_rsl.rsl);
+			CCHAN_PT.send(rx_rsl);
 		}
 
+		/* Forward common channel management to the special port for it */
 		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeC(?))) -> value rx_rsl {
-			log("Ignoring Common Channel Mgmt ", rx_rsl.rsl);
+			log("Forwarding Common Channel Mgmt ", rx_rsl.rsl);
+			CCHAN_PT.send(rx_rsl);
 		}
 
 		/* blindly acknowledge all channel activations */
-		[] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) -> value rx_rsl {
+		[bts_role] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) -> value rx_rsl {
 			chan_nr := rx_rsl.rsl.ies[0].body.chan_nr;
 			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl.streamId, ts_RSL_CHAN_ACT_ACK(chan_nr, 23)));
 		}
@@ -367,7 +379,7 @@ function main() runs on RSL_Emulation_CT {
 			self.stop;
 		}
 
-		[] CLIENT_PT.receive(RSLDC_ChanRqd:?) -> value chan_rqd sender vc_conn {
+		[bts_role] CLIENT_PT.receive(RSLDC_ChanRqd:?) -> value chan_rqd sender vc_conn {
 			/* Store the knowledge that this sender has requested a certain RQ+time */
 			f_cid_create(chan_rqd.ra, chan_rqd.fn, vc_conn);
 			IPA_PT.send(ts_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
