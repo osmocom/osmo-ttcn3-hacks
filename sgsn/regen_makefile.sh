@@ -1,5 +1,7 @@
 #!/bin/sh
 
-FILES="*.ttcn BSSGP_EncDec.cc LLC_EncDec.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc NS_CodecPort_CtrlFunctDef.cc RLCMAC_EncDec.cc Native_FunctionDefs.cc SDP_EncDec.cc SDP_parse_.tab.c lex.SDP_parse_.c TELNETasp_PT.cc IPA_CodecPort_CtrlFunctDef.cc GTPU_EncDec.cc GTPC_EncDec.cc GTP_CodecPort_CtrlFunctDef.cc"
+FILES="*.ttcn *.ttcnpp BSSGP_EncDec.cc LLC_EncDec.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc NS_CodecPort_CtrlFunctDef.cc RLCMAC_EncDec.cc Native_FunctionDefs.cc TELNETasp_PT.cc IPA_CodecPort_CtrlFunctDef.cc GTPU_EncDec.cc GTPC_EncDec.cc GTP_CodecPort_CtrlFunctDef.cc"
+
+export CPPFLAGS_TTCN3="-DIPA_EMULATION_GSUP"
 
 ../regen-makefile.sh SGSN_Tests.ttcn $FILES

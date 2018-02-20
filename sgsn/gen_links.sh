@@ -36,17 +36,6 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
-# required by IPA Emulation
-DIR=../MTP3asp_CNL113337/src
-FILES="MTP3asp_PortType.ttcn  MTP3asp_Types.ttcn"
-gen_links $DIR $FILES
-
-# required by MGCP Types, which is required by IPA Emulation
-DIR=$BASEDIR/titan.ProtocolModules.SDP/src
-FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
-SDP_parser.y lex.SDP_parse_.c"
-gen_links $DIR $FILES
-
 DIR=$BASEDIR/titan.ProtocolModules.NS_v7.3.0/src
 FILES="NS_Types.ttcn"
 gen_links $DIR $FILES
@@ -62,7 +51,6 @@ gen_links $DIR $FILES
 DIR=$BASEDIR/titan.ProtocolModules.SNDCP_v7.0.0/src
 FILES="SNDCP_Types.ttcn"
 gen_links $DIR $FILES
-
 
 DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
@@ -80,8 +68,7 @@ FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter
 FILES+="Osmocom_VTY_Functions.ttcn "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 # IPA_Emulation + dependencies
-FILES+="IPA_Types.ttcn IPA_Emulation.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn
-IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn GSUP_Emulation.ttcn MGCP_Types.ttcn RSL_Types.ttcn "
+FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn GSUP_Emulation.ttcn "
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn
 GTP_Templates.ttcn IPCP_Types.ttcn "
 gen_links $DIR $FILES

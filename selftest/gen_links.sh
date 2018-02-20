@@ -46,11 +46,6 @@ DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.SDP/src
-FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
-SDP_parser.y lex.SDP_parse_.c"
-gen_links $DIR $FILES
-
 DIR=../library
-FILES="General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcn L3_Templates.ttcn BSSMAP_Templates.ttcn RLCMAC_CSN1_Types.ttcn GSM_RR_Types.ttcn RSL_Types.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn BSSAP_CodecPort.ttcn Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn GSUP_Types.ttcn"
+FILES="General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp L3_Templates.ttcn BSSMAP_Templates.ttcn RLCMAC_CSN1_Types.ttcn GSM_RR_Types.ttcn RSL_Types.ttcn BSSAP_CodecPort.ttcn Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn GSUP_Types.ttcn"
 gen_links $DIR $FILES
