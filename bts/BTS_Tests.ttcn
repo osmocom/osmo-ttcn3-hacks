@@ -1,0 +1,618 @@
+module BTS_Tests {
+
+import from General_Types all;
+import from GSM_Types all;
+import from GSM_RR_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from GSM_RR_Types all;
+import from L1CTL_PortType all;
+import from L1CTL_Types all;
+import from LAPDm_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from RSL_Types all;
+import from IPA_Emulation all;
+import from RSL_Emulation all;
+
+import from IPL4asp_Types all;
+import from TRXC_Types all;
+import from TRXC_CodecPort all;
+import from TRXC_CodecPort_CtrlFunct all;
+
+/* The tests assume a BTS with the following timeslot configuration:
+ * TS0 : Combined CCCH + SDCCH/4
+ * TS1 .. TS 4: TCH/F
+ * TS5 : TCH/H
+ * TS6 : SDCCH/8
+ * TS7 : PDCH
+ */
+
+modulepar {
+	charstring mp_rsl_ip := "127.0.0.2";
+	integer mp_rsl_port := 3003;
+	integer mp_trx0_arfcn := 871;
+	integer mp_bb_trxc_port := 5704;
+}
+
+type component test_CT extends CTRL_Adapter_CT {
+	var IPA_Emulation_CT vc_IPA;
+
+	var RSL_Emulation_CT vc_RSL;
+	port RSL_CCHAN_PT RSL_CCHAN;
+}
+
+/* an individual call / channel */
+type component ConnHdlr extends RSL_DchanHdlr {
+	port L1CTL_PT L1CTL;
+
+	port TRXC_CODEC_PT BB_TRXC;
+	var integer g_bb_trxc_conn_id;
+
+	timer g_Tguard;
+	timer g_Tmeas_exp := 2.0; /* >= 103 SACCH multiframe ~ 500ms */
+
+	var ConnHdlrPars g_pars;
+	var uint8_t g_next_meas_res_nr := 0;
+}
+
+function f_init_rsl(charstring id) runs on test_CT {
+	vc_IPA := IPA_Emulation_CT.create(id & "-RSL-IPA");
+	vc_RSL := RSL_Emulation_CT.create(id & "-RSL");
+
+	map(vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_IPA:IPA_RSL_PORT, vc_RSL:IPA_PT);
+	connect(self:RSL_CCHAN, vc_RSL:CCHAN_PT);
+
+	vc_IPA.start(IPA_Emulation.main_server(mp_rsl_ip, mp_rsl_port));
+	vc_RSL.start(RSL_Emulation.main(false));
+}
+
+type record ConnHdlrPars {
+	RslChannelNr chan_nr,
+	RSL_IE_ChannelMode chan_mode,
+	float t_guard,
+	ConnL1Pars l1_pars
+}
+
+
+/* global init function */
+function f_init(charstring id) runs on test_CT {
+	f_init_rsl(id);
+	RSL_CCHAN.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP});
+}
+
+type function void_fn(charstring id) runs on ConnHdlr;
+
+/* create a new test component */
+function f_start_handler(void_fn fn, ConnHdlrPars pars)
+runs on test_CT return ConnHdlr {
+	var charstring id := testcasename();
+	var ConnHdlr vc_conn;
+
+	vc_conn := ConnHdlr.create(id);
+	/* connect to RSL Emulation main component */
+	connect(vc_conn:RSL, vc_RSL:CLIENT_PT);
+	connect(vc_conn:RSL_PROC, vc_RSL:RSL_PROC);
+
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+private altstep as_Tguard() runs on ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		self.stop;
+	}
+}
+
+private function f_l1_tune() runs on ConnHdlr {
+	/* tune our virtual L1 to the right ARFCN */
+	//var BCCH_tune_req tune_req := { arfcn := { false, mp_trx0_arfcn }, combined_ccch := true };
+	//L1.send(tune_req);
+	f_L1CTL_FBSB(L1CTL, { false, mp_trx0_arfcn }, CCCH_MODE_COMBINED);
+}
+
+private function f_trxc_connect() runs on ConnHdlr {
+	map(self:BB_TRXC, system:BB_TRXC);
+	var Result res;
+	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(BB_TRXC, "127.0.0.1", mp_bb_trxc_port,
+							"127.0.0.1", 0, -1, {udp:={}}, {});
+	g_bb_trxc_conn_id := res.connId;
+}
+
+private function f_trxc_fake_rssi(uint8_t rssi) runs on ConnHdlr {
+	BB_TRXC.send(ts_TRXC_Send(g_bb_trxc_conn_id, ts_TRXC_FAKE_RSSI(rssi))); 
+}
+
+private function f_trx_fake_toffs256(int16_t toffs256) runs on ConnHdlr {
+	BB_TRXC.send(ts_TRXC_Send(g_bb_trxc_conn_id, ts_TRXC_FAKE_TIMING(toffs256))); 
+}
+
+/* first function started in ConnHdlr component */
+private function f_handler_init(void_fn fn, charstring id, ConnHdlrPars pars)
+runs on ConnHdlr {
+	g_pars := pars;
+	g_chan_nr := pars.chan_nr;
+
+	map(self:L1CTL, system:L1CTL);
+	f_connect_reset(L1CTL);
+
+	f_trxc_connect();
+
+	g_Tguard.start(pars.t_guard);
+	activate(as_Tguard());
+
+	f_rslem_register(0, pars.chan_nr);
+
+	/* call the user-supplied test case function */
+	fn.apply(id);
+}
+
+
+function f_rsl_chan_act(RSL_IE_ChannelMode mode) runs on ConnHdlr {
+	RSL.send(ts_RSL_CHAN_ACT(g_chan_nr, mode));
+	alt {
+	[] RSL.receive(tr_RSL_CHAN_ACT_ACK(g_chan_nr)) {
+		g_Tmeas_exp.start;
+		}
+	[] RSL.receive(tr_RSL_CHAN_ACT_NACK(g_chan_nr)) {
+		setverdict(fail, "Unexpected RF CHAN ACT NACK");
+		}
+	}
+}
+
+function f_rsl_chan_deact() runs on ConnHdlr {
+	timer T := 3.0;
+	RSL.send(ts_RSL_RF_CHAN_REL(g_chan_nr));
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_RF_CHAN_REL_ACK(g_chan_nr)) {
+		g_Tmeas_exp.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RF CHAN REL ACK");
+		}
+	}
+}
+
+
+private template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
+					template RSL_IE_ChannelMode chan_mode,
+					float t_guard := 20.0) := {
+	chan_nr := valueof(chan_nr),
+	chan_mode := valueof(chan_mode),
+	t_guard := t_guard,
+	l1_pars := {
+		dtx_enabled := false,
+		meas_ul := {
+			full := {
+				rxlev := dbm2rxlev(-53),
+				rxqual := 0
+			},
+			sub := {
+				rxlev := dbm2rxlev(-53),
+				rxqual := 0
+			}
+		},
+		timing_offset_256syms := 0,
+		bs_power_level := 0,
+		ms_power_level := 0,
+		ms_actual_ta := 0
+	}
+}
+
+/* Stress test: Do 500 channel activations/deactivations in rapid succession */
+function f_TC_chan_act_stress(charstring id) runs on ConnHdlr {
+	for (var integer i := 0; i < 500; i := i+1) {
+		f_rsl_chan_act(g_pars.chan_mode);
+		f_rsl_chan_deact();
+	}
+	setverdict(pass);
+}
+testcase TC_chan_act_stress() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_init(testcasename());
+	vc_conn := f_start_handler(refers(f_TC_chan_act_stress), pars);
+	vc_conn.done;
+}
+
+/* Test if re-activation of an already active channel fails as expected */
+function f_TC_chan_act_react(charstring id) runs on ConnHdlr {
+	f_rsl_chan_act(g_pars.chan_mode);
+	/* attempt to activate the same lchan again -> expect reject */
+	RSL.send(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode));
+	alt {
+	[] RSL.receive(tr_RSL_CHAN_ACT_ACK(g_chan_nr)) {
+		setverdict(fail, "Unexpected CHAN ACT ACK on double activation");
+		}
+	[] RSL.receive(tr_RSL_CHAN_ACT_NACK(g_chan_nr)) {
+		setverdict(pass);
+		}
+	}
+	f_rsl_chan_deact();
+}
+testcase TC_chan_act_react() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_init(testcasename());
+	vc_conn := f_start_handler(refers(f_TC_chan_act_react), pars);
+	vc_conn.done;
+}
+
+/* Attempt to de-activate a channel that's not active */
+function f_TC_chan_deact_not_active(charstring id) runs on ConnHdlr {
+	timer T := 3.0;
+	RSL.send(ts_RSL_RF_CHAN_REL(g_chan_nr));
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_RF_CHAN_REL_ACK(g_chan_nr)) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout expecting RF_CHAN_REL_ACK");
+		}
+	}
+}
+testcase TC_chan_deact_not_active() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_init(testcasename());
+	var ConnHdlr vc_conn := f_start_handler(refers(f_TC_chan_deact_not_active), pars);
+	vc_conn.done;
+}
+
+/* attempt to activate channel with wrong RSL Channel Nr IE; expect NACK */
+function f_TC_chan_act_wrong_nr(charstring id) runs on ConnHdlr {
+	RSL.send(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode));
+	alt {
+	[] RSL.receive(tr_RSL_CHAN_ACT_ACK(g_chan_nr)) {
+		setverdict(fail, "Unexpected CHAN ACT ACK");
+		}
+	[] RSL.receive(tr_RSL_CHAN_ACT_NACK(g_chan_nr)) {
+		setverdict(pass);
+		}
+	}
+}
+private type record WrongChanNrCase {
+	RslChannelNr	chan_nr,
+	charstring	description
+}
+private type record of WrongChanNrCase WrongChanNrCases;
+private template WrongChanNrCase t_WCN(template RslChannelNr chan_nr, charstring desc) := {
+	chan_nr := chan_nr,
+	description := desc
+}
+
+testcase TC_chan_act_wrong_nr() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+
+	f_init(testcasename());
+
+	var WrongChanNrCases wrong := {
+		valueof(t_WCN(t_RslChanNr_RACH(0), "RACH is not a dedicated channel")),
+		valueof(t_WCN(t_RslChanNr_RACH(1), "RACH doesn't exist on timeslot")),
+		valueof(t_WCN(t_RslChanNr_BCCH(0), "BCCH is not a dedicated channel")),
+		valueof(t_WCN(t_RslChanNr_PCH_AGCH(0), "PCH/AGCH is not a dedicated channel")),
+		valueof(t_WCN(t_RslChanNr_Bm(0), "TS0 cannot be TCH/F")),
+		valueof(t_WCN(t_RslChanNr_Lm(0, 0), "TS0 cannot be TCH/H")),
+		valueof(t_WCN(t_RslChanNr_Lm(0, 1), "TS0 cannot be TCH/H")),
+		valueof(t_WCN(t_RslChanNr_PDCH(0), "TS0 cannot be PDCH")),
+		valueof(t_WCN(t_RslChanNr_SDCCH8(0, 0), "TS0 cannot be SDCCH/8")),
+		valueof(t_WCN(t_RslChanNr_SDCCH8(0, 7), "TS0 cannot be SDCCH/8")),
+		valueof(t_WCN(t_RslChanNr_SDCCH4(7, 0), "TS7 cannot be SDCCH/4")),
+		valueof(t_WCN(t_RslChanNr_SDCCH4(7, 3), "TS7 cannot be SDCCH/4")),
+		valueof(t_WCN(t_RslChanNr_Lm(1, 0), "TS1 cannot be TCH/H"))
+	};
+
+	for (var integer i := 0; i < sizeof(wrong); i := i+1) {
+		pars := valueof(t_Pars(wrong[i].chan_nr, ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_chan_act_wrong_nr), pars);
+		vc_conn.done;
+	}
+}
+
+function f_TC_chan_req(charstring id) runs on ConnHdlr {
+	f_l1_tune();
+
+	RSL.clear;
+	//L1.send(DCCH_establish_req:{ra := 23});
+	/* This arrives on CCHAN, so we cannot test here */
+	//RSL.receive(tr_RSL_CHAN_RQD(int2oct(23,1)));
+}
+testcase TC_chan_req() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_init(testcasename());
+	vc_conn := f_start_handler(refers(f_TC_chan_req), pars);
+	vc_conn.done;
+}
+
+template LapdmAddressField ts_LapdmAddr(LapdmSapi sapi, boolean c_r) := {
+	spare := '0'B,
+	lpd := 0,
+	sapi := sapi,
+	c_r := c_r,
+	ea := true
+}
+
+template LapdmFrameB ts_LAPDm_B(LapdmSapi sapi, boolean c_r, boolean p, octetstring pl) := {
+	addr := ts_LapdmAddr(sapi, c_r),
+	ctrl := t_LapdmCtrlUI(p),
+	len := 0, /* overwritten */
+	m := false,
+	el := 1,
+	payload := pl
+}
+
+/* handle incoming downlink SACCH and respond with uplink SACCH (meas res) */
+altstep as_l1_sacch() runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	[] L1CTL.receive(t_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl {
+		log("SACCH received: ", l1_dl.payload.data_ind.payload);
+		var GsmRrL3Message meas_rep := valueof(ts_MEAS_REP(true, 23, 23, 0, 0, omit));
+		var LapdmFrameB lb := valueof(ts_LAPDm_B(0, false, false, enc_GsmRrL3Message(meas_rep)));
+		log("LAPDm: ", lb);
+		var octetstring pl := '0000'O & enc_LapdmFrameB(lb);
+		L1CTL.send(t_L1CTL_DATA_REQ(g_chan_nr, ts_RslLinkID_SACCH(0), pl));
+		repeat;
+		}
+}
+
+altstep as_l1_dcch() runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	[] L1CTL.receive(t_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_DCCH(?))) -> value l1_dl {
+		log("DCCH received: ", l1_dl.payload.data_ind.payload);
+		var octetstring pl := '010301'O;
+		L1CTL.send(t_L1CTL_DATA_REQ(g_chan_nr, ts_RslLinkID_DCCH(0), pl));
+		repeat;
+		}
+}
+
+type record MeasElem {
+	uint6_t rxlev,
+	uint3_t rxqual
+}
+
+type record MeasElemFS {
+	MeasElem full,
+	MeasElem sub
+}
+
+type record ConnL1Pars {
+	boolean dtx_enabled,
+	MeasElemFS meas_ul,
+	int16_t timing_offset_256syms,
+	uint5_t bs_power_level,
+	uint5_t ms_power_level,
+	uint8_t ms_actual_ta
+}
+
+/* Convert tiing offset from 1/256th symbol to RSL Timing Offset */
+private function toffs256s_to_rsl(int16_t toffs256s) return uint8_t {
+	return 63 + (toffs256s/256);
+}
+
+/* build a template for matching measurement results against */
+private function f_build_meas_res_tmpl() runs on ConnHdlr return template RSL_Message {
+	var ConnL1Pars l1p := g_pars.l1_pars;
+	var template RSL_IE_UplinkMeas ul_meas := {
+		len := 3,
+		rfu := '0'B,
+		dtx_d := l1p.dtx_enabled,
+		rxlev_f_u := l1p.meas_ul.full.rxlev,
+		reserved1 := '00'B,
+		rxlev_s_u := l1p.meas_ul.sub.rxlev,
+		reserved2 := '00'B,
+		rxq_f_u := l1p.meas_ul.full.rxqual,
+		rxq_s_u := l1p.meas_ul.sub.rxqual,
+		supp_meas_info := omit
+	};
+	/* HACK HACK HACK FIXME HACK HACK HACK see https://osmocom.org/issues/2988 */
+	ul_meas.rxlev_f_u := ?;
+	ul_meas.rxlev_s_u := ?;
+	ul_meas.rxq_f_u := ?;
+	ul_meas.rxq_s_u := ?;
+	var template RSL_IE_BS_Power bs_power := {
+		reserved := 0,
+		epc := false,
+		fpc := false,
+		power_level := l1p.bs_power_level
+	};
+	var template RSL_IE_L1Info l1_info := {
+		ms_power_lvl := l1p.ms_power_level,
+		fpc := false,
+		reserved := 0,
+		actual_ta := l1p.ms_actual_ta
+	};
+	var uint8_t offs := toffs256s_to_rsl(l1p.timing_offset_256syms);
+	var template uint8_t t_toffs := (offs-1 .. offs+1);	 /* some tolerance */
+	return tr_RSL_MEAS_RES_OSMO(g_chan_nr, g_next_meas_res_nr, ul_meas, bs_power, l1_info,
+				    ?, t_toffs);
+}
+
+/* verify we regularly receive measurement reports with incrementing numbers */
+altstep as_meas_res() runs on ConnHdlr {
+	var RSL_Message rsl;
+	[] RSL.receive(f_build_meas_res_tmpl()) -> value rsl {
+		/* increment counter of next to-be-expected meas rep */
+		g_next_meas_res_nr := (g_next_meas_res_nr + 1) mod 256;
+		/* Re-start the timer expecting the next MEAS RES */
+		g_Tmeas_exp.start;
+		repeat;
+		}
+	[] RSL.receive(tr_RSL_MEAS_RES(g_chan_nr, g_next_meas_res_nr)) -> value rsl {
+		setverdict(fail, "Received unspecific MEAS RES ", rsl);
+		self.stop;
+		}
+	[] RSL.receive(tr_RSL_MEAS_RES(?)) -> value rsl {
+		setverdict(fail, "Received unexpected MEAS RES ", rsl);
+		self.stop;
+		}
+	[] g_Tmeas_exp.timeout {
+		setverdict(fail, "Didn't receive expected measurement result")
+		self.stop;
+		}
+}
+
+/* Establish dedicated channel: L1CTL + RSL side */
+private function f_est_dchan() runs on ConnHdlr {
+	var GsmFrameNumber fn;
+	var ImmediateAssignment imm_ass;
+	var integer ra := 23;
+
+	fn := f_L1CTL_RACH(L1CTL, ra);
+	/* This arrives on CCHAN, so we cannot test for receiving CHAN RQDhere */
+	//RSL.receive(tr_RSL_CHAN_RQD(int2oct(23,1)));
+
+	/* Activate channel on BTS side */
+	f_rsl_chan_act(g_pars.chan_mode);
+
+	/* Send IMM.ASS via CCHAN */
+	var ChannelDescription ch_desc := {
+		chan_nr := g_pars.chan_nr,
+		tsc := 7,
+		h := false,
+		arfcn := mp_trx0_arfcn,
+		maio_hsn := omit
+	};
+	var MobileAllocation ma := {
+		len := 0,
+		ma := ''B
+	};
+	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, ma));
+	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
+
+	/* receive IMM.ASS on MS side */
+	var ImmediateAssignment ia_um;
+	ia_um := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
+	/* enable dedicated mode */
+	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um);
+}
+
+/* establish DChan, verify existance + contents of measurement reports */
+function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
+	f_l1_tune();
+	RSL.clear;
+
+	g_pars.l1_pars.meas_ul.full.rxlev := dbm2rxlev(-100);
+	g_pars.l1_pars.meas_ul.sub.rxlev := g_pars.l1_pars.meas_ul.full.rxlev;
+	f_trxc_fake_rssi(100);
+
+	g_pars.l1_pars.timing_offset_256syms := 512; /* 2 symbols */
+	f_trx_fake_toffs256(g_pars.l1_pars.timing_offset_256syms);
+
+	f_est_dchan();
+
+	/* run for a number of seconds, send SACCH + FACCH from MS side and verify
+	 * RSL measurement reports on Abis side */
+	timer T := 8.0;
+	T.start;
+	alt {
+	[] as_l1_sacch();
+	[] as_meas_res();
+	[] as_l1_dcch();
+	[] L1CTL.receive { repeat; }
+	[g_Tmeas_exp.running] T.timeout {
+		/* as_meas_res() would have done setverdict(fail) / self.stop in case
+		 * of any earlier errors, so if we reach this timeout, we're good */
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "No MEAS RES received at all");
+		}
+	}
+	f_rsl_chan_deact();
+}
+testcase TC_meas_res_sign_tchf() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer tn := 1; tn <= 4; tn := tn+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars);
+		vc_conn.done;
+	}
+}
+testcase TC_meas_res_sign_tchh() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer ss := 0; ss <= 1; ss := ss+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Lm(5, ss), ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars);
+		vc_conn.done;
+	}
+}
+testcase TC_meas_res_sign_sdcch4() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer ss := 0; ss <= 3; ss := ss+1) {
+		pars := valueof(t_Pars(t_RslChanNr_SDCCH4(0, ss), ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars);
+		vc_conn.done;
+	}
+}
+testcase TC_meas_res_sign_sdcch8() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer ss := 0; ss <= 7; ss := ss+1) {
+		pars := valueof(t_Pars(t_RslChanNr_SDCCH8(6, ss), ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars);
+		vc_conn.done;
+	}
+}
+
+/* Test if a channel without valid uplink bursts generates RSL CONN FAIL IND */
+private function f_TC_conn_fail_crit(charstring id) runs on ConnHdlr {
+	f_l1_tune();
+	RSL.clear;
+
+	f_est_dchan();
+	f_sleep(2.0);
+	L1CTL.send(t_L1CTL_DM_REL_REQ(g_chan_nr));
+
+	timer T := 40.0;
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_CONN_FAIL_IND(g_chan_nr, ?)) {
+		setverdict(pass)
+		}
+	[] RSL.receive { repeat };
+	[] T.timeout {
+		setverdict(fail, "No CONN FAIL IND received");
+		}
+	}
+	f_rsl_chan_deact();
+}
+testcase TC_conn_fail_crit() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	pars := valueof(t_Pars(t_RslChanNr_SDCCH8(6, 3), ts_RSL_ChanMode_SIGN));
+	pars.t_guard := 60.0;
+	vc_conn := f_start_handler(refers(f_TC_conn_fail_crit), pars);
+	vc_conn.done;
+}
+
+
+
+
+control {
+	execute( TC_chan_act_stress() );
+	execute( TC_chan_act_react() );
+	execute( TC_chan_deact_not_active() );
+	execute( TC_chan_act_wrong_nr() );
+	execute( TC_chan_req() );
+	execute( TC_meas_res_sign_tchf() );
+	execute( TC_meas_res_sign_tchh() );
+	execute( TC_meas_res_sign_sdcch4() );
+	execute( TC_meas_res_sign_sdcch8() );
+	execute( TC_conn_fail_crit() );
+}
+
+
+}
