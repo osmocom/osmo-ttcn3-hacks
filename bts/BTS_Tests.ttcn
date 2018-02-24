@@ -21,8 +21,10 @@ import from TRXC_Types all;
 import from TRXC_CodecPort all;
 import from TRXC_CodecPort_CtrlFunct all;
 
-import from L3_Templates all;
 import from MobileL3_CommonIE_Types all;
+import from MobileL3_RRM_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
 
 /* The tests assume a BTS with the following timeslot configuration:
  * TS0 : Combined CCCH + SDCCH/4
@@ -40,10 +42,15 @@ modulepar {
 }
 
 type component test_CT extends CTRL_Adapter_CT {
+	/* IPA Emulation component underneath RSL */
 	var IPA_Emulation_CT vc_IPA;
-
+	/* RSL Emulation component (for ConnHdlr tests) */
 	var RSL_Emulation_CT vc_RSL;
+	/* Direct RSL_CCHAN_PT */
 	port RSL_CCHAN_PT RSL_CCHAN;
+
+	/* L1CTL port (for classic tests) */
+	port L1CTL_PT L1CTL;
 }
 
 /* an individual call / channel */
@@ -126,7 +133,7 @@ template (value) GsmRrMessage ts_SI3_default := {
 }
 
 /* global init function */
-function f_init(charstring id) runs on test_CT {
+function f_init(charstring id := "BTS-Test") runs on test_CT {
 	f_init_rsl(id);
 	RSL_CCHAN.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP});
 
@@ -135,6 +142,12 @@ function f_init(charstring id) runs on test_CT {
 	log("Sending SI3 ", si3);
 	var octetstring si3_enc := enc_GsmRrMessage(si3);
 	RSL_CCHAN.send(ts_RSL_UD(ts_RSL_BCCH_INFO(RSL_SYSTEM_INFO_3, si3_enc)));
+}
+
+/* Attach L1CTL to master test_CT (classic tests, non-handler mode) */
+function f_init_l1ctl() runs on test_CT {
+	map(self:L1CTL, system:L1CTL);
+	f_connect_reset(L1CTL);
 }
 
 type function void_fn(charstring id) runs on ConnHdlr;
@@ -172,10 +185,7 @@ private altstep as_Tguard() runs on ConnHdlr {
 	}
 }
 
-private function f_l1_tune() runs on ConnHdlr {
-	/* tune our virtual L1 to the right ARFCN */
-	//var BCCH_tune_req tune_req := { arfcn := { false, mp_trx0_arfcn }, combined_ccch := true };
-	//L1.send(tune_req);
+private function f_l1_tune(L1CTL_PT L1CTL) {
 	f_L1CTL_FBSB(L1CTL, { false, mp_trx0_arfcn }, CCCH_MODE_COMBINED);
 }
 
@@ -380,7 +390,7 @@ testcase TC_chan_act_wrong_nr() runs on test_CT {
 }
 
 function f_TC_chan_req(charstring id) runs on ConnHdlr {
-	f_l1_tune();
+	f_l1_tune(L1CTL);
 
 	RSL.clear;
 	//L1.send(DCCH_establish_req:{ra := 23});
@@ -559,7 +569,7 @@ private function f_est_dchan() runs on ConnHdlr {
 
 /* establish DChan, verify existance + contents of measurement reports */
 function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
-	f_l1_tune();
+	f_l1_tune(L1CTL);
 	RSL.clear;
 
 	g_pars.l1_pars.meas_ul.full.rxlev := dbm2rxlev(-100);
@@ -634,7 +644,7 @@ testcase TC_meas_res_sign_sdcch8() runs on test_CT {
 
 /* Test if a channel without valid uplink bursts generates RSL CONN FAIL IND */
 private function f_TC_conn_fail_crit(charstring id) runs on ConnHdlr {
-	f_l1_tune();
+	f_l1_tune(L1CTL);
 	RSL.clear;
 
 	f_est_dchan();
@@ -664,8 +674,315 @@ testcase TC_conn_fail_crit() runs on test_CT {
 	vc_conn.done;
 }
 
+function tmsi_is_dummy(TMSIP_TMSI_V tmsi) return boolean {
+	if (tmsi == 'FFFFFFFF'O) {
+		return true;
+	} else {
+		return false;
+	}
+}
 
 
+altstep as_l1_count_paging(inout integer num_paging_rcv_msgs, inout integer num_paging_rcv_ids)
+runs on test_CT {
+	var L1ctlDlMessage dl;
+	[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0), ?, c_DummyUI)) {
+		repeat;
+	}
+	[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0))) -> value dl {
+		var octetstring without_plen :=
+			substr(dl.payload.data_ind.payload, 1, lengthof(dl.payload.data_ind.payload)-1);
+		var PDU_ML3_NW_MS rr := dec_PDU_ML3_NW_MS(without_plen);
+		if (match(rr, tr_PAGING_REQ1)) {
+			num_paging_rcv_msgs := num_paging_rcv_msgs + 1;
+			num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			if (isvalue(rr.msgs.rrm.pagingReq_Type1.mobileIdentity2)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+		} else if (match(rr, tr_PAGING_REQ2)) {
+			num_paging_rcv_msgs := num_paging_rcv_msgs + 1;
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type2.mobileIdentity1)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type2.mobileIdentity2)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+			if (isvalue(rr.msgs.rrm.pagingReq_Type2.mobileIdentity3)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+		} else if (match(rr, tr_PAGING_REQ3)) {
+			num_paging_rcv_msgs := num_paging_rcv_msgs + 1;
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type3.mobileIdentity1)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type3.mobileIdentity2)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type3.mobileIdentity3)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+			if (not tmsi_is_dummy(rr.msgs.rrm.pagingReq_Type3.mobileIdentity4)) {
+				num_paging_rcv_ids := num_paging_rcv_ids + 1;
+			}
+		}
+		repeat;
+	}
+}
+
+type record PagingTestCfg {
+	boolean combined_ccch,
+	integer bs_ag_blks_res,
+	float load_factor,
+	boolean exp_load_ind,
+	boolean exp_overload,
+	boolean use_tmsi
+}
+
+type record PagingTestState {
+	integer num_paging_sent,
+	integer num_paging_rcv_msgs,
+	integer num_paging_rcv_ids,
+	integer num_overload
+}
+
+/* receive + ignore RSL RF RES IND */
+altstep as_rsl_res_ind() runs on test_CT {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RF_RES_IND)) {
+		repeat;
+	}
+}
+
+/* Helper function for paging related testing */
+private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTestState {
+	f_init(testcasename());
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	var PagingTestState st := {
+		num_paging_sent := 0,
+		num_paging_rcv_msgs := 0,
+		num_paging_rcv_ids := 0,
+		num_overload := 0
+	};
+
+	var float max_pch_blocks_per_sec := f_pch_block_rate_est(cfg.combined_ccch, cfg.bs_ag_blks_res);
+	var float max_pch_imsi_per_sec;
+	if (cfg.use_tmsi) {
+		max_pch_imsi_per_sec := max_pch_blocks_per_sec * 4.0; /* Type 3 */
+	} else {
+		max_pch_imsi_per_sec := max_pch_blocks_per_sec * 2.0; /* Type 1 */
+	}
+	var float pch_blocks_per_sec := max_pch_imsi_per_sec * cfg.load_factor;
+	var float interval := 1.0 / pch_blocks_per_sec;
+	log("pch_blocks_per_sec=", pch_blocks_per_sec, " interval=", interval);
+
+	for (var integer i := 0; i < float2int(20.0/interval); i := i+1) {
+		/* build mobile Identity */
+		var MobileL3_CommonIE_Types.MobileIdentityLV mi;
+		if (cfg.use_tmsi) {
+			mi := valueof(ts_MI_TMSI_LV(f_rnd_octstring(4)));
+		} else {
+			mi := valueof(ts_MI_IMSI_LV(f_gen_imsi(i)));
+		}
+		var octetstring mi_enc_lv := enc_MobileIdentityLV(mi);
+		var octetstring mi_enc := substr(mi_enc_lv, 1, lengthof(mi_enc_lv)-1);
+
+		/* Send RSL PAGING COMMAND */
+		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_PAGING_CMD(mi_enc, i mod 4)));
+		st.num_paging_sent := st.num_paging_sent + 1;
+
+		/* Wait for interval to next PAGING COMMAND */
+		timer T_itv := interval;
+		T_itv.start;
+		alt {
+		/* check for presence of CCCH LOAD IND (paging load) */
+		[cfg.exp_overload] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND(0))) {
+			st.num_overload := st.num_overload + 1;
+			repeat;
+			}
+		[not cfg.exp_overload]  RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND(0))) {
+			setverdict(fail, "Unexpected PCH Overload");
+			}
+		[cfg.exp_load_ind] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND)) {
+			log("Rx LOAD_IND");
+			/* FIXME: analyze/verify interval + contents */
+			repeat;
+			}
+		/* check if paging requests arrive on Um side */
+		[] as_l1_count_paging(st.num_paging_rcv_msgs, st.num_paging_rcv_ids);
+		[] L1CTL.receive { repeat; }
+		[] T_itv.timeout { }
+		[] as_rsl_res_ind();
+		}
+	}
+
+	/* wait for max 18s for paging queue to drain (size: 200, ~ 13 per s -> 15s) */
+	timer T_wait := 18.0;
+	T_wait.start;
+	alt {
+	[] as_l1_count_paging(st.num_paging_rcv_msgs, st.num_paging_rcv_ids);
+	[] L1CTL.receive { repeat; }
+	/* 65535 == empty paging queue, we can terminate*/
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND(65535))) { }
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND)) { repeat; }
+	[] T_wait.timeout {
+		setverdict(fail, "Waiting for empty paging queue");
+		}
+	[] as_rsl_res_ind();
+	}
+
+	log("num_paging_sent=", st.num_paging_sent, " rcvd_msgs=", st.num_paging_rcv_msgs,
+	    " rcvd_ids=", st.num_paging_rcv_ids);
+	return st;
+}
+
+/* Create ~ 80% paging load (IMSI only) sustained for about 20s, verifying that
+ *  - the number of Mobile Identities on Um PCH match the number of pages on RSL
+ *  - that CCCH LOAD IND (PCH) are being generated
+ *  - that CCCH LOAD IND (PCH) [no load] is received after paging flood is over */
+testcase TC_paging_imsi_80percent() runs on test_CT {
+	var PagingTestCfg cfg := {
+		combined_ccch := true,
+		bs_ag_blks_res := 1,
+		load_factor := 0.8,
+		exp_load_ind := true,
+		exp_overload := false,
+		use_tmsi := false
+	};
+	var PagingTestState st := f_TC_paging(cfg);
+	if (st.num_paging_sent != st.num_paging_rcv_ids) {
+		setverdict(fail, "Expected ", st.num_paging_sent, " pagings but have ",
+			   st.num_paging_rcv_ids);
+	} else {
+		setverdict(pass);
+	}
+}
+
+/* Create ~ 80% paging load (TMSI only) sustained for about 20s, verifying that
+ *  - the number of Mobile Identities on Um PCH match the number of pages on RSL
+ *  - that CCCH LOAD IND (PCH) are being generated
+ *  - that CCCH LOAD IND (PCH) [no load] is received after paging flood is over */
+testcase TC_paging_tmsi_80percent() runs on test_CT {
+	var PagingTestCfg cfg := {
+		combined_ccch := true,
+		bs_ag_blks_res := 1,
+		load_factor := 0.8,
+		exp_load_ind := true,
+		exp_overload := false,
+		use_tmsi := true
+	};
+	var PagingTestState st := f_TC_paging(cfg);
+	if (st.num_paging_sent != st.num_paging_rcv_ids) {
+		setverdict(fail, "Expected ", st.num_paging_sent, " pagings but have ",
+			   st.num_paging_rcv_ids);
+	} else {
+		setverdict(pass);
+	}
+}
+
+/* Create ~ 200% paging load (IMSI only) sustained for about 20s, verifying that
+ *  - the number of Mobile Identities on Um PCH are ~ 82% of the number of pages on RSL
+ *  - that CCCH LOAD IND (PCH) are being generated and reach 0 at some point
+ *  - that CCCH LOAD IND (PCH) [no load] is received after paging flood is over */
+testcase TC_paging_imsi_200percent() runs on test_CT {
+	var PagingTestCfg cfg := {
+		combined_ccch := true,
+		bs_ag_blks_res := 1,
+		load_factor := 2.0,
+		exp_load_ind := true,
+		exp_overload := true,
+		use_tmsi := false
+	};
+	var PagingTestState st := f_TC_paging(cfg);
+	/* We expect about 80-85% to pass, given that we can fill the paging buffer of 200
+	 * slots and will fully drain that buffer before returning */
+	var template integer tpl := (st.num_paging_sent*80/100 .. st.num_paging_sent *85/100);
+	if (not match(st.num_paging_rcv_ids, tpl)) {
+		setverdict(fail, "Expected ", tpl, " pagings but have ", st.num_paging_rcv_ids);
+	} else {
+		setverdict(pass);
+	}
+}
+
+/* Create ~ 200% paging load (TMSI only) sustained for about 20s, verifying that
+ *  - the number of Mobile Identities on Um PCH are ~ 82% of the number of pages on RSL
+ *  - that CCCH LOAD IND (PCH) are being generated and reach 0 at some point
+ *  - that CCCH LOAD IND (PCH) [no load] is received after paging flood is over */
+testcase TC_paging_tmsi_200percent() runs on test_CT {
+	var PagingTestCfg cfg := {
+		combined_ccch := true,
+		bs_ag_blks_res := 1,
+		load_factor := 2.0,
+		exp_load_ind := true,
+		exp_overload := true,
+		use_tmsi := true
+	};
+	var PagingTestState st := f_TC_paging(cfg);
+	/* We expect about 70% to pass, given that we can fill the paging buffer of 200
+	 * slots and will fully drain that buffer before returning */
+	var template integer tpl := (st.num_paging_sent*68/100 .. st.num_paging_sent *72/100);
+	if (not match(st.num_paging_rcv_ids, tpl)) {
+		setverdict(fail, "Expected ", tpl, " pagings but have ", st.num_paging_rcv_ids);
+	} else {
+		setverdict(pass);
+	}
+}
+
+
+testcase TC_imm_ass() runs on test_CT {
+	f_init(testcasename());
+	for (var integer i := 0; i < 1000; i := i+1) {
+		var octetstring ia_enc := f_rnd_octstring(8);
+		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_IMM_ASSIGN(ia_enc, 0)));
+		f_sleep(0.02);
+	}
+	/* FIXME: check if imm.ass arrive on Um side */
+	/* FIXME: check for DELETE INDICATION */
+	f_sleep(100.0);
+}
+
+testcase TC_bcch_info() runs on test_CT {
+	f_init(testcasename());
+	/* FIXME: enable / disable individual BCCH info */
+	//ts_RSL_BCCH_INFO(si_type, info);
+	/* expect no ERROR REPORT after either of them *
+	/* negative test: ensure ERROR REPORT on unsupported types */
+}
+
+
+/* TODO Areas:
+
+* channel activation
+** with BS_Power / MS_Power, bypassing power control loop
+** on primary vs. secondary TRX
+** with encryption from initial activation on
+** with timing advance from initial activation on
+* mode modify
+** encryption
+** multirate
+* check DEACTIVATE SACCH
+* encryption command / intricate logic about tx-only/tx+rx/...
+** unsupported algorithm
+* handover detection
+* MS Power Control
+* BS Power Control
+* Physical Context
+* SACCH info modify
+* BCCH INFO (SI Broadcasting)
+* CCCH Load Indication for PCH and RACH
+* Delete Indication on AGCH overflow
+* SMS Broadcast Req / Cmd / CBCH LOad Ind
+* RF resource ind
+* IPA/speech related commands
+* error handling
+* discriminator error
+** type error
+** sequence error
+** IE duplicated?
+** IE missing
+** IE length error
+
+*/
 
 control {
 	execute( TC_chan_act_stress() );
@@ -678,6 +995,10 @@ control {
 	execute( TC_meas_res_sign_sdcch4() );
 	execute( TC_meas_res_sign_sdcch8() );
 	execute( TC_conn_fail_crit() );
+	execute( TC_paging_imsi_80percent() );
+	execute( TC_paging_tmsi_80percent() );
+	execute( TC_paging_imsi_200percent() );
+	execute( TC_paging_tmsi_200percent() );
 }
 
 
