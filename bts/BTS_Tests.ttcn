@@ -53,6 +53,10 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* L1CTL port (for classic tests) */
 	port L1CTL_PT L1CTL;
 
+	/* TRXC port (for classic tests) */
+	port TRXC_CODEC_PT BB_TRXC;
+	var integer g_bb_trxc_conn_id;
+
 	/* SI configuration */
 	var SystemInformationConfig si_cfg := {
 		bcch_extended := false,
@@ -554,6 +558,65 @@ testcase TC_rach_count() runs on test_CT {
 	}
 }
 
+private function f_main_trxc_connect() runs on test_CT {
+	map(self:BB_TRXC, system:BB_TRXC);
+	var Result res;
+	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(BB_TRXC, "127.0.0.1", mp_bb_trxc_port,
+							"127.0.0.1", 0, -1, {udp:={}}, {});
+	g_bb_trxc_conn_id := res.connId;
+}
+
+private function f_rach_toffs(int16_t toffs256, boolean expect_pass) runs on test_CT {
+	/* tell fake_trx to use a given timing offset for all bursts */
+	BB_TRXC.send(ts_TRXC_Send(g_bb_trxc_conn_id, ts_TRXC_FAKE_TIMING(toffs256)));
+	f_sleep(0.5);
+
+	/* Transmit RACH request + wait for confirmation */
+	var OCT1 ra := f_rnd_ra_cs();
+	var GsmFrameNumber fn := f_L1CTL_RACH(L1CTL, oct2int(ra));
+
+	/* Check for expected result */
+	timer T := 1.5;
+	T.start;
+	alt {
+	[expect_pass] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CHAN_RQD(ra, fn))) {
+		setverdict(pass);
+		}
+	[not expect_pass] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CHAN_RQD(ra, fn))) {
+		setverdict(fail, "RACH passed but was expected to be dropped");
+		}
+	[] RSL_CCHAN.receive { repeat; }
+	[not expect_pass] T.timeout {
+		setverdict(pass);
+		}
+	[expect_pass] T.timeout {
+		setverdict(fail, "Timeout waiting for CHAN RQD");
+		}
+	}
+}
+
+/* Test if dropping of RACH Based on NM_ATT_MAX_TA works */
+testcase TC_rach_max_ta() runs on test_CT {
+	f_init(testcasename());
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+	f_main_trxc_connect();
+	f_sleep(1.0);
+
+	/* default max-ta is 63 (full range of GSM timing advance */
+
+	/* negative TA must not happen */
+	f_rach_toffs(-10*256, false);
+
+	/* 0 / 32 / 63 bits is legal / permitted */
+	f_rach_toffs(0, true);
+	f_rach_toffs(32*256, true);
+	f_rach_toffs(63*256, true);
+
+	/* more than 63 bits is not legal / permitted */
+	f_rach_toffs(64*256, false);
+	f_rach_toffs(127*256, false);
+}
 
 /***********************************************************************
  * Measurement Processing / Reporting
@@ -1731,6 +1794,7 @@ control {
 	execute( TC_chan_act_wrong_nr() );
 	execute( TC_rach_content() );
 	execute( TC_rach_count() );
+	execute( TC_rach_max_ta() );
 	execute( TC_meas_res_sign_tchf() );
 	execute( TC_meas_res_sign_tchh() );
 	execute( TC_meas_res_sign_sdcch4() );
