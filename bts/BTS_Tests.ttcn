@@ -22,6 +22,9 @@ import from TRXC_Types all;
 import from TRXC_CodecPort all;
 import from TRXC_CodecPort_CtrlFunct all;
 
+import from PCUIF_Types all;
+import from PCUIF_CodecPort all;
+
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_RRM_Types all;
 import from MobileL3_Types all;
@@ -43,6 +46,7 @@ modulepar {
 	integer mp_rsl_port := 3003;
 	integer mp_trx0_arfcn := 871;
 	integer mp_bb_trxc_port := 5704;
+	charstring mp_pcu_socket := PCU_SOCK_DEFAULT;
 }
 
 type component test_CT extends CTRL_Adapter_CT {
@@ -61,6 +65,12 @@ type component test_CT extends CTRL_Adapter_CT {
 	var integer g_bb_trxc_conn_id;
 
 	port TELNETasp_PT BTSVTY;
+
+	/* PCU Interface of BTS */
+	port PCUIF_CODEC_PT PCU;
+	var integer g_pcu_conn_id;
+	/* Last PCU INFO IND we received */
+	var PCUIF_Message g_pcu_last_info;
 
 	/* SI configuration */
 	var SystemInformationConfig si_cfg := {
@@ -212,6 +222,33 @@ private function f_init_vty(charstring id) runs on test_CT {
 	f_vty_transceive(BTSVTY, "enable");
 }
 
+/* PCU socket may at any time receive a new INFO.ind */
+private altstep as_pcu_info_ind() runs on test_CT {
+	var PCUIF_send_data sd;
+	[] PCU.receive(t_SD_PCUIF_MSGT(g_pcu_conn_id, PCU_IF_MSG_INFO_IND)) -> value sd {
+		g_pcu_last_info := sd.data;
+		repeat;
+		}
+}
+
+private function f_init_pcu(charstring id) runs on test_CT {
+	timer T := 2.0;
+	var PCUIF_send_data sd;
+	map(self:PCU, system:PCU);
+	g_pcu_conn_id := f_pcuif_connect(PCU, mp_pcu_socket);
+
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF_MSGT(g_pcu_conn_id, PCU_IF_MSG_INFO_IND)) -> value sd {
+		g_pcu_last_info := sd.data;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PCU INFO_IND");
+		self.stop;
+		}
+	}
+}
+
 /* global init function */
 function f_init(charstring id := "BTS-Test") runs on test_CT {
 	f_init_rsl(id);
@@ -224,6 +261,8 @@ function f_init(charstring id := "BTS-Test") runs on test_CT {
 	/* SI2 + SI4 are required for SI testing as they are mandatory defaults */
 	f_rsl_bcch_fill(RSL_SYSTEM_INFO_2, ts_SI2_default);
 	f_rsl_bcch_fill(RSL_SYSTEM_INFO_4, ts_SI4_default);
+
+	f_init_pcu(id);
 
 	/* start with a default moderate timing offset equalling TA=2 */
 	f_main_trxc_connect();
@@ -500,6 +539,15 @@ private function f_rnd_ra_cs() return OCT1 {
 	do {
 		ra := f_rnd_octstring(1);
 	} while (ra_is_ps(ra));
+	return ra;
+}
+
+/* generate a random RACH for packet-switched */
+private function f_rnd_ra_ps() return OCT1 {
+	var OCT1 ra;
+	do {
+		ra := f_rnd_octstring(1);
+	} while (not ra_is_ps(ra));
 	return ra;
 }
 
@@ -1790,6 +1838,353 @@ testcase TC_ipa_crcx_sdcch_not_active() runs on test_CT {
 }
 
 
+/***********************************************************************
+ * PCU Socket related tests
+ ***********************************************************************/
+
+private function f_TC_pcu_act_req(uint8_t bts_nr, uint8_t trx_nr, uint8_t ts_nr, boolean exp_success)
+runs on test_CT {
+	timer T := 3.0;
+
+	/* we don't expect any RTS.req before PDCH are active */
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RTS_REQ(bts_nr))) {
+		setverdict(fail, "PCU RTS.req before PDCH active?");
+		self.stop;
+		}
+	[] PCU.receive { repeat; }
+	[] T.timeout { }
+	}
+
+	/* Send PDCH activate request for known PDCH timeslot */
+	PCU.send(t_SD_PCUIF(g_pcu_conn_id, ts_PCUIF_ACT_REQ(bts_nr, trx_nr, ts_nr)));
+
+	/* we now expect RTS.req for this timeslot (only) */
+	T.start;
+	alt {
+	[exp_success] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RTS_REQ(bts_nr, trx_nr, ts_nr))) {
+		setverdict(pass);
+		}
+	[not exp_success] PCU.receive(t_SD_PCUIF(g_pcu_conn_id,
+						 tr_PCUIF_RTS_REQ(bts_nr, trx_nr, ts_nr))) {
+		setverdict(fail, "Unexpected RTS.req for supposedly failing activation");
+		self.stop;
+		}
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RTS_REQ)) {
+		setverdict(fail, "RTS.req for wrong TRX/TS");
+		self.stop;
+		}
+	[] PCU.receive { repeat; }
+	[exp_success] T.timeout {
+		setverdict(fail, "Timeout waiting for PCU RTS.req");
+		}
+	[not exp_success] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+private function f_TC_pcu_deact_req(uint8_t bts_nr, uint8_t trx_nr, uint8_t ts_nr)
+runs on test_CT {
+	timer T := 3.0;
+
+	/* Send PDCH activate request for known PDCH timeslot */
+	PCU.send(t_SD_PCUIF(g_pcu_conn_id, ts_PCUIF_DEACT_REQ(bts_nr, trx_nr, ts_nr)));
+
+	PCU.clear;
+	/* we now expect no RTS.req for this timeslot */
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RTS_REQ(bts_nr, trx_nr, ts_nr))) {
+		setverdict(fail, "Received unexpected PCU RTS.req");
+		self.stop;
+		}
+	[] PCU.receive { repeat; }
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+/* PDCH activation via PCU socket; check for presence of RTS.req */
+testcase TC_pcu_act_req() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+}
+
+/* PDCH activation via PCU socket on non-PDCU timeslot */
+testcase TC_pcu_act_req_wrong_ts() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 1, false);
+}
+
+/* PDCH activation via PCU socket on wrong BTS */
+testcase TC_pcu_act_req_wrong_bts() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(23, 0, 7, false);
+}
+
+/* PDCH activation via PCU socket on wrong TRX */
+testcase TC_pcu_act_req_wrong_trx() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 23, 7, false);
+}
+
+/* PDCH deactivation via PCU socket; check for absence of RTS.req */
+testcase TC_pcu_deact_req() runs on test_CT {
+	f_init();
+	/* Activate PDCH */
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_sleep(1.0);
+	/* and De-Activate again */
+	f_TC_pcu_deact_req(0, 0, 7);
+}
+
+/* Attempt to deactivate a PDCH on a non-PDCH timeslot */
+testcase TC_pcu_deact_req_wrong_ts() runs on test_CT {
+	f_init();
+	f_TC_pcu_deact_req(0, 0, 1);
+}
+
+/* Test the PCU->BTS Version and BTS->PCU SI13 handshake */
+testcase TC_pcu_ver_si13() runs on test_CT {
+	const octetstring si13 := '00010203040506070909'O;
+	var PCUIF_send_data sd;
+	timer T:= 3.0;
+	f_init();
+
+	/* Set SI13 via RSL */
+	f_rsl_bcch_fill_raw(RSL_SYSTEM_INFO_13, si13);
+	PCU.send(t_SD_PCUIF(g_pcu_conn_id, ts_PCUIF_TXT_IND(0, PCU_VERSION, "BTS_Test v23")));
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_DATA_IND(0, 0, 0, ?, PCU_IF_SAPI_BCCH))) -> value sd {
+		if (substr(sd.data.u.data_ind.data, 0, lengthof(si13)) == si13) {
+			setverdict(pass);
+		} else {
+			repeat;
+		}
+		}
+	[] PCU.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SI13");
+		self.stop;
+		}
+	}
+}
+
+private const octetstring c_PCU_DATA := '000102030405060708090a0b0c0d0e0f10111213141516'O;
+
+/* helper function to send a PCU DATA.req */
+private function f_pcu_data_req(uint8_t bts_nr, uint8_t trx_nr, uint8_t ts_nr,
+				uint8_t block_nr, uint32_t fn, PCUIF_Sapi sapi, octetstring data)
+runs on test_CT
+{
+	PCU.send(t_SD_PCUIF(g_pcu_conn_id,
+			ts_PCUIF_DATA_REQ(bts_nr, trx_nr, ts_nr, block_nr, fn, sapi, data)));
+}
+
+/* helper function to wait for RTS.ind for given SAPI on given BTS/TRX/TS and then send */
+private function f_pcu_wait_rts_and_data_req(uint8_t bts_nr, uint8_t trx_nr, uint8_t ts_nr,
+					     PCUIF_Sapi sapi, octetstring data)
+runs on test_CT
+{
+	var PCUIF_send_data sd;
+
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id,
+				tr_PCUIF_RTS_REQ(bts_nr, trx_nr, ts_nr, sapi))) -> value sd {
+		f_pcu_data_req(bts_nr, trx_nr, ts_nr, sd.data.u.rts_req.block_nr,
+				  sd.data.u.rts_req.fn, sapi, data);
+		}
+	[] PCU.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RTS.ind");
+		}
+	}
+}
+
+/* Send DATA.req on invalid BTS */
+testcase TC_pcu_data_req_wrong_bts() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_data_req(23, 0, 7, 0, 0, PCU_IF_SAPI_PDTCH, c_PCU_DATA);
+	/* FIXME: how to check this wasn't actually sent and didn't crash BTS? */
+	f_sleep(10.0);
+}
+
+/* Send DATA.req on invalid TRX */
+testcase TC_pcu_data_req_wrong_trx() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_data_req(0, 100, 7, 0, 0, PCU_IF_SAPI_PDTCH, c_PCU_DATA);
+	/* FIXME: how to check this wasn't actually sent and didn't crash BTS? */
+	f_sleep(10.0);
+}
+
+/* Send DATA.req on invalid timeslot */
+testcase TC_pcu_data_req_wrong_ts() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_data_req(0, 0, 70, 0, 0, PCU_IF_SAPI_PDTCH, c_PCU_DATA);
+	/* FIXME: how to check this wasn't actually sent and didn't crash BTS? */
+	f_sleep(10.0);
+}
+
+/* Send DATA.req on timeslot that hasn't been activated */
+testcase TC_pcu_data_req_ts_inactive() runs on test_CT {
+	f_init();
+	f_pcu_data_req(0, 0, 7, 0, 0, PCU_IF_SAPI_PDTCH, c_PCU_DATA);
+	/* FIXME: how to check this wasn't actually sent and didn't crash BTS? */
+	f_sleep(2.0);
+}
+
+testcase TC_pcu_data_req_pdtch() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_wait_rts_and_data_req(0, 0, 7, PCU_IF_SAPI_PDTCH, c_PCU_DATA);
+	/* FIXME: how to check this was actually sent */
+	f_sleep(2.0);
+}
+
+testcase TC_pcu_data_req_ptcch() runs on test_CT {
+	f_init();
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_wait_rts_and_data_req(0, 0, 7, PCU_IF_SAPI_PTCCH, c_PCU_DATA);
+	/* FIXME: how to check this was actually sent */
+	f_sleep(2.0);
+}
+
+/* Send AGCH from PCU; check it appears on Um side */
+testcase TC_pcu_data_req_agch() runs on test_CT {
+	timer T := 3.0;
+	f_init();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	f_TC_pcu_act_req(0, 0, 7, true);
+	f_pcu_data_req(0, 0, 7, 0, 0, PCU_IF_SAPI_AGCH, c_PCU_DATA);
+
+	T.start;
+	alt {
+	[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0), ?, c_PCU_DATA)) {
+		setverdict(pass);
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PCU-originated AGCH block on Um");
+		}
+	}
+}
+
+/* Send IMM.ASS from PCU for PCH; check it appears on Um side */
+testcase TC_pcu_data_req_imm_ass_pch() runs on test_CT {
+	var octetstring imm_ass := f_rnd_octstring(23);
+	f_init();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	/* append 3 last imsi digits so BTS can compute pagng group */
+	var uint32_t fn := f_PCUIF_tx_imm_ass_pch(PCU, g_pcu_conn_id, imm_ass, '123459987'H);
+
+	timer T := 0.5;
+	T.start;
+	alt {
+	[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0), ?, imm_ass)) {
+		/* TODO: verify paging group */
+		setverdict(pass);
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PCU-originated AGCH block on Um");
+		}
+	}
+}
+
+/* Send RACH from Um side, expect it to show up on PCU socket */
+testcase TC_pcu_rach_content() runs on test_CT {
+	f_init();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	var GsmFrameNumber fn_last := 0;
+	for (var integer i := 0; i < 1000; i := i+1) {
+		var OCT1 ra := f_rnd_ra_ps();
+		var GsmFrameNumber fn := f_L1CTL_RACH(L1CTL, oct2int(ra));
+		if (fn == fn_last) {
+			setverdict(fail, "Two RACH in same FN?!?");
+			self.stop;
+		}
+		fn_last := fn;
+
+		timer T := 2.0;
+		T.start;
+		alt {
+		[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RACH_IND(0, oct2int(ra), 0, ?, fn))) {
+			T.stop;
+			}
+		[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_RACH_IND)) {
+			setverdict(fail, "Unexpected RACH IND");
+			self.stop;
+			}
+		[] PCU.receive { repeat; }
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for RACH IND");
+			self.stop;
+			}
+		}
+	}
+	setverdict(pass);
+}
+
+private function f_pad_oct(octetstring str, integer len, OCT1 pad) return octetstring {
+	var integer strlen := lengthof(str);
+	for (var integer i := 0; i < len-strlen; i := i+1) {
+		str := str & pad;
+	}
+	return str;
+}
+
+/* Send PAGING via RSL, expect it to shw up on PCU socket */
+testcase TC_pcu_paging_from_rsl() runs on test_CT {
+	f_init();
+
+	for (var integer i := 0; i < 100; i := i+1) {
+		var MobileL3_CommonIE_Types.MobileIdentityLV mi;
+		timer T := 3.0;
+		if (i < 50) {
+			mi := valueof(ts_MI_TMSI_LV(f_rnd_octstring(4)));
+		} else {
+			mi := valueof(ts_MI_IMSI_LV(f_gen_imsi(i)));
+		}
+		var octetstring mi_enc_lv := enc_MobileIdentityLV(mi);
+		var octetstring mi_enc := substr(mi_enc_lv, 1, lengthof(mi_enc_lv)-1);
+		var octetstring t_mi_lv := f_pad_oct(mi_enc_lv, 9, '00'O);
+
+		/* Send RSL PAGING COMMAND */
+		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_PAGING_CMD(mi_enc, i mod 4)));
+		T.start;
+		alt {
+		[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_PAG_REQ(0, t_mi_lv))) {
+			}
+		[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_PAG_REQ)) {
+			setverdict(fail, "Unexpected PAGING REQ");
+			self.stop;
+			}
+		[] PCU.receive { repeat; }
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for PAGING REQ");
+			self.stop;
+			}
+		}
+	}
+	setverdict(pass);
+}
+
+
 /* TODO Areas:
 
 * channel activation
@@ -1817,6 +2212,10 @@ testcase TC_ipa_crcx_sdcch_not_active() runs on test_CT {
 ** type error
 ** sequence error
 ** IE duplicated?
+* PCU interface
+** TIME_IND from BTS->PCU
+** DATA_IND from BTS->PCU
+** verification of PCU-originated DATA_REQ arrival on Um/MS side
 
 */
 
@@ -1853,6 +2252,24 @@ control {
 	execute( TC_ipa_crcx_mdcx_dlcx_not_active() );
 	execute( TC_ipa_crcx_mdcx_mdcx_dlcx_not_active() );
 	execute( TC_ipa_crcx_sdcch_not_active() );
+
+	execute( TC_pcu_act_req() );
+	execute( TC_pcu_act_req_wrong_ts() );
+	execute( TC_pcu_act_req_wrong_bts() );
+	execute( TC_pcu_act_req_wrong_trx() );
+	execute( TC_pcu_deact_req() );
+	execute( TC_pcu_deact_req_wrong_ts() );
+	execute( TC_pcu_ver_si13() );
+	execute( TC_pcu_data_req_wrong_bts() );
+	execute( TC_pcu_data_req_wrong_trx() );
+	execute( TC_pcu_data_req_wrong_ts() );
+	execute( TC_pcu_data_req_ts_inactive() );
+	execute( TC_pcu_data_req_pdtch() );
+	execute( TC_pcu_data_req_ptcch() );
+	execute( TC_pcu_data_req_agch() );
+	execute( TC_pcu_data_req_imm_ass_pch() );
+	execute( TC_pcu_rach_content() );
+	execute( TC_pcu_paging_from_rsl() );
 }
 
 

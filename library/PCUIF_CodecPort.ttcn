@@ -1,0 +1,114 @@
+module PCUIF_CodecPort {
+
+import from Osmocom_Types all;
+import from PCUIF_Types all;
+import from UD_PortType all;
+import from UD_Types all;
+
+type record PCUIF_send_data {
+	PCUIF_Message	data,
+	integer		id
+};
+
+private function PCUIF_to_UD(in PCUIF_send_data pin, out UD_send_data pout) {
+	pout.id := pin.id;
+	pout.data := enc_PCUIF_Message(pin.data);
+} with { extension "prototype(fast)" };
+
+private function UD_to_PCUIF(in UD_send_data pin, out PCUIF_send_data pout) {
+	pout.id := pin.id;
+	pout.data := dec_PCUIF_Message(pin.data);
+} with { extension "prototype(fast)" };
+
+type port PCUIF_CODEC_PT message {
+	out	UD_close, UD_listen, UD_shutdown, UD_connect, PCUIF_send_data;
+	in	UD_listen_result, UD_connect_result, UD_connected, PCUIF_send_data;
+} with { extension "user UD_PT
+	out (
+		UD_close -> UD_close:simple;
+		UD_listen -> UD_listen:simple;
+		UD_shutdown -> UD_shutdown:simple;
+		UD_connect -> UD_connect:simple;
+		PCUIF_send_data -> UD_send_data: function(PCUIF_to_UD)
+		)
+	in (
+		UD_listen_result -> UD_listen_result:simple;
+		UD_connect_result -> UD_connect_result:simple;
+		UD_send_data -> PCUIF_send_data: function(UD_to_PCUIF);
+		UD_connected -> UD_connected:simple
+		)"
+};
+
+template PCUIF_send_data t_SD_PCUIF(integer id, template PCUIF_Message pdu) := {
+	data := pdu,
+	id := id
+}
+
+template PCUIF_send_data t_SD_PCUIF_MSGT(integer id, template PCUIF_MsgType msg_type,
+					 template uint8_t bts_nr := ?) := {
+	data := {
+		msg_type := msg_type,
+		bts_nr := bts_nr,
+		spare := ?,
+		u := ?
+	},
+	id := id
+}
+
+function f_pcuif_connect(PCUIF_CODEC_PT pt, charstring sock) return integer {
+	var UD_connect_result res;
+	timer T := 5.0;
+
+	T.start;
+	pt.send(UD_connect:{sock, -1});
+	alt {
+	[] pt.receive(UD_connect_result:?) -> value res {
+		if (ispresent(res.result) and ispresent(res.result.result_code) and
+		    res.result.result_code == ERROR) {
+			setverdict(fail, "Error connecting to PCU socket");
+			self.stop;
+		} else {
+			return res.id;
+		}
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout connecting to PCU socket");
+		self.stop;
+		}
+	}
+	return -23;
+}
+
+function f_PCUIF_tx_imm_ass_pch(PCUIF_CODEC_PT pt, integer conn_id, octetstring imm_ass, hexstring imsi,
+				uint8_t bts_nr := 0) return uint32_t {
+	var PCUIF_send_data sd;
+	timer T := 3.0;
+	/* append 3 last imsi digits so BTS can compute pagng group */
+	var hexstring last_digits := substr(imsi, lengthof(imsi)-3, 3);
+	var octetstring prefix := ''O;
+	log("3 last imsi digits: ", last_digits);
+	for (var integer i := 0; i < 3; i := i+1) {
+		prefix := prefix & int2oct(hex2int('30'H) + hex2int(last_digits[i]), 1);
+	}
+	pt.send(t_SD_PCUIF(conn_id,
+			ts_PCUIF_DATA_REQ(bts_nr, 0, 0, 0, 0, PCU_IF_SAPI_PCH, prefix & imm_ass)));
+	T.start;
+	alt {
+	[] pt.receive(t_SD_PCUIF(conn_id,
+				tr_PCUIF_DATA_CNF(bts_nr, 0, 0, PCU_IF_SAPI_PCH))) -> value sd {
+		log("IMM.ASS was sent on fn ", sd.data.u.data_cnf.fn);
+		return sd.data.u.data_cnf.fn;
+		}
+	[] pt.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PCU DATA.cnf");
+		self.stop;
+		}
+	}
+	return 0;
+}
+
+
+
+
+}
