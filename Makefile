@@ -1,6 +1,6 @@
 SUBDIRS=bsc bsc-nat bts ggsn_tests gprs_gb hlr lapdm mgw msc selftest sgsn sysinfo
 
-PARALLEL_MAKE:=-j4
+PARALLEL_MAKE ?= -j8
 
 # This master makefile allows you to do things like
 # 	make clean	(remove all generated binary, c++ and symlinks)
