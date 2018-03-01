@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN="GSUP_Test.ttcn"
+MAIN="HLR_Tests.ttcn"
 
 FILES="*.ttcn *.ttcnpp IPA_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc"
 
