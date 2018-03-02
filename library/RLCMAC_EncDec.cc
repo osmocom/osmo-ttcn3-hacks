@@ -136,14 +136,7 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 	}
 
 	if (in.mac__hdr().tlli__ind()) {
-		/* FIXME */
-		//in.tlli().encode(GSM__Types::GprsTlli_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
-		INTEGER t = in.tlli();
-		unsigned int tmp = t.get_long_long_val();
-		ttcn_buffer.put_c(tmp >> 24);
-		ttcn_buffer.put_c(tmp >> 16);
-		ttcn_buffer.put_c(tmp >> 8);
-		ttcn_buffer.put_c(tmp);
+		ttcn_buffer.put_string(in.tlli());
 	}
 
 	if (in.mac__hdr().pfi__ind()) {
@@ -215,13 +208,7 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 
 	/* parse optional TLLI */
 	if (ret_val.mac__hdr().tlli__ind()) {
-		/* FIXME: Why is this not working ?!? */
-		//ret_val.tlli().decode(GSM__Types::GprsTlli_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
-		const unsigned char *cur = ttcn_buffer.get_read_data();
-		unsigned int tmp = cur[0] << 24 | cur[1] << 16 | cur[2] << 8 | cur[3];
-		INTEGER t;
-		t.set_long_long_val(tmp);
-		ret_val.tlli() = t;
+		ret_val.tlli() = OCTETSTRING(4, ttcn_buffer.get_read_data());
 		ttcn_buffer.increase_pos(4);
 	}
 	/* parse optional PFI */
