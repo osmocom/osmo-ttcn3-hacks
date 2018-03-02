@@ -17,8 +17,8 @@ module Test {
 
 	modulepar {
 		BssgpConfig mp_gb_cfg := {
-			nsei := 96,
-			bvci := 196,
+			nsei := 1234,
+			bvci := 1234,
 			cell_id := {
 				ra_id := {
 					lai := {
@@ -33,16 +33,16 @@ module Test {
 	}
 
 	type record MmContext {
-		octetstring	imsi optional,
+		hexstring	imsi optional,
 		GprsTlli	tlli,
 		uint9_t		n_u
 	};
 
-	type component dummy_CT {
+
+	type component dummy_CT extends BSSGP_Client_CT {
 		var lapdm_CT lapdm_component;
 		port LAPDm_PT L1;
 
-		port BSSGP_PT BSSGP;
 		var NS_CT ns_component;
 		var BSSGP_CT bssgp_component;
 
@@ -64,6 +64,7 @@ module Test {
 		bssgp_component := BSSGP_CT.create;
 		/* connect our BSSGP port to the BSSGP Emulation */
 		connect(self:BSSGP, bssgp_component:BSSGP_SP);
+		connect(self:BSSGP_PROC, bssgp_component:BSSGP_PROC);
 		/* connect lower-end of BSSGP with BSSGP_CODEC_PORT (maps to NS_PT*/
 		connect(bssgp_component:BSCP, ns_component:NS_SP);
 		/* connect lower-end of NS emulation to NS_CODEC_PORT (on top of IPl4) */
@@ -174,7 +175,7 @@ module Test {
 
 	/* Establish BSSGP connection to PCU */
 	function f_bssgp_establish() runs on dummy_CT {
-		timer T:= 60.0;
+		timer T:= 10.0;
 
 		f_init();
 		T.start
@@ -251,9 +252,23 @@ module Test {
 		}
 	}
 	template RlcmacUlBlock t_RLCMAC_UL_DATA_TLLI(template uint5_t tfi, template uint4_t cv, template uint7_t bsn,
-						     template LlcBlocks blocks := {}, template boolean stall := false, template GprsTlli tlli) modifies t_RLCMAC_UL_DATA := {
+						     template LlcBlocks blocks := {}, template boolean stall := false, template GprsTlli tlli) := {
 		data := {
-			tlli := tlli
+			mac_hdr := {
+				payload_type := MAC_PT_RLC_DATA,
+				countdown := cv,
+				stall_ind := false,
+				retry := false,
+				spare := '0'B,
+				pfi_ind := false,
+				tfi := tfi,
+				tlli_ind := true,
+				bsn := bsn,
+				e := false
+			},
+			tlli := tlli,
+			pfi := omit,
+			blocks := blocks
 		}
 	}
 
@@ -338,36 +353,64 @@ uint3_t usf) := {
 		return tlli;
 	}
 
+	/* Compute the frame number of the uplink block based on current fn + rrbp */
+	function f_rrbp_fn(GsmFrameNumber fn, MacRrbp rrbp) return GsmFrameNumber {
+		var integer add;
+		select (rrbp) {
+		case (RRBP_Nplus13_mod_2715648) {
+			add := 13;
+			}
+		case (RRBP_Nplus17_or_18_mod_2715648) {
+			add := 17; /* FIXME: What about 'or 18'? */
+			}
+		case (RRBP_Nplus21_or_22_mod_2715648) {
+			add := 21; /* FIXME: What about 'or 22'? */
+			}
+		case (RRBP_Nplus26_mod_2715648) {
+			add := 26;
+			}
+		}
+		return (fn + add) mod 2715648;
+	}
+
 	/* Send a single Uplink Block via Um; Verify reception on BSSGP; Expect UL_ACK on Um */
 	function f_single_ul_block(GprsCodingScheme cs) runs on dummy_CT {
-		var GprsTlli tlli := f_random_tlli();
 		var octetstring payload := '01020304'O;
+		var PDU_LLC llc := valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u));
+		var octetstring llc_enc := enc_PDU_LLC(llc);
+		var RLCMAC_ph_data_ind dl;
 
 		/* establish upling TBF */
 		f_establish_ul_tbf();
 
 		/* Generate LLC PDU consisting of single RLC block and send it via simulated MS */
-		var template RlcmacUlBlock blk := t_RLCMAC_UL_DATA_TLLI(0, 0, 0, {t_RLCMAC_LLCBLOCK(payload)}, false, tlli);
-		L1.send(RLCMAC_ph_data_req:{tbf_id := 0, cs := cs, block := blk});
+		var template RlcmacUlBlock blk := t_RLCMAC_UL_DATA_TLLI(0, 0, 0, {t_RLCMAC_LLCBLOCK(llc_enc)}, false, g_mmctx.tlli);
+		L1.send(RLCMAC_ph_data_req:{dyn:={tbf_id := 0, cs := cs, block := blk}});
 		/* ensure that this LLC-PDU arrives from the right TLLI at the (simulated) SGSN */
-		BSSGP.receive(tr_BD_BSSGP(tr_BSSGP_UL_UD(tlli, ?, payload)));
+		BSSGP.receive(tr_BD_BSSGP(tr_BSSGP_UL_UD(g_mmctx.tlli, ?, llc_enc)));
 
 		/* ensure the MS eceives an UL_ACK_NACK */
 		alt {
-			[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, block:=tr_RLCMAC_ACK_NACK(0, tlli)}) { };
-			[] L1.receive { repeat; };
+		[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, ts_nr:=?, fn:=?, block:=tr_RLCMAC_ACK_NACK(0, g_mmctx.tlli)}) -> value dl {
+			log("found matching ACK/NACK");
+			/* send CTRL ACK in uplink */
+			var GsmFrameNumber ul_fn := f_rrbp_fn(dl.fn, dl.block.ctrl.mac_hdr.rrbp);
+			var RlcmacUlCtrlMsg ctrl_ack := valueof(ts_RlcMacUlCtrl_PKT_CTRL_ACK(g_mmctx.tlli));
+			var RlcmacUlBlock ul_block := valueof(ts_RLC_UL_CTRL_ACK(ctrl_ack));
+			L1.send(ts_PH_DATA_ABS(0, CS1, dl.ts_nr, ul_fn, {false, 0}, ul_block));
+			}
+		[] L1.receive { repeat; };
 		}
-		log("found matching ACK/NACK");
-		/* send CTRL ACK in uplink */
-		//L1.send(FIXME);
 	}
 
 	testcase TC_rach() runs on dummy_CT {
-		var hexstring imsi := '262420123456789'H;
 		var BssgpBvci bvci := 196;
-		var GsmTmsi tmsi := hex2int('01234567'H);
+		g_mmctx.imsi := '262420123456789'H;
+		g_mmctx.tlli := f_random_tlli();
 
 		f_init();
+
+		f_bssgp_client_register(g_mmctx.imsi, g_mmctx.tlli, mp_gb_cfg.cell_id);
 
 		f_bssgp_establish();
 
