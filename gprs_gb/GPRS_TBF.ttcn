@@ -1,0 +1,365 @@
+module GPRS_TBF {
+
+/* GPRS TBF Routines, intended as minimal MS-Side GPRS implementation
+ *
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from GSM_Types all;
+import from Osmocom_Types all;
+import from General_Types all;
+import from RLCMAC_Types all;
+import from RLCMAC_CSN1_Types all;
+import from LLC_Types all;
+import from GPRS_Context all;
+
+/* input parameters into TBF (mostly mode/cs + LLC PDUs */
+
+type record UlTbfPars {
+	/* Acknowledged mode (true) or unacknowledged (false) */
+	boolean			ack_mode,
+	/* Coding Scheme for transmission, determines block size */
+	GprsCodingScheme	initial_cs,
+	/* list of abstract/decoded LLC PDUs */
+	record of PDU_LLC	llc_pdus optional,
+	/* possibly computed: list of encoded LLC PDUs */
+	record of octetstring 	llc_pdus_enc
+}
+
+type record RlcEndpointTx {
+	/* send state variable V(S) (9.1.1): 0 .. SNS-1 */
+	integer			v_s,
+	/* acknowledge state variable V(A) (9.1.2): BSN value of oldest RLC data block that has not
+	 * been positively acknowledged by peer. */
+	integer			v_a,
+	/* acknowledge state array V(B) (9.1.3) */
+	bitstring		v_b
+}
+private function f_RlcEndpointTx_init(inout RlcEndpointTx ep) {
+	ep.v_s := 0;
+	ep.v_a := 0;
+	ep.v_b := int2bit(0, 128); /* FIXME: EGPRS 2048 bits length */
+}
+
+type record RlcEndpointRx {
+	/* receive state variable V(R) (9.1.5): BSN one higher than highest BSN yet received (mod SNS) */
+	integer			v_r,
+	/* receive window state variable V(Q) (9.1.6): Lowest BSN not yet received (mod SNS) */
+	integer			v_q,
+	/* receive state array V(N) (9.1.7) */
+	bitstring		v_n
+}
+
+private function f_RlcEndpointRx_init(inout RlcEndpointRx ep) {
+	ep.v_r := 0;
+	ep.v_q := 0;
+	ep.v_n := int2bit(0, 128); /* FIXME: EGPRS 2048 bits length */
+}
+
+
+type record UlTbfState {
+	/* "const" input state with TBF Data */
+	UlTbfPars		tbf,
+	uint8_t			num_ts,
+
+	RlcEndpointTx		et,
+
+	integer			tfi,
+	/* total length of all encoded LLC PDUs */
+	integer			llc_pdu_totlen,
+	/* index of current/next PDU in llc_pdus_enc */
+	integer			cur_pdu,
+	/* byte offset into current/next PDU; next byte to transmit */
+	integer			cur_index,
+	/* block sequence number of next block within TBF */
+	integer			bsn_p,
+	/* total number of bytes remaining in TBF */
+	integer			total_bytes_remain,
+
+	/* list of already-sent RLC/MAC Blocks */
+	record of RlcmacUlBlock	rlc_sent
+}
+
+function f_UlTbfState_init(inout UlTbfState us, in UlTbfPars utpars) {
+	var RlcmacUlBlock blk;
+
+	us.tbf := utpars;
+	us.num_ts := 1;
+
+	f_RlcEndpointTx_init(us.et);
+
+	us.tfi := 0;	/* FIXME */
+	us.cur_pdu := 0;
+	us.cur_index := 0;
+	us.bsn_p := 0;
+	us.total_bytes_remain := 0;
+	us.rlc_sent := {};
+
+	/* encode all LLC PDUs from their abstract type to octetstring */
+	us.cur_pdu := 0;	/* currently processed PDU */
+	us.cur_index := 0;	/* next to-be transmitted index */
+	if (ispresent(us.tbf.llc_pdus)) {
+		us.tbf.llc_pdus_enc := {};
+		us.llc_pdu_totlen := 0;
+		for (var integer i := 0; i < sizeof(us.tbf.llc_pdus); i := i+1) {
+			var octetstring cur_enc := enc_PDU_LLC(us.tbf.llc_pdus[i]);
+			us.tbf.llc_pdus_enc := us.tbf.llc_pdus_enc & { cur_enc };
+			us.llc_pdu_totlen := us.llc_pdu_totlen + lengthof(cur_enc);
+		}
+		us.total_bytes_remain := us.llc_pdu_totlen;
+	}
+}
+
+private function f_UlTbf_ack_one_block(inout UlTbfState us, integer n) {
+	/* compute index into v_b */
+	var integer idx := n - us.et.v_a;
+	if (idx < 0 or idx > lengthof(us.et.v_b)) {
+		setverdict(fail, "UlTbf: Cannot ACK ", n, " while V(A) is ", us.et.v_a);
+		self.stop;
+	}
+	/* set the bit in the acknowledge state array */
+	us.et.v_b[idx] := '1'B;
+}
+
+/* check if V(B) contains '1' at lower end: if yes, advance V(A) and shift V(B) */
+private function f_UlTbf_check_advance_v_a(inout UlTbfState us) {
+	log("FIXME: Implement this");
+}
+
+/* copy 'len' number of bytes from current pending LLC PDU */
+private function f_copy_from_llc(inout UlTbfState us, integer len) return octetstring
+{
+	var integer pdu_len := lengthof(us.tbf.llc_pdus_enc[us.cur_pdu])
+	var octetstring ret;
+
+	ret := substr(us.tbf.llc_pdus_enc[us.cur_pdu], us.cur_index, len);
+
+	us.cur_index := us.cur_index + len;
+	us.total_bytes_remain := us.total_bytes_remain - len;
+
+	log("copy_from_llc: ", ret, " us: ", us);
+
+	/* if we completed this PDU, move on to the next, resetting the index */
+	if (us.cur_index >= pdu_len) {
+		us.cur_pdu := us.cur_pdu +1;
+		us.cur_index := 0;
+		log("copy_from_llc (incrementing pdu)");
+	}
+
+	return ret;
+}
+
+/* generate one LlcBlock (maximum size 'max_len') */
+private function f_ul_tbf_pull_one(out LlcBlock ret, inout LlcBlockHdr prev_hdr,
+				   inout UlTbfState us, integer max_len,
+				   boolean is_final) return boolean
+{
+	/* if we've already pulled all data from all LLC PDUs: nothing to do */
+	if (us.cur_pdu >= sizeof(us.tbf.llc_pdus_enc)) {
+		log("pull_one: No more data", us);
+		return false;
+	}
+
+	var integer pdu_len := lengthof(us.tbf.llc_pdus_enc[us.cur_pdu])
+	var integer cur_llc_remain_len := pdu_len - us.cur_index;
+	var integer len;
+	var LlcBlock lb;
+
+	if (us.cur_index == 0) {
+		/* start of a new LLC PDU */
+		prev_hdr.more := true;
+	}
+
+	if (cur_llc_remain_len > max_len) {
+		log("Chunk with length ", cur_llc_remain_len, " larger than space (",
+			max_len, ") left in block");
+		len := max_len;
+		lb := {
+			hdr := omit,
+			payload := f_copy_from_llc(us, len)
+		}
+	} else if (cur_llc_remain_len == max_len and is_final) {
+		/* final RLC block of TBF and LLC remainder fits exactly */
+		len := max_len;
+		lb := {
+			hdr := omit,
+			payload := f_copy_from_llc(us, len)
+		}
+		prev_hdr.e := true;
+	} else if (cur_llc_remain_len == max_len) {
+		/* LLC remaineder would fit exactly -> "singular case" with L=0 */
+		len := max_len - 1;
+		lb := {
+			hdr := {
+				length_ind := 0,
+				more := false,
+				e := true
+			},
+			payload := f_copy_from_llc(us, len)
+		}
+		prev_hdr.e := false;
+	} else {
+		/* normal case: cur_llc_remain_len < max_len */
+		len := cur_llc_remain_len;
+		lb := {
+			hdr := {
+				length_ind := len,
+				more := false,
+				e := true
+			},
+			payload := f_copy_from_llc(us, len)
+		}
+		prev_hdr.e := false;
+	}
+	ret := lb;
+	return true;
+}
+
+/* return encoded size of one given LlcBlock */
+private function f_LlcBlock_enc_len(LlcBlock blk) return integer {
+	if (isvalue(blk.hdr)) {
+		return 1 + lengthof(blk.payload);
+	} else {
+		return lengthof(blk.payload);
+	}
+}
+
+/* return encoded size of given record of LlcBlock */
+private function f_LlcBlocks_enc_len(LlcBlocks blks) return integer {
+	var integer sum := 0;
+	for (var integer i := 0; i < sizeof(blks); i := i+1) {
+		sum := sum + f_LlcBlock_enc_len(blks[i]);
+	}
+	return sum;
+}
+
+private function f_ul_tbf_pull_multi(out LlcBlocks ret, inout UlTbfState us, integer max_len,
+				     boolean is_final) return boolean
+{
+	var integer space_left;
+	var boolean rc;
+	ret := {};
+
+	/* loop as long as we have pending LLC data and space left in the current block... */
+	for (space_left := max_len; space_left > 0; space_left := max_len - f_LlcBlocks_enc_len(ret)) {
+		var LlcBlock lb;
+		var integer ret_size := sizeof(ret);
+		if (ret_size > 0) {
+			rc := f_ul_tbf_pull_one(lb, ret[ret_size-1].hdr, us, space_left, is_final);
+		} else {
+			var LlcBlockHdr dummy_hdr;
+			rc := f_ul_tbf_pull_one(lb, dummy_hdr, us, space_left, is_final);
+		}
+		if (rc == false) {
+			/* we couldn't fill the full RLC block, insufficient LLC Data */
+			if (sizeof(ret) == 0) {
+				/* we couldn't obtain any LlcBlocks at all */
+				return false;
+			} else {
+				/* we have some LlcBlocks from earlier iterations */
+				return true;
+			}
+		}
+		ret := ret & {lb};
+	}
+	return true;
+}
+
+/* Determine 'K' value for given CS (TS 44.060 9.3.1.1) */
+private function f_k_for_cs(GprsCodingScheme cs) return integer {
+	/* FIXME: EGPRS */
+	return 1;
+}
+
+/* TS 44.060 9.3.1.1 */
+private function f_calc_cv(integer nbc, integer bsn_p, integer nts, GprsCodingScheme cs,
+			   integer bs_cv_max) return integer {
+	var integer dividend := nbc - bsn_p - 1;
+	var integer k := f_k_for_cs(cs);
+	var integer divisor := nts * k;
+	var integer x := f_div_round_up(dividend, divisor);
+	if (x <= bs_cv_max) {
+		return x;
+	} else {
+		return 15;
+	}
+}
+
+private function f_rlcmac_hdr_size(boolean tlli_needed) return integer {
+	var integer ret := 2;
+	if (tlli_needed) {
+		ret := ret + 4;
+	}
+	return ret;
+}
+
+/* determine countdown value based on remaining length pending */
+private function f_ul_tbf_get_cv(inout UlTbfState us, GprsCodingScheme cs, boolean tlli_needed)
+return integer {
+	var integer hdr_size := f_rlcmac_hdr_size(tlli_needed); /* FIXME: PFI, ... */
+	var integer blk_len_net := f_gprs_blocksize(cs) - hdr_size;
+	var integer num_remain := f_div_round_up(us.total_bytes_remain, blk_len_net);
+	var integer cv := f_calc_cv(num_remain + sizeof(us.rlc_sent), us.bsn_p, us.num_ts, us.tbf.initial_cs, 14 /* FIXME */);
+	log("CV=", cv, ", num_rmain=", num_remain, " from ", us);
+	return cv;
+}
+
+
+function f_ul_tbf_get_next_block(out RlcmacUlBlock blk, inout UlTbfState us, inout MmContext mmctx,
+				 boolean tlli_needed := false) return boolean {
+	var integer hdr_size := f_rlcmac_hdr_size(tlli_needed); /* FIXME: TLLI, PFI, ... */
+	var integer len_remain := f_gprs_blocksize(us.tbf.initial_cs) - hdr_size;
+	var octetstring payload;
+	var integer cv;
+	var LlcBlocks llc_blocks;
+
+	cv := f_ul_tbf_get_cv(us, us.tbf.initial_cs, tlli_needed);
+	/* potentially get multiple payload chunks of multiple LLC PDUs */
+	if (f_ul_tbf_pull_multi(llc_blocks, us, len_remain, false) == false) {
+		return false;
+	}
+
+	/* include TLLI when needed */
+	if (tlli_needed) {
+		blk := valueof(t_RLCMAC_UL_DATA_TLLI(us.tfi, cv, us.et.v_s,
+						llc_blocks, false, mmctx.tlli));
+	} else {
+		blk := valueof(t_RLCMAC_UL_DATA(us.tfi, cv, us.et.v_s, llc_blocks, false));
+	}
+
+	/* Increment Block Sequence Number */
+	us.bsn_p := us.bsn_p + 1;
+	us.et.v_s := us.bsn_p mod 128; /* FIXME: EGPRS SNS: 2048 */
+
+	/* append to list of sent blocks */
+	us.rlc_sent := us.rlc_sent & { blk };
+
+	return true;
+}
+
+function f_ul_tbf_process_acknack(inout UlTbfState us, RlcmacDlCtrlBlock db) {
+	if (ispresent(db.payload.u.ul_ack_nack.gprs)) {
+		var UlAckNackGprs uan_gprs := db.payload.u.ul_ack_nack.gprs;
+		if (ispresent(uan_gprs.cont_res_tlli)) {
+			/* FIXME: check for contention resolution */
+		}
+		var integer i;
+		/* iterate over received bitmap, ACK each block in our TBF state */
+		for (i := lengthof(uan_gprs.ack_nack_desc.receive_block_bitmap)-1; i >= 0; i := i-1) {
+			if (uan_gprs.ack_nack_desc.receive_block_bitmap[i] == '1'B) {
+				var integer seq := uan_gprs.ack_nack_desc.starting_seq_nr + i;
+				f_UlTbf_ack_one_block(us, seq);
+			}
+		}
+		f_UlTbf_check_advance_v_a(us);
+	}
+}
+
+
+
+}

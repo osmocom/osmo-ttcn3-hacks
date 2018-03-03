@@ -14,6 +14,8 @@ module Test {
 	import from RLCMAC_Types all;
 	import from RLCMAC_CSN1_Types all;
 	import from LAPDm_RAW_PT all;
+	import from GPRS_Context all;
+	import from GPRS_TBF all;
 
 	modulepar {
 		BssgpConfig mp_gb_cfg := {
@@ -31,13 +33,6 @@ module Test {
 			sgsn_role := true
 		};
 	}
-
-	type record MmContext {
-		hexstring	imsi optional,
-		GprsTlli	tlli,
-		uint9_t		n_u
-	};
-
 
 	type component dummy_CT extends BSSGP_Client_CT {
 		var lapdm_CT lapdm_component;
@@ -230,123 +225,6 @@ module Test {
 		T.stop;
 	}
 
-	/* Template fro uplink Data block */
-	template RlcmacUlBlock t_RLCMAC_UL_DATA(template uint5_t tfi, template uint4_t cv, template uint7_t bsn,
-						template LlcBlocks blocks := {}, template boolean stall := false) := {
-		data := {
-			mac_hdr := {
-				payload_type := MAC_PT_RLC_DATA,
-				countdown := cv,
-				stall_ind := false,
-				retry := false,
-				spare := '0'B,
-				pfi_ind := false,
-				tfi := tfi,
-				tlli_ind := false,
-				bsn := bsn,
-				e := false
-			},
-			tlli := omit,
-			pfi := omit,
-			blocks := blocks
-		}
-	}
-	template RlcmacUlBlock t_RLCMAC_UL_DATA_TLLI(template uint5_t tfi, template uint4_t cv, template uint7_t bsn,
-						     template LlcBlocks blocks := {}, template boolean stall := false, template GprsTlli tlli) := {
-		data := {
-			mac_hdr := {
-				payload_type := MAC_PT_RLC_DATA,
-				countdown := cv,
-				stall_ind := false,
-				retry := false,
-				spare := '0'B,
-				pfi_ind := false,
-				tfi := tfi,
-				tlli_ind := true,
-				bsn := bsn,
-				e := false
-			},
-			tlli := tlli,
-			pfi := omit,
-			blocks := blocks
-		}
-	}
-
-	template DlMacHeader t_RLCMAC_DlMacH(template MacPayloadType pt, template MacRrbp rrbp, template
-uint3_t usf) := {
-		payload_type := pt,
-		rrbp := rrbp,
-		rrbp_valid := ispresent(rrbp),
-		usf := usf
-	}
-
-	/* Receive Template for Downlink ACK/NACK */
-	template RlcmacDlBlock tr_RLCMAC_ACK_NACK(template uint5_t ul_tfi, template GprsTlli tlli := ?) := {
-		ctrl := {
-			mac_hdr := {
-				payload_type := (MAC_PT_RLCMAC_NO_OPT, MAC_PT_RLCMAC_OPT),
-				rrbp:= ?,
-				rrbp_valid := true,
-				usf := ?
-			},
-			opt := *,
-			payload := {
-				msg_type := PACKET_UL_ACK_NACK,
-				u := {
-					ul_ack_nack := {
-						page_mode := ?,
-						msg_excape := ?,
-						uplink_tfi := ul_tfi,
-						is_egprs := '0'B,
-						gprs := {
-							ch_coding_cmd := ?,
-							ack_nack_desc := ?,
-							cont_res_tlli_present := ?,
-							cont_res_tlli := tlli,
-							pkt_ta_present := ?,
-							pkt_ta := *,
-							pwr_ctrl_present := ?,
-							pwr_ctrl := *
-						}
-					}
-				}
-			}
-		}
-	}
-
-	/* Template for Uplink MAC Control Header */
-	template UlMacCtrlHeader t_RLCMAC_UlMacCtrlH(template MacPayloadType pt, template boolean retry := false) := {
-		payload_type := pt,
-		spare := '00000'B,
-		retry := retry
-	}
-
-	/* Template for Uplink Conntrol ACK */
-	template RlcmacUlBlock ts_RLCMAC_CTRL_ACK(GprsTlli tlli, CtrlAck ack := MS_RCVD_TWO_RLC_SAME_RTI_DIFF_RBSN) := {
-		ctrl := {
-			mac_hdr := t_RLCMAC_UlMacCtrlH(MAC_PT_RLCMAC_NO_OPT),
-			payload := {
-				msg_type := PACKET_CONTROL_ACK,
-				u := {
-					ctrl_ack := {
-						tlli := tlli,
-						ctrl_ack := ack
-					}
-				}
-			}
-		}
-	}
-
-	/* Template for a LlcBlock (part of a LLC frame inside RlcMac?lDataBlock */
-	template LlcBlock t_RLCMAC_LLCBLOCK(octetstring data, BIT1 more := '0'B, boolean e := true) := {
-		hdr := {
-			length_ind := lengthof(data),
-			more := more,
-			e := e
-		},
-		payload := data
-	}
-
 	/* compute a random TLLI; FIXME: what about TLLI prefix / local/foreign/...? */
 	function f_random_tlli() return GprsTlli {
 		var GprsTlli tlli := f_rnd_octstring(4);
@@ -373,6 +251,60 @@ uint3_t usf) := {
 		return (fn + add) mod 2715648;
 	}
 
+
+function f_bssgp_wait_ul_ud(template BssgpDecoded bd_exp) runs on dummy_CT {
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] BSSGP.receive(bd_exp) {
+		log("found matching BSSGP UL-UNITDATA PDU");
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", bd_exp);
+		}
+	}
+}
+
+
+function f_ul_tbf(inout UlTbfState us) runs on dummy_CT {
+	var RLCMAC_ph_data_ind dl;
+
+	/* Establish an UL-TBF */
+	f_establish_ul_tbf();
+
+	while (true) {
+		var RlcmacUlBlock blk;
+		if (f_ul_tbf_get_next_block(blk, us, g_mmctx, true) == false) {
+			break;
+		}
+
+		/* Send the block to L1 for transmission */
+		log("L1=", blk);
+		L1.send(RLCMAC_ph_data_req:{dyn:={tbf_id := 0, cs := us.tbf.initial_cs, block := blk}});
+	}
+
+	alt {
+	[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, ts_nr:=?, fn:=?, block:=tr_RLCMAC_ACK_NACK(0, g_mmctx.tlli)}) -> value dl {
+		log("found matching ACK/NACK");
+		/* send CTRL ACK in uplink */
+		var GsmFrameNumber ul_fn := f_rrbp_fn(dl.fn, dl.block.ctrl.mac_hdr.rrbp);
+		var RlcmacUlCtrlMsg ctrl_ack := valueof(ts_RlcMacUlCtrl_PKT_CTRL_ACK(g_mmctx.tlli));
+		var RlcmacUlBlock ul_block := valueof(ts_RLC_UL_CTRL_ACK(ctrl_ack));
+		L1.send(ts_PH_DATA_ABS(0, CS1, dl.ts_nr, ul_fn, {false, 871}, ul_block));
+		/* wait for the final ACK */
+		if (dl.block.ctrl.payload.u.ul_ack_nack.gprs.ack_nack_desc.final_ack == '0'B) {
+			repeat;
+		}
+		}
+	[] L1.receive { repeat; }
+	}
+
+	for (var integer i := 0; i < sizeof(us.tbf.llc_pdus_enc); i := i+1) {
+		f_bssgp_wait_ul_ud(tr_BD_BSSGP(tr_BSSGP_UL_UD(g_mmctx.tlli, ?, us.tbf.llc_pdus_enc[i])));
+	}
+	setverdict(pass);
+}
+
 	/* Send a single Uplink Block via Um; Verify reception on BSSGP; Expect UL_ACK on Um */
 	function f_single_ul_block(GprsCodingScheme cs) runs on dummy_CT {
 		var octetstring payload := '01020304'O;
@@ -389,7 +321,7 @@ uint3_t usf) := {
 		/* ensure that this LLC-PDU arrives from the right TLLI at the (simulated) SGSN */
 		BSSGP.receive(tr_BD_BSSGP(tr_BSSGP_UL_UD(g_mmctx.tlli, ?, llc_enc)));
 
-		/* ensure the MS eceives an UL_ACK_NACK */
+		/* ensure the MS receives an UL_ACK_NACK */
 		alt {
 		[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, ts_nr:=?, fn:=?, block:=tr_RLCMAC_ACK_NACK(0, g_mmctx.tlli)}) -> value dl {
 			log("found matching ACK/NACK");
@@ -571,6 +503,35 @@ uint3_t usf) := {
 
 		log(c_ia_tbf);
 		log(dec_GsmRrMessage(c_ia_tbf));
+	}
+
+	function f_seq_octstr(integer len) return octetstring {
+		var octetstring payload := ''O;
+		for (var integer i := 0; i < len; i := i+1 ) {
+			payload := payload & int2oct(i mod 256, 1);
+		}
+		return payload;
+	}
+
+	testcase TC_ul_tbf() runs on dummy_CT {
+		g_mmctx.imsi := '262420123456789'H;
+		g_mmctx.tlli := f_random_tlli();
+		f_init();
+		f_bssgp_client_register(g_mmctx.imsi, g_mmctx.tlli, mp_gb_cfg.cell_id);
+		f_bssgp_establish();
+
+		var octetstring payload := f_seq_octstr(256);
+		var UlTbfPars ul_tbf_pars := {
+			ack_mode := true,
+			initial_cs := CS1,
+			llc_pdus := { 
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u)),
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+1))
+			}
+		};
+		var UlTbfState ul_tbf_state;
+		f_UlTbfState_init(ul_tbf_state, ul_tbf_pars);
+		f_ul_tbf(ul_tbf_state);
 	}
 
 	control {

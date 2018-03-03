@@ -32,9 +32,9 @@ OCTETSTRING enc__RlcmacDlDataBlock(const RlcmacDlDataBlock& si)
 		for (i = 0; i < in.blocks().size_of(); i++) {
 			/* fix the 'E' bit in case it is not clear */
 			if (i < in.blocks().size_of()-1)
-				in.blocks()[i].hdr().e() = false;
+				in.blocks()[i].hdr()().e() = false;
 			else
-				in.blocks()[i].hdr().e() = true;
+				in.blocks()[i].hdr()().e() = true;
 			in.blocks()[i].hdr().encode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 		}
 	}
@@ -69,7 +69,7 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 			ret_val.blocks()[num_llc_blocks++] = lb;
 
 			/* if E == '1'B, we can proceed further */
-			if (lb.hdr().e() == true)
+			if (lb.hdr()().e() == true)
 				break;
 		}
 	}
@@ -87,7 +87,7 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 	} else {
 		if (ret_val.blocks().is_bound()) {
 			for (int i = 0; i < ret_val.blocks().size_of(); i++) {
-				unsigned int length = ret_val.blocks()[i].hdr().length__ind();
+				unsigned int length = ret_val.blocks()[i].hdr()().length__ind();
 				if (length > ttcn_buffer.get_read_len())
 					length = ttcn_buffer.get_read_len();
 				ret_val.blocks()[i].payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
@@ -107,31 +107,57 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 	TTCN_Buffer ttcn_buffer;
 	int i;
 
-	/* Fix 'e' bit of initial header based on following blocks */
-	if (!in.blocks().is_bound() ||
-	    (in.blocks().size_of() == 1 && !in.blocks()[0].hdr().is_bound()))
-		in.mac__hdr().e() = true;
-	else
+	if (!in.blocks().is_bound()) {
+		/* we don't have nay blocks: Add length value (zero) */
+		in.mac__hdr().e() = false; /* E=0: extension octet follows */
+	} else if (in.blocks().size_of() == 1 && in.blocks()[0].hdr() == OMIT_VALUE) {
+		/* If there's only a single block, and that block has no HDR value defined, */
+		in.mac__hdr().e() = true; /* E=0: extension octet follows */
+	} else {
+		/* Length value */
 		in.mac__hdr().e() = false;
+	}
 
 	/* Fix other presence indications */
 	in.mac__hdr().tlli__ind() = in.tlli().is_bound() && in.tlli() != OMIT_VALUE;
 	in.mac__hdr().pfi__ind() = in.pfi().is_bound() && in.pfi() != OMIT_VALUE;
 
-	/* use automatic/generated decoder for header */
+	/* use automatic/generated encoder for header */
 	in.mac__hdr().encode(UlMacDataHeader_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 
-	/* Add LI octets, if any */
-	if (in.blocks().is_bound() &&
-	    (in.blocks().size_of() != 1 || in.blocks()[0].hdr().is_bound())) {
-		/* first write LI octets */
-		for (i = 0; i < in.blocks().size_of(); i++) {
-			/* fix the 'E' bit in case it is not clear */
-			if (i < in.blocks().size_of()-1)
-				in.blocks()[i].hdr().e() = false;
-			else
-				in.blocks()[i].hdr().e() = true;
-			in.blocks()[i].hdr().encode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+	if (in.mac__hdr().e() == false) {
+		/* Add LI octets, if any */
+		if (!in.blocks().is_bound()) {
+			ttcn_buffer.put_c(0x01); /* M=0, E=1 LEN=0 */
+		} else {
+			for (i = 0; i < in.blocks().size_of(); i++) {
+#if 0
+				/* check for penultimate block */
+				if (i == in.blocks().size_of()-2) {
+					/* if last block has no header, no more LI */
+					if (in.blocks()[i+1].hdr() == OMIT_VALUE) {
+						in.blocks()[i].hdr()().more() = true;
+					} else {
+						/* header present, we have to encode LI */
+						in.blocks()[i].hdr()().more() = false;
+						in.blocks()[i].hdr()().length__ind() =
+								in.blocks()[i+1].payload().lengthof();
+					}
+				} else if (i < in.blocks().size_of()-2) {
+					/* one of the first blocks, before the penultimate or last */
+					in.blocks()[i].hdr()().e() = false; /* LI present */
+					/* re-compute length */
+					in.blocks()[i].hdr()().length__ind() =
+								in.blocks()[i+1].payload().lengthof();
+				}
+				/* Encode LI octet if E=0 */
+				}
+#endif
+				if (in.blocks()[i].hdr() != OMIT_VALUE) {
+					in.blocks()[i].hdr()().encode(LlcBlockHdr_descr_, ttcn_buffer,
+									TTCN_EncDec::CT_RAW);
+				}
+			}
 		}
 	}
 
@@ -201,7 +227,7 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 			TTCN_Logger::end_event();
 
 			/* if E == '1'B, we can proceed further */
-			if (lb.hdr().e() == true)
+			if (lb.hdr()().e() == true)
 				break;
 		}
 	}
@@ -229,7 +255,7 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 	} else {
 		if (ret_val.blocks().is_bound()) {
 			for (int i = 0; i < ret_val.blocks().size_of(); i++) {
-				unsigned int length = ret_val.blocks()[i].hdr().length__ind();
+				unsigned int length = ret_val.blocks()[i].hdr()().length__ind();
 				if (length > ttcn_buffer.get_read_len())
 					length = ttcn_buffer.get_read_len();
 				ret_val.blocks()[i].payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
