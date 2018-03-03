@@ -71,6 +71,15 @@ module Test {
 		connect(self:L1, lapdm_component:LAPDM_SP);
 		map(lapdm_component:L1CTL, system:L1CTL);
 		lapdm_component.start(LAPDmStart());
+
+		f_bssgp_client_register(g_mmctx.imsi, g_mmctx.tlli, mp_gb_cfg.cell_id);
+		f_bssgp_establish();
+	}
+
+	function f_exit() runs on dummy_CT {
+		lapdm_component.stop;
+		ns_component.stop;
+		bssgp_component.stop;
 	}
 
 	function f_bssgp_dec_and_log(in octetstring inp) {
@@ -220,7 +229,10 @@ module Test {
 		alt {
 			[] L1.receive(TBF_establish_res:?) {}
 			[] L1.receive { repeat; }
-			[] T.timeout { setverdict(fail); }
+			[] T.timeout {
+				setverdict(fail, "Timeout establishing UL TBF");
+				self.stop;
+			}
 		}
 		T.stop;
 	}
@@ -303,37 +315,9 @@ function f_ul_tbf(inout UlTbfState us) runs on dummy_CT {
 		f_bssgp_wait_ul_ud(tr_BD_BSSGP(tr_BSSGP_UL_UD(g_mmctx.tlli, ?, us.tbf.llc_pdus_enc[i])));
 	}
 	setverdict(pass);
+
+	L1.send(DCCH_release_req:{});
 }
-
-	/* Send a single Uplink Block via Um; Verify reception on BSSGP; Expect UL_ACK on Um */
-	function f_single_ul_block(GprsCodingScheme cs) runs on dummy_CT {
-		var octetstring payload := '01020304'O;
-		var PDU_LLC llc := valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u));
-		var octetstring llc_enc := enc_PDU_LLC(llc);
-		var RLCMAC_ph_data_ind dl;
-
-		/* establish upling TBF */
-		f_establish_ul_tbf();
-
-		/* Generate LLC PDU consisting of single RLC block and send it via simulated MS */
-		var template RlcmacUlBlock blk := t_RLCMAC_UL_DATA_TLLI(0, 0, 0, {t_RLCMAC_LLCBLOCK(llc_enc)}, false, g_mmctx.tlli);
-		L1.send(RLCMAC_ph_data_req:{dyn:={tbf_id := 0, cs := cs, block := blk}});
-		/* ensure that this LLC-PDU arrives from the right TLLI at the (simulated) SGSN */
-		BSSGP.receive(tr_BD_BSSGP(tr_BSSGP_UL_UD(g_mmctx.tlli, ?, llc_enc)));
-
-		/* ensure the MS receives an UL_ACK_NACK */
-		alt {
-		[] L1.receive(RLCMAC_ph_data_ind:{cs:=?, ts_nr:=?, fn:=?, block:=tr_RLCMAC_ACK_NACK(0, g_mmctx.tlli)}) -> value dl {
-			log("found matching ACK/NACK");
-			/* send CTRL ACK in uplink */
-			var GsmFrameNumber ul_fn := f_rrbp_fn(dl.fn, dl.block.ctrl.mac_hdr.rrbp);
-			var RlcmacUlCtrlMsg ctrl_ack := valueof(ts_RlcMacUlCtrl_PKT_CTRL_ACK(g_mmctx.tlli));
-			var RlcmacUlBlock ul_block := valueof(ts_RLC_UL_CTRL_ACK(ctrl_ack));
-			L1.send(ts_PH_DATA_ABS(0, CS1, dl.ts_nr, ul_fn, {false, 0}, ul_block));
-			}
-		[] L1.receive { repeat; };
-		}
-	}
 
 	testcase TC_rach() runs on dummy_CT {
 		var BssgpBvci bvci := 196;
@@ -345,25 +329,6 @@ function f_ul_tbf(inout UlTbfState us) runs on dummy_CT {
 		f_bssgp_client_register(g_mmctx.imsi, g_mmctx.tlli, mp_gb_cfg.cell_id);
 
 		f_bssgp_establish();
-
-		f_single_ul_block(CS1);
-
-		while (true) {
-			var BssgpDecoded bd;
-			var RLCMAC_ph_data_ind dl_msg;
-			alt {
-
-				[] BSSGP.receive(tr_BD_BSSGP(?)) -> value bd {
-					log("BSSGP Rx: ", bd);
-				}
-				[] BSSGP.receive(t_BssgpStsInd(?, ?, BVC_S_UNBLOCKED)) { repeat; }
-				[] BSSGP.receive { repeat; }
-
-				[] L1.receive(RLCMAC_ph_data_ind:?) -> value dl_msg {
-					log("L1 DL: ", dl_msg);
-				}
-			}
-		}
 	}
 
 
@@ -513,25 +478,53 @@ function f_ul_tbf(inout UlTbfState us) runs on dummy_CT {
 		return payload;
 	}
 
+	testcase TC_ul_tbf_single_llc_sizes() runs on dummy_CT {
+		g_mmctx.imsi := '262420123456789'H;
+		g_mmctx.tlli := f_random_tlli();
+		f_init();
+
+		for (var integer len := 1; len <= 1560; len := len+1) {
+			log("Testing Uplink TBF with single LLC-PDU of ", len, " bytes");
+			var octetstring payload := f_seq_octstr(len);
+			var UlTbfPars ul_tbf_pars := {
+				ack_mode := true,
+				initial_cs := CS1,
+				llc_pdus := {
+					valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u))
+				}
+			}
+			var UlTbfState ul_tbf_state;
+			f_UlTbfState_init(ul_tbf_state, ul_tbf_pars);
+			f_ul_tbf(ul_tbf_state);
+			f_sleep(1.0);
+		}
+
+		f_exit();
+	}
+
 	testcase TC_ul_tbf() runs on dummy_CT {
 		g_mmctx.imsi := '262420123456789'H;
 		g_mmctx.tlli := f_random_tlli();
 		f_init();
-		f_bssgp_client_register(g_mmctx.imsi, g_mmctx.tlli, mp_gb_cfg.cell_id);
-		f_bssgp_establish();
 
-		var octetstring payload := f_seq_octstr(256);
+		var octetstring payload := f_seq_octstr(1023);
 		var UlTbfPars ul_tbf_pars := {
 			ack_mode := true,
 			initial_cs := CS1,
 			llc_pdus := { 
 				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u)),
-				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+1))
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+1)),
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+2)),
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+3)),
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+4)),
+				valueof(ts_LLC_UI(payload, c_LLC_SAPI_LLGMM, '0'B, g_mmctx.n_u+5))
 			}
 		};
 		var UlTbfState ul_tbf_state;
 		f_UlTbfState_init(ul_tbf_state, ul_tbf_pars);
 		f_ul_tbf(ul_tbf_state);
+
+		f_exit();
 	}
 
 	control {
