@@ -63,6 +63,16 @@ type component MTC_CT extends CTRL_Adapter_CT {
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
 	/* VTY to MSC */
 	port TELNETasp_PT MSCVTY;
+
+	/* A port to directly send BSSAP messages. This port is used for
+	 * tests that require low level access to sen arbitrary BSSAP
+	 * messages. Run f_init_bssap_direct() to connect and initialize */
+	port BSSAP_CODEC_PT BSSAP_DIRECT;
+
+	/* When BSSAP messages are directly sent, then the connection
+	 * handler is not active, which means that also no guard timer is
+	 * set up. The following timer will serve as a replacement */
+	timer Tguard_direct := 60.0;
 }
 
 modulepar {
@@ -89,6 +99,14 @@ modulepar {
 	};
 }
 
+/* altstep for the global guard timer (only used when BSSAP_DIRECT
+ * is used for communication */
+private altstep as_Tguard_direct() runs on MTC_CT {
+	[] Tguard_direct.timeout {
+		setverdict(fail, "Tguard timeout");
+		self.stop;
+	}
+}
 
 function f_init_mncc(charstring id) runs on MTC_CT {
 	id := id & "-MNCC";
@@ -170,6 +188,18 @@ function f_init() runs on MTC_CT {
 	f_vty_config(MSCVTY, "network", "authentication optional");
 	f_vty_config(MSCVTY, "msc", "assign-tmsi");
 	f_vty_config(MSCVTY, "network", "encryption a5 0");
+}
+
+/* Initialize for a direct connection to BSSAP. This function is an alternative
+ * to f_init() when the high level functions of the BSC_ConnectionHandler are
+ * not needed. */
+function f_init_bssap_direct() runs on MTC_CT {
+	f_bssap_init(g_bssap, mp_bssap_cfg, "MSC_Test", omit);
+	connect(g_bssap.vc_SCCP:SCCP_SP_PORT, self:BSSAP_DIRECT);
+
+	/* Start guard timer and activate it as default */
+	Tguard_direct.start
+	activate(as_Tguard_direct());
 }
 
 template PDU_BSSAP ts_BSSAP_BSSMAP := {
@@ -1599,6 +1629,41 @@ testcase TC_mo_setup_and_dtmf_dup() runs on MTC_CT {
 	vc_conn.done;
 }
 
+testcase TC_cr_before_reset() runs on MTC_CT {
+	timer T := 4.0;
+	var boolean reset_ack_seen := false;
+	f_init_bssap_direct();
+
+	/* Make a blind connection attemt, to trigger the deadlock condition */
+	BSSAP_DIRECT.send(ts_BSSAP_CONNECT_req(g_bssap.sccp_addr_peer, g_bssap.sccp_addr_own, 1, omit));
+
+	/* Send a BSSMAP reset */
+	BSSAP_DIRECT.send(ts_BSSAP_UNITDATA_req(g_bssap.sccp_addr_peer, g_bssap.sccp_addr_own, ts_BSSMAP_Reset(0)));
+	T.start
+	alt {
+	[] BSSAP_DIRECT.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_ResetAck)) {
+		reset_ack_seen := true;
+		repeat;
+	}
+
+	/* Acknowledge MSC sided reset requests */
+	[] BSSAP_DIRECT.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) {
+		BSSAP_DIRECT.send(ts_BSSAP_UNITDATA_req(g_bssap.sccp_addr_peer, g_bssap.sccp_addr_own, ts_BSSMAP_ResetAck));
+		repeat;
+	}
+
+	/* Ignore all other messages (e.g CR from the connection request) */
+	[] BSSAP_DIRECT.receive { repeat }
+
+	/* If we got no BSSMAP RESET ACK back, then the MSC entered the
+	 * deadlock situation. The MSC is then unable to respond to any
+	 * further BSSMAP RESET or any other sort of traffic. */
+	[reset_ack_seen == true] T.timeout { setverdict(pass) }
+	[reset_ack_seen == false] T.timeout {
+		setverdict(fail, "no BSSMAP RESET ACK seen!");
+	}
+	}	
+}
 
 
 
@@ -1616,6 +1681,7 @@ testcase TC_mo_setup_and_dtmf_dup() runs on MTC_CT {
 
 
 control {
+	execute( TC_cr_before_reset() );
 	execute( TC_lu_imsi_noauth_tmsi() );
 	execute( TC_lu_imsi_noauth_notmsi() );
 	execute( TC_lu_imsi_reject() );
