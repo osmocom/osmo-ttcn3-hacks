@@ -35,7 +35,7 @@ OCTETSTRING enc__RlcmacDlDataBlock(const RlcmacDlDataBlock& si)
 				in.blocks()[i].hdr()().e() = false;
 			else
 				in.blocks()[i].hdr()().e() = true;
-			in.blocks()[i].hdr().encode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+			in.blocks()[i].hdr()().encode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 		}
 	}
 	if (in.blocks().is_bound()) {
@@ -65,7 +65,7 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 		while (1) {
 			/* decode one more extension octet with LlcBlocHdr inside */
 			LlcBlock lb;
-			lb.hdr().decode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+			lb.hdr()().decode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 			ret_val.blocks()[num_llc_blocks++] = lb;
 
 			/* if E == '1'B, we can proceed further */
@@ -214,7 +214,7 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 		while (1) {
 			/* decode one more extension octet with LlcBlocHdr inside */
 			LlcBlock lb;
-			lb.hdr().decode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+			lb.hdr()().decode(LlcBlockHdr_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 			ret_val.blocks()[num_llc_blocks++] = lb;
 
 			TTCN_Logger::begin_event(TTCN_Logger::DEBUG_ENCDEC);
