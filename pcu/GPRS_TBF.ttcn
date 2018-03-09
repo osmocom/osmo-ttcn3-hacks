@@ -18,8 +18,25 @@ import from RLCMAC_CSN1_Types all;
 import from LLC_Types all;
 import from GPRS_Context all;
 
-/* input parameters into TBF (mostly mode/cs + LLC PDUs */
+private const integer RLC_GPRS_SNS := 128;
+private const integer RLC_GPRS_WS := 64;
+private const integer RLC_EGPRS_MIN_WS := 64;
+private const integer RLC_EGPRS_MAX_WS := 1024;
+private const integer RLC_EGPRS_SNS := 2048;
+private const integer RLC_EGPRS_MAX_BSN_DELTA := 512;
+private const integer RLC_MAX_SNS := RLC_EGPRS_SNS;
+private const integer RLC_MAX_WS := RLC_EGPRS_MAX_WS;
+private const integer RLC_MAX_LEN := 74 /* MCS-9 data unit */
 
+private const integer sns_half := (RLC_MAX_SNS / 2);
+private const integer mod_sns_half := (RLC_MAX_SNS / 2) - 1;
+
+
+/***********************************************************************
+ * Uplink TBF handling
+ ***********************************************************************/
+
+/* input parameters into TBF (mostly mode/cs + LLC PDUs */
 type record UlTbfPars {
 	/* Acknowledged mode (true) or unacknowledged (false) */
 	boolean			ack_mode,
@@ -45,22 +62,6 @@ private function f_RlcEndpointTx_init(inout RlcEndpointTx ep) {
 	ep.v_a := 0;
 	ep.v_b := int2bit(0, 128); /* FIXME: EGPRS 2048 bits length */
 }
-
-type record RlcEndpointRx {
-	/* receive state variable V(R) (9.1.5): BSN one higher than highest BSN yet received (mod SNS) */
-	integer			v_r,
-	/* receive window state variable V(Q) (9.1.6): Lowest BSN not yet received (mod SNS) */
-	integer			v_q,
-	/* receive state array V(N) (9.1.7) */
-	bitstring		v_n
-}
-
-private function f_RlcEndpointRx_init(inout RlcEndpointRx ep) {
-	ep.v_r := 0;
-	ep.v_q := 0;
-	ep.v_n := int2bit(0, 128); /* FIXME: EGPRS 2048 bits length */
-}
-
 
 type record UlTbfState {
 	/* "const" input state with TBF Data */
@@ -358,6 +359,142 @@ function f_ul_tbf_process_acknack(inout UlTbfState us, RlcmacDlCtrlBlock db) {
 		}
 		f_UlTbf_check_advance_v_a(us);
 	}
+}
+
+/***********************************************************************
+ * Downlink TBF handling
+ ***********************************************************************/
+
+type record RlcEndpointRx {
+	/* receive state variable V(R) (9.1.5): BSN one higher than highest BSN yet received (mod SNS) */
+	integer			v_r,
+	/* receive window state variable V(Q) (9.1.6): Lowest BSN not yet received (mod SNS) */
+	integer			v_q,
+	/* receive state array V(N) (9.1.7) */
+	bitstring		v_n
+}
+
+private function f_RlcEndpointRx_init(inout RlcEndpointRx ep) {
+	ep.v_r := 0;
+	ep.v_q := 0;
+	ep.v_n := int2bit(0, 128); /* FIXME: EGPRS 2048 bits length */
+}
+
+type record DlTbfPars {
+	/* Acknowledged mode (true) or unacknowledged (false) */
+	boolean			ack_mode,
+	/* Coding Scheme for transmission, determines block size */
+	GprsCodingScheme	initial_cs,
+	/* Sequence Number Space */
+	integer			sns,
+	/* Window Size */
+	integer			ws
+}
+
+type record DlTbfState {
+	/* "const" input state with TBF Data */
+	DlTbfPars		tbf,
+	uint8_t			num_ts,
+
+	RlcEndpointRx		er,
+
+	integer			tfi,
+
+	/* list of abstract/decoded RLC PDUs */
+	record of RlcmacDlBlock	rlc_received
+}
+
+function f_dl_tbf_mod_sns(DlTbfState ds, integer val) return integer
+{
+	return (val mod ds.tbf.sns);
+}
+
+function f_dl_tbf_is_in_window(integer bsn) return boolean {
+	setverdict(fail, "pleaes implement me");
+	self.stop;
+}
+
+function f_dl_tbf_is_received(inout DlTbfState ds, integer bsn) return boolean {
+	var integer offset_v_r;
+
+	if (not f_dl_tbf_is_in_window(bsn)) {
+		return false;
+	}
+
+	/* offset to the end of the received window */
+	offset_v_r := f_dl_tbf_mod_sns(ds, ds.er.v_r - 1 - bsn);
+	if (not (offset_v_r < ds.tbf.ws)) {
+		return false;
+	}
+
+	if (ds.er.v_n[bsn mod sns_half] == '1'B) {
+		return true;
+	}
+
+	return false;
+}
+
+function f_dl_tbf_mark_received(inout DlTbfState ds, integer bsn) {
+	ds.er.v_n[bsn mod sns_half] := '1'B;
+	f_dl_tbf_raise_v_r(ds, bsn);
+}
+
+/* Raise V(Q) if possible */
+function f_dl_tbf_raise_v_q(inout DlTbfState ds, integer bsn) return integer {
+	var integer count := 0;
+	while (ds.er.v_q != ds.er.v_r) {
+		var integer v_q_old := ds.er.v_q;
+		if (not f_dl_tbf_is_received(ds, v_q_old)) {
+			break;
+		}
+		ds.er.v_q := f_dl_tbf_mod_sns(ds, ds.er.v_q + 1)
+		log("RLCMAC: Taking block ", v_q_old, " out, raising V(Q) to ", ds.er.v_q);
+		count := count+1;
+	}
+	return count;
+}
+
+function f_dl_tbf_raise_v_r(inout DlTbfState ds, integer bsn) {
+	var integer offset_v_r := f_dl_tbf_mod_sns(ds, bsn + 1 - ds.er.v_r);
+	if (offset_v_r < (ds.tbf.sns / 2)) {
+		for (var integer i := offset_v_r; i > 0; i := i-1) {
+			/* mark as missing */
+			ds.er.v_n[bsn mod sns_half] := '0'B;
+			//raise_v_r_to(1);
+		}
+		log("RLCMAC: Raising V(R) to ", ds.er.v_r);
+	}
+}
+
+/* process the actual data and update TbfState */
+function f_dl_tbf_process_dl_data(inout DlTbfState ds, RlcmacDlDataBlock db) {
+	var integer bsn := db.mac_hdr.hdr_ext.bsn;
+	if (db.mac_hdr.hdr_ext.tfi != ds.tfi) {
+		setverdict(fail, "Unexpected TFI of DL Data Block ", db);
+		self.stop;
+	}
+	f_dl_tbf_mark_received(ds, bsn);
+	if (ds.tbf.ack_mode) {
+		/* In RLC acknowledged mode, the receive window is defined by the receive window
+		 * state variable V(Q) in the following inequality[ V(Q) ≤ BSN < V(Q)+ WS ] modulo
+		 * SNS */
+		if (bsn < ds.er.v_q or bsn > ds.er.v_q + ds.tbf.ws) {
+			setverdict(fail, "Unexpected BSN outside of window ", bsn);
+			self.stop;
+		}
+
+		/* In RLC acknowledged mode, the value of V(Q) shall be updated when the RLC
+		 * receiver receives the RLC data block whose BSN is equal to V(Q). The value of
+		 * V(Q) shall then be set to the BSN value of the next RLC data block in the receive
+		 * window (modulo SNS) that has not yet been received, or it shall be set to V(R) if
+		 * all RLC data blocks in the receive window have been received */
+		f_dl_tbf_mark_received(ds, bsn);
+	} else {
+		/* In RLC unacknowledged mode, if [V(R) - V(Q)] modulo SNS > WS after updating V(R),
+		 * then V(Q) is set to [V(R) - WS] modulo SNS. */
+		/* FIXME */
+	}
+
 }
 
 
