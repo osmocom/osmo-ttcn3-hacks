@@ -26,7 +26,21 @@ module LAPDm_RAW_PT {
 		charstring err optional
 	}
 
-	type record TBF_establish_res {
+	type record length(8) of uint8_t TfiList;
+	type record TbfPars {
+		GsmArfcn	arfcn optional,
+		/* Temporary Flow Identifier for each TN */
+		TfiList		tfi
+	}
+	type record length(8) of TbfPars TbfParsPerTs;
+
+	template TbfPars t_TbfParsInit := {
+		arfcn := omit,
+		tfi := { 255, 255, 255, 255, 255, 255, 255, 255 }
+	}
+
+	type record TBF_UL_establish_res {
+		TbfPars pars optional,
 		charstring err optional
 	}
 
@@ -40,8 +54,15 @@ module LAPDm_RAW_PT {
 		LapdmFrame lapdm
 	}
 
-	type record TBF_establish_req {
+	type integer TbfNr (0..7);	/* maximum of 8 concurrent TBF per direction */
+	type record TBF_UL_establish_req {
+		TbfNr tbf_nr,
 		uint8_t ra
+	}
+
+	type record TBF_DL_establish_req {
+		TbfNr tbf_nr,
+		TbfPars pars
 	}
 
 	/* PH-DATA.ind / PH-DATA.req */
@@ -74,11 +95,12 @@ module LAPDm_RAW_PT {
 		in	BCCH_tune_req,
 			DCCH_establish_req,
 			DCCH_release_req,
-			TBF_establish_req,
+			TBF_UL_establish_req,
+			TBF_DL_establish_req,
 			RLCMAC_ph_data_req,
 			LAPDm_ph_data;
 		out	DCCH_establish_res,
-			TBF_establish_res,
+			TBF_UL_establish_res,
 			RLCMAC_ph_data_ind,
 			LAPDm_ph_data;
 	} with {extension "internal"};
@@ -86,13 +108,14 @@ module LAPDm_RAW_PT {
 	/* port from user (external) point of view */
 	type port LAPDm_PT message {
 		in	DCCH_establish_res,
-			TBF_establish_res,
+			TBF_UL_establish_res,
 			RLCMAC_ph_data_ind,
 			LAPDm_ph_data;
 		out	BCCH_tune_req,
 			DCCH_establish_req,
 			DCCH_release_req,
-			TBF_establish_req,
+			TBF_UL_establish_req,
+			TBF_DL_establish_req,
 			RLCMAC_ph_data_req,
 			LAPDm_ph_data;
 	} with {extension "internal"};
@@ -124,6 +147,9 @@ module LAPDm_RAW_PT {
 
 		/* channel description of the currently active DCH */
 		var ChannelDescription chan_desc;
+
+		var TbfParsPerTs g_tbf_ul;
+		var TbfParsPerTs g_tbf_dl;
 	};
 
 	/* wrapper function to log state transitions */
@@ -286,6 +312,51 @@ module LAPDm_RAW_PT {
 		set_ph_state(PH_STATE_BCH);
 	}
 
+	/* Establish TBF / packet transfer mode */
+	private altstep as_tbf_ul_est() runs on lapdm_CT {
+		var TBF_UL_establish_req tbf_ul_req;
+		[] LAPDM_SP.receive(TBF_UL_establish_req:?) -> value tbf_ul_req {
+			var TbfNr tbf_nr := tbf_ul_req.tbf_nr;
+			var TBF_UL_establish_res res;
+			if (isvalue(g_tbf_ul[tbf_nr].arfcn)) {
+				setverdict(fail, "Cannot establish UL TBF ID ", tbf_nr, ": BUSY");
+				self.stop;
+			}
+			f_establish_tbf(tbf_ul_req.ra);
+			if (ph_state == PH_STATE_TBF) {
+				g_tbf_ul[tbf_nr] := valueof(t_TbfParsInit); /* FIXME: Actual TFI[s] */
+				log("Established UL TBF ", tbf_nr);
+				res := { pars := g_tbf_ul[tbf_nr], err := omit };
+			} else {
+				res := { pars := omit, err := "Unable to establish UL TBF" };
+			}
+			LAPDM_SP.send(res);
+		}
+	}
+
+	private altstep as_tbf_dl_est() runs on lapdm_CT {
+		var TBF_DL_establish_req tbf_dl_req;
+		[] LAPDM_SP.receive(TBF_DL_establish_req:?) -> value tbf_dl_req {
+			var TbfNr tbf_nr := tbf_dl_req.tbf_nr;
+			if (isvalue(g_tbf_dl[tbf_nr].arfcn)) {
+				setverdict(fail, "Cannot establish DL TBF ID ", tbf_nr, ": BUSY");
+				self.stop;
+			}
+			g_tbf_dl[tbf_nr] := tbf_dl_req.pars;
+			f_L1CTL_TBF_CFG(L1CTL, false, tbf_dl_req.pars.tfi);
+			set_ph_state(PH_STATE_TBF);
+			log("Established DL TBF ", tbf_nr, ": ", tbf_dl_req.pars);
+		}
+	}
+
+	private function f_init_tbf() runs on lapdm_CT {
+		var integer i;
+		for (i := 0; i < 8; i := i+1) {
+			g_tbf_ul[i] := valueof(t_TbfParsInit);
+			g_tbf_dl[i] := valueof(t_TbfParsInit);
+		}
+	}
+
 	function ScanEvents() runs on lapdm_CT {
 		var L1ctlDlMessage dl;
 		var BCCH_tune_req bt;
@@ -294,7 +365,8 @@ module LAPDm_RAW_PT {
 		var RLCMAC_ph_data_req rpdr;
 		var DCCH_establish_req est_req;
 		var DCCH_establish_res est_res;
-		var TBF_establish_req tbf_req;
+
+		f_init_tbf();
 
 		while (true) {
 		if (ph_state == PH_STATE_NULL) {
@@ -341,17 +413,8 @@ module LAPDm_RAW_PT {
 				LAPDM_SP.send(res);
 			}
 
-			/* Establish TBF / packet transfer mode */
-			[] LAPDM_SP.receive(TBF_establish_req:?) -> value tbf_req {
-				var TBF_establish_res res;
-				f_establish_tbf(tbf_req.ra);
-				if (ph_state == PH_STATE_TBF) {
-					res := { err := omit };
-				} else {
-					res := { err := "Unable to establish TBF" };
-				}
-				LAPDM_SP.send(res);
-			}
+			[] as_tbf_ul_est();
+			[] as_tbf_dl_est();
 
 			[] LAPDM_SP.receive {}
 			[] L1CTL.receive {}
@@ -404,6 +467,7 @@ module LAPDm_RAW_PT {
 			/* decode + forward any blocks from L1 to L23*/
 			[] L1CTL.receive(t_L1CTL_DATA_IND(t_RslChanNr_PDCH(?))) -> value dl {
 				rpdi.block := dec_RlcmacDlBlock(dl.payload.data_ind.payload);
+				/* FIXME: Filter based on g_tbf_dl */
 				rpdi.fn := dl.dl_info.frame_nr;
 				rpdi.ts_nr := dl.dl_info.chan_nr.tn;
 				rpdi.cs := CS1; /* FIXME */
@@ -427,10 +491,14 @@ module LAPDm_RAW_PT {
 				}
 			}
 
+			[] as_tbf_ul_est();
+			[] as_tbf_dl_est();
+
 			/* FIXME: release TBF mode */
 			[] LAPDM_SP.receive(DCCH_release_req:?) {
 				/* go back to BCCH */
 				f_release_tbf();
+				f_init_tbf();
 			}
 
 			}
