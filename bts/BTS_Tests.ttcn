@@ -52,6 +52,8 @@ modulepar {
 	integer mp_tolerance_rxlev := 3;
 }
 
+type record of RslChannelNr ChannelNrs;
+
 type component test_CT extends CTRL_Adapter_CT {
 	/* IPA Emulation component underneath RSL */
 	var IPA_Emulation_CT vc_IPA;
@@ -94,6 +96,9 @@ type component test_CT extends CTRL_Adapter_CT {
 		si21_present := false,
 		si22_present := false
 	};
+
+	/* all logical channels available on the BTS */
+	var ChannelNrs g_AllChannels;
 }
 
 /* an individual call / channel */
@@ -259,6 +264,22 @@ private function f_init_pcu(charstring id) runs on test_CT {
 
 /* global init function */
 function f_init(charstring id := "BTS-Test") runs on test_CT {
+	g_AllChannels := {
+		/* TS 1..4: TCH/F */
+		valueof(ts_RslChanNr_Bm(1)), valueof(ts_RslChanNr_Bm(2)),
+		valueof(ts_RslChanNr_Bm(3)), valueof(ts_RslChanNr_Bm(4)),
+		/* TS 5: TCH/H */
+		valueof(ts_RslChanNr_Lm(5,0)), valueof(ts_RslChanNr_Lm(5,1)),
+		/* TS 0: SDCCH/4 */
+		valueof(ts_RslChanNr_SDCCH4(0,0)), valueof(ts_RslChanNr_SDCCH4(0,1)),
+		valueof(ts_RslChanNr_SDCCH4(0,2)), valueof(ts_RslChanNr_SDCCH4(0,3)),
+		/* TS 6: SDCCH/8 */
+		valueof(ts_RslChanNr_SDCCH8(6,0)), valueof(ts_RslChanNr_SDCCH8(6,1)),
+		valueof(ts_RslChanNr_SDCCH8(6,2)), valueof(ts_RslChanNr_SDCCH8(6,3)),
+		valueof(ts_RslChanNr_SDCCH8(6,4)), valueof(ts_RslChanNr_SDCCH8(6,5)),
+		valueof(ts_RslChanNr_SDCCH8(6,6)), valueof(ts_RslChanNr_SDCCH8(6,7))
+	};
+
 	f_init_rsl(id);
 	RSL_CCHAN.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP});
 	f_sleep(0.5);	/* workaround for OS#3000 */
@@ -548,6 +569,75 @@ testcase TC_chan_act_wrong_nr() runs on test_CT {
 	}
 	f_shutdown();
 }
+
+/***********************************************************************
+ * SACCH handling
+ ***********************************************************************/
+
+private function f_exp_sacch(boolean exp) runs on ConnHdlr {
+	timer T_sacch := 3.0;
+	T_sacch.start;
+	alt {
+	[not exp] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(0))) {
+		setverdict(fail, "Received SACCH when not expecting it");
+		}
+	[not exp] T_sacch.timeout {
+		setverdict(pass);
+		}
+	[exp] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(0))) {
+		setverdict(pass);
+		}
+	[exp] T_sacch.timeout {
+		setverdict(fail, "Timeout waiting for SACCH on ", g_chan_nr);
+		}
+	[] L1CTL.receive { repeat; }
+	[] RSL.receive { repeat; }
+	}
+}
+
+/* Test if DEACTIVATE SACCH actualy deactivates its transmission (TS 48.058 4.6) */
+private function f_TC_deact_sacch(charstring id) runs on ConnHdlr {
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* activate the logical channel */
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* check that SACCH actually are received as expected */
+	f_exp_sacch(true);
+
+	/* deactivate SACCH on the logical channel */
+	RSL.send(ts_RSL_DEACT_SACCH(g_chan_nr));
+	f_sleep(1.0);
+	L1CTL.clear;
+
+	/* check that no SACCH are received anymore */
+	f_exp_sacch(false);
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+}
+testcase TC_deact_sacch() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	for (var integer i := 0; i < sizeof(g_AllChannels); i := i+1) {
+	//for (var integer i := 0; i < 1; i := i+1) {
+		pars := valueof(t_Pars(g_AllChannels[i], ts_RSL_ChanMode_SIGN));
+		log(testcasename(), ": Starting for ", g_AllChannels[i]);
+		vc_conn := f_start_handler(refers(f_TC_deact_sacch), pars);
+		vc_conn.done;
+	}
+	/* TODO: do the above in parallel, rather than sequentially? */
+	f_shutdown();
+}
+
+/* Test for default SACCH FILL transmitted in DL SACCH (all channel types) */
+/* Test for lchan-specific SACCH INFO MODIFY (TS 48.058 4.12) */
+/* Test for SACCH transmission rules in the context of special CHAN ACT (HO) */
+
 
 /***********************************************************************
  * RACH Handling
@@ -2334,6 +2424,7 @@ control {
 	execute( TC_chan_act_react() );
 	execute( TC_chan_deact_not_active() );
 	execute( TC_chan_act_wrong_nr() );
+	execute( TC_deact_sacch() );
 	execute( TC_rach_content() );
 	execute( TC_rach_count() );
 	execute( TC_rach_max_ta() );
