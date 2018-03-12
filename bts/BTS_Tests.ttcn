@@ -105,6 +105,7 @@ type component test_CT extends CTRL_Adapter_CT {
 
 	/* all logical channels available on the BTS */
 	var ChannelNrs g_AllChannels;
+	var ChannelNrs g_AllChanTypes;
 }
 
 /* an individual call / channel */
@@ -141,7 +142,13 @@ type record ConnHdlrPars {
 	RslChannelNr chan_nr,
 	RSL_IE_ChannelMode chan_mode,
 	float t_guard,
-	ConnL1Pars l1_pars
+	ConnL1Pars l1_pars,
+	TestSpecUnion spec optional
+}
+
+/* Test-specific parameters */
+type union TestSpecUnion {
+	RllTestCase rll
 }
 
 template (value) RachControlParameters ts_RachCtrl_default := {
@@ -289,6 +296,16 @@ function f_init(charstring id := "BTS-Test") runs on test_CT {
 		valueof(ts_RslChanNr_SDCCH8(6,2)), valueof(ts_RslChanNr_SDCCH8(6,3)),
 		valueof(ts_RslChanNr_SDCCH8(6,4)), valueof(ts_RslChanNr_SDCCH8(6,5)),
 		valueof(ts_RslChanNr_SDCCH8(6,6)), valueof(ts_RslChanNr_SDCCH8(6,7))
+	};
+	g_AllChanTypes := {
+		/* TS 1..4: TCH/F */
+		//valueof(ts_RslChanNr_Bm(1)),
+		/* TS 5: TCH/H */
+		//valueof(ts_RslChanNr_Lm(5,1)),
+		/* TS 0: SDCCH/4 */
+		valueof(ts_RslChanNr_SDCCH4(0,2)),
+		/* TS 6: SDCCH/8 */
+		valueof(ts_RslChanNr_SDCCH8(6,4))
 	};
 
 	f_init_rsl(id);
@@ -480,7 +497,8 @@ private template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 		bs_power_level := 0,
 		ms_power_level := 0,
 		ms_actual_ta := 0
-	}
+	},
+	spec := omit
 }
 
 /***********************************************************************
@@ -1313,6 +1331,7 @@ function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
 	f_rsl_chan_deact();
 	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
 }
+
 testcase TC_meas_res_sign_tchf() runs on test_CT {
 	var ConnHdlr vc_conn;
 	var ConnHdlrPars pars;
@@ -1372,7 +1391,7 @@ testcase TC_meas_res_sign_tchh_toa256() runs on test_CT {
 }
 
 
-/* Test if a channel without valid uplink bursts generates RSL CONN FAIL IND */
+/* Test if a channel without valid uplink bursts generates RSL CONN FAIL IND (TS 48.058 4.10) */
 private function f_TC_conn_fail_crit(charstring id) runs on ConnHdlr {
 	f_l1_tune(L1CTL);
 	RSL.clear;
@@ -2993,6 +3012,421 @@ testcase TC_dyn_ipa_pdch_act_tchf_act_nack() runs on test_CT {
 }
 
 
+/***********************************************************************
+ * LAPDm / RLL related
+ ***********************************************************************/
+
+private function f_tx_lapdm(template (value) LapdmFrame l,
+			    template (value) RslLinkId link_id) runs on ConnHdlr {
+	var octetstring l2 := enc_LapdmFrame(valueof(l));
+	if (valueof(link_id.c) == SACCH) {
+		/* prepend dummy L1 header */
+		l2 := '0000'O & l2;
+	}
+	log("encoding ", l, " to ", l2);
+	L1CTL.send(ts_L1CTL_DATA_REQ(g_chan_nr, link_id, l2));
+}
+
+type record RllTestCase {
+	uint3_t		sapi,
+	RslLinkId	link_id,
+	octetstring	l3,
+	boolean		exp
+}
+type record of RllTestCase RllTestCases;
+template RllTestCase t_EITC(uint3_t sapi, RslLinkId id, octetstring l3, boolean exp) := {
+	sapi := sapi,
+	link_id := id,
+	l3 := l3,
+	exp := exp
+}
+
+/* execute the same callback function with a set of different parameters (tcs) on a
+ * variety of logical channels */
+private function f_rll_testmatrix(RllTestCases tcs, void_fn fn) runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init(testcasename());
+
+	/* test on each of the channels we have */
+	for (var integer i := 0; i < sizeof(g_AllChanTypes); i := i+1) {
+		pars := valueof(t_Pars(g_AllChanTypes[i], ts_RSL_ChanMode_SIGN));
+
+		/* test each of the test cases on the current channel */
+		for (var integer j := 0; j < sizeof(tcs); j := j+1) {
+			pars.spec.rll := tcs[j];
+			log(testcasename(), ": XXX Starting ", tcs[j] , " on ", g_AllChanTypes[i]);
+			vc_conn := f_start_handler(fn, pars);
+			vc_conn.done;
+		}
+	}
+
+	f_shutdown();
+}
+
+/* test if SABM on Um triggers EST IND (TS 48.058 3.1) */
+private function f_TC_rll_est_ind(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+	timer T := 3.0;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* activate the logical channel */
+	f_est_dchan();
+	L1CTL.clear;
+
+	f_tx_lapdm(ts_LAPDm_SABM(tc.sapi, cr_MO_CMD, true, tc.l3), tc.link_id);
+	T.start;
+	alt {
+	[tc.l3 != ''O] RSL.receive(tr_RSL_EST_IND(g_chan_nr, tc.link_id, tc.l3)) {
+		if (tc.exp) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Unexpected EST IND with L3 in ", tc);
+		}
+		}
+	[tc.l3 == ''O] RSL.receive(tr_RSL_EST_IND_NOL3(g_chan_nr, tc.link_id)) {
+		if (tc.exp) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Unexpected EST IND without L3 in ", tc);
+		}
+		}
+	[tc.exp] T.timeout {
+		setverdict(fail, "Timeout waiting for EST IND");
+		}
+	[not tc.exp] T.timeout {
+		setverdict(pass);
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_est_ind() runs on test_CT {
+	var RllTestCases tcs := {
+		/* normal SAPI0 establishment */
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), '01020304'O, true)),
+		/* SAPI 0 requires contention resolution */
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), ''O, false)),
+		/* SAPI 3 doesn't support contention resolution */
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), '01020304'O, false)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), '01020304'O, false)),
+		/* normal SAPI3 establishment on main DCCH */
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), ''O, true)),
+		/* normal SAPI3 establishment on SACCH */
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), ''O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_est_ind));
+}
+
+/* test if RLL EST REQ trigeres SABM on Um; UA on Um triggers EST CONF (TS 48.058 3.2) */
+private function f_TC_rll_est_req(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+	var L1ctlDlMessage dl;
+	timer T := 3.0;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* activate the logical channel */
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* Send a RSL EST REQ for SAPI3 on main DCCH */
+	RSL.send(ts_RSL_EST_REQ(g_chan_nr, tc.link_id));
+	T.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, ?)) -> value dl {
+		var LapdmFrame lapdm;
+		var octetstring l2 := dl.payload.data_ind.payload;
+		if (dl.dl_info.link_id.c == SACCH) {
+			/* remove L1 header */
+			l2 := substr(l2, 2, lengthof(l2)-2);
+		}
+		lapdm.ab := dec_LapdmFrameAB(l2);
+		if (match(lapdm, tr_LAPDm_SABM(tc.sapi, cr_MT_CMD, true, ''O))) {
+			setverdict(pass);
+		} else {
+			repeat;
+		}
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SABM");
+		self.stop;
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_est_req_DCCH_3() runs on test_CT {
+	var RllTestCases tcs := {
+		/* normal SAPI3 establishment on main DCCH */
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), ''O, true))//,
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_est_req));
+}
+testcase TC_rll_est_req_ACCH_3() runs on test_CT {
+	var RllTestCases tcs := {
+		/* normal SAPI3 establishment on SACCH */
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), ''O, true))
+	}
+	f_rll_testmatrix(tcs, refers(f_TC_rll_est_req));
+}
+
+/* altstep to receive a LAPDm frame matching the given template */
+private altstep as_l1_exp_lapdm(template LapdmFrame exp) runs on ConnHdlr {
+	var L1ctlDlMessage dl;
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, ?)) -> value dl {
+		var LapdmFrame lapdm;
+		var octetstring l2 := dl.payload.data_ind.payload;
+		if (dl.dl_info.link_id.c == SACCH) {
+			/* remove L1 header */
+			l2 := substr(l2, 2, lengthof(l2)-2);
+		}
+		if (ischosen(exp.ab)) {
+			lapdm.ab := dec_LapdmFrameAB(l2);
+		} else if (ischosen(exp.b4)) {
+			lapdm.b4 := dec_LapdmFrameB4(l2);
+		} else if (ischosen(exp.bbis)) {
+			lapdm.bbis := dec_LapdmFrameBbis(l2);
+		}
+		log("Rx LAPDm ", lapdm);
+		if (match(lapdm, exp)) {
+			setverdict(pass);
+		} else {
+			repeat;
+		}
+		}
+	[] L1CTL.receive { repeat; }
+}
+private function f_l1_exp_lapdm(template LapdmFrame exp, float t := 3.0) runs on ConnHdlr {
+	timer T := t;
+	T.start;
+	alt {
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for LAPDm ", exp);
+		self.stop;
+		}
+	[] as_l1_exp_lapdm(exp);
+	}
+}
+
+/* establish one Radio Link Layer via SABM -> UA. Use l3 for contention resolution */
+private function f_est_rll_mo(uint3_t sapi, RslLinkId link_id, octetstring l3) runs on ConnHdlr {
+	/* send SABM from MS -> BTS */
+	f_tx_lapdm(ts_LAPDm_SABM(sapi, cr_MO_CMD, true, l3), link_id);
+	/* expect RLL EST IND on Abis */
+	alt {
+	[l3 != ''O] RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3));
+	[l3 == ''O] RSL.receive(tr_RSL_EST_IND_NOL3(g_chan_nr, link_id));
+	[] RSL.receive(tr_RSL_ERROR_IND(g_chan_nr, link_id, ?)) {
+		setverdict(fail, "Failing due to RSL_ERROR_IND");
+		self.stop;
+		}
+	[] RSL.receive { repeat; }
+	}
+	/* expect UA from BTS -> MS */
+	f_l1_exp_lapdm(tr_LAPDm_UA(sapi, cr_MT_RSP, true, l3));
+}
+
+/* test if DISC on Um triggers RLL REL IND (TS 48.058 3.3) */
+private function f_TC_rll_rel_ind(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* activate the logical channel */
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* first establish the link-layer */
+	f_est_rll_mo(tc.sapi, tc.link_id, tc.l3);
+
+	/* then send the DISC */
+	f_tx_lapdm(ts_LAPDm_DISC(tc.sapi, cr_MO_CMD, true), tc.link_id);
+	/* ... and expect the REL IND on the RSL side */
+	alt {
+	[] RSL.receive(tr_RSL_REL_IND(g_chan_nr, tc.link_id)) {
+		setverdict(pass);
+		}
+	}
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_rel_ind_DCCH_0() runs on test_CT {
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), '01020304'O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_rel_ind));
+}
+
+testcase TC_rll_rel_ind_ACCH_0() runs on test_CT {
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_SACCH(0)), ''O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_rel_ind));
+}
+testcase TC_rll_rel_ind_DCCH_3() runs on test_CT {
+	var RllTestCases tcs := {
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), ''O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_rel_ind));
+}
+testcase TC_rll_rel_ind_ACCH_3() runs on test_CT {
+	var RllTestCases tcs := {
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), ''O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_rel_ind));
+}
+
+/* test if RLL REL REQ triggers DISC on Um; UA/DM triggers RLL REL CONF (TS 48.058 3.4) */
+private function f_TC_rll_rel_req(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* activate the logical channel */
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* first establish the link-layer */
+	f_est_rll_mo(tc.sapi, tc.link_id, tc.l3);
+
+	/* then send the REL REQ via RSL */
+	RSL.send(ts_RSL_REL_REQ(g_chan_nr, tc.link_id, RSL_REL_MODE_NORMAL));
+	/* ... and expect the DISC on the Um side */
+	alt {
+	[] as_l1_exp_lapdm(tr_LAPDm_DISC(tc.sapi, cr_MO_CMD, true))  {
+		/* FIXME: send a UA in resposne to the DISC */
+		}
+	}
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_rel_req() runs on test_CT {
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), '01020304'O, true)),
+		valueof(t_EITC(0, valueof(ts_RslLinkID_SACCH(0)), ''O, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), ''O, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), ''O, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_rel_req));
+}
+
+/* test if RLL DATA REQ triggers I-frames on Um (TS 48.058 3.5) */
+testcase TC_rll_data_req() runs on test_CT {
+}
+
+/* test if I-frames on Um trigger RLL DATA IND (TS 48.058 3.6) */
+testcase TC_rll_data_ind() runs on test_CT {
+}
+
+/* test if RLL UNIT DATA REQ triggers UI-frame on Um (TS 48.058 3.7) */
+private function f_TC_rll_ud_req(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* Send UNITDATA REQ on RSL side */
+	RSL.send(ts_RSL_UNITDATA_REQ(g_chan_nr, tc.link_id, tc.l3));
+	/* Expect it to arrive on the other side */
+	if (tc.link_id.c == SACCH) {
+		f_l1_exp_lapdm(tr_LAPDm_B4_UI(tc.sapi, cr_MT_CMD, false, tc.l3));
+	} else {
+		f_l1_exp_lapdm(tr_LAPDm_UI(tc.sapi, cr_MT_CMD, false, tc.l3));
+	}
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_unit_data_req_DCCH() runs on test_CT {
+	var octetstring l3 := f_rnd_octstring(15);
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), l3, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), l3, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_ud_req));
+}
+testcase TC_rll_unit_data_req_ACCH() runs on test_CT {
+	var octetstring l3 := f_rnd_octstring(19);
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_SACCH(0)), l3, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), l3, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_ud_req));
+}
+
+/* test if UI-frames on Um trigger RLL UNIT DATA IND (TS 48.058 3.8) */
+private function f_TC_rll_ud_ind(charstring id) runs on ConnHdlr {
+	var RllTestCase tc := g_pars.spec.rll;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	f_est_dchan();
+	L1CTL.clear;
+
+	/* Send LAPDm UI frame. There is no B4 format in uplink! */
+	f_tx_lapdm(ts_LAPDm_UI(tc.sapi, cr_MO_CMD, false, tc.l3), tc.link_id);
+	/* Expdct RLL UNITDATA IND on RSL side */
+	alt {
+	[] RSL.receive(tr_RSL_UNITDATA_IND(g_chan_nr, tc.link_id, tc.l3)) {
+		setverdict(pass);
+		}
+	[] RSL.receive { repeat; }
+	}
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rll_unit_data_ind_DCCH() runs on test_CT {
+	var octetstring l3 := f_rnd_octstring(15);
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_DCCH(0)), l3, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_DCCH(3)), l3, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_ud_ind));
+}
+testcase TC_rll_unit_data_ind_ACCH() runs on test_CT {
+	var octetstring l3 := f_rnd_octstring(18);
+	var RllTestCases tcs := {
+		valueof(t_EITC(0, valueof(ts_RslLinkID_SACCH(0)), l3, true)),
+		valueof(t_EITC(3, valueof(ts_RslLinkID_SACCH(3)), l3, true))
+	};
+	f_rll_testmatrix(tcs, refers(f_TC_rll_ud_ind));
+}
+
+
+/* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
+/*	protocol error as per 44.006 */
+/*	link layer failure (repetition of I-frame N200 times without ACK */
+/*	repetition of SABM or DISC N200 times without ACK */
+/*	receptiom of SABM in multi-frame established state */
+
+
+
+
 
 /* TODO Areas:
 
@@ -3095,6 +3529,19 @@ control {
 	execute( TC_dyn_ipa_pdch_tchf_act() );
 	execute( TC_dyn_ipa_pdch_tchf_act_pdch_act_nack() );
 	execute( TC_dyn_ipa_pdch_act_tchf_act_nack() );
+
+	execute( TC_rll_est_ind() );
+	execute( TC_rll_est_req_DCCH_3() );
+	execute( TC_rll_est_req_ACCH_3() );
+	execute( TC_rll_rel_ind_DCCH_0() );
+	execute( TC_rll_rel_ind_DCCH_3() );
+	execute( TC_rll_rel_ind_ACCH_0() );
+	execute( TC_rll_rel_ind_ACCH_3() );
+	execute( TC_rll_rel_req() );
+	execute( TC_rll_unit_data_req_DCCH() );
+	execute( TC_rll_unit_data_req_ACCH() );
+	execute( TC_rll_unit_data_ind_DCCH() );
+	execute( TC_rll_unit_data_ind_ACCH() );
 }
 
 
