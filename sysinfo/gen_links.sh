@@ -2,14 +2,7 @@
 
 BASEDIR=../deps
 
-gen_links() {
-	DIR=$1
-	FILES=$*
-	for f in $FILES; do
-		echo "Linking $f"
-		ln -sf $DIR/$f $f
-	done
-}
+. ../gen_links.sh.inc
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
