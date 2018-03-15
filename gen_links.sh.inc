@@ -19,3 +19,10 @@ gen_links() {
 		gen_link "$DIR/$f" "$f"
 	done
 }
+
+ignore_pp_results() {
+	for pp in *.ttcnpp; do
+		ttcn_file="$(echo $pp | sed 's/pp$//')"
+		echo "$ttcn_file" >> .gitignore
+	done
+}

@@ -24,3 +24,4 @@ DIR=../library
 FILES="GSMTAP_PortType.ttcn GSMTAP_Types.ttcn GSM_SystemInformation.ttcn GSM_RR_Types.ttcn RLCMAC_CSN1_Types.ttcn GSM_Types.ttcn IPL4_GSMTAP_CtrlFunct.ttcn IPL4_GSMTAP_CtrlFunctDef.cc Osmocom_Types.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn"
 gen_links $DIR $FILES
 
+ignore_pp_results

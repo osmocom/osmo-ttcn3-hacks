@@ -27,3 +27,5 @@ FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter
 FILES+="Osmocom_VTY_Functions.ttcn "
 
 gen_links $DIR $FILES
+
+ignore_pp_results

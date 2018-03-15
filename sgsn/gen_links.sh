@@ -65,3 +65,5 @@ FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_Ctr
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn
 GTP_Templates.ttcn IPCP_Types.ttcn "
 gen_links $DIR $FILES
+
+ignore_pp_results
