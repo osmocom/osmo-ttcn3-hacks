@@ -29,7 +29,7 @@ gen_links $DIR $FILES
 DIR=../SCCP_CNL113341/src
 FILES="SCCP_Emulation.ttcn  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
-ln -sf SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
+gen_link SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
 
 DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
 FILES="BSSAP_Types.ttcn"
