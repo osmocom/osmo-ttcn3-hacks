@@ -21,14 +21,13 @@ FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttc
 gen_links $DIR $FILES
 
 # required by SCCP Emulation
-DIR=../MTP3asp_CNL113337/src
+DIR=$BASEDIR/titan.TestPorts.MTP3asp/src
 FILES="MTP3asp_PortType.ttcn  MTP3asp_Types.ttcn"
 gen_links $DIR $FILES
 
-DIR=../SCCP_CNL113341/src
+DIR=$BASEDIR/titan.ProtocolEmulations.SCCP/src
 FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
-gen_link SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
 
 DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
 FILES="BSSAP_Types.ttcn"

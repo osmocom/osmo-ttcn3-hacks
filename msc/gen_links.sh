@@ -32,19 +32,18 @@ FILES="SCTPasp_PT.cc  SCTPasp_PT.hh  SCTPasp_PortType.ttcn  SCTPasp_Types.ttcn"
 gen_links $DIR $FILES
 
 # required by M3UA Emulation
-DIR=../MTP3asp_CNL113337/src
+DIR=$BASEDIR/titan.TestPorts.MTP3asp/src
 FILES="MTP3asp_PortType.ttcn  MTP3asp_Types.ttcn"
 gen_links $DIR $FILES
 
 # required by SCCP Emulation
-DIR=../M3UA_CNL113537/src
+DIR=$BASEDIR/titan.ProtocolEmulations.M3UA/src
 FILES="M3UA_Emulation.ttcn"
 gen_links $DIR $FILES
 
-DIR=../SCCP_CNL113341/src
+DIR=$BASEDIR/titan.ProtocolEmulations.SCCP/src
 FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
-gen_link SCCP_Mapping.ttcnpp SCCP_Mapping.ttcn
 
 DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
 FILES="BSSAP_Types.ttcn"
