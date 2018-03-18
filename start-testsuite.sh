@@ -10,7 +10,7 @@ if [ $# -lt 1 ]; then
 fi
 
 SUITE=$1
-CFG=`basename $SUITE`.cfg
+CFG=$(basename "$SUITE").cfg
 if [ $# -gt 1 ]; then
 	CFG=$2
 fi
@@ -19,4 +19,4 @@ if [ $# -gt 2 ]; then
 	TEST=$3
 fi
 
-LD_LIBRARY_PATH=`dirname $SUITE`:/usr/lib/titan:/usr/ttcn3/lib ttcn3_start $SUITE $CFG $TEST
+LD_LIBRARY_PATH=$(dirname "$SUITE"):/usr/lib/titan:/usr/ttcn3/lib ttcn3_start "$SUITE" "$CFG" "$TEST"
