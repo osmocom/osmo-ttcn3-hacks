@@ -18,7 +18,7 @@ LOG_FILES="$BASE_NAME*.log"
 TEST_CASES=`ls -1 $LOG_FILES | awk 'BEGIN { FS = "-" } { print $2 }' | sort | uniq`
 
 for t in $TEST_CASES; do
-	PREFIX="$BASE_NAME-$t"
+	PREFIX="$BASE_NAME.$t"
 	OUTPUT="$PREFIX.merged"
 	ttcn3_logmerge $PREFIX-*.log > $OUTPUT
 	echo "Generated $OUTPUT"
