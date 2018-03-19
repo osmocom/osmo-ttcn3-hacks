@@ -33,6 +33,8 @@ import from IPA_Types all;
 import from RSL_Types all;
 import from RSL_Emulation all;
 import from MGCP_Emulation all;
+import from MGCP_Templates all;
+import from MGCP_Types all;
 
 import from Osmocom_CTRL_Functions all;
 import from Osmocom_CTRL_Types all;
@@ -43,11 +45,14 @@ import from TELNETasp_PortType all;
 
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_Types all;
+import from MobileL3_RRM_Types all;
 import from L3_Templates all;
 import from GSM_RR_Types all;
 
 import from SCCP_Templates all;
 import from BSSMAP_Templates all;
+
+import from SCCPasp_Types all;
 
 const integer NUM_BTS := 3;
 const float T3101_MAX := 12.0;
@@ -570,6 +575,19 @@ function f_gen_ass_req() return PDU_BSSAP {
 		ass_cmd := valueof(ts_BSSMAP_AssignmentReq(cic, omit));
 	}
 	return ass_cmd;
+}
+
+function f_gen_handover_req() return PDU_BSSAP {
+	var PDU_BSSAP ho_req;
+	if (mp_bssap_cfg.transport == BSSAP_TRANSPORT_AoIP) {
+		var BSSMAP_IE_AoIP_TransportLayerAddress tla :=
+						valueof(ts_BSSMAP_IE_AoIP_TLA4('01020304'O, 2342));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(omit, tla));
+	} else {
+		var BSSMAP_IE_CircuitIdentityCode cic := valueof(ts_BSSMAP_IE_CIC(0,1));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(cic, omit));
+	}
+	return ho_req;
 }
 
 /* generate an assignment complete template for either AoIP or SCCPlite */
@@ -2083,6 +2101,10 @@ testcase TC_err_84_unknown_msg() runs on test_CT {
 	vc_conn.done;
 }
 
+/***********************************************************************
+ * Handover
+ ***********************************************************************/
+
 /* execute a "bts <0-255> trx <0-255> timeslot <0-7> " command on given Dchan */
 private function f_vty_ts_action(charstring suffix, integer bts_nr, integer trx_nr, integer ts_nr)
 runs on test_CT {
@@ -2164,6 +2186,158 @@ testcase TC_ho_int() runs on test_CT {
 	vc_conn := f_start_handler(refers(f_tc_ho_int));
 	vc_conn.done;
 }
+
+private function f_tc_ho_out_of_this_bsc(charstring id) runs on MSC_ConnHdlr {
+	g_pars := valueof(t_def_TestHdlrPars);
+
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	f_vty_transceive(BSCVTY, "handover any to arfcn 123 bsic any");
+
+	BSSAP.receive(tr_BSSMAP_HandoverRequired);
+
+	f_sleep(0.5);
+	/* The MSC negotiates Handover Request and Handover Request Ack with
+	 * the other BSS and comes back with a BSSMAP Handover Command
+	 * containing an RR Handover Command coming from the target BSS... */
+
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	log("Remote cell's RR Handover Command passed through as L3 Info: ", rr_ho_cmd);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	log("Remote cell's RR Handover Command passed through as L3 Info, encoded: ", rr_ho_cmd_enc);
+	BSSAP.send(ts_BSSMAP_HandoverCommand(rr_ho_cmd_enc));
+
+	/* expect the Handover Command to go out on RR */
+	var RSL_Message rsl_ho_cmd
+	RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, ?)) -> value rsl_ho_cmd;
+	log("RSL Data Req went out to first BTS: ", rsl_ho_cmd);
+	var RSL_IE_Body rsl_ho_cmd_l3;
+	if (not f_rsl_find_ie(rsl_ho_cmd, RSL_IE_L3_INFO, rsl_ho_cmd_l3)) {
+		log("RSL message contains no L3 Info IE, expected RR Handover Command");
+		setverdict(fail);
+	} else {
+		log("Found L3 Info: ", rsl_ho_cmd_l3);
+		if (rsl_ho_cmd_l3.l3_info.payload != rr_ho_cmd_enc) {
+			log("FAIL: the BSC sent out a different L3 Info, not matching the RR Handover Command the other BSS forwarded.");
+			setverdict(fail);
+		} else {
+			log("Success: the BSC sent out the same RR Handover Command the other BSS forwarded.");
+			setverdict(pass);
+		}
+	}
+
+	/* When the other BSS has reported a completed handover, this side is
+	 * torn down. */
+
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_HANDOVER_SUCCESSFUL;
+	var BssmapCause cause := enum2int(cause_val);
+	BSSAP.send(ts_BSSMAP_ClearCommand(cause));
+
+	/* Expecting MGCP to DLCX the endpoint's two connections: towards BTS and towards MSC */
+	var MgcpCommand mgcp;
+	interleave {
+	[] BSSAP.receive(tr_BSSMAP_ClearComplete);
+	[] MGCP.receive(tr_DLCX()) -> value mgcp {
+			log("Got first DLCX: ", mgcp);
+		}
+	[] MGCP.receive(tr_DLCX()) -> value mgcp {
+			log("Got second DLCX: ", mgcp);
+		}
+	}
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_ho_out_of_this_bsc() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler(refers(f_tc_ho_out_of_this_bsc));
+	vc_conn.done;
+}
+
+private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
+	/* Hack: the proper way would be to wait for the BSSMAP Handover Request ACK and extract the
+	 * actual assigned chan_nr from its L3 (RR Handover Command) message. But osmo-bsc starts acting
+	 * on the lchan even before we get a chance to evaluate the BSSMAP Handover Request ACK. So we
+	 * need to assume that osmo-bsc will activate TS 1 and already set up this lchan's RSL emulation
+	 * before we get started. */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	f_rslem_register(0, new_chan_nr);
+	g_chan_nr := new_chan_nr;
+	f_sleep(1.0);
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	activate(as_Media());
+
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.handover.sccp_addr_bsc, g_pars.handover.sccp_addr_msc,
+				     f_gen_handover_req()));
+	BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
+
+	var PDU_BSSAP rx_bssap;
+	var octetstring ho_command_str;
+
+	BSSAP.receive(tr_BSSMAP_HandoverRequestAcknowledge(?)) -> value rx_bssap;
+	
+	ho_command_str := rx_bssap.pdu.bssmap.handoverRequestAck.layer3Information.layer3info;
+	log("Received L3 Info in HO Request Ack: ", ho_command_str);
+	var PDU_ML3_NW_MS ho_command := dec_PDU_ML3_NW_MS(ho_command_str);
+	log("L3 Info in HO Request Ack is ", ho_command);
+
+	var GsmArfcn arfcn;
+	var RslChannelNr actual_new_chan_nr;
+	f_ChDesc2RslChanNr(ho_command.msgs.rrm.handoverCommand.channelDescription2,
+			actual_new_chan_nr, arfcn);
+
+	if (actual_new_chan_nr != new_chan_nr) {
+		log("ERROR: osmo-bsc assigned a different lchan than we assumed above -- this test will fail now.",
+		    " Assumed: ", new_chan_nr, " Assigned: ", actual_new_chan_nr);
+		setverdict(fail);
+		return;
+	}
+	log("Handover Command chan_nr is", actual_new_chan_nr);
+
+	/* Now the MSC forwards the RR Handover Command to the other BSC, which
+	 * tells the MS to handover to the new lchan. Here comes the new MS on
+	 * the new lchan with a Handover RACH: */
+
+	/* send handover detect */
+
+	RSL.send(ts_RSL_HANDO_DET(new_chan_nr));
+
+	BSSAP.receive(tr_BSSMAP_HandoverDetect);
+
+	/* send handover complete over the new channel */
+
+	var PDU_ML3_MS_NW l3_tx := valueof(ts_RRM_HandoverComplete('00'O));
+	RSL.send(ts_RSL_EST_IND(new_chan_nr, valueof(ts_RslLinkID_DCCH(0)),
+				enc_PDU_ML3_MS_NW(l3_tx)));
+
+	BSSAP.receive(tr_BSSMAP_HandoverComplete);
+	setverdict(pass);
+}
+testcase TC_ho_into_this_bsc() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.handover.sccp_addr_msc := g_bssap.sccp_addr_own;
+	pars.handover.sccp_addr_bsc := g_bssap.sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_ho_into_this_bsc), pars);
+	vc_conn.done;
+}
+
 
 /* OS#3041: Open and close N connections in a normal fashion, and expect no
  * BSSMAP Reset just because of that. */
@@ -2648,7 +2822,10 @@ control {
 	execute( TC_unsol_ho_fail() );
 	execute( TC_err_82_short_msg() );
 	execute( TC_err_84_unknown_msg() );
+
 	execute( TC_ho_int() );
+	execute( TC_ho_out_of_this_bsc() );
+	execute( TC_ho_into_this_bsc() );
 
 	execute( TC_bssap_rlsd_does_not_cause_bssmap_reset() );
 	execute( TC_bssmap_clear_does_not_cause_bssmap_reset() );
