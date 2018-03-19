@@ -1,0 +1,173 @@
+module SIP_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from TELNETasp_PortType all;
+import from Osmocom_VTY_Functions all;
+
+import from MNCC_Emulation all;
+import from MNCC_Types all;
+
+import from SDP_Types all;
+
+import from SIP_Emulation all;
+import from SIPmsg_Types all;
+
+modulepar {
+	//charstring mp_local_host := "127.0.0.2;
+	charstring mp_osmosip_host := "127.0.0.1";
+	integer mp_osmosip_port_ctrl := -1; /* RFU */
+	charstring mp_mncc := "/tmp/mncc";
+}
+
+type component test_CT extends CTRL_Adapter_CT {
+	var MNCC_Emulation_CT vc_MNCC;
+	var SIP_Emulation_CT vc_SIP;
+
+	port TELNETasp_PT SIPVTY;
+}
+
+type component ConnHdlr extends SIP_ConnHdlr, MNCC_ConnHdlr {
+	var ConnHdlrPars g_pars;
+	timer g_Tguard;
+}
+
+type record ConnHdlrPars {
+	float t_guard
+}
+
+
+function f_init_mncc(charstring id) runs on test_CT {
+	id := id & "-MNCC";
+	var MnccOps ops := {
+		create_cb := refers(MNCC_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(MNCC_Emulation.DummyUnitdataCallback)
+	};
+
+	vc_MNCC := MNCC_Emulation_CT.create(id);
+	map(vc_MNCC:MNCC, system:MNCC_CODEC_PT);
+	vc_MNCC.start(MNCC_Emulation.main(ops, id, mp_mncc, true));
+}
+
+function f_init() runs on test_CT {
+	//f_ipa_ctrl_start(mp_osmosip_host, mp_osmosip_port_ctrl);
+	f_init_mncc("SIP_Test");
+	log("end of f_init_mncc");
+	f_init_sip(vc_SIP, "SIP_Test");
+	log("end of f_init_sip");
+
+	map(self:SIPVTY, system:SIPVTY);
+	f_vty_set_prompts(SIPVTY);
+	f_vty_transceive(SIPVTY, "enable");
+	log("end of f_init");
+}
+
+type function void_fn(charstring id) runs on ConnHdlr;
+
+function f_start_handler(void_fn fn, ConnHdlrPars pars)
+runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := ConnHdlr.create(id);
+
+	connect(vc_conn:SIP, vc_SIP:CLIENT);
+	connect(vc_conn:SIP_PROC, vc_SIP:CLIENT_PROC);
+
+	connect(vc_conn:MNCC, vc_MNCC:MNCC_CLIENT);
+	connect(vc_conn:MNCC_PROC, vc_MNCC:MNCC_PROC);
+
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+private altstep as_Tguard() runs on ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		self.stop;
+	}
+}
+
+private function f_handler_init(void_fn fn, charstring id, ConnHdlrPars pars)
+runs on ConnHdlr {
+	g_pars := pars;
+	g_Tguard.start(pars.t_guard);
+	activate(as_Tguard());
+
+	/* call the user-supied test case function */
+	fn.apply(id);
+}
+
+
+template (value) ConnHdlrPars t_Pars := {
+	t_guard := 30.0
+}
+
+private function f_TC_mo_setup(charstring id) runs on ConnHdlr {
+	var PDU_SIP_Request sip_req;
+
+	var MNCC_number dst := valueof(ts_MNCC_number("01234567"));
+	var MNCC_number src := valueof(ts_MNCC_number("112"));
+
+	f_create_sip_expect(valueof(ts_SIP_Url("+01234567")));
+
+	log("sending mncc setup");
+	MNCC.send(ts_MNCC_SETUP_ind(2342, dst, src, "262420123456789"));
+
+	MNCC.receive(tr_MNCC_RTP_CREATE(2342));
+	MNCC.send(ts_MNCC_RTP_CREATE(2342));
+
+	SIP.receive(PDU_SIP_Request:?) -> value sip_req {
+		log(sip_req);
+	}
+}
+
+testcase TC_mo_setup() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	pars := valueof(t_Pars);
+	vc_conn := f_start_handler(refers(f_TC_mo_setup), pars);
+	vc_conn.done;
+}
+
+
+
+
+
+/* SIP specifics */
+
+const integer c_SIP_PORT := 5060;
+
+template (value) SIP_comm_adress ts_SipAddr(charstring rhost,
+					    template (omit) charstring lhost := omit,
+					    integer rport := c_SIP_PORT,
+					    integer lport := c_SIP_PORT,
+					    SIP_com_prot prot := UDP_E) := {
+	remote_host := rhost,
+	remote_port := rport,
+	local_host := lhost,
+	local_port := lport,
+	protocol := prot
+}
+
+template (value) ASP_SIP_open ts_SIP_open(SIP_comm_adress addr) := {
+	addr := addr
+}
+
+
+
+control {
+	execute( TC_mo_setup() );
+}
+
+
+
+}

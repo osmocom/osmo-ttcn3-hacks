@@ -193,7 +193,7 @@ runs on MNCC_Emulation_CT {
 }
 
 
-function f_connect(charstring sock) runs on MNCC_Emulation_CT {
+private function f_connect(charstring sock) runs on MNCC_Emulation_CT {
 	var UD_connect_result res;
 	timer T := 5.0;
 
@@ -215,6 +215,40 @@ function f_connect(charstring sock) runs on MNCC_Emulation_CT {
 	}
 }
 
+private function f_listen(charstring sock) runs on MNCC_Emulation_CT {
+	var UD_listen_result res;
+	var UD_connected udc;
+	timer T := 5.0;
+
+	T.start;
+	MNCC.send(UD_listen:{sock});
+	alt {
+	[] MNCC.receive(UD_listen_result:?) -> value res {
+		if (ispresent(res.result) and ispresent(res.result.result_code) and res.result.result_code == ERROR) {
+			setverdict(fail, "Error listening to MNCC socket", res);
+			self.stop;
+		} else {
+			g_mncc_ud_id := res.id;
+		}
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout listening to MNCC socket");
+		self.stop;
+		}
+	}
+
+	T.start;
+	alt {
+	[] MNCC.receive(UD_connected:?) -> value udc {
+		g_mncc_ud_id := res.id;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for MNCC connection");
+		self.stop;
+		}
+	}
+}
+
 /* call-back type, to be provided by specific implementation; called when new SCCP connection
  * arrives */
 type function MnccCreateCallback(MNCC_PDU conn_ind, charstring id)
@@ -228,9 +262,14 @@ type record MnccOps {
 	MnccUnitdataCallback unitdata_cb
 }
 
-function main(MnccOps ops, charstring id, charstring sock) runs on MNCC_Emulation_CT {
+function main(MnccOps ops, charstring id, charstring sock, boolean role_server := false)
+runs on MNCC_Emulation_CT {
 
-	f_connect(sock);
+	if (role_server) {
+		f_listen(sock);
+	} else {
+		f_connect(sock);
+	}
 	f_expect_table_init();
 	f_call_table_init();
 
@@ -289,15 +328,19 @@ function main(MnccOps ops, charstring id, charstring sock) runs on MNCC_Emulatio
 			f_call_table_del(call_id);
 			}
 
-		/* Client -> MNCC Socket: SETUP.req: forward + add call table entry */
-		[] MNCC_CLIENT.receive(MNCC_PDU:{msg_type := MNCC_SETUP_REQ, u:=?}) -> value mncc sender vc_conn {
-			/* add to call table */
-			f_call_table_add(vc_conn, f_mncc_get_call_id(mncc));
+		/* Client -> MNCC Socket: Normal message */
+		[] MNCC_CLIENT.receive(MNCC_PDU:?) -> value mncc sender vc_conn {
+			if (mncc.msg_type == MNCC_SETUP_REQ and not role_server) {
+				/* ConnHdlr -> MNCC Server: SETUP.req: add to call table */
+				f_call_table_add(vc_conn, f_mncc_get_call_id(mncc));
+			} else if (mncc.msg_type == MNCC_SETUP_IND and role_server) {
+				/* ConnHdlr -> MNCC Client: SETUP.ind: add to call table */
+				f_call_table_add(vc_conn, f_mncc_get_call_id(mncc));
+			}
 			/* forward to MNCC socket */
 			MNCC.send(t_SD_MNCC(g_mncc_ud_id, mncc));
 			}
 
-		/* Client -> MNCC Socket: Normal message */
 		[] MNCC_CLIENT.receive(MNCC_PDU:?) -> value mncc sender vc_conn {
 			/* forward to MNCC socket */
 			MNCC.send(t_SD_MNCC(g_mncc_ud_id, mncc));

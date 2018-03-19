@@ -1,0 +1,408 @@
+module SIP_Emulation {
+
+/* SIP Emulation, runs on top of SIPmsg_PT.  It multiplexes/demultiplexes
+ * the individual calls, so there can be separate TTCN-3 components handling
+ * each of the calls
+ *
+ * The SIP_Emulation.main() function processes SIP message from the SIPmsg
+ * socket via the SIPmsg_PT, and dispatches them to the per-connection components.
+ *
+ * Outbound SIP calls are initiated by sending a PDU_SIP_Request messages
+ * to the component running the SIP_Emulation.main() function.
+ *
+ * For each new inbound call, the SipOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that inbound
+ * call is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound call, it can
+ * do so by registering an "expect" with the expected destination phone number.  This is e.g. useful
+ * if you are simulating MNCC + SIP, and first trigger a connection from MNCC side in a
+ * component which then subsequently should also handle the SIP emulation.
+ *
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+import from SIPmsg_Types all;
+import from SIPmsg_PortType all;
+
+type component SIP_ConnHdlr {
+	/* ports towards SIP Emulation core / call dispatcher */
+	port SIP_Conn_PT SIP;
+	port SIPEM_PROC_PT SIP_PROC;
+}
+
+/* port between individual per-call components and this dispatcher */
+type port SIP_Conn_PT message {
+	inout PDU_SIP_Request, PDU_SIP_Response;
+} with { extension "internal" };
+
+/* represents a single SIP Call */
+type record CallData {
+	/* reference to the instance of the per-connection component */
+	SIP_ConnHdlr	comp_ref,
+	CallidString	call_id
+}
+
+type component SIP_Emulation_CT {
+	/* SIP test port on bottom side */
+	port SIPmsg_PT SIP;
+	/* SIP port to the per-call clients */
+	port SIP_Conn_PT CLIENT;
+
+	var CallData SipCallTable[16];
+	var ExpectData SipExpectTable[16];
+
+	/* procedure based port to register for incoming connections */
+	port SIPEM_PROC_PT CLIENT_PROC;
+};
+
+private function f_sip_init() runs on SIP_Emulation_CT {
+	map(self:SIP, system:SIP);
+}
+
+template RequestLine tr_ReqLine(template Method method) := {
+	method := method,
+	requestUri := ?,
+	sipVersion := ?
+}
+
+template PDU_SIP_Request tr_SIP_INVITE := {
+	requestLine := tr_ReqLine(INVITE_E),
+	msgHeader := t_SIP_msgHeader_any,
+	messageBody := *,
+	payload := *
+}
+
+
+template SipUrl tr_SIP_Url(template charstring user_or_num,
+			   template charstring host := *,
+			   template integer portField := *) := {
+	scheme := "sip",
+	userInfo := {
+		userOrTelephoneSubscriber := user_or_num,
+		password := *
+	},
+	hostPort := {
+		host := host,
+		portField := portField
+	},
+	urlParameters := *,
+	headers := *
+}
+template (value) SipUrl ts_SIP_Url(charstring user_or_num,
+			   template (omit) charstring host := omit,
+			   template (omit) integer portField := omit) := {
+	scheme := "sip",
+	userInfo := {
+		userOrTelephoneSubscriber := user_or_num,
+		password := omit
+	},
+	hostPort := {
+		host := host,
+		portField := portField
+	},
+	urlParameters := omit,
+	headers := omit
+}
+
+template Addr_Union tr_SIP_Addr(template SipUrl sip_url) := {
+	nameAddr := {
+		displayName := *,
+		addrSpec := sip_url
+	}
+}
+template (value) Addr_Union ts_SIP_Addr(template (value) SipUrl sip_url) := {
+	nameAddr := {
+		displayName := omit,
+		addrSpec := sip_url
+	}
+}
+
+template To tr_SIP_To(template Addr_Union addr) := {
+	fieldName := TO_E,
+	addressField := addr,
+	toParams := *
+}
+template (value) To ts_SIP_To(template (value) Addr_Union addr) := {
+	fieldName := TO_E,
+	addressField := addr,
+	toParams := omit
+}
+
+/* resolve component reference by connection ID */
+private function f_call_id_known(CallidString call_id)
+runs on SIP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(SipCallTable); i := i+1) {
+		if (SipCallTable[i].call_id == call_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* resolve component reference by connection ID */
+private function f_comp_by_call_id(CallidString call_id)
+runs on SIP_Emulation_CT return SIP_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(SipCallTable); i := i+1) {
+		if (SipCallTable[i].call_id == call_id) {
+			return SipCallTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "SIP Call table not found by SIP Call ID ", call_id);
+	self.stop;
+}
+
+/* resolve connection ID by component reference */
+private function f_call_id_by_comp(SIP_ConnHdlr client)
+runs on SIP_Emulation_CT return CallidString {
+	for (var integer i := 0; i < sizeof(SipCallTable); i := i+1) {
+		if (SipCallTable[i].comp_ref == client) {
+			return SipCallTable[i].call_id;
+		}
+	}
+	setverdict(fail, "SIP Call table not found by component ", client);
+	self.stop;
+}
+
+private function f_expect_table_init()
+runs on SIP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(SipExpectTable); i := i+1) {
+		SipExpectTable[i].sip_to := omit;
+		SipExpectTable[i].vc_conn := null;
+	}
+}
+
+private function f_call_table_init()
+runs on SIP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(SipCallTable); i := i+1) {
+		SipCallTable[i].comp_ref := null;
+		SipCallTable[i].call_id := "";
+	}
+}
+
+private function f_call_table_add(SIP_ConnHdlr comp_ref, CallidString call_id)
+runs on SIP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(SipCallTable); i := i+1) {
+		if (SipCallTable[i].call_id == "") {
+			SipCallTable[i].comp_ref := comp_ref;
+			SipCallTable[i].call_id := call_id;
+			log("Added SIP Call Table entry [", i, "] for ", call_id, " at ", comp_ref);
+			return;
+		}
+	}
+	setverdict(fail, "SIP Call table full");
+	self.stop;
+}
+
+private function f_call_table_del(CallidString call_id)
+runs on SIP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(SipCallTable); i := i+1) {
+		if (SipCallTable[i].call_id == call_id) {
+			SipCallTable[i].comp_ref := null;
+			SipCallTable[i].call_id := "";
+			log("Deleted SIP Call Table entry [", i, "] for ", call_id);
+			return;
+		}
+	}
+	setverdict(fail, "SIP Call table attempt to delete non-existant ", call_id);
+	self.stop;
+}
+
+/* call-back type, to be provided by specific implementation; called when new call connection
+ * arrives */
+type function SipCreateCallback(PDU_SIP_Request sip_req, charstring id)
+runs on SIP_Emulation_CT return SIP_ConnHdlr;
+
+type record SipOps {
+	SipCreateCallback create_cb
+};
+
+function f_init_sip(inout SIP_Emulation_CT ct, charstring id) {
+	id := id & "-SIP";
+
+	var SipOps ops := {
+		create_cb := refers(SIP_Emulation.ExpectedCreateCallback)
+	};
+
+	ct := SIP_Emulation_CT.create(id);
+	map(ct:SIP, system:SIP);
+	ct.start(SIP_Emulation.main(ops, id));
+}
+
+function main(SipOps ops, charstring id)
+runs on SIP_Emulation_CT {
+
+	f_sip_init();
+	f_expect_table_init();
+	f_call_table_init();
+
+	while (true) {
+		var SIP_ConnHdlr vc_hdlr, vc_conn;
+		var PDU_SIP_Request sip_req;
+		var PDU_SIP_Response sip_resp;
+		var SipUrl sip_to;
+
+		alt {
+		/* SIP INVITE was received on SIP socket/port */
+		[] SIP.receive(tr_SIP_INVITE) -> value sip_req {
+			var CallidString call_id := sip_req.msgHeader.callId.callid;
+			if (f_call_id_known(call_id)) {
+				/* re-invite? */
+				vc_conn := f_comp_by_call_id(call_id);
+			} else {
+				/* new INVITE: check expect */
+				vc_conn := ops.create_cb.apply(sip_req, id);
+				f_call_table_add(vc_conn, call_id);
+			}
+			CLIENT.send(sip_req) to vc_conn;
+			}
+		/* other SIP request was received on SIP socket/port */
+		[] SIP.receive(PDU_SIP_Request:?) -> value sip_req {
+			var CallidString call_id := sip_req.msgHeader.callId.callid;
+			if (f_call_id_known(call_id)) {
+				vc_conn := f_comp_by_call_id(call_id);
+				CLIENT.send(sip_req) to vc_conn;
+			} else {
+				setverdict(fail, "SIP Request for unknown call ", call_id);
+				self.stop;
+			}
+			}
+		/* SIP response was received on SIP socket/port */
+		[] SIP.receive(PDU_SIP_Response:?) -> value sip_resp {
+			var CallidString call_id := sip_resp.msgHeader.callId.callid;
+			if (f_call_id_known(call_id)) {
+				vc_conn := f_comp_by_call_id(call_id);
+				CLIENT.send(sip_resp) to vc_conn;
+			} else {
+				setverdict(fail, "SIP Response for unknown call ", call_id);
+				self.stop;
+			}
+			}
+
+		/* a ConnHdlr is sending us a SIP INVITE: Forward to SIP port */
+		[] CLIENT.receive(tr_SIP_INVITE) -> value sip_req sender vc_conn {
+			var CallidString call_id := sip_req.msgHeader.callId.callid;
+			if (f_call_id_known(call_id)) {
+				/* re-invite? */
+				vc_conn := f_comp_by_call_id(call_id);
+			} else {
+				/* new INVITE: add to table */
+				f_call_table_add(vc_conn, call_id);
+			}
+			SIP.send(sip_req);
+			}
+		/* a ConnHdlr is sending us a SIP request: Forward to SIP port */
+		[] CLIENT.receive(PDU_SIP_Request:?) -> value sip_req sender vc_conn {
+			SIP.send(sip_req);
+			}
+		/* a ConnHdlr is sending us a SIP request: Forward to SIP port */
+		[] CLIENT.receive(PDU_SIP_Response:?) -> value sip_resp sender vc_conn {
+			SIP.send(sip_resp);
+			}
+
+		[] CLIENT_PROC.getcall(SIPEM_register:{?,?}) -> param(sip_to, vc_hdlr) {
+			f_create_expect(sip_to, vc_hdlr);
+			CLIENT_PROC.reply(SIPEM_register:{sip_to, vc_hdlr});
+			}
+
+		}
+	}
+}
+
+/***********************************************************************
+ * "Expect" Handling (mapping for expected incoming SIP callds from IUT)
+ ***********************************************************************/
+
+/* data about an expected future incoming connection */
+type record ExpectData {
+	/* SIP "To" (destination number) based on which we can match */
+	SipUrl sip_to optional,
+	/* component reference registered for the connection */
+	SIP_ConnHdlr vc_conn
+}
+
+/* procedure based port to register for incoming calls */
+signature SIPEM_register(SipUrl sip_to, SIP_ConnHdlr vc_conn);
+
+type port SIPEM_PROC_PT procedure {
+	inout SIPEM_register;
+} with { extension "internal" };
+
+
+/* CreateCallback that can be used as create_cb and will use the expect table */
+function ExpectedCreateCallback(PDU_SIP_Request sip_req, charstring id)
+runs on SIP_Emulation_CT return SIP_ConnHdlr {
+	var SIP_ConnHdlr ret := null;
+	var SipUrl sip_to;
+	var integer i;
+
+	if (sip_req.requestLine.method != INVITE_E) {
+		setverdict(fail, "SIP ExpectedCreateCallback needs INVITE");
+		return ret;
+	}
+	sip_to := sip_req.msgHeader.toField.addressField.nameAddr.addrSpec;
+
+	for (i := 0; i < sizeof(SipExpectTable); i := i+1) {
+		if (not ispresent(SipExpectTable[i].sip_to)) {
+			continue;
+		}
+		/* build a template, use '*' for all 'omit' values */
+		var template SipUrl t_exp := SipExpectTable[i].sip_to;
+		if (not ispresent(t_exp.hostPort.host)) {
+			t_exp.hostPort.host := *;
+		}
+		if (not ispresent(t_exp.hostPort.portField)) {
+			t_exp.hostPort.portField := *;
+		}
+		if (not ispresent(t_exp.urlParameters)) {
+			t_exp.urlParameters := *;
+		}
+		if (not ispresent(t_exp.headers)) {
+			t_exp.headers := *;
+		}
+		/* match against the constructed template */
+		if (match(sip_to, t_exp)) {
+			ret := SipExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			SipExpectTable[i].sip_to := omit;
+			SipExpectTable[i].vc_conn := null;
+			log("Found SipExpect[", i, "] for ", sip_to, " handled at ", ret);
+			return ret;
+		}
+	}
+
+	setverdict(fail, "Couldn't find SipExpect for incoming call ", sip_to);
+	return ret;
+}
+
+/* server/emulation side function to create expect */
+private function f_create_expect(SipUrl sip_to, SIP_ConnHdlr hdlr)
+runs on SIP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(SipExpectTable); i := i+1) {
+		if (not ispresent(SipExpectTable[i].sip_to)) {
+			SipExpectTable[i].sip_to := sip_to;
+			SipExpectTable[i].vc_conn := hdlr;
+			log("Created SipExpect[", i, "] for ", sip_to, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in SipExpectTable");
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_sip_expect(SipUrl sip_to) runs on SIP_ConnHdlr {
+	SIP_PROC.call(SIPEM_register:{sip_to, self}) {
+		[] SIP_PROC.getreply(SIPEM_register:{?,?}) {};
+	}
+}
+
+
+
+}
