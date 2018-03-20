@@ -47,22 +47,72 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 
-all: $(ALL_REPOS)
+# Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
+# In order to keep local changes in the repository of a dependency, set its commit to the
+# name of a local branch here (e.g. 'master').
+# CAREFUL: 'make clean' WILL DISCARD UNCOMMITTED CHANGES IN THESE REPOSITORIES!
+titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
+titan.ProtocolEmulations.M3UA_commit=		R.2.A
+titan.ProtocolEmulations.SCCP_commit=	 	724c83fd2794e8ea362d08c42d9fc10fc1885ef1
+titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
+titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
+titan.ProtocolModules.BSSMAP_v11.2.0_commit=	R.2.A
+titan.ProtocolModules.GRE_commit=		R.2.A
+titan.ProtocolModules.GTP_v13.5.0_commit=	R.2.A
+titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A
+titan.ProtocolModules.ICMP_commit=		R.2.A
+titan.ProtocolModules.ICMPv6_commit=		R.2.A
+titan.ProtocolModules.IP_commit=		R.10.B-1-g99d0ec9
+titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A
+titan.ProtocolModules.L2TP_commit=		R.2.A
+titan.ProtocolModules.LLC_v7.1.0_commit=	R.2.A
+titan.ProtocolModules.M2PA_commit=		R.2.A
+titan.ProtocolModules.M3UA_commit=		R.2.A
+titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
+titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
+titan.ProtocolModules.RTP_commit=		R.5.A
+titan.ProtocolModules.SCTP_commit=		R.2.A
+titan.ProtocolModules.SDP_commit=		R.14.A
+titan.ProtocolModules.SMPP_commit=		R.2.A
+titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A
+titan.ProtocolModules.SUA_commit=		R.5.A
+titan.ProtocolModules.TCP_commit=		R.3.A
+titan.ProtocolModules.UDP_commit=		R.4.A
+titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A
+titan.TestPorts.GPIO_commit=			R.3.A
+titan.TestPorts.IPL4asp_commit=			R.29.A
+titan.TestPorts.LANL2asp_commit=		R.8.B
+titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11
+titan.TestPorts.PCAPasp_commit=			R.7.A
+titan.TestPorts.SCTPasp_commit=			R.11.A-2-g2faa9cf
+titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
+titan.TestPorts.TCPasp_commit=			R.9.A
+titan.TestPorts.TELNETasp_commit=		R.9.A
+titan.TestPorts.UDPasp_commit=			R.8.A
+titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-3-g61e5a25
 
-update: $(foreach dir,$(ALL_REPOS),$(dir)/update)
+all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
 
 define GIT_template
+$(1)_ORIGIN!=	if [ -d $(1) ]; then cd $(1) && git remote get-url origin; fi
+$(1)_HEAD!=	if [ -d $(1) ]; then cd $(1) && git describe --tags 2>/dev/null || git rev-parse HEAD; fi
+
 $(1):
 	git clone $(2)/$(1)
 
-.PHONY:$(1)/update
+.PHONY: $(1)/update
 $(1)/update: $(1)
-	(cd $(1) && git remote set-url origin $(2)/$(1) && git fetch && git checkout -f -B master origin/master)
+ifneq ($$($(1)_ORIGIN),$(2)/$(1))
+	cd $(1) && git remote set-url origin $(2)/$(1) && git fetch
+endif
+ifneq ($$($(1)_HEAD),$($(1)_commit))
+	cd $(1) && git checkout -q -f "$($(1)_commit)"
+endif
 
 .PHONY: $(1)/clean
 $(1)/clean: $(1)
-	(cd $(1) && git checkout -f -B master && git reset --hard)
+	cd $(1) && git checkout -q -f "$($(1)_commit)" && git reset --hard
 
 .PHONY: $(1)/distclean
 $(1)/distclean:

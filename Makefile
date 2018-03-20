@@ -20,9 +20,10 @@ default: deps all
 deps:
 	$(MAKE) -C deps
 
+# deps-update target for backwards compat; now does the same as 'make deps'
 .PHONY: deps-update
 deps-update:
-	$(MAKE) -C deps update
+	$(MAKE) -C deps
 
 compile: $(foreach dir,$(SUBDIRS),$(dir)/compile)
 clean: $(foreach dir,$(SUBDIRS),$(dir)/clean)
