@@ -43,7 +43,7 @@ FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
-FILES+="SIP_Emulation.ttcn "
+FILES+="SIP_Emulation.ttcn SIP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
