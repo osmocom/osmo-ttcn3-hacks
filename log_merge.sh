@@ -26,5 +26,5 @@ done
 
 if [ "$2" = "--rm" ]; then
 	echo "Removing Input log files !!!"
-	rm "$LOG_FILES"
+	rm $LOG_FILES
 fi
