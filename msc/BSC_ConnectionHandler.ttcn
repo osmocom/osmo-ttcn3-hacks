@@ -405,14 +405,12 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	mgcp_connection_id_mss := '0'H //
 };
 
-
-function f_mt_call(inout CallParameters cpars)
+function f_mt_call_establish(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 
 	var MobileIdentityLV mi;
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
-	var boolean respond_to_dlcx;
 
 	f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
 
@@ -494,45 +492,10 @@ runs on BSC_ConnHdlr {
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT(cpars.transaction_id)));
 	MNCC.receive(tr_MNCC_SETUP_cnf(cpars.mncc_callref));
 
-	/* FIXME */
-	f_sleep(3.0);
-
-	/* Hangup by "A" side */
-	MNCC.send(ts_MNCC_DISC_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
-
-	if (false) {
-		/* A-side (PLMN) Release of call */
-		MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(42))));
-		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
-		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
-	} else {
-		/* B-side (MS) Release of call */
-		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_RELEASE(cpars.transaction_id, '1'B, '0000000'B)));
-		MNCC.receive(tr_MNCC_REL_ind(cpars.mncc_callref));
-		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_REL_COMPL(cpars.transaction_id)));
-	}
-
-	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
-
-	/* clearing of radio channel */
-	interleave {
-	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
-		BSSAP.send(ts_BSSMAP_ClearComplete);
-		BSSAP.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
-		}
-	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
-		if (respond_to_dlcx) {
-			/* TODO: For one or all connections on EP? */
-			MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-			f_create_mgcp_delete_ep(cpars.mgcp_ep);
-		}
-		}
-	}
 	setverdict(pass);
 }
 
-function f_mo_call(inout CallParameters cpars)
+function f_mo_call_establish(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 
 	var MobileIdentityLV mi;
@@ -625,16 +588,31 @@ runs on BSC_ConnHdlr {
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CONNECT(cpars.transaction_id)));
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT_ACK(cpars.transaction_id)));
 
-	f_sleep(3.0);
+	setverdict(pass);
+}
 
-	/* Hangup by "B" side */
+function f_call_hangup(inout CallParameters cpars, boolean release_by_ms)
+runs on BSC_ConnHdlr {
+
+	var MobileIdentityLV mi;
+	var MNCC_PDU mncc;
+	var MgcpCommand mgcp_cmd;
+	var boolean respond_to_dlcx;
+
 	MNCC.send(ts_MNCC_DISC_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
 
-	/* Release of call */
-	MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(42))));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
+	if (release_by_ms) {
+		/* B-side (MS) Release of call */
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_RELEASE(cpars.transaction_id, '1'B, '0000000'B)));
+		MNCC.receive(tr_MNCC_REL_ind(cpars.mncc_callref));
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_REL_COMPL(cpars.transaction_id)));
+	} else {
+		/* A-side (PLMN) Release of call */
+		MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(42))));
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
+	}
 
 	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
 
@@ -652,6 +630,33 @@ runs on BSC_ConnHdlr {
 		}
 		}
 	}
+
+	setverdict(pass);
+}
+
+function f_mt_call(inout CallParameters cpars)
+runs on BSC_ConnHdlr {
+
+	f_mt_call_establish(cpars);
+
+	/* Hold the call for some time */
+	f_sleep(3.0);
+
+	f_call_hangup(cpars, true);
+
+	setverdict(pass);
+}
+
+function f_mo_call(inout CallParameters cpars)
+runs on BSC_ConnHdlr {
+
+	f_mo_call_establish(cpars);
+
+	/* Hold the call for some time */
+	f_sleep(3.0);
+
+	f_call_hangup(cpars, false);
+
 	setverdict(pass);
 }
 
