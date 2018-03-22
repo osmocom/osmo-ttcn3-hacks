@@ -50,7 +50,6 @@ ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # In order to keep local changes in the repository of a dependency, set its commit to the
 # name of a local branch here (e.g. 'master').
-# CAREFUL: 'make clean' WILL DISCARD UNCOMMITTED CHANGES IN THESE REPOSITORIES!
 titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
 titan.ProtocolEmulations.M3UA_commit=		R.2.A
 titan.ProtocolEmulations.SCCP_commit=	 	724c83fd2794e8ea362d08c42d9fc10fc1885ef1
@@ -93,30 +92,44 @@ titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-3-g61e5a25
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
+distclean: $(foreach dir,$(ALL_REPOS),$(dir)/distclean)
 
 define GIT_template
 $(1)_ORIGIN!=	if [ -d $(1) ]; then cd $(1) && git remote get-url origin; fi
 $(1)_HEAD!=	if [ -d $(1) ]; then cd $(1) && git describe --tags 2>/dev/null || git rev-parse HEAD; fi
+$(1)_MODIFIED!=	if [ -d $(1) ]; then cd $(1) && git diff --quiet --exit-code || echo -n "1"; fi
 
 $(1):
 	git clone $(2)/$(1)
 
 .PHONY: $(1)/update
 $(1)/update: $(1)
+ifeq ($$($(1)_MODIFIED),1)
+	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
+else
 ifneq ($$($(1)_ORIGIN),$(2)/$(1))
 	cd $(1) && git remote set-url origin $(2)/$(1) && git fetch
 endif
 ifneq ($$($(1)_HEAD),$($(1)_commit))
 	cd $(1) && git checkout -q -f "$($(1)_commit)"
 endif
+endif
 
 .PHONY: $(1)/clean
 $(1)/clean: $(1)
+ifeq ($$($(1)_MODIFIED),1)
+	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
+else
 	cd $(1) && git checkout -q -f "$($(1)_commit)" && git reset --hard
+endif
 
 .PHONY: $(1)/distclean
 $(1)/distclean:
+ifeq ($$($(1)_MODIFIED),1)
+	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
+else
 	@rm -rf $(1)
+endif
 endef
 
 $(foreach dir,$(ECLIPSEGIT_REPOS), \
