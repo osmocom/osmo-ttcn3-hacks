@@ -10,7 +10,13 @@ module RSL_Emulation {
  * Outbound RSL connections are initiated by sending a RSLDC_ChanRqd primitive
  * to the component running the RSL_Emulation.main() function.
  *
- * (C) 2017 by Harald Welte <laforge@gnumonks.org>
+ * in case we're emulating the BTS-side of RSL: We have no clue as to which particular logical
+ * channel the BSC may decide to activate at which point, so we have to blindly acknowledge all
+ * channel activations.  Still, a test case might be interested in the exact assignment message to
+ * determine the type of activation, encryption, codec flags etc. at some later point, when it's
+ * clear for which transaction this activation happened.  We keep this in the LastChanAct table.
+ *
+ * (C) 2017-2018 by Harald Welte <laforge@gnumonks.org>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -60,9 +66,10 @@ type port RSL_CCHAN_PT message {
 signature RSLEM_register(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_unregister(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_suspend(boolean suspend);
+signature RSLEM_get_last_act(in uint8_t trx_nr, in RslChannelNr chan_nr, out RSL_Message chan_act);
 
 type port RSLEM_PROC_PT procedure {
-	inout RSLEM_register, RSLEM_unregister, RSLEM_suspend;
+	inout RSLEM_register, RSLEM_unregister, RSLEM_suspend, RSLEM_get_last_act;
 } with { extension "internal" };
 
 /***********************************************************************
@@ -240,6 +247,46 @@ runs on RSL_Emulation_CT {
 	ConnectionTable[cid].comp_ref := null;
 }
 
+/* last activation for a given channel number */
+type record LastActData {
+	uint8_t		trx_nr optional,
+	RslChannelNr	chan_nr optional,
+	RSL_Message	chan_act optional
+}
+
+private function f_store_last_act_data(uint8_t trx_nr, RslChannelNr chan_nr, RSL_Message chan_act)
+runs on RSL_Emulation_CT {
+	for (var integer i := 0; i < sizeof(LastActTable); i := i+1) {
+		if (not ispresent(LastActTable[i].chan_nr) or
+		    (LastActTable[i].chan_nr == chan_nr and LastActTable[i].trx_nr == trx_nr)) {
+			LastActTable[i].trx_nr := trx_nr;
+			LastActTable[i].chan_nr := chan_nr;
+			LastActTable[i].chan_act := chan_act;
+			return;
+		}
+	}
+	setverdict(fail, "No space left in LastActTable to store chan_act for ", chan_nr);
+	self.stop;
+}
+
+private function f_lookup_last_act(uint8_t trx_nr, RslChannelNr chan_nr)
+runs on RSL_Emulation_CT return RSL_Message {
+	for (var integer i := 0; i < sizeof(LastActTable); i := i+1) {
+		if (ispresent(LastActTable[i].chan_nr) and LastActTable[i].chan_nr == chan_nr
+		    and LastActTable[i].trx_nr == trx_nr) {
+			return LastActTable[i].chan_act;
+		}
+	}
+	setverdict(fail, "No LastActTable entry found for TRX ", trx_nr, " ", chan_nr);
+	self.stop;
+}
+
+private function f_last_act_table_init() runs on RSL_Emulation_CT {
+	for (var integer i := 0; i < sizeof(LastActTable); i := i+1) {
+		LastActTable[i] := { omit, omit, omit };
+	}
+}
+
 type component RSL_Emulation_CT {
 	/* port facing down towards IPA emulation */
 	port IPA_RSL_PT IPA_PT;
@@ -252,6 +299,9 @@ type component RSL_Emulation_CT {
 
 	/* state of all concurrent connections / dedicated channels */
 	var ConnectionData ConnectionTable[64];
+
+	/* last RSL CHAN ACT for each chan_nr */
+	var LastActData LastActTable[64];
 }
 
 
@@ -290,6 +340,7 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 	var boolean dchan_suspended := false;
 
 	f_conn_table_init();
+	f_last_act_table_init();
 
 	while (true) {
 		alt {
@@ -364,6 +415,8 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 		/* blindly acknowledge all channel activations */
 		[bts_role] IPA_PT.receive(tr_RSL(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) -> value rx_rsl {
 			chan_nr := rx_rsl.rsl.ies[0].body.chan_nr;
+			trx_nr := f_trx_by_streamId(rx_rsl.streamId);
+			f_store_last_act_data(trx_nr, chan_nr, rx_rsl.rsl);
 			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl.streamId, ts_RSL_CHAN_ACT_ACK(chan_nr, 23)));
 		}
 
@@ -424,6 +477,10 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 			RSL_PROC.reply(RSLEM_suspend:{false});
 			}
 
+		[] RSL_PROC.getcall(RSLEM_get_last_act:{?,?,?}) -> param(trx_nr, chan_nr) {
+			var RSL_Message last_chan_act := f_lookup_last_act(trx_nr, chan_nr);
+			RSL_PROC.reply(RSLEM_get_last_act:{trx_nr, chan_nr, last_chan_act});
+			}
 		}
 	}
 }
@@ -469,6 +526,17 @@ runs on RSL_DchanHdlr {
 		[] PT.getreply(RSLEM_suspend:{false}) {};
 	}
 }
+
+/* obtain the last RSL_CHAN_ACT message for the given chan_nr */
+function f_rslem_get_last_act(RSLEM_PROC_PT PT, uint8_t trx_nr, RslChannelNr chan_nr)
+runs on RSL_DchanHdlr return RSL_Message {
+	var RSL_Message chan_act;
+	PT.call(RSLEM_get_last_act:{trx_nr, chan_nr, -}) {
+		[] PT.getreply(RSLEM_get_last_act:{trx_nr, chan_nr, ?}) -> param(chan_act) {};
+	}
+	return chan_act;
+}
+
 
 
 
