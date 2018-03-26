@@ -1,4 +1,4 @@
-SUBDIRS=bsc bsc-nat bts ggsn_tests hlr lapdm mgw msc pcu selftest sgsn sysinfo
+SUBDIRS=bsc bsc-nat bts ggsn_tests hlr lapdm mgw msc pcu selftest sgsn sip sysinfo
 
 PARALLEL_MAKE ?= -j8
 
