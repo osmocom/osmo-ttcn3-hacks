@@ -37,12 +37,12 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.NS_v7.3.0 \
-			titan.ProtocolModules.SNDCP_v7.0.0 \
-			titan.ProtocolEmulations.M3UA
+			titan.ProtocolModules.SNDCP_v7.0.0
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp \
+			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolEmulations.SCCP
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
