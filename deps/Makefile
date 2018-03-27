@@ -37,13 +37,13 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.NS_v7.3.0 \
-			titan.ProtocolModules.SNDCP_v7.0.0
+			titan.ProtocolModules.SNDCP_v7.0.0 \
+			titan.ProtocolEmulations.SCCP
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp \
-			titan.ProtocolEmulations.M3UA \
-			titan.ProtocolEmulations.SCCP
+			titan.ProtocolEmulations.M3UA
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 
@@ -51,8 +51,8 @@ ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
 # In order to keep local changes in the repository of a dependency, set its commit to the
 # name of a local branch here (e.g. 'master').
 titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
-titan.ProtocolEmulations.M3UA_commit=		R.2.A
-titan.ProtocolEmulations.SCCP_commit=	 	724c83fd2794e8ea362d08c42d9fc10fc1885ef1
+titan.ProtocolEmulations.M3UA_commit=		R.2.A-1-g53dead2
+titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-2-g724c83f
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
 titan.ProtocolModules.BSSMAP_v11.2.0_commit=	R.2.A
@@ -88,7 +88,7 @@ titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
 titan.TestPorts.TCPasp_commit=			R.9.A
 titan.TestPorts.TELNETasp_commit=		R.9.A
 titan.TestPorts.UDPasp_commit=			R.8.A
-titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-3-g61e5a25
+titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-4-g63d4ee3
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
