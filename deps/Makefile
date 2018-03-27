@@ -111,7 +111,7 @@ ifneq ($$($(1)_ORIGIN),$(2)/$(1))
 	cd $(1) && git remote set-url origin $(2)/$(1) && git fetch
 endif
 ifneq ($$($(1)_HEAD),$($(1)_commit))
-	cd $(1) && git checkout -q -f "$($(1)_commit)"
+	cd $(1) && git fetch && git checkout -q -f "$($(1)_commit)"
 endif
 endif
 
@@ -120,7 +120,7 @@ $(1)/clean: $(1)
 ifeq ($$($(1)_MODIFIED),1)
 	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
 else
-	cd $(1) && git checkout -q -f "$($(1)_commit)" && git reset --hard
+	cd $(1) && git fetch && git checkout -q -f "$($(1)_commit)" && git reset --hard
 endif
 
 .PHONY: $(1)/distclean
