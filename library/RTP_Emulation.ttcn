@@ -74,6 +74,10 @@ type component RTP_Emulation_CT {
 	/* configurable by user, should be fixed */
 	var RtpemConfig g_cfg := c_RtpemDefaultCfg;
 
+	/* statistics */
+	var RtpemStats g_stats_rtp := c_RtpemStatsReset;
+	var RtpemStats g_stats_rtcp := c_RtpemStatsReset;
+
 	var HostName g_remote_host;
 	var PortNumber g_remote_port;
 	var HostName g_local_host;
@@ -97,6 +101,34 @@ type enumerated RtpemMode {
 	RTPEM_MODE_RXONLY,
 	RTPEM_MODE_BIDIR
 };
+
+type record RtpemStats {
+	/* number of packets transmitted */
+	integer num_pkts_tx,
+	/* number of RTP payload bytes transmitted */
+	integer bytes_payload_tx,
+
+	/* number of packets received */
+	integer num_pkts_rx,
+	/* number of RTP payload bytes received */
+	integer bytes_payload_rx,
+	/* number of packets received out-of-sequence */
+	integer num_pkts_rx_err_seq,
+	/* number of packets received wrong timestamp */
+	integer num_pkts_rx_err_ts,
+	/* number of packets received during Rx disable */
+	integer num_pkts_rx_err_disabled
+}
+
+const RtpemStats c_RtpemStatsReset := {
+	num_pkts_tx := 0,
+	bytes_payload_tx := 0,
+	num_pkts_rx := 0,
+	bytes_payload_rx := 0,
+	num_pkts_rx_err_seq := 0,
+	num_pkts_rx_err_ts := 0,
+	num_pkts_rx_err_disabled := 0
+}
 
 type record RtpemConfig {
 	INT7b tx_payload_type,
@@ -122,9 +154,10 @@ signature RTPEM_bind(in HostName local_host, inout PortNumber local_port);
 signature RTPEM_connect(in HostName remote_host, in PortNumber remote_port);
 signature RTPEM_mode(in RtpemMode mode);
 signature RTPEM_configure(in RtpemConfig cfg);
+signature RTPEM_stats_get(out RtpemStats stats, in boolean rtcp);
 
 type port RTPEM_CTRL_PT procedure {
-	inout RTPEM_bind, RTPEM_connect, RTPEM_mode, RTPEM_configure;
+	inout RTPEM_bind, RTPEM_connect, RTPEM_mode, RTPEM_configure, RTPEM_stats_get;
 } with { extension "internal" };
 
 template PDU_RTP ts_RTP(BIT32_BO_LAST ssrc, INT7b pt, LIN2_BO_LAST seq, uint32_t ts,
@@ -158,6 +191,7 @@ private function f_tx_rtp(octetstring payload, BIT1 marker := '0'B) runs on RTP_
 function f_main() runs on RTP_Emulation_CT
 {
 	var Result res;
+	var boolean is_rtcp
 
 	timer T_transmit := int2float(g_cfg.tx_duration_ms)/1000.0;
 	var RTP_RecvFrom rx_rtp;
@@ -249,20 +283,38 @@ function f_main() runs on RTP_Emulation_CT
 			g_iuup_ent.cfg.active_init := g_cfg.iuup_tx_init;
 			CTRL.reply(RTPEM_configure:{cfg});
 		}
+		[] CTRL.getcall(RTPEM_stats_get:{?, ?}) -> param (is_rtcp) {
+			if (is_rtcp) {
+				CTRL.reply(RTPEM_stats_get:{g_stats_rtcp, is_rtcp});
+			} else {
+				CTRL.reply(RTPEM_stats_get:{g_stats_rtp, is_rtcp});
+			}
+		}
 
-		/* simply ignore any RTTP/RTCP if receiver not enabled */
-		[g_rx_enabled==false] RTP.receive(tr_rtp) { }
-		[g_rx_enabled==false] RTCP.receive(tr_rtp) { }
+
+
+		/* simply ignore any RTTP/RTP if receiver not enabled */
+		[g_rx_enabled==false] RTP.receive(tr_rtp) {
+			g_stats_rtp.num_pkts_rx_err_disabled := g_stats_rtp.num_pkts_rx_err_disabled+1;
+			}
+		[g_rx_enabled==false] RTCP.receive(tr_rtp) {
+			g_stats_rtcp.num_pkts_rx_err_disabled := g_stats_rtcp.num_pkts_rx_err_disabled+1;
+			}
 
 		/* process received RTCP/RTP if receiver enabled */
 		[g_rx_enabled] RTP.receive(tr_rtp) -> value rx_rtp {
 			log("RX RTP: ", rx_rtp);
+			/* increment counters */
+			g_stats_rtp.num_pkts_rx := g_stats_rtp.num_pkts_rx+1;
+			g_stats_rtp.bytes_payload_rx := g_stats_rtp.bytes_payload_rx +
+								lengthof(rx_rtp.msg.rtp.data);
 			if (g_cfg.iuup_mode) {
 				rx_rtp.msg.rtp.data := f_IuUP_Em_rx_decaps(g_iuup_ent, rx_rtp.msg.rtp.data);
 			}
 		}
 		[g_rx_enabled] RTCP.receive(tr_rtcp) -> value rx_rtp {
 			log("RX RTCP: ", rx_rtp);
+			g_stats_rtcp.num_pkts_rx := g_stats_rtcp.num_pkts_rx+1;
 		}
 
 		/* transmit if timer has expired */
@@ -270,6 +322,10 @@ function f_main() runs on RTP_Emulation_CT
 			/* send one RTP frame, re-start timer */
 			f_tx_rtp(g_cfg.tx_fixed_payload);
 			T_transmit.start;
+			/* update counters */
+			g_stats_rtp.num_pkts_tx := g_stats_rtp.num_pkts_tx+1;
+			g_stats_rtp.bytes_payload_tx := g_stats_rtp.bytes_payload_tx +
+								lengthof(g_cfg.tx_fixed_payload);
 		}
 
 		/* fail on any unexpected messages */
