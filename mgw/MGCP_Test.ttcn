@@ -8,6 +8,7 @@ module MGCP_Test {
 	import from RTP_CodecPort all;
 	import from RTP_CodecPort_CtrlFunct all;
 	import from RTP_Endpoint all;
+	import from RTP_Emulation all;
 	import from IPL4asp_Types all;
 
 	const charstring c_mgw_domain := "mgw";
@@ -24,6 +25,9 @@ module MGCP_Test {
 		var integer g_trans_id;
 
 		var RtpEndpoint	g_rtp_ep[2];
+
+		var RTP_Emulation_CT vc_RTPEM[2];
+		port RTPEM_CTRL_PT RTPEM[2];
 	};
 
 	function get_next_trans_id() runs on dummy_CT return MgcpTransId {
@@ -42,6 +46,14 @@ module MGCP_Test {
 		PortNumber mp_remote_udp_port := 2427;
 		charstring mp_remote_ip := "127.0.0.1";
 		PortNumber mp_local_rtp_port_base := 10000;
+	}
+
+	private function f_rtpem_init(inout RTP_Emulation_CT comp_ref, integer i)
+	runs on dummy_CT {
+		comp_ref := RTP_Emulation_CT.create("RTPEM" & int2str(i));
+		map(comp_ref:RTP, system:RTP);
+		map(comp_ref:RTCP, system:RTCP);
+		comp_ref.start(RTP_Emulation.f_main());
 	}
 
 	/* initialization function, called by each test case at the
@@ -68,6 +80,11 @@ module MGCP_Test {
 			rtp_endpoint_bind(RTP, g_rtp_ep[0]);
 			rtp_endpoint_init(g_rtp_ep[1], mp_local_ip, mp_local_rtp_port_base+2, ssrc);
 			rtp_endpoint_bind(RTP, g_rtp_ep[1]);
+
+			for (var integer i := 0; i < sizeof(vc_RTPEM); i := i+1) {
+				f_rtpem_init(vc_RTPEM[i], i);
+				connect(vc_RTPEM[i]:CTRL, self:RTPEM[i]);
+			}
 		}
 
 		if (isvalue(ep)) {
@@ -222,6 +239,62 @@ module MGCP_Test {
 	function f_dlcx_ignore(MgcpEndpoint ep, template MgcpCallId call_id := omit,
 				template MgcpConnectionId conn_id := omit) runs on dummy_CT {
 		f_dlcx(ep, ?, *, call_id, conn_id);
+	}
+
+	type record HostPort {
+		charstring hostname,
+		integer portnr optional
+	}
+	type record RtpFlowData {
+		HostPort em,	/* emulation side */
+		HostPort mgw,	/* mgw side */
+		uint7_t pt,
+		charstring codec,
+		MgcpConnectionId mgcp_conn_id optional
+	}
+
+	function f_flow_create(RTPEM_CTRL_PT pt, MgcpEndpoint ep, inout RtpFlowData flow,
+				boolean one_phase := true)
+	runs on dummy_CT {
+		var MgcpCallId call_id := '1226'H;
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+
+		/* bind local RTP emulation socket */
+		f_rtpem_bind(pt, flow.em.hostname, flow.em.portnr);
+
+		if (one_phase) {
+			/* Connect flow to MGW */
+			cmd := ts_CRCX(get_next_trans_id(), ep, "sendrecv", call_id);
+			cmd.sdp := ts_SDP(flow.em.hostname, flow.mgw.hostname, "23", "42",
+					  flow.em.portnr, { int2str(flow.pt) },
+					  { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)),
+					    valueof(ts_SDP_ptime(20)) });
+			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK);
+			flow.mgcp_conn_id := extract_conn_id(resp);
+			/* extract port number from response */
+			flow.mgw.portnr :=
+				resp.sdp.media_list[0].media_field.ports.port_number;
+		} else {
+			/* first create the MGW side RTP socket */
+			cmd := ts_CRCX(get_next_trans_id(), ep, "recvonly", call_id);
+			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK);
+			flow.mgcp_conn_id := extract_conn_id(resp);
+			/* extract MGW-side port number from response */
+			flow.mgw.portnr :=
+				resp.sdp.media_list[0].media_field.ports.port_number;
+
+			/* then connect it to the emulation-side RTP socket using SDP */
+			cmd := ts_MDCX(get_next_trans_id(), ep, "sendrecv", call_id, flow.mgcp_conn_id);
+			cmd.sdp := ts_SDP(flow.em.hostname, flow.mgw.hostname, "23", "42",
+					  flow.em.portnr, { int2str(flow.pt) },
+					  { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)),
+					    valueof(ts_SDP_ptime(20)) });
+			resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
+
+		}
+		/* finally, connect the emulation-side RTP socket to the MGW */
+		f_rtpem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
 	}
 
 	function f_crcx(charstring ep_prefix) runs on dummy_CT {
@@ -711,7 +784,95 @@ module MGCP_Test {
 		setverdict(pass);
 	}
 
+	template (value) RtpFlowData t_RtpFlow(charstring host_a, charstring host_b, uint7_t pt,
+						charstring codec) := {
+		em := {
+			hostname := host_a,
+			portnr := omit
+		},
+		mgw := {
+			hostname := host_b,
+			portnr := omit
+		},
+		pt := pt,
+		codec := codec
+	}
 
+	/* transmit RTP streams between two RTP Emulations back-to-back; expect no loss */
+	testcase TC_rtpem_selftest() runs on dummy_CT {
+		var RtpemStats stats[2];
+		var integer local_port := 10000;
+		var integer local_port2 := 20000;
+
+		f_init();
+
+		f_rtpem_bind(RTPEM[0], "127.0.0.1", local_port);
+		f_rtpem_bind(RTPEM[1], "127.0.0.2", local_port2);
+
+		f_rtpem_connect(RTPEM[0], "127.0.0.2", local_port2);
+		f_rtpem_connect(RTPEM[1], "127.0.0.1", local_port);
+
+		log("=== starting");
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_BIDIR);
+
+		f_sleep(5.0);
+
+		log("=== stopping");
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_RXONLY);
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_RXONLY);
+		f_sleep(0.5);
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_NONE);
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_NONE);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (not f_rtpem_stats_compare(stats[0], stats[1])) {
+			setverdict(fail, "RTP endpoint statistics don't match");
+		}
+		setverdict(pass);
+	}
+
+	/* create two local RTP emulations; create two connections on MGW EP, exchange some data */
+	testcase TC_two_crcx_and_rtp() runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats[2];
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1226'H;
+
+		f_init(ep);
+
+		/* from us to MGW */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
+		/* bind local RTP emulation sockets */
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, flow[0]);
+
+		/* from MGW back to us */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
+		flow[1].em.portnr := 20000;
+		f_flow_create(RTPEM[1], ep, flow[1]);
+
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_RXONLY);
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
+
+		f_sleep(1.0);
+
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_NONE);
+		f_sleep(0.1);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (not f_rtpem_stats_compare(stats[0], stats[1])) {
+			setverdict(fail, "RTP endpoint statistics don't match");
+		}
+
+		f_dlcx_ok(ep, call_id);
+		setverdict(pass);
+
+	}
 
 	/* TODO: Double-DLCX (no retransmission) */
 
@@ -750,5 +911,8 @@ module MGCP_Test {
 		execute(TC_crcx_and_dlcx_retrans());
 
 		execute(TC_crcx_dlcx_30ep());
+
+		execute(TC_rtpem_selftest());
+		execute(TC_two_crcx_and_rtp());
 	}
 }
