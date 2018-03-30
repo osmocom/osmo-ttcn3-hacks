@@ -1,5 +1,6 @@
 module BTS_Tests {
 
+import from Native_Functions all;
 import from General_Types all;
 import from GSM_Types all;
 import from GSM_RR_Types all;
@@ -17,6 +18,8 @@ import from RSL_Types all;
 import from IPA_Types all;
 import from IPA_Emulation all;
 import from RSL_Emulation all;
+
+import from RTP_Emulation all;
 
 import from IPL4asp_Types all;
 import from TRXC_Types all;
@@ -117,6 +120,9 @@ type component ConnHdlr extends RSL_DchanHdlr {
 	var ConnHdlrPars g_pars;
 	var uint8_t g_next_meas_res_nr := 0;
 	var boolean g_first_meas_res := true;
+
+	var RTP_Emulation_CT vc_RTPEM;
+	port RTPEM_CTRL_PT RTPEM;
 }
 
 function f_init_rsl(charstring id) runs on test_CT {
@@ -393,6 +399,13 @@ runs on ConnHdlr {
 	activate(as_Tguard());
 
 	f_rslem_register(0, pars.chan_nr);
+
+	/* Create + connect RTP emulation */
+	vc_RTPEM := RTP_Emulation_CT.create(id & "-RTPEM");
+	map(vc_RTPEM:RTP, system:RTP);
+	map(vc_RTPEM:RTCP, system:RTCP);
+	connect(vc_RTPEM:CTRL, self:RTPEM);
+	vc_RTPEM.start(RTP_Emulation.f_main());
 
 	/* call the user-supplied test case function */
 	fn.apply(id);
@@ -2619,6 +2632,177 @@ testcase TC_pcu_paging_from_rsl() runs on test_CT {
 	setverdict(pass);
 }
 
+type record HostPort {
+	char hostname,
+	integer portnr
+}
+type record MediaConfig {
+	HostPort em,
+	HostPort bts,
+	integer ipa_conn_id,
+	uint7_t pt
+}
+
+/* perform IPA CRCX + CRCX ACK transaction; extract IP + Port of BTS side */
+private function f_ipa_crcx(inout MediaConfig mcfg) runs on ConnHdlr {
+	var RSL_Message rx_rsl;
+	var RSL_IE_Body rsl_ie;
+	/* Send IPA CRCX, which will tell us the IP+Port on the BTS side */
+	rx_rsl := f_rsl_transceive_ret(ts_RSL_IPA_CRCX(g_chan_nr),
+					tr_RSL_IPA_CRCX_ACK(g_chan_nr, ?, ?, ?),
+					"IPA CRCX ACK");
+	f_rsl_find_ie(rx_rsl, RSL_IE_IPAC_LOCAL_IP, rsl_ie)
+	mcfg.bts.hostname := f_inet_ntoa(int2oct(rsl_ie.ipa_local_ip, 4));
+	f_rsl_find_ie(rx_rsl, RSL_IE_IPAC_LOCAL_PORT, rsl_ie)
+	mcfg.bts.portnr := rsl_ie.ipa_local_port;
+	f_rsl_find_ie(rx_rsl, RSL_IE_IPAC_CONN_ID, rsl_ie)
+	mcfg.ipa_conn_id := rsl_ie.ipa_conn_id;
+}
+
+private function f_ipa_mdcx(inout MediaConfig mcfg) runs on ConnHdlr {
+	f_rsl_transceive_ret(ts_RSL_IPA_MDCX(g_chan_nr, mcfg.ipa_conn_id,
+						oct2int(f_inet_addr(mcfg.em.hostname)),
+						mcfg.em.portnr, mcfg.pt),
+				tr_RSL_IPA_MDCX_ACK(g_chan_nr, mcfg.ipa_conn_id,
+						    oct2int(f_inet_addr(mcfg.bts.hostname)),
+						    mcfg.bts.portnr, mcfg.pt),
+				"IPA MDCX ACK");
+}
+
+/* determine RTP payload type to use for given channel mode (rate/codec version) */
+private function f_RTP_PT_by_chan_mod(RSL_IE_ChannelMode chmod) return integer {
+	select (chmod) {
+	/* those are not 3GPP standard but standard in the Osmocom universe */
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM1)) { return 3; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM2)) { return 97; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM3)) { return 98; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM1)) { return 96; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM3)) { return 98; }
+	}
+	return -1;
+}
+
+private function f_RTP_len_by_chan_mod(RSL_IE_ChannelMode chmod) return integer {
+	select (chmod) {
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM1)) { return 33; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM2)) { return 31; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM3)) { return 0; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM1)) { return 14; }
+	case (ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM3)) { return 0; }
+	}
+	return -1;
+}
+
+
+/* establish DChan, verify existance + contents of RTP stream */
+function f_TC_rtp(charstring id) runs on ConnHdlr {
+	var MediaConfig mcfg;
+	var RtpemStats stats;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	mcfg.em.portnr := 10000;
+	mcfg.em.hostname := mp_rsl_ip;
+	mcfg.pt := f_RTP_PT_by_chan_mod(g_pars.chan_mode);
+
+	f_est_dchan();
+
+	/* Create socket on BTS side */
+	f_ipa_crcx(mcfg);
+	/* Create socket on emulation side */
+	f_rtpem_bind(RTPEM, mcfg.em.hostname, mcfg.em.portnr);
+	/* connect socket on BTS side */
+	f_ipa_mdcx(mcfg);
+	/* connect socket on emulation side */
+	f_rtpem_connect(RTPEM, mcfg.bts.hostname, mcfg.bts.portnr);
+
+	f_rtpem_mode(RTPEM, RTPEM_MODE_RXONLY);
+
+	/* run for a number of seconds, send SACCH + FACCH from MS side and verify
+	 * RSL measurement reports on Abis side */
+	timer T := 8.0;
+	T.start;
+	alt {
+	/* respond to SACCH uplink with SACCH downlink */
+	[] as_l1_sacch();
+	/* ignore all measurement results */
+	[] RSL.receive(tr_RSL_MEAS_RES(?)) { repeat; }
+	/* respond to FACCH DL with FACCH UL (shouldn't actually happen?) */
+	[] as_l1_dcch();
+	/* respond to TCH DL with TCH UL (codec frame) */
+	[] L1CTL.receive(tr_L1CTL_TRAFFIC_IND(g_chan_nr, ?, *, ?, ?)) {
+		var octetstring fr := 'D00000000000000000000000000000000000000000000000000000000000000000'O;
+		L1CTL.send(ts_L1CTL_TRAFFIC_REQ(g_chan_nr, ts_RslLinkID_DCCH(0), fr));
+		repeat;
+		}
+	/* ignore everything else L1CTL might send us */
+	[] L1CTL.receive { repeat; }
+	[] T.timeout { }
+	}
+	stats := f_rtpem_stats_get(RTPEM);
+	log(stats);
+	/* in 8 seconds, we expect 8000ms/20ms = 400 RTP packets */
+	var integer nominal_num_pkts := 8000/20;
+	var integer nominal_num_bytes := nominal_num_pkts * f_RTP_len_by_chan_mod(g_pars.chan_mode);
+	var template RtpemStats t_stats := {
+		num_pkts_tx := 0,
+		bytes_payload_tx := 0,
+		num_pkts_rx := f_tolerance(nominal_num_pkts, 0, 4294967296, nominal_num_pkts/10),
+		bytes_payload_rx := f_tolerance(nominal_num_bytes, 0, 4294967295, nominal_num_bytes/10),
+		num_pkts_rx_err_seq := 0,
+		num_pkts_rx_err_ts := 0,
+		num_pkts_rx_err_disabled := ?
+	};
+	if (match(stats, t_stats)) {
+		setverdict(pass);
+	} else {
+		setverdict(fail,"Statistics unexpected");
+	}
+
+	/* cleanup */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+}
+testcase TC_rtp_tchf_fr() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		var RSL_IE_ChannelMode chm := valueof(ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM1));
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), chm));
+		vc_conn := f_start_handler(refers(f_TC_rtp), pars);
+		vc_conn.done;
+	}
+	f_shutdown();
+}
+testcase TC_rtp_tchf_efr() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		var RSL_IE_ChannelMode chm := valueof(ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM2));
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), chm));
+		vc_conn := f_start_handler(refers(f_TC_rtp), pars);
+		vc_conn.done;
+	}
+	f_shutdown();
+}
+testcase TC_rtp_tchh_hr() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init(testcasename());
+	for (var integer ss := 0; ss <= 1; ss := ss+1) {
+		var RSL_IE_ChannelMode chm := valueof(ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM1));
+		pars := valueof(t_Pars(t_RslChanNr_Lm(5, ss), chm));
+		vc_conn := f_start_handler(refers(f_TC_rtp), pars);
+		vc_conn.done;
+	}
+	f_shutdown();
+}
+
+
+
 
 /* TODO Areas:
 
@@ -2711,6 +2895,10 @@ control {
 	execute( TC_pcu_data_req_imm_ass_pch() );
 	execute( TC_pcu_rach_content() );
 	execute( TC_pcu_paging_from_rsl() );
+
+	execute( TC_rtp_tchf_fr() );
+	execute( TC_rtp_tchf_efr() );
+	execute( TC_rtp_tchh_hr() );
 }
 
 

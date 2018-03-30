@@ -32,6 +32,10 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.RTP/src
+FILES="RTP_EncDec.cc RTP_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_VTY_Functions.ttcn GSM_SystemInformation.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc L1CTL_Types.ttcn L1CTL_PortType.ttcn L1CTL_PortType_CtrlFunct.ttcn L1CTL_PortType_CtrlFunctDef.cc LAPDm_RAW_PT.ttcn LAPDm_Types.ttcn "
 #FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
@@ -42,6 +46,7 @@ FILES+="L3_Templates.ttcn L3_Common.ttcn "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="TRXC_Types.ttcn TRXC_CodecPort.ttcn TRXC_CodecPort_CtrlFunct.ttcn TRXC_CodecPort_CtrlFunctDef.cc "
 FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
+FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttcn IuUP_EncDec.cc "
 gen_links $DIR $FILES
 
 ignore_pp_results
