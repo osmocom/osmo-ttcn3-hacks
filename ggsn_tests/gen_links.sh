@@ -40,9 +40,14 @@ DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
+FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Templates.ttcn "
+FILES+="Osmocom_VTY_Functions.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
