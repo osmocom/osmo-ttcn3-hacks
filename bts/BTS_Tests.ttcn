@@ -117,6 +117,9 @@ type component ConnHdlr extends RSL_DchanHdlr {
 	var ConnHdlrPars g_pars;
 	var uint8_t g_next_meas_res_nr := 0;
 	var boolean g_first_meas_res := true;
+
+	/* PCU Interface of BTS */
+	port PCUIF_CODEC_PT PCU;
 }
 
 function f_init_rsl(charstring id) runs on test_CT {
@@ -235,30 +238,31 @@ private function f_init_vty(charstring id) runs on test_CT {
 }
 
 /* PCU socket may at any time receive a new INFO.ind */
-private altstep as_pcu_info_ind() runs on test_CT {
+private altstep as_pcu_info_ind(PCUIF_CODEC_PT pt, integer pcu_conn_id,
+				out PCUIF_Message pcu_last_info) {
 	var PCUIF_send_data sd;
-	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_INFO_IND(0, ?))) -> value sd {
-		g_pcu_last_info := sd.data;
+	[] pt.receive(t_SD_PCUIF(pcu_conn_id, tr_PCUIF_INFO_IND(0, ?))) -> value sd {
+		pcu_last_info := sd.data;
 		}
-	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_INFO_IND(?, ?, ?))) -> value sd {
+	[] pt.receive(t_SD_PCUIF(pcu_conn_id, tr_PCUIF_INFO_IND(?, ?, ?))) -> value sd {
 		setverdict(fail, "Invalid PCU Version/BTS Number received");
 		self.stop;
 		}
 }
 
-private function f_init_pcu(charstring id) runs on test_CT {
+private function f_init_pcu(PCUIF_CODEC_PT pt, charstring id,
+			    out integer pcu_conn_id, out PCUIF_Message pcu_last_info) {
 	timer T := 2.0;
 	var PCUIF_send_data sd;
-	map(self:PCU, system:PCU);
 	if (mp_pcu_socket == "") {
-		g_pcu_conn_id := -1;
+		pcu_conn_id := -1;
 		return;
 	}
-	g_pcu_conn_id := f_pcuif_connect(PCU, mp_pcu_socket);
+	pcu_conn_id := f_pcuif_connect(pt, mp_pcu_socket);
 
 	T.start;
 	alt {
-	[] as_pcu_info_ind();
+	[] as_pcu_info_ind(pt, pcu_conn_id, pcu_last_info);
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for PCU INFO_IND");
 		self.stop;
@@ -296,7 +300,8 @@ function f_init(charstring id := "BTS-Test") runs on test_CT {
 	f_rsl_bcch_fill(RSL_SYSTEM_INFO_2, ts_SI2_default);
 	f_rsl_bcch_fill(RSL_SYSTEM_INFO_4, ts_SI4_default);
 
-	f_init_pcu(id);
+	map(self:PCU, system:PCU);
+	f_init_pcu(PCU, id, g_pcu_conn_id, g_pcu_last_info);
 
 	if (mp_bb_trxc_port != -1) {
 		var TrxcMessage ret;
@@ -322,7 +327,7 @@ function f_init_l1ctl() runs on test_CT {
 type function void_fn(charstring id) runs on ConnHdlr;
 
 /* create a new test component */
-function f_start_handler(void_fn fn, ConnHdlrPars pars)
+function f_start_handler(void_fn fn, ConnHdlrPars pars, boolean pcu_comp := false)
 runs on test_CT return ConnHdlr {
 	var charstring id := testcasename();
 	var ConnHdlr vc_conn;
@@ -331,6 +336,13 @@ runs on test_CT return ConnHdlr {
 	/* connect to RSL Emulation main component */
 	connect(vc_conn:RSL, vc_RSL:CLIENT_PT);
 	connect(vc_conn:RSL_PROC, vc_RSL:RSL_PROC);
+	if (pcu_comp) {
+		/* the ConnHdlr component wants to talk directly to the PCU, so disconnect
+		 * it from the test_CT and connect it to the component.  This obviously only
+		 * works for one component, i.e. no concurrency */
+		unmap(self:PCU, system:PCU);
+		map(vc_conn:PCU, system:PCU);
+	}
 
 	vc_conn.start(f_handler_init(fn, id, pars));
 	return vc_conn;
