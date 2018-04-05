@@ -29,6 +29,7 @@ struct TestCase {
 	static constexpr const char* Pass = "pass";
 	static constexpr const char* Inconc = "INCONCLUSIVE";
 	static constexpr const char* Fail = "FAIL";
+	static constexpr const char* XFail = "xfail";
 	static constexpr const char* Error = "ERROR";
 	static constexpr const char* Unbound = "UNBOUND";
 	static constexpr const char* Skipped = "skipped";
@@ -43,6 +44,8 @@ struct TestCase {
 	void writeTestCase(FILE* file_stream_) const;
 	void setTCVerdict(const TitanLoggerApi::TitanLogEvent& event);
 	void reset();
+	bool evaluateExpectedVerdict(const char *suite_name, const char *test_name,
+				     const char *verdict_name);
 };
 
 
@@ -62,6 +65,9 @@ struct TestSuite {
 	
 	void addTestCase(const TestCase& element);
 	void write(FILE* file_stream_);
+	void readExpectedVerdicts(const char *path=NULL);
+	void evaluateExpectedVerdict(const char *suite_name, const char *test_name,
+				     const char *verdict_name);
 };
 
 class SummaryLogger: public ILoggerPlugin
