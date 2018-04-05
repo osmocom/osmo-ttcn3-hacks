@@ -2635,7 +2635,7 @@ testcase TC_pcu_paging_from_rsl() runs on test_CT {
 }
 
 /***********************************************************************
- * Dynamic Timeslot Support
+ * Osmocom Style Dynamic Timeslot Support
  ***********************************************************************/
 
 private function f_dyn_osmo_pdch_act(integer pcu_conn_id, integer bts_nr, integer trx_nr)
@@ -2817,6 +2817,182 @@ testcase TC_dyn_osmo_pdch_tchh_act() runs on test_CT {
 	vc_conn.done;
 }
 
+/***********************************************************************
+ * IPA Style Dynamic Timeslot Support
+ ***********************************************************************/
+
+private function f_dyn_ipa_pdch_act(integer pcu_conn_id, integer bts_nr, integer trx_nr)
+runs on ConnHdlr {
+	var PCUIF_send_data sd;
+	/* Expect BTS to immediately acknowledge activation as PDCH */
+	PCU.clear;
+	RSL.send(ts_RSL_IPA_PDCH_ACT(g_chan_nr));
+	/* expect INFO_IND on PCU interface listing TS as PDCH */
+	alt {
+	[] PCU.receive(t_SD_PCUIF(pcu_conn_id, tr_PCUIF_INFO_IND(bts_nr, ?))) -> value sd {
+		if (substr(sd.data.u.info_ind.trx[trx_nr].pdch_mask, g_chan_nr.tn, 1) != '1'B) {
+			setverdict(fail, "PCUIF_INFO_IND PDCH_MASK not '1' after PDCH ACT");
+			self.stop;
+		}
+		}
+	[] PCU.receive { repeat; }
+	}
+	/* try to activate this PDCH from the PCU point of view */
+	PCU.send(t_SD_PCUIF(pcu_conn_id, ts_PCUIF_ACT_REQ(bts_nr, trx_nr, g_chan_nr.tn)));
+	/* FIXME: is there a response? */
+
+	RSL.receive(tr_RSL_IPA_PDCH_ACT_ACK(g_chan_nr, ?));
+}
+
+private function f_dyn_ipa_pdch_deact(integer pcu_conn_id, integer bts_nr, integer trx_nr)
+runs on ConnHdlr {
+	var PCUIF_send_data sd;
+	/* Send RSL CHAN REL (deactivate) */
+	RSL.send(ts_RSL_IPA_PDCH_DEACT(g_chan_nr));
+	PCU.clear;
+	/* expect BTS to ask PCU to deactivate the channel */
+	alt {
+	[] PCU.receive(t_SD_PCUIF(pcu_conn_id, tr_PCUIF_INFO_IND(bts_nr, ?))) -> value sd {
+		if (substr(sd.data.u.info_ind.trx[trx_nr].pdch_mask, g_chan_nr.tn, 1) != '0'B) {
+			setverdict(fail, "PCUIF_INFO_IND PDCH_MASK not '0' after PDCH DEACT");
+			self.stop;
+		}
+		}
+	[] PCU.receive { repeat; }
+	}
+	/* Emulate PCU asking BTS to deactivate PDCH */
+	PCU.send(t_SD_PCUIF(pcu_conn_id, ts_PCUIF_DEACT_REQ(bts_nr, trx_nr, g_chan_nr.tn)));
+	alt {
+	[] RSL.receive(tr_RSL_IPA_PDCH_DEACT_ACK(g_chan_nr)) {
+		setverdict(pass);
+		}
+	[] RSL.receive { repeat; }
+	}
+}
+
+/* Activate and de-activate an IPA-style dynamic TCH/F + PDCH */
+function f_TC_dyn_ipa_pdch_act_deact(charstring id) runs on ConnHdlr {
+	var PCUIF_Message first_info;
+	var integer ts_nr := g_chan_nr.tn;
+	var integer trx_nr := 0;
+	var integer bts_nr := 0;
+	var integer pcu_conn_id := -1;
+
+	f_init_pcu(PCU, id, pcu_conn_id, first_info);
+
+	f_dyn_ipa_pdch_act(pcu_conn_id, bts_nr, trx_nr);
+	f_sleep(3.0);
+	f_dyn_ipa_pdch_deact(pcu_conn_id, bts_nr, trx_nr);
+
+	setverdict(pass);
+
+}
+testcase TC_dyn_ipa_pdch_act_deact() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(3), ts_RSL_ChanMode_SIGN));
+	vc_conn := f_start_handler(refers(f_TC_dyn_ipa_pdch_act_deact), pars, true);
+	vc_conn.done;
+}
+
+/* try to RSL CHAN ACT a TCH/F on an IPA-style PDCH */
+function f_TC_dyn_ipa_pdch_tchf_act(charstring id) runs on ConnHdlr {
+	var PCUIF_Message first_info;
+	var integer ts_nr := g_chan_nr.tn;
+	var integer trx_nr := 0;
+	var integer bts_nr := 0;
+	var integer pcu_conn_id := -1;
+
+	f_init_pcu(PCU, id, pcu_conn_id, first_info);
+
+	f_rsl_transceive(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode), tr_RSL_CHAN_ACT_ACK(g_chan_nr),
+			 "RSL CHAN ACT");
+	f_rsl_transceive(ts_RSL_RF_CHAN_REL(g_chan_nr), tr_RSL_RF_CHAN_REL_ACK(g_chan_nr),
+			"RF CHAN REL", true);
+	setverdict(pass);
+}
+testcase TC_dyn_ipa_pdch_tchf_act() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init(testcasename());
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(3), ts_RSL_ChanMode_SIGN));
+	vc_conn := f_start_handler(refers(f_TC_dyn_ipa_pdch_tchf_act), pars, true);
+	vc_conn.done;
+}
+
+/* Activate IPA style dyn PDCH as TCH/F and then illegally try to activate it as PDCH, too */
+function f_TC_dyn_ipa_pdch_tchf_act_pdch_act_nack(charstring id) runs on ConnHdlr {
+	var PCUIF_Message first_info;
+	var integer ts_nr := g_chan_nr.tn;
+	var integer trx_nr := 0;
+	var integer bts_nr := 0;
+	var integer pcu_conn_id := -1;
+
+	f_init_pcu(PCU, id, pcu_conn_id, first_info);
+
+	f_rsl_transceive(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode), tr_RSL_CHAN_ACT_ACK(g_chan_nr),
+			 "RSL CHAN ACT");
+
+	RSL.send(ts_RSL_IPA_PDCH_ACT(g_chan_nr));
+	alt {
+	[] RSL.receive(tr_RSL_IPA_PDCH_ACT_NACK(g_chan_nr, ?));
+	[] RSL.receive(tr_RSL_IPA_PDCH_ACT_ACK(g_chan_nr, ?)) {
+		setverdict(fail, "Unexpected PDCH ACT ACK");
+		self.stop;
+		}
+	[] RSL.receive { repeat; }
+	}
+
+	f_rsl_transceive(ts_RSL_RF_CHAN_REL(g_chan_nr), tr_RSL_RF_CHAN_REL_ACK(g_chan_nr),
+			"RF CHAN REL", true);
+	setverdict(pass);
+}
+testcase TC_dyn_ipa_pdch_tchf_act_pdch_act_nack() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init(testcasename());
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(3), ts_RSL_ChanMode_SIGN));
+	vc_conn := f_start_handler(refers(f_TC_dyn_ipa_pdch_tchf_act_pdch_act_nack), pars, true);
+	vc_conn.done;
+}
+
+/* try to RSL CHAN ACT a TCH/F on an IPA-style PDCH that's already in PDCH mode; expect NACK */
+function f_TC_dyn_ipa_pdch_act_tchf_act_nack(charstring id) runs on ConnHdlr {
+	var PCUIF_Message first_info;
+	var integer ts_nr := g_chan_nr.tn;
+	var integer trx_nr := 0;
+	var integer bts_nr := 0;
+	var integer pcu_conn_id := -1;
+
+	/* register for the TCH/F channel number */
+	f_rslem_register(0, g_chan_nr);
+
+	f_init_pcu(PCU, id, pcu_conn_id, first_info);
+
+	f_dyn_ipa_pdch_act(pcu_conn_id, bts_nr, trx_nr);
+
+	f_rsl_transceive(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode), tr_RSL_CHAN_ACT_NACK(g_chan_nr),
+			 "RSL CHAN ACT");
+
+	f_dyn_ipa_pdch_deact(pcu_conn_id, bts_nr, trx_nr);
+
+	setverdict(pass);
+}
+testcase TC_dyn_ipa_pdch_act_tchf_act_nack() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init(testcasename());
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(3), ts_RSL_ChanMode_SIGN));
+	vc_conn := f_start_handler(refers(f_TC_dyn_ipa_pdch_act_tchf_act_nack), pars, true);
+	vc_conn.done;
+}
+
+
 
 /* TODO Areas:
 
@@ -2915,6 +3091,10 @@ control {
 	execute( TC_dyn_osmo_pdch_double_act() );
 	execute( TC_dyn_osmo_pdch_tchf_act() );
 	execute( TC_dyn_osmo_pdch_tchh_act() );
+	execute( TC_dyn_ipa_pdch_act_deact() );
+	execute( TC_dyn_ipa_pdch_tchf_act() );
+	execute( TC_dyn_ipa_pdch_tchf_act_pdch_act_nack() );
+	execute( TC_dyn_ipa_pdch_act_tchf_act_nack() );
 }
 
 
