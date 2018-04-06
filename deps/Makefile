@@ -88,7 +88,7 @@ titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
 titan.TestPorts.TCPasp_commit=			R.9.A
 titan.TestPorts.TELNETasp_commit=		R.9.A
 titan.TestPorts.UDPasp_commit=			R.8.A
-titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-4-g63d4ee3
+titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-4-gbacd73d
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
