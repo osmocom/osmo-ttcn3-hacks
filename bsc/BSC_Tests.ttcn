@@ -281,7 +281,11 @@ function f_init_mgcp(charstring id) runs on test_CT {
 	vc_MGCP.start(MGCP_Emulation.main(ops, mgcp_pars, id));
 }
 
-private function f_init_vty(charstring id) runs on test_CT {
+private function f_init_vty(charstring id := "foo") runs on test_CT {
+	if (BSCVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
 	map(self:BSCVTY, system:BSCVTY);
 	f_vty_set_prompts(BSCVTY);
 	f_vty_transceive(BSCVTY, "enable");
@@ -1917,6 +1921,14 @@ testcase TC_err_84_unknown_msg() runs on test_CT {
 	vc_conn.done;
 }
 
+/* execute a "bts <0-255> trx <0-255> timeslot <0-7> " command on given Dchan */
+private function f_vty_ts_action(charstring suffix, integer bts_nr, integer trx_nr, integer ts_nr)
+runs on test_CT {
+	var charstring cmd := "bts "&int2str(bts_nr)&" trx "&int2str(trx_nr)&
+				" timeslot "&int2str(ts_nr)&" ";
+	f_vty_transceive(BSCVTY, cmd & suffix);
+}
+
 /* execute a "bts <0-255> trx <0-255> timeslot <0-7> sub-slot <0-7>" command on given Dchan */
 private function f_vty_ss_action(charstring suffix, integer bts_nr, integer trx_nr, RslChannelNr chan_nr)
 runs on MSC_ConnHdlr {
@@ -2145,6 +2157,239 @@ testcase TC_ms_rel_ind_does_not_cause_bssmap_reset() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/***********************************************************************
+ * IPA style dynamic PDCH
+ ***********************************************************************/
+
+private function f_dyn_ipa_pdch_act(integer bts_nr, integer trx_nr, integer ts_nr,
+				    template (omit) RSL_Cause nack := omit)
+runs on test_CT {
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_Bm(ts_nr));
+	var RSL_Message rsl_unused;
+	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
+	f_vty_ts_action("pdch activate", bts_nr, trx_nr, ts_nr);
+	/* expect the BSC to issue the related RSL command */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
+	if (istemplatekind(nack, "omit")) {
+		/* respond with a related acknowledgement */
+		f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+	} else {
+		f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_NACK(chan_nr, valueof(nack)));
+	}
+}
+
+private function f_dyn_ipa_pdch_deact(integer bts_nr, integer trx_nr, integer ts_nr,
+				      template (omit) RSL_Cause nack := omit)
+runs on test_CT {
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_Bm(ts_nr));
+	var RSL_Message rsl_unused;
+	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
+	f_vty_ts_action("pdch deactivate", bts_nr, trx_nr, ts_nr);
+	/* expect the BSC to issue the related RSL command */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_DEACT(chan_nr));
+	if (istemplatekind(nack, "omit")) {
+		/* respond with a related acknowledgement */
+		f_ipa_tx(0, ts_RSL_IPA_PDCH_DEACT_ACK(chan_nr));
+	} else {
+		f_ipa_tx(0, ts_RSL_IPA_PDCH_DEACT_NACK(chan_nr, valueof(nack)));
+	}
+}
+
+private function f_ts_dyn_mode_get(integer bts_nr, integer trx_nr, integer ts_nr)
+runs on test_CT return charstring {
+	var charstring cmd, resp;
+	cmd := "show timeslot "&int2str(bts_nr)&" "&int2str(trx_nr)&" "&int2str(ts_nr);
+	resp := f_vty_transceive_ret(BSCVTY, cmd);
+	return regexp(resp, "*\((*)\)*", 0);
+}
+
+private function f_ts_dyn_mode_assert(integer bts_nr, integer trx_nr, integer ts_nr,
+					template charstring exp)
+runs on test_CT {
+	var charstring mode := f_ts_dyn_mode_get(bts_nr, trx_nr, ts_nr);
+	if (not match(mode, exp)) {
+		setverdict(fail, "Unexpected TS Mode: ", mode);
+		self.stop;
+	}
+}
+
+private function f_ts_set_chcomb(integer bts_nr, integer trx_nr, integer ts_nr, charstring chcomb)
+runs on test_CT {
+	f_vty_enter_cfg_ts(BSCVTY, bts_nr, trx_nr, ts_nr);
+	f_vty_transceive(BSCVTY, "phys_chan_config " & chcomb);
+	f_vty_transceive(BSCVTY, "end");
+}
+
+private const charstring TCHF_MODE := "TCH/F mode";
+private const charstring TCHH_MODE := "TCH/H mode";
+private const charstring PDCH_MODE := "PDCH mode";
+private const charstring NONE_MODE := "NONE mode";
+
+/* Test IPA PDCH activation / deactivation triggered by VTY */
+testcase TC_dyn_pdch_ipa_act_deact() runs on test_CT {
+	var RSL_Message rsl_unused;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 6, "TCH/F_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_Bm(6));
+
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
+	f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
+
+	/* De-activate it via VTY */
+	f_dyn_ipa_pdch_deact(0, 0, chan_nr.tn);
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+
+	/* re-activate it via VTY */
+	f_dyn_ipa_pdch_act(0, 0, chan_nr.tn);
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
+
+	/* and finally de-activate it again */
+	f_dyn_ipa_pdch_deact(0, 0, chan_nr.tn);
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+
+	setverdict(pass);
+}
+
+/* Test IPA PDCH activation NACK */
+testcase TC_dyn_pdch_ipa_act_nack() runs on test_CT {
+	var RSL_Message rsl_unused;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 6, "TCH/F_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_Bm(6));
+
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
+	f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
+
+	/* De-activate it via VTY */
+	f_dyn_ipa_pdch_deact(0, 0, chan_nr.tn);
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+
+	/* re-activate it via VTY, but fail that; check BSC still assumes TCH/F mode */
+	f_dyn_ipa_pdch_act(0, 0, chan_nr.tn, RSL_ERR_EQUIPMENT_FAIL);
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
+
+	setverdict(pass);
+}
+
+
+/***********************************************************************
+ * Osmocom style dynamic PDCH
+ ***********************************************************************/
+
+private function f_dyn_osmo_pdch_act(integer bts_nr, integer trx_nr, integer ts_nr,
+				     template (omit) RSL_Cause nack := omit)
+runs on test_CT {
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(ts_nr));
+	var RSL_Message rsl_unused;
+	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
+	/* FIXME: no VTY command to activate Osmocom PDCH !! */
+	/* expect the BSC to issue the related RSL command */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT(chan_nr, ?));
+	if (istemplatekind(nack, "omit")) {
+		/* respond with a related acknowledgement */
+		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	} else {
+		f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(chan_nr, valueof(nack)));
+	}
+}
+
+private function f_dyn_osmo_pdch_deact(integer bts_nr, integer trx_nr, integer ts_nr,
+				       template (omit) RSL_Cause nack := omit)
+runs on test_CT {
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(ts_nr));
+	var RSL_Message rsl_unused;
+	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
+	/* FIXME: no VTY command to activate Osmocom PDCH !! */
+	/* expect the BSC to issue the related RSL command */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(chan_nr));
+	if (istemplatekind(nack, "omit")) {
+		/* respond with a related acknowledgement */
+		f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+	} else {
+		//f_ipa_tx(0, ts_RSL_RF_CHAN_REL_NACK(chan_nr, valueof(nack)));
+	}
+}
+
+/* Test Osmocom dyn PDCH activation / deactivation triggered by VTY */
+testcase TC_dyn_pdch_osmo_act_deact() runs on test_CT {
+	var RSL_Message rsl_unused;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 6, "TCH/F_TCH/H_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(6));
+
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr, ?));
+
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
+
+	setverdict(pass);
+}
+
+/* Test Osmocom dyn PDCH activation NACK behavior */
+testcase TC_dyn_pdch_osmo_act_nack() runs on test_CT {
+	var RSL_Message rsl_unused;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 6, "TCH/F_TCH/H_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(6));
+
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr, ?));
+
+	/* NACK this activation and expect the "show timeslot" mode still to be NONE */
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL));
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
+
+	setverdict(pass);
+}
+
+
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -2229,6 +2474,11 @@ control {
 	execute( TC_bssap_rlsd_does_not_cause_bssmap_reset() );
 	execute( TC_bssmap_clear_does_not_cause_bssmap_reset() );
 	execute( TC_ms_rel_ind_does_not_cause_bssmap_reset() );
+
+	execute( TC_dyn_pdch_ipa_act_deact() );
+	execute( TC_dyn_pdch_ipa_act_nack() );
+	execute( TC_dyn_pdch_osmo_act_deact() );
+	execute( TC_dyn_pdch_osmo_act_nack() );
 }
 
 }
