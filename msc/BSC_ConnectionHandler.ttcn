@@ -25,6 +25,7 @@ import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_MM_Types all;
 import from MobileL3_CC_Types all;
+import from MobileL3_SMS_Types all;
 import from L3_Templates all;
 import from L3_Common all;
 
@@ -186,7 +187,8 @@ runs on BSC_ConnHdlr {
 type enumerated EstablishType {
 	EST_TYPE_MO_CALL,
 	EST_TYPE_EMERG_CALL,
-	EST_TYPE_PAG_RESP
+	EST_TYPE_PAG_RESP,
+	EST_TYPE_MO_SMS
 };
 
 /* helper function to fully establish a dedicated channel */
@@ -211,6 +213,9 @@ runs on BSC_ConnHdlr {
 		}
 	case (EST_TYPE_PAG_RESP) {
 		l3_info := valueof(ts_PAG_RESP(mi));
+		}
+	case (EST_TYPE_MO_SMS) {
+		l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_SMS, mi));
 		}
 	}
 
@@ -740,6 +745,146 @@ function f_expect_clear(float t := 5.0) runs on BSC_ConnHdlr {
 		self.stop;
 		}
 	}
+}
+
+type record SmsParametersTp {
+	OCT1		msg_ref,
+	TP_DA		da,
+	OCT1		pid,
+	OCT1		dcs,
+	integer		udl,
+	octetstring	ud
+}
+type record SmsParametersRp {
+	OCT1		msg_ref,
+	RP_NumberingPlan_and_NumberDigits orig optional,
+	RP_NumberingPlan_and_NumberDigits dest optional
+}
+type record SmsParameters {
+	SmsParametersTp tp,
+	SmsParametersRp rp,
+	uint3_t		tid,
+	OCT1		dlci,
+	uint7_t		exp_rp_err optional
+}
+
+template (value) TP_DA ts_TP_DA(BIT4 npl, BIT3 ton, hexstring addr) := {
+	tP_DA_NoPad := {
+		tP_LengthIndicator := 0, /* overwritten */
+		tP_NumberingPlanID := npl,
+		tP_TypeOfNumber := ton,
+		tp_Spare := '0'B,
+		tP_DAValue := addr
+	}
+}
+
+template (value) SmsParameters t_SmsPars(hexstring tp_daddr := '12345'H) := {
+	tp := {
+		msg_ref := '23'O,
+		da := ts_TP_DA('0000'B, '000'B, tp_daddr),
+		pid := '00'O,
+		dcs := '00'O,
+		udl := 0,
+		ud := ''O
+	},
+	rp := {
+		msg_ref := '42'O,
+		orig := omit,
+		dest := { '0000'B, '000'B, '0'B, '98765'H }
+	},
+	tid := 0,
+	dlci := '03'O,
+	exp_rp_err := omit
+}
+
+private altstep as_other_sms() runs on BSC_ConnHdlr {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_SMS(?, ?, ?), ?)) {
+		setverdict(fail, "Unexpected SMS related PDU from MSC");
+		self.stop;
+	}
+}
+
+/* Submit a MO-SMS over an already existing (and authenticated, ...) DTAP connection */
+function f_mo_sms(inout SmsParameters spars)
+runs on BSC_ConnHdlr {
+	var template (value) TPDU_RP_DATA_MS_SGSN tp_mo;
+	var template (value) RPDU_MS_SGSN rp_mo;
+	var template (value) PDU_ML3_MS_NW l3_mo;
+
+	var template TPDU_RP_DATA_SGSN_MS tp_mt;
+	var template RPDU_SGSN_MS rp_mt;
+	var template PDU_ML3_NW_MS l3_mt;
+
+	var default d := activate(as_other_sms());
+
+	tp_mo := ts_SMS_SUBMIT(spars.tp.msg_ref, spars.tp.da, spars.tp.pid, spars.tp.dcs,
+				 spars.tp.udl, spars.tp.ud);
+	rp_mo := ts_RP_DATA_MO(spars.rp.msg_ref, spars.rp.orig, spars.rp.dest, tp_mo);
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_DATA_MO(rp_mo));
+	BSSAP.send(ts_PDU_DTAP_MO(l3_mo, spars.dlci, true));
+	/* receive CP-ACK for CP-DATA above */
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_ACK_MT), spars.dlci));
+
+	if (ispresent(spars.exp_rp_err)) {
+		/* expect an RP-ERROR message from MSC with given cause */
+		rp_mt := tr_RP_ERROR_MT(spars.rp.msg_ref, spars.exp_rp_err);
+		l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_DATA_MT(rp_mt));
+		BSSAP.receive(tr_PDU_DTAP_MT(l3_mt, spars.dlci));
+		/* send CP-ACK for CP-DATA just received */
+		l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_ACK_MO);
+		BSSAP.send(ts_PDU_DTAP_MO(l3_mo, spars.dlci, true));
+	} else {
+		/* expect RP-ACK for RP-DATA */
+		rp_mt := tr_RP_ACK_MT(spars.rp.msg_ref);
+		l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_DATA_MT(rp_mt));
+		BSSAP.receive(tr_PDU_DTAP_MT(l3_mt, spars.dlci));
+		/* send CP-ACO for CP-DATA just received */
+		l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_ACK_MO);
+		BSSAP.send(ts_PDU_DTAP_MO(l3_mo, spars.dlci, true));
+	}
+	deactivate(d);
+	setverdict(pass);
+}
+
+/* receive MT-SMS delivered from the MSC/SMSC over an already existing DTAP connection */
+function f_mt_sms(inout SmsParameters spars)
+runs on BSC_ConnHdlr {
+	var template (value) TPDU_RP_DATA_MS_SGSN tp_mo;
+	var template (value) RPDU_MS_SGSN rp_mo;
+	var template (value) PDU_ML3_MS_NW l3_mo;
+
+	var template TPDU_RP_DATA_SGSN_MS tp_mt;
+	var template RPDU_SGSN_MS rp_mt;
+	var template PDU_ML3_NW_MS l3_mt;
+
+	var PDU_DTAP_MT dtap_mt;
+
+	var default d := activate(as_other_sms());
+
+	/* Expect CP-DATA(RP-DATA(SMS-DELIVER)) */
+	tp_mt := tr_SMS_DELIVER(?, spars.tp.ud, spars.tp.pid, spars.tp.dcs, ?);
+	rp_mt := tr_RP_DATA_MT(?, ?, omit, tp_mt);
+	l3_mt := tr_ML3_MT_SMS(?, c_TIF_ORIG, tr_CP_DATA_MT(rp_mt));
+	BSSAP.receive(tr_PDU_DTAP_MT(l3_mt, spars.dlci)) -> value dtap_mt;
+	/* Extract relevant identifiers */
+	spars.tid := bit2int(dtap_mt.dtap.tiOrSkip.transactionId.tio);
+	spars.rp.msg_ref := dtap_mt.dtap.msgs.sms.cP_DATA.cP_User_Data.cP_RPDU.rP_DATA_SGSN_MS.rP_MessageReference;
+
+	/* send CP-ACK for CP-DATA just received */
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_REPL, ts_CP_ACK_MO);
+	BSSAP.send(ts_PDU_DTAP_MO(l3_mo, spars.dlci, true));
+
+	/* send RP-ACK for RP-DATA */
+	rp_mo := ts_RP_ACK_MO(spars.rp.msg_ref);
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_REPL, ts_CP_DATA_MO(rp_mo));
+	BSSAP.send(ts_PDU_DTAP_MO(l3_mo, spars.dlci, true));
+
+	/* expect CP-ACK for CP-DATA(RP-ACK) just sent */
+	l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_ACK_MT);
+	BSSAP.receive(tr_PDU_DTAP_MT(l3_mt, spars.dlci));
+
+	deactivate(d);
+	setverdict(pass);
 }
 
 
