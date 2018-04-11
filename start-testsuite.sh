@@ -23,7 +23,7 @@ fi
 
 LD_LIBRARY_PATH="$SUITE_DIR:/usr/lib/titan:/usr/ttcn3/lib" ttcn3_start $SUITE $CFG $TEST
 
-expected="$SUITE_DIR/expected-results.log"
+expected="$SUITE_DIR/expected-results.xml"
 if [ ! -f "$expected" ]; then
   echo "No expected results found, not comparing outcome. ($expected)"
   exit 0
