@@ -47,6 +47,10 @@ import from MobileL3_CommonIE_Types all;
 import from L3_Templates all;
 import from L3_Common all;
 
+import from SMPP_Types all;
+import from SMPP_Templates all;
+import from SMPP_Emulation all;
+
 const integer NUM_BSC := 2;
 type record of BSSAP_Configuration BSSAP_Configurations;
 
@@ -60,6 +64,7 @@ type component MTC_CT extends CTRL_Adapter_CT {
 	var MGCP_Emulation_CT vc_MGCP;
 	var GSUP_Emulation_CT vc_GSUP;
 	var IPA_Emulation_CT vc_GSUP_IPA;
+	var SMPP_Emulation_CT vc_SMPP;
 
 	/* only to get events from IPA underneath GSUP */
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
@@ -90,6 +95,10 @@ modulepar {
 	integer mp_mgw_port := 2427;
 
 	charstring mp_msc_mncc := "/tmp/mncc";
+
+	integer mp_msc_smpp_port := 2775;
+	charstring mp_smpp_system_id := "msc_tester";
+	charstring mp_smpp_password := "osmocom1";
 
 	BSSAP_Configurations mp_bssap_cfg := {
 		{
@@ -123,6 +132,28 @@ private altstep as_Tguard_direct() runs on MTC_CT {
 		self.stop;
 	}
 }
+
+function f_init_smpp(charstring id) runs on MTC_CT {
+	id := id & "-SMPP";
+	var EsmePars pars := {
+		mode := MODE_TRANSCEIVER,
+		bind := {
+			system_id := mp_smpp_system_id,
+			password := mp_smpp_password,
+			system_type := "MSC_Tests",
+			interface_version := hex2int('34'H),
+			addr_ton := unknown,
+			addr_npi := unknown,
+			address_range := ""
+		},
+		esme_role := true
+	}
+
+	vc_SMPP := SMPP_Emulation_CT.create(id);
+	map(vc_SMPP:SMPP_PORT, system:SMPP_PORT);
+	vc_SMPP.start(SMPP_Emulation.main_client(pars, mp_msc_ip, mp_msc_smpp_port, "", -1));
+}
+
 
 function f_init_mncc(charstring id) runs on MTC_CT {
 	id := id & "-MNCC";
@@ -206,6 +237,7 @@ function f_init(integer num_bsc := 1) runs on MTC_CT {
 	f_init_mncc("MSC_Test");
 	f_init_mgcp("MSC_Test");
 	f_init_gsup("MSC_Test");
+	f_init_smpp("MSC_Test");
 
 	map(self:MSCVTY, system:MSCVTY);
 	f_vty_set_prompts(MSCVTY);
@@ -437,6 +469,9 @@ function f_start_handler_with_pars(void_fn fn, BSC_ConnHdlrPars pars) runs on MT
 	/* GSUP part */
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+	/* SMPP part */
+	connect(vc_conn:SMPP, vc_SMPP:SMPP_CLIENT);
+	connect(vc_conn:SMPP_PROC, vc_SMPP:SMPP_PROC);
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
@@ -1812,6 +1847,10 @@ testcase TC_reset_two() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/***********************************************************************
+ * SMS Testing
+ ***********************************************************************/
+
 /* LU followed by MO SMS */
 private function f_tc_lu_and_mo_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	var SmsParameters spars := valueof(t_SmsPars);
@@ -1881,9 +1920,202 @@ testcase TC_lu_and_mt_sms() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* mobile originated SMS from MS/BTS/BSC side to SMPP */
+private function f_tc_smpp_mo_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
 
+	f_init_handler(pars);
 
-/* TODO:
+	/* Perform location update so IMSI is known + registered in MSC/VLR */
+	f_perform_lu();
+	f_establish_fully(EST_TYPE_MO_SMS);
+
+	f_mo_sms(spars);
+
+	var SMPP_PDU smpp;
+	var template SMPP_PDU tr_smpp := tr_SMPP(c_SMPP_command_id_deliver_sm, ESME_ROK);
+	tr_smpp.body.deliver_sm := {
+		service_type := "CMT",
+		source_addr_ton := network_specific,
+		source_addr_npi := isdn,
+		source_addr := hex2str(pars.msisdn),
+		dest_addr_ton := f_sm_ton_from_gsm(spars.tp.da.tP_DA_NoPad.tP_TypeOfNumber),
+		dest_addr_npi := f_sm_npi_from_gsm(spars.tp.da.tP_DA_NoPad.tP_NumberingPlanID),
+		destination_addr := hex2str(spars.tp.da.tP_DA_NoPad.tP_DAValue),
+		esm_class := '00000001'B,
+		protocol_id := 0,
+		priority_flag := 0,
+		schedule_delivery_time := "",
+		replace_if_present := 0,
+		data_coding := '00000001'B,
+		sm_default_msg_id := 0,
+		sm_length := ?,
+		short_message := spars.tp.ud,
+		opt_pars := {
+			{
+				tag := user_message_reference,
+				len := 2,
+				opt_value := {
+					int2_val := oct2int(spars.tp.msg_ref)
+				}
+			}
+		}
+	};
+	alt {
+	[] SMPP.receive(tr_smpp) -> value smpp {
+		SMPP.send(ts_SMPP_DELIVER_SM_resp(ESME_ROK, smpp.header.seq_num));
+		}
+	[] SMPP.receive(tr_SMPP(c_SMPP_command_id_alert_notification, ESME_ROK)) { repeat; }
+	}
+
+	f_expect_clear();
+}
+testcase TC_smpp_mo_sms() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config2(MSCVTY, { "smpp", "esme msc_tester"}, "default-route");
+	vc_conn := f_start_handler(refers(f_tc_smpp_mo_sms), 44);
+	vc_conn.done;
+	f_vty_config2(MSCVTY, { "smpp", "esme msc_tester"}, "no default-route");
+}
+
+/* convert GSM L3 TON to SMPP_TON enum */
+function f_sm_ton_from_gsm(BIT3 ton) return SMPP_TON {
+	select (ton) {
+	case ('000'B) { return unknown; }
+	case ('001'B) { return international; }
+	case ('010'B) { return national; }
+	case ('011'B) { return network_specific; }
+	case ('100'B) { return subscriber_number; }
+	case ('101'B) { return alphanumeric; }
+	case ('110'B) { return abbreviated; }
+	}
+	setverdict(fail, "Unknown TON ", ton);
+	self.stop;
+}
+/* convert GSM L3 NPI to SMPP_NPI enum */
+function f_sm_npi_from_gsm(BIT4 npi) return SMPP_NPI {
+	select (npi) {
+	case ('0000'B) { return unknown; }
+	case ('0001'B) { return isdn; }
+	case ('0011'B) { return data; }
+	case ('0100'B) { return telex; }
+	case ('0110'B) { return land_mobile; }
+	case ('1000'B) { return national; }
+	case ('1001'B) { return private_; }
+	case ('1010'B) { return ermes; }
+	}
+	setverdict(fail, "Unknown NPI ", npi);
+	self.stop;
+}
+
+/* build a SMPP_SM from SmsParameters */
+function f_mt_sm_from_spars(SmsParameters spars)
+runs on BSC_ConnHdlr return SMPP_SM {
+	var SMPP_SM sm := {
+		service_type := "CMT",
+		source_addr_ton := f_sm_ton_from_gsm(spars.tp.da.tP_DA_NoPad.tP_TypeOfNumber),
+		source_addr_npi := f_sm_npi_from_gsm(spars.tp.da.tP_DA_NoPad.tP_NumberingPlanID),
+		source_addr := hex2str(spars.tp.da.tP_DA_NoPad.tP_DAValue),
+		dest_addr_ton := international,
+		dest_addr_npi := isdn,
+		destination_addr := hex2str(g_pars.msisdn),
+		esm_class := '00000001'B,
+		protocol_id := 0,
+		priority_flag := 0,
+		schedule_delivery_time := "",
+		validity_period := "",
+		registered_delivery := '00000000'B,
+		replace_if_present := 0,
+		data_coding := '00000001'B,
+		sm_default_msg_id := 0,
+		sm_length := spars.tp.udl,
+		short_message := spars.tp.ud,
+		opt_pars := {}
+	};
+	return sm;
+}
+
+/* helper function to encode SMS from 'spars', send it via SMPP to MSC; receive it on MS side */
+private function f_smpp_mt_sms(SmsParameters spars, boolean trans_mode) runs on BSC_ConnHdlr {
+	var SMPP_SM sm := f_mt_sm_from_spars(spars);
+	if (trans_mode) {
+		sm.esm_class := '00000010'B;
+	}
+
+	/* actually cause MSC to send a SMS via SUBMIT-SM from SMPP side */
+	SMPP.send(ts_SMPP_SUBMIT_SM(sm));
+	if (not match(sm.esm_class, tr_ESM_CLASS_TRANSACTION)) {
+		/* if we're not in SMPP transaction mode, we expect the SMPP-level ACK
+		 * before we expect the SMS delivery on the BSC/radio side */
+		SMPP.receive(tr_SMPP(c_SMPP_command_id_submit_sm_resp, ESME_ROK));
+	}
+
+	/* MSC->BSC: expect PAGING from MSC */
+	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	/* Establish DTAP / BSSAP / SCCP connection */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+	SMPP.receive(tr_SMPP(c_SMPP_command_id_alert_notification, ESME_ROK));
+
+	f_mt_sms(spars);
+
+	if (match(sm.esm_class, tr_ESM_CLASS_TRANSACTION)) {
+		SMPP.receive(tr_SMPP(c_SMPP_command_id_submit_sm_resp, ESME_ROK));
+	}
+	f_expect_clear();
+}
+
+/* mobile terminated SMS, from SMPP to BSC/BTS/MS */
+private function f_tc_smpp_mt_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Perform location update so IMSI is known + registered in MSC/VLR */
+	f_perform_lu();
+	SMPP.receive(tr_SMPP(c_SMPP_command_id_alert_notification, ESME_ROK));
+
+	/* register an 'expect' for given IMSI (+TMSI) */
+	var OCT4 tmsi;
+	if (isvalue(g_pars.tmsi)) {
+		tmsi := g_pars.tmsi;
+	} else {
+		tmsi := 'FFFFFFFF'O;
+	}
+	f_bssmap_register_imsi(g_pars.imsi, tmsi);
+
+	var SmsParameters spars := valueof(t_SmsPars);
+	/* TODO: test with more intelligent user data; test different coding schemes */
+	spars.tp.ud := '00'O;
+	spars.tp.udl := 1;
+
+	/* first test the non-transaction store+forward mode */
+	f_smpp_mt_sms(spars, false);
+
+	/* then test the transaction mode */
+	f_smpp_mt_sms(spars, true);
+}
+testcase TC_smpp_mt_sms() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_smpp_mt_sms), 45);
+	vc_conn.done;
+}
+
+/* TODO (SMS):
+   * different user data lengths
+   * SMPP transaction mode with unsuccessful delivery
+   * queued MT-SMS with no paging response + later delivery
+   * different data coding schemes
+   * multi-part SMS
+   * user-data headers
+   * TP-PID for SMS to SIM
+   * behavior if SMS memory is full + RP-SMMA
+   * delivery reports
+   * SMPP osmocom extensions
+   * more-messages-to-send
+   * SMS during ongoing call (SACCH/SAPI3)
+ */
+
+/* TODO (General):
    * continue to send repeated MO signalling messages to keep channel open: does MSC tmeout?
    * malformed messages (missing IE, invalid message type): properly rejected?
    * MT call while LU or is ongoing: Do we use existing lchan or page while lchan active?
@@ -1946,6 +2178,8 @@ control {
 
 	execute( TC_lu_and_mo_sms() );
 	execute( TC_lu_and_mt_sms() );
+	execute( TC_smpp_mo_sms() );
+	execute( TC_smpp_mt_sms() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
