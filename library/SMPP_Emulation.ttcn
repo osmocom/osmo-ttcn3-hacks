@@ -1,0 +1,413 @@
+module SMPP_Emulation {
+
+/* SMPP Emulation layer, sitting on top of SMPP_CodecPort.
+ *
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from Osmocom_Types all;
+import from General_Types all;
+import from SMPP_Types all;
+import from SMPP_Templates all;
+import from SMPP_CodecPort all;
+import from SMPP_CodecPort_CtrlFunct all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from Socket_API_Definitions all;
+
+/* general "base class" component definition, of which specific implementations
+ * derive themselves by menas of the "extends" feature */
+type component SMPP_ConnHdlr {
+	/* port towards SPPP_Emulation_CT */
+	port SMPP_Conn_PT SMPP;
+	port SMPPEM_PROC_PT SMPP_PROC;
+}
+
+
+type component SMPP_Emulation_CT {
+	/* down-facing port to SMPP Codec port */
+	port SMPP_CODEC_PT SMPP_PORT;
+	var IPL4asp_Types.ConnectionId g_smpp_conn_id := -1;
+
+	var integer g_seq := 1;
+
+	/* up-facing port to Clients */
+	port SMPP_Conn_PT SMPP_CLIENT;
+	port SMPPEM_PROC_PT SMPP_PROC;
+
+	var TransactionData TransactionTable[32];
+	var ExpectData ExpectTable[32];
+}
+
+type port SMPP_Conn_PT message {
+	inout SMPP_PDU;
+} with { extension "internal" };
+
+type record TransactionData {
+	uint32_t	tid optional,
+	SMPP_ConnHdlr	vc_conn
+}
+
+type record ExpectData {
+	SMPP_TON	dst_ton optional,
+	SMPP_NPI	dst_npi optional,
+	charstring	dst_addr,
+	SMPP_ConnHdlr	vc_conn
+}
+
+private function f_trans_id_known(uint32_t tid)
+runs on SMPP_Emulation_CT return boolean {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		if (TransactionTable[i].tid == tid) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(SMPP_ConnHdlr client)
+runs on SMPP_Emulation_CT return boolean {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		if (TransactionTable[i].vc_conn == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_trans_id(uint32_t tid)
+runs on SMPP_Emulation_CT return SMPP_ConnHdlr {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		if (TransactionTable[i].tid == tid) {
+			return TransactionTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No componten for SMPP TID ", tid);
+	self.stop;
+}
+
+
+private function f_trans_table_init()
+runs on SMPP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		TransactionTable[i].vc_conn := null;
+		TransactionTable[i].tid := omit;
+	}
+}
+
+private function f_trans_table_add(SMPP_ConnHdlr vc_conn, uint32_t trans_id)
+runs on SMPP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		if (TransactionTable[i].vc_conn == null) {
+			TransactionTable[i].vc_conn := vc_conn;
+			TransactionTable[i].tid := trans_id;
+			return;
+		}
+	}
+	setverdict(fail, "SMPP Trans table full!");
+	self.stop;
+}
+
+private function f_trans_table_del(uint32_t trans_id)
+runs on SMPP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(TransactionTable); i := i+1) {
+		if (TransactionTable[i].tid == trans_id) {
+			TransactionTable[i].vc_conn := null;
+			TransactionTable[i].tid := omit;
+			return;
+		}
+	}
+	setverdict(fail, "SMPP Trans table attempt to delete non-existant ", trans_id);
+	self.stop;
+}
+
+
+
+function f_connect(charstring remote_host, IPL4asp_Types.PortNumber remote_port,
+		   charstring local_host, IPL4asp_Types.PortNumber local_port)
+runs on SMPP_Emulation_CT {
+	var IPL4asp_Types.Result res;
+	res := SMPP_CodecPort_CtrlFunct.f_IPL4_connect(SMPP_PORT, remote_host, remote_port,
+							local_host, local_port, 0, { tcp :={} });
+	g_smpp_conn_id := res.connId;
+}
+
+/* Function to use to bind to a local port as IPA server, accepting remote clients */
+function f_bind(charstring local_host, IPL4asp_Types.PortNumber local_port)
+runs on SMPP_Emulation_CT {
+	var IPL4asp_Types.Result res;
+	res := SMPP_CodecPort_CtrlFunct.f_IPL4_listen(SMPP_PORT, local_host, local_port, { tcp:={} });
+	g_smpp_conn_id := res.connId;
+}
+
+
+function main_server(EsmePars pars, charstring local_host, integer local_port)
+runs on SMPP_Emulation_CT {
+	f_bind(local_host, local_port);
+	f_mainloop(pars);
+}
+
+function main_client(EsmePars pars, charstring remote_host, integer remote_port,
+			charstring local_host, integer local_port)
+runs on SMPP_Emulation_CT {
+	f_connect(remote_host, remote_port, local_host, local_port);
+	f_mainloop(pars);
+}
+
+type enumerated EsmeMode {
+	MODE_TRANSMITTER,
+	MODE_RECEIVER,
+	MODE_TRANSCEIVER
+}
+type record EsmePars {
+	EsmeMode	mode,
+	SMPP_Bind	bind,
+	boolean		esme_role
+}
+
+private function f_tx_smpp(template (value) SMPP_PDU pdu) runs on SMPP_Emulation_CT {
+	pdu.header.seq_num := g_seq;
+	SMPP_PORT.send(ts_SMPP_Send(g_smpp_conn_id, pdu));
+	g_seq := g_seq+1;
+}
+
+private function f_rx_smpp(template SMPP_PDU pdu) runs on SMPP_Emulation_CT {
+	timer T_wait := 3.0;
+	T_wait.start;
+	alt {
+	[] SMPP_PORT.receive(tr_SMPP_Recv(g_smpp_conn_id, pdu)) { }
+	[] T_wait.timeout {
+		setverdict(fail, "Timeout waiting for ", pdu);
+		self.stop;
+		}
+	}
+}
+
+/* default altstep which we use throughout */
+private altstep as_smpp() runs on SMPP_Emulation_CT {
+	var SMPP_ConnHdlr vc_conn;
+	var SMPP_RecvFrom smpp_rf;
+	/* Answer to ENQUIRE LINK */
+	[] SMPP_PORT.receive(tr_SMPP_Recv(g_smpp_conn_id,
+			     tr_SMPP(c_SMPP_command_id_enquire_link, ESME_ROK))) {
+		f_tx_smpp(ts_SMPP_ENQ_LINK_resp);
+		}
+	[] SMPP_PORT.receive(tr_SMPP_Recv(g_smpp_conn_id,
+			     tr_SMPP(c_SMPP_command_id_alert_notification, ESME_ROK))) -> value smpp_rf {
+		/* TODO: dispatch to ConnHdlr based on some kind of expect mechanism? */
+		vc_conn := f_exp_lookup(smpp_rf.msg.body.alert_notif.source_addr_ton,
+					smpp_rf.msg.body.alert_notif.source_addr_npi,
+					smpp_rf.msg.body.alert_notif.source_addr);
+		SMPP_CLIENT.send(smpp_rf.msg) to vc_conn;
+		}
+	[] SMPP_PORT.receive {
+		setverdict(fail, "Unexpected SMPP from peer");
+		self.stop;
+		}
+}
+
+function f_mainloop(EsmePars pars)
+runs on SMPP_Emulation_CT {
+
+	/* Set function for dissecting the binary stream into packets */
+	var f_IPL4_getMsgLen vl_f := refers(f_IPL4_fixedMsgLen);
+	/* Offset: 0, size of length: 4, delta: 0, multiplier: 1, big-endian */
+	SMPP_CodecPort_CtrlFunct.f_IPL4_setGetMsgLen(SMPP_PORT, g_smpp_conn_id, vl_f, {0, 4, 0, 1, 0});
+
+	f_trans_table_init();
+	f_expect_table_init();
+
+	/* activate default altstep */
+	var default d := activate(as_smpp());
+
+	if (pars.esme_role) {
+		/* BIND to SMSC */
+		select (pars.mode) {
+		case (MODE_TRANSMITTER) {
+			f_tx_smpp(ts_SMPP_BIND_TX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_rx_smpp(tr_SMPP(c_SMPP_command_id_bind_transmitter_resp, ESME_ROK, g_seq));
+			}
+		case (MODE_RECEIVER) {
+			f_tx_smpp(ts_SMPP_BIND_RX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_rx_smpp(tr_SMPP(c_SMPP_command_id_bind_receiver_resp, ESME_ROK, g_seq));
+			}
+		case (MODE_TRANSCEIVER) {
+			f_tx_smpp(ts_SMPP_BIND_TRX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_rx_smpp(tr_SMPP(c_SMPP_command_id_bind_transceiver_resp, ESME_ROK));
+			}
+		}
+	} else {
+		var SMPP_Bind_resp bresp := {
+			system_id := pars.bind.system_id,
+			opt_pars := {}
+		}
+		/* Expect bind from ESME */
+		select (pars.mode) {
+		case (MODE_TRANSMITTER) {
+			f_rx_smpp(tr_SMPP_BIND_TX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_tx_smpp(ts_SMPP_BIND_TX_resp(ESME_ROK, bresp));
+			}
+		case (MODE_RECEIVER) {
+			f_rx_smpp(tr_SMPP_BIND_RX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_tx_smpp(ts_SMPP_BIND_RX_resp(ESME_ROK, bresp));
+			}
+		case (MODE_TRANSCEIVER) {
+			f_rx_smpp(tr_SMPP_BIND_TRX(pars.bind));
+			/* FIXME: do we have to check for SEQ? */
+			f_tx_smpp(ts_SMPP_BIND_TRX_resp(ESME_ROK, bresp));
+			}
+		}
+	}
+
+	while (true) {
+		var SMPP_ConnHdlr vc_conn;
+		var SMPP_RecvFrom smpp_rf;
+		var SMPP_PDU smpp;
+		var charstring dest_addr;
+		alt {
+		/* SMSC -> CLIENT: response, map by seq_nr */
+		[pars.esme_role] SMPP_PORT.receive(tr_SMPP_Recv(g_smpp_conn_id,
+							tr_SMPP_esme_resp)) -> value smpp_rf {
+			var uint32_t trans_id := smpp_rf.msg.header.seq_num;
+			if (f_trans_id_known(trans_id)) {
+				vc_conn := f_comp_by_trans_id(trans_id);
+				SMPP_CLIENT.send(smpp_rf.msg) to vc_conn;
+				f_trans_table_del(trans_id);
+			} else {
+				log("Received SMPP response for unknown trans_id ", smpp_rf);
+				/* FIXME */
+			}
+			}
+		/* SMSC -> CLIENT: DELIVER-SM.req */
+		[pars.esme_role] SMPP_PORT.receive(tr_SMPP_Recv(g_smpp_conn_id,
+				tr_SMPP(c_SMPP_command_id_deliver_sm, ESME_ROK))) -> value smpp_rf {
+			vc_conn := f_exp_lookup(smpp_rf.msg.body.deliver_sm.dest_addr_ton,
+						smpp_rf.msg.body.deliver_sm.dest_addr_npi,
+						smpp_rf.msg.body.deliver_sm.destination_addr);
+			SMPP_CLIENT.send(smpp_rf.msg) to vc_conn;
+			}
+
+		/* record seq_nr for commands from CLIENT -> SMSC */
+		[pars.esme_role] SMPP_CLIENT.receive(tr_SMPP_esme_req) -> value smpp sender vc_conn {
+			/* register current seq_nr/trans_id */
+			f_trans_table_add(vc_conn, g_seq);
+			f_tx_smpp(smpp);
+			}
+		/* pass responses 1:1 through from CLIENT -> SMSC */
+		[pars.esme_role] SMPP_CLIENT.receive(tr_SMPP_smsc_resp) -> value smpp sender vc_conn {
+			SMPP_PORT.send(ts_SMPP_Send(g_smpp_conn_id, smpp));
+			}
+
+		[] SMPP_PROC.getcall(SMPPEM_register:{?,?}) -> param(dest_addr, vc_conn) {
+			f_create_expect(dest_addr, vc_conn);
+			SMPP_PROC.reply(SMPPEM_register:{dest_addr, vc_conn});
+			}
+		}
+	}
+}
+
+/* Requests from ESME -> SMSC */
+template OCT4 SMPP_esme_req := (
+	c_SMPP_command_id_submit_sm,
+	c_SMPP_command_id_replace_sm,
+	c_SMPP_command_id_cancel_sm,
+	c_SMPP_command_id_submit_multi
+);
+template SMPP_PDU tr_SMPP_esme_req := tr_SMPP(SMPP_esme_req, ?);
+
+/* Responses from ESME -> SMSC */
+template OCT4 SMPP_esme_resp := (
+	c_SMPP_command_id_submit_sm_resp,
+	c_SMPP_command_id_replace_sm_resp,
+	c_SMPP_command_id_cancel_sm_resp,
+	c_SMPP_command_id_submit_multi_resp
+);
+template SMPP_PDU tr_SMPP_esme_resp := tr_SMPP(SMPP_esme_resp, ?);
+
+/* Requests from SMSC -> ESME */
+template OCT4 SMPP_smsc_req := (
+	c_SMPP_command_id_deliver_sm
+);
+template SMPP_PDU tr_SMPP_smsc_req := tr_SMPP(SMPP_smsc_req, ?);
+
+/* Responses from SMSC -> ESME */
+template OCT4 SMPP_smsc_resp := (
+	c_SMPP_command_id_deliver_sm_resp
+);
+template SMPP_PDU tr_SMPP_smsc_resp := tr_SMPP(SMPP_smsc_resp, ?);
+
+
+
+signature SMPPEM_register(charstring dst_addr, SMPP_ConnHdlr hdlr);
+
+type port SMPPEM_PROC_PT procedure {
+	inout SMPPEM_register;
+} with { extension "internal" };
+
+private function f_create_expect(charstring dest_number, SMPP_ConnHdlr hdlr)
+runs on SMPP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (ExpectTable[i].vc_conn == null) {
+			ExpectTable[i] := {
+				dst_ton := omit,
+				dst_npi := omit,
+				dst_addr := dest_number,
+				vc_conn := hdlr
+			}
+			return;
+		}
+	}
+	setverdict(fail, "No space left in SmppExpectTable");
+	self.stop;
+}
+
+private function f_exp_lookup(SMPP_TON ton, SMPP_NPI npi, charstring dst)
+runs on SMPP_Emulation_CT return SMPP_ConnHdlr {
+	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (ExpectTable[i].vc_conn != null and ExpectTable[i].dst_addr == dst) {
+			if (ispresent(ExpectTable[i].dst_ton) and ExpectTable[i].dst_ton != ton) {
+				continue;
+			}
+			if (ispresent(ExpectTable[i].dst_npi) and ExpectTable[i].dst_npi != npi) {
+				continue;
+			}
+			return ExpectTable[i].vc_conn;
+		}
+	}
+	return null;
+}
+private function f_expect_table_init()
+runs on SMPP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
+		ExpectTable[i] := {
+			dst_ton := omit,
+			dst_npi := omit,
+			dst_addr := "",
+			vc_conn := null
+		};
+	}
+}
+
+
+
+
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_smpp_expect(charstring dest_number) runs on SMPP_ConnHdlr {
+	SMPP_PROC.call(SMPPEM_register:{dest_number, self}) {
+		[] SMPP_PROC.getreply(SMPPEM_register:{?,?}) {};
+	}
+}
+
+
+}
