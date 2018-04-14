@@ -9,7 +9,6 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.IP \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.M3UA \
-			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
 			titan.ProtocolModules.UDP \
 			titan.ProtocolModules.RTP \
@@ -43,6 +42,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp \
+			titan.ProtocolModules.SMPP \
 			titan.ProtocolEmulations.M3UA
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
@@ -72,7 +72,7 @@ titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
 titan.ProtocolModules.RTP_commit=		R.5.A
 titan.ProtocolModules.SCTP_commit=		R.2.A
 titan.ProtocolModules.SDP_commit=		R.14.A
-titan.ProtocolModules.SMPP_commit=		R.2.A
+titan.ProtocolModules.SMPP_commit=		R.2.A-1-ge044a36
 titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A
 titan.ProtocolModules.SUA_commit=		R.5.A
 titan.ProtocolModules.TCP_commit=		R.3.A
