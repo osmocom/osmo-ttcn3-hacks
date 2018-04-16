@@ -13,6 +13,8 @@ import from M3UA_Emulation all;
 import from MTP3asp_Types all;
 import from MTP3asp_PortType all;
 
+import from IPA_Emulation all;
+
 import from SCCP_Types all;
 import from SCCPasp_Types all;
 import from SCCP_Emulation all;
@@ -26,7 +28,8 @@ import from BSSMAP_Emulation all;
 
 type record BSSAP_Adapter {
 	/* component references */
-	M3UA_CT vc_M3UA,
+	M3UA_CT vc_M3UA, /* only in 3GPP AoIP */
+	IPA_Emulation_CT vc_IPA, /* only in SCCPliste */
 	SCCP_CT vc_SCCP,
 
 	MSC_SCCP_MTP3_parameters sccp_pars,
@@ -37,7 +40,14 @@ type record BSSAP_Adapter {
 	BSSMAP_Emulation_CT vc_BSSMAP
 }
 
+type enumerated BSSAP_Transport {
+	BSSAP_TRANSPORT_AoIP,	/* 3GPP AoIP: SCCP over M3UA over SCTP */
+	BSSAP_TRANSPORT_SCCPlite_SERVER, /* SCCPlite: SCCP over IPA over TCP */
+	BSSAP_TRANSPORT_SCCPlite_CLIENT  /* SCCPlite: SCCP over IPA over TCP */
+};
+
 type record BSSAP_Configuration {
+	BSSAP_Transport transport,
 	charstring sccp_service_type,
 	SCTP_Association_Address sctp_addr,
 	integer own_pc,
@@ -87,18 +97,42 @@ function f_bssap_init(inout BSSAP_Adapter ba, in BSSAP_Configuration cfg, charst
 	ops.sccp_addr_peer := ba.sccp_addr_peer;
 
 	/* create components */
-	ba.vc_M3UA := M3UA_CT.create(id & "-M3UA");
 	ba.vc_SCCP := SCCP_CT.create(id & "-SCCP");
 	if (isvalue(ops)) {
 		ba.vc_BSSMAP := BSSMAP_Emulation_CT.create(id & "-BSSMAP");
 	}
+	select (cfg.transport) {
+	case (BSSAP_TRANSPORT_AoIP) {
+		ba.vc_M3UA := M3UA_CT.create(id & "-M3UA");
+		map(ba.vc_M3UA:SCTP_PORT, system:sctp);
+		/* connect MTP3 service provider (M3UA) to lower side of SCCP */
+		connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		ba.vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr, cfg.rctx));
+		}
+	case (BSSAP_TRANSPORT_SCCPlite_SERVER) {
+		ba.vc_IPA := IPA_Emulation_CT.create(id & "-IPA");
+		map(ba.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+		/* connect MTP3 service provider (IPA) to lower side of SCCP */
+		connect(ba.vc_IPA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		ba.vc_IPA.start(IPA_Emulation.main_server(cfg.sctp_addr.local_ip_addr,
+							cfg.sctp_addr.local_sctp_port));
+		}
+	case (BSSAP_TRANSPORT_SCCPlite_CLIENT) {
+		ba.vc_IPA := IPA_Emulation_CT.create(id & "-IPA");
+		map(ba.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+		/* connect MTP3 service provider (IPA) to lower side of SCCP */
+		connect(ba.vc_IPA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		ba.vc_IPA.start(IPA_Emulation.main_client(cfg.sctp_addr.remote_ip_addr,
+							cfg.sctp_addr.remote_sctp_port,
+							cfg.sctp_addr.local_ip_addr,
+							cfg.sctp_addr.local_sctp_port));
+		}
+	case else {
+		setverdict(fail, "Unsuppored BSSAP_Transport");
+		self.stop;
+		}
+	}
 
-	map(ba.vc_M3UA:SCTP_PORT, system:sctp);
-
-	/* connect MTP3 service provider (M3UA) to lower side of SCCP */
-	connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
-
-	ba.vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr, cfg.rctx));
 	ba.vc_SCCP.start(SCCPStart(ba.sccp_pars));
 
 	if (isvalue(ops)) {
