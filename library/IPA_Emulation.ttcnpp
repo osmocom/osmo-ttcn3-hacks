@@ -164,6 +164,7 @@ type component IPA_Emulation_CT {
 	var boolean g_is_bsc_mgw;
 
 	var IpaMode g_mode;
+	var boolean g_ccm_enabled;
 	var IPA_CCM_Parameters	g_ccm_pars := c_IPA_default_ccm_pars;
 }
 
@@ -331,19 +332,39 @@ template PDU_IPA_CCM ts_IPA_ID_GET := {
 }
 
 /* receive IPA CCM message */
-private function f_ccm_rx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
+private function f_ccm_rx_client(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
 	select (ccm.msg_type) {
 		case (IPAC_MSGT_PING) {
 			f_ccm_tx(valueof(ts_IPA_PONG));
 		}
 		case (IPAC_MSGT_ID_ACK) {
-			f_ccm_tx(valueof(ts_IPA_ACK));
+			f_send_IPA_EVT(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_ID_ACK));
 		}
 		case (IPAC_MSGT_ID_GET) {
 			f_ccm_tx(f_ccm_make_id_resp(ccm));
 		}
+		case else {
+			log("Unknown/unsupported IPA CCM message type", ccm);
+		}
+	}
+}
+
+private function f_ccm_rx_server(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
+	select (ccm.msg_type) {
+		case (IPAC_MSGT_PING) {
+			f_ccm_tx(valueof(ts_IPA_PONG));
+		}
+		case (IPAC_MSGT_ID_ACK) {
+			/* the IPA server should at some point receive an ID_ACK from the client,
+			 * in case of RSL/OML from nanoBTS, this is actually the first message after
+			 * the TCP connection is established.  Other implementations may differ.
+			 * We currently ignore it completely - but actually we should make sure that
+			 * one ID_ACK is received by the server at some point */
+		}
 		case (IPAC_MSGT_ID_RESP) {
 			log("IPA ID RESP: ", ccm.u.resp);
+			/* acknowledge any identity that the client may have sent */
+			f_ccm_tx(valueof(ts_IPA_ACK));
 		}
 		case else {
 			log("Unknown/unsupported IPA CCM message type", ccm);
@@ -377,16 +398,24 @@ private function f_from_rsl(IPL4asp_Types.ConnectionId connId, ASP_RSL_Unitdata 
 /* main function to use for a client-side IPA implementation */
 function main_client(charstring remote_host, IPL4asp_Types.PortNumber remote_port,
 		     charstring local_host, IPL4asp_Types.PortNumber local_port,
-		     IPA_CCM_Parameters ccm_pars := c_IPA_default_ccm_pars) runs on IPA_Emulation_CT {
+		     IPA_CCM_Parameters ccm_pars := c_IPA_default_ccm_pars,
+		     boolean ccm_enabled := true) runs on IPA_Emulation_CT {
 	g_mode := IPA_MODE_CLIENT;
+	g_ccm_enabled := ccm_enabled;
 	f_connect(remote_host, remote_port, local_host, local_port, ccm_pars);
+	if (g_ccm_enabled) {
+		/* we're a client: Send ID_ACK immediately after connect */
+		f_ccm_tx(valueof(ts_IPA_ACK));
+	}
 	f_send_IPA_EVT(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP));
 	ScanEvents();
 }
 
 /* main function to use for a server-side IPA implementation */
-function main_server(charstring local_host, IPL4asp_Types.PortNumber local_port) runs on IPA_Emulation_CT {
+function main_server(charstring local_host, IPL4asp_Types.PortNumber local_port,
+		     boolean ccm_enabled := true) runs on IPA_Emulation_CT {
 	g_mode := IPA_MODE_SERVER;
+	g_ccm_enabled := ccm_enabled;
 	f_bind(local_host, local_port);
 	ScanEvents();
 }
@@ -454,13 +483,24 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 	while (true) {
 		alt {
 		/* Received IPA -> up into SCCP stack */
-		[] IPA_PORT.receive(IPA_RecvFrom: ?) -> value ipa_rx {
-			select (ipa_rx.streamId) {
-			case (IPAC_PROTO_CCM) {
-				var PDU_IPA_CCM ccm := dec_PDU_IPA_CCM(ipa_rx.msg);
-				log("CCM Rx:", ccm);
-				f_ccm_rx(ccm);
+		[g_ccm_enabled] IPA_PORT.receive(IPA_RecvFrom:{?,IPAC_PROTO_CCM,omit,?}) -> value ipa_rx {
+			var PDU_IPA_CCM ccm := dec_PDU_IPA_CCM(ipa_rx.msg);
+			log("CCM Rx:", ccm);
+			select (g_mode) {
+				case (IPA_MODE_CLIENT) {
+					f_ccm_rx_client(ccm);
+				}
+				case (IPA_MODE_SERVER) {
+					f_ccm_rx_server(ccm);
+				}
+				case else {
+					setverdict(fail, "Unknown mode");
+					self.stop;
+				}
 			}
+			}
+		[] IPA_PORT.receive(IPA_RecvFrom:?) -> value ipa_rx {
+			select (ipa_rx.streamId) {
 #ifdef IPA_EMULATION_SCCP
 			case (IPAC_PROTO_SCCP) {
 				var ASP_MTP3_TRANSFERind mtp;
@@ -513,7 +553,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 			log("IPA: Connected");
 			g_ipa_conn_id := asp_evt.connOpened.connId;
 			f_send_IPA_EVT(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP));
-			if (g_mode == IPA_MODE_SERVER) {
+			if (g_mode == IPA_MODE_SERVER and g_ccm_enabled) {
 				f_ccm_tx(valueof(ts_IPA_ID_GET));
 			}
 		}
