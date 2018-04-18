@@ -143,7 +143,8 @@ type record ConnHdlrPars {
 	RSL_IE_ChannelMode chan_mode,
 	float t_guard,
 	ConnL1Pars l1_pars,
-	TestSpecUnion spec optional
+	TestSpecUnion spec optional,
+	RSL_IE_EncryptionInfo encr optional
 }
 
 /* Test-specific parameters */
@@ -464,9 +465,17 @@ runs on ConnHdlr {
 	var RSL_Message rx := f_rsl_transceive_ret(tx, exp_rx, id, ignore_other);
 }
 
-function f_rsl_chan_act(RSL_IE_ChannelMode mode) runs on ConnHdlr {
-	f_rsl_transceive(ts_RSL_CHAN_ACT(g_chan_nr, mode), tr_RSL_CHAN_ACT_ACK(g_chan_nr),
-			 "RSL CHAN ACT");
+function f_rsl_chan_act(RSL_IE_ChannelMode mode, boolean encr_enable := false)
+runs on ConnHdlr {
+	var RSL_Message ch_act := valueof(ts_RSL_CHAN_ACT(g_chan_nr, mode));
+	if (encr_enable) {
+		/* append encryption related IEs, if requested */
+		var RSL_IE_EncryptionInfo encr_info;
+		encr_info := valueof(ts_RSL_IE_EncrInfo(g_pars.encr.alg_id, g_pars.encr.key));
+		ch_act.ies := ch_act.ies & { valueof(t_RSL_IE(RSL_IE_ENCR_INFO, RSL_IE_Body:{encr_info :=
+encr_info})) };
+	}
+	f_rsl_transceive(ch_act, tr_RSL_CHAN_ACT_ACK(g_chan_nr), "RSL CHAN ACT");
 }
 
 function f_rsl_chan_deact() runs on ConnHdlr {
@@ -498,7 +507,8 @@ private template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 		ms_power_level := 0,
 		ms_actual_ta := 0
 	},
-	spec := omit
+	spec := omit,
+	encr := omit
 }
 
 /***********************************************************************
@@ -617,6 +627,23 @@ testcase TC_chan_act_wrong_nr() runs on test_CT {
 		vc_conn := f_start_handler(refers(f_TC_chan_act_wrong_nr), pars);
 		vc_conn.done;
 	}
+	f_shutdown();
+}
+
+/* execute the same callback function on a variety of logical channels */
+private function f_testmatrix_each_chan(ConnHdlrPars pars, void_fn fn) runs on test_CT {
+	var ConnHdlr vc_conn;
+	f_init(testcasename());
+
+	/* test on each of the channels we have */
+	for (var integer i := 0; i < sizeof(g_AllChanTypes); i := i+1) {
+		pars.chan_nr := valueof(g_AllChanTypes[i]);
+
+		log(testcasename(), ": XXX Starting on ", g_AllChanTypes[i]);
+		vc_conn := f_start_handler(fn, pars);
+		vc_conn.done;
+	}
+
 	f_shutdown();
 }
 
@@ -1254,8 +1281,42 @@ altstep as_meas_res() runs on ConnHdlr {
 		}
 }
 
+private function f_alg_id_to_l1ctl(RSL_AlgId rsl_alg_id) return uint8_t {
+	select (rsl_alg_id) {
+	case (RSL_ALG_ID_A5_0) { return 0; }
+	case (RSL_ALG_ID_A5_1) { return 1; }
+	case (RSL_ALG_ID_A5_2) { return 2; }
+	case (RSL_ALG_ID_A5_3) { return 3; }
+	case (RSL_ALG_ID_A5_4) { return 4; }
+	case (RSL_ALG_ID_A5_5) { return 5; }
+	case (RSL_ALG_ID_A5_6) { return 6; }
+	case (RSL_ALG_ID_A5_7) { return 7; }
+	case else {
+		setverdict(fail, "Unknwon Algorithm ID");
+		self.stop;
+		}
+	}
+}
+
+private function f_alg_id_to_l3(RSL_AlgId rsl_alg_id) return BIT3 {
+	select (rsl_alg_id) {
+	case (RSL_ALG_ID_A5_1) { return '000'B; }
+	case (RSL_ALG_ID_A5_2) { return '001'B; }
+	case (RSL_ALG_ID_A5_3) { return '010'B; }
+	case (RSL_ALG_ID_A5_4) { return '011'B; }
+	case (RSL_ALG_ID_A5_5) { return '100'B; }
+	case (RSL_ALG_ID_A5_6) { return '101'B; }
+	case (RSL_ALG_ID_A5_7) { return '110'B; }
+	case else {
+		setverdict(fail, "Unknwon Algorithm ID");
+		self.stop;
+		}
+	}
+}
+
+
 /* Establish dedicated channel: L1CTL + RSL side */
-private function f_est_dchan() runs on ConnHdlr {
+private function f_est_dchan(boolean encr_enable := false) runs on ConnHdlr {
 	var GsmFrameNumber fn;
 	var ImmediateAssignment imm_ass;
 	var integer ra := 23;
@@ -1265,7 +1326,7 @@ private function f_est_dchan() runs on ConnHdlr {
 	//RSL.receive(tr_RSL_CHAN_RQD(int2oct(23,1)));
 
 	/* Activate channel on BTS side */
-	f_rsl_chan_act(g_pars.chan_mode);
+	f_rsl_chan_act(g_pars.chan_mode, encr_enable);
 
 	/* Send IMM.ASS via CCHAN */
 	var ChannelDescription ch_desc := {
@@ -1287,6 +1348,11 @@ private function f_est_dchan() runs on ConnHdlr {
 	ia_um := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
 	/* enable dedicated mode */
 	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um);
+	/* enable encryption, if requested */
+	if (encr_enable) {
+		var uint8_t alg_id := f_alg_id_to_l1ctl(g_pars.encr.alg_id);
+		f_L1CTL_CRYPTO_REQ(L1CTL, g_pars.chan_nr, alg_id, g_pars.encr.key);
+	}
 
 	g_first_meas_res := true;
 }
@@ -3349,9 +3415,9 @@ private function f_TC_rll_ud_req(charstring id) runs on ConnHdlr {
 	RSL.send(ts_RSL_UNITDATA_REQ(g_chan_nr, tc.link_id, tc.l3));
 	/* Expect it to arrive on the other side */
 	if (tc.link_id.c == SACCH) {
-		f_l1_exp_lapdm(tr_LAPDm_B4_UI(tc.sapi, cr_MT_CMD, false, tc.l3));
+		f_l1_exp_lapdm(tr_LAPDm_B4_UI(tc.sapi, cr_MT_CMD, tc.l3));
 	} else {
-		f_l1_exp_lapdm(tr_LAPDm_UI(tc.sapi, cr_MT_CMD, false, tc.l3));
+		f_l1_exp_lapdm(tr_LAPDm_UI(tc.sapi, cr_MT_CMD, tc.l3));
 	}
 
 	/* release the channel */
@@ -3387,7 +3453,7 @@ private function f_TC_rll_ud_ind(charstring id) runs on ConnHdlr {
 	L1CTL.clear;
 
 	/* Send LAPDm UI frame. There is no B4 format in uplink! */
-	f_tx_lapdm(ts_LAPDm_UI(tc.sapi, cr_MO_CMD, false, tc.l3), tc.link_id);
+	f_tx_lapdm(ts_LAPDm_UI(tc.sapi, cr_MO_CMD, tc.l3), tc.link_id);
 	/* Expdct RLL UNITDATA IND on RSL side */
 	alt {
 	[] RSL.receive(tr_RSL_UNITDATA_IND(g_chan_nr, tc.link_id, tc.l3)) {
@@ -3418,6 +3484,172 @@ testcase TC_rll_unit_data_ind_ACCH() runs on test_CT {
 	f_rll_testmatrix(tcs, refers(f_TC_rll_ud_ind));
 }
 
+/***********************************************************************
+ * Encryption Related
+ ***********************************************************************/
+
+/* send UNITDATA_REQ from BTS to MS and expect it to arrive */
+function f_unitdata_mt(RslLinkId link_id, octetstring l3) runs on ConnHdlr {
+	RSL.send(ts_RSL_UNITDATA_REQ(g_chan_nr, link_id, l3));
+	if (link_id.c == SACCH) {
+		f_l1_exp_lapdm(tr_LAPDm_B4_UI(link_id.sapi, cr_MT_CMD, l3));
+	} else {
+		f_l1_exp_lapdm(tr_LAPDm_UI(link_id.sapi, cr_MT_CMD, l3));
+	}
+}
+
+/* Send UI frame from MS and expect it to arrive as RLL UNITDATA IND on Abis */
+function f_unitdata_mo(RslLinkId link_id, octetstring l3) runs on ConnHdlr {
+	timer T := 3.0;
+	f_tx_lapdm(ts_LAPDm_UI(link_id.sapi, cr_MO_CMD, l3), link_id);
+	T.start;
+	/* Expect RLL UNITDATA IND on RSL side */
+	alt {
+	[] RSL.receive(tr_RSL_UNITDATA_IND(g_chan_nr, link_id, l3)) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for UNIT_DATA_IND");
+		}
+	[] RSL.receive { repeat; }
+	}
+}
+
+/* Test channel activation with A5/n right from the beginning (like in assignment + hand-over) */
+function f_TC_chan_act_encr(charstring id) runs on ConnHdlr {
+	f_l1_tune(L1CTL);
+	f_est_dchan(true);
+
+	/* now we actually need to transmit some data both ways to check if the encryption works */
+	var L1ctlDlMessage dl;
+
+	var octetstring l3 := f_rnd_octstring(16);
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(0));
+
+	/* send UNITDATA_REQ from BTS to MS and expect it to arrive */
+	f_unitdata_mt(link_id, l3);
+
+	/* Send UI frame from MS and expect it to arrive as RLL UNITDATA IND on Abis */
+	f_unitdata_mo(link_id, l3);
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_chan_act_a51() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_1, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_chan_act_encr));
+}
+testcase TC_chan_act_a52() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_2, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_chan_act_encr));
+}
+testcase TC_chan_act_a53() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_3, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_chan_act_encr));
+}
+
+
+/* Test unencrypted channel activation followed by explicit ENCR CMD later */
+function f_TC_encr_cmd(charstring id) runs on ConnHdlr {
+	/* L3 payload doesn't matter, as it is passed transparently */
+	var BIT3 l3_alg_id := f_alg_id_to_l3(g_pars.encr.alg_id);
+	var octetstring l3 := enc_PDU_ML3_NW_MS(valueof(ts_RRM_CiphModeCmd(l3_alg_id)));
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(0));
+
+	f_l1_tune(L1CTL);
+
+	/* first establish a dedicated channel in the clear */
+	f_est_dchan(false);
+
+	/* Establish ABM */
+	f_est_rll_mo(link_id.sapi, link_id, '23420815'O);
+
+	/* then send the RSL ENCR CMD with an actual RR CIPH MOD CMD inside */
+	RSL.send(ts_RSL_ENCR_CMD(g_chan_nr, link_id, g_pars.encr.alg_id, g_pars.encr.key, l3));
+	/* expect the L3 to arrive still unencrypted on the MS side */
+	f_l1_exp_lapdm(tr_LAPDm_I(link_id.sapi, cr_MT_CMD, ?, ?, ?, l3));
+
+	/* configure L1 to apply ciphering */
+	var uint8_t alg_id := f_alg_id_to_l1ctl(g_pars.encr.alg_id);
+	f_L1CTL_CRYPTO_REQ(L1CTL, g_pars.chan_nr, alg_id, g_pars.encr.key);
+
+	/* send first ciphered I-frame in response */
+	l3 := '0a0b0c0d'O;
+	f_tx_lapdm(ts_LAPDm_I(link_id.sapi, cr_MO_CMD, true, 1, 0, l3), link_id);
+	RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, l3));
+
+	/* now the BTS code should have detected the first properly encrypted uplink I-frame,
+	 * and hence enable encryption also on the downlink */
+
+	/* expect bi-directional communication work in encrypted mode */
+	f_unitdata_mo(link_id, f_rnd_octstring(15));
+	f_unitdata_mt(link_id, f_rnd_octstring(15));
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_encr_cmd_a51() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_1, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_encr_cmd));
+}
+testcase TC_encr_cmd_a52() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_2, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_encr_cmd));
+}
+testcase TC_encr_cmd_a53() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_3, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_encr_cmd));
+}
+
+private function f_assert_lapdm(octetstring enc, template LapdmFrame exp_match, charstring name := "") {
+	var LapdmFrame lf;
+	var octetstring reenc;
+
+	/* decode the LAPDm frame */
+	if (ischosen(exp_match.ab)) {
+		lf.ab := dec_LapdmFrameAB(enc);
+	} else {
+		setverdict(fail, "unsupported frame type");
+		self.stop;
+	}
+
+	/* check if decoder result matches expectation */
+	if (not match(lf, exp_match)) {
+		setverdict(fail, name, ": decoded LAPDm doesn't match");
+	} else {
+		log(name, ": matched");
+		setverdict(pass);
+	}
+
+	/* test if re-encoded frame equals original input */
+	reenc := enc_LapdmFrame(lf);
+	if (enc != reenc) {
+		setverdict(fail, name, ": re-encoded LAPDm frame doesn't match");
+	} else {
+		setverdict(pass);
+	}
+}
+
+testcase TC_lapdm_selftest() runs on test_CT {
+	f_assert_lapdm('030301'O, tr_LAPDm_UI(0, true, ''O), "ui_s0_empty");
+	f_assert_lapdm('0F0301'O, tr_LAPDm_UI(3, true, ''O), "ui_s3_empty");
+	f_assert_lapdm('013F01'O, tr_LAPDm_SABM(0, false, true, ''O), "sabm_s0_empty");
+	f_assert_lapdm('013F1123420815'O, tr_LAPDm_SABM(0, false, true, '23420815'O), "sabm_s0_l3");
+	f_assert_lapdm('03E101'O, tr_LAPDm_RR(0, true, false, 7), "rr_s0_7");
+	f_assert_lapdm('03000d063505'O, tr_LAPDm_I(0, true, false, 0, 0, '063505'O), "I/0/0");
+	f_assert_lapdm('03e00d063505'O, tr_LAPDm_I(0, true, false, 7, 0, '063505'O), "I/7/0");
+}
+
 
 /* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
 /*	protocol error as per 44.006 */
@@ -3434,13 +3666,11 @@ testcase TC_rll_unit_data_ind_ACCH() runs on test_CT {
 * channel activation
 ** with BS_Power / MS_Power, bypassing power control loop
 ** on primary vs. secondary TRX
-** with encryption from initial activation on
 ** with timing advance from initial activation on
 * mode modify
 ** encryption
 ** multirate
 * check DEACTIVATE SACCH
-* encryption command / intricate logic about tx-only/tx+rx/...
 ** unsupported algorithm
 * handover detection
 * MS Power Control
@@ -3543,6 +3773,15 @@ control {
 	execute( TC_rll_unit_data_req_ACCH() );
 	execute( TC_rll_unit_data_ind_DCCH() );
 	execute( TC_rll_unit_data_ind_ACCH() );
+
+	execute( TC_chan_act_a51() );
+	execute( TC_chan_act_a52() );
+	execute( TC_chan_act_a53() );
+	execute( TC_encr_cmd_a51() );
+	execute( TC_encr_cmd_a52() );
+	execute( TC_encr_cmd_a53() );
+
+	execute( TC_lapdm_selftest() );
 }
 
 
