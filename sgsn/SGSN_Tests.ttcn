@@ -35,6 +35,8 @@ import from Osmocom_VTY_Functions all;
 
 import from GSM_RR_Types all;
 
+import from MobileL3_MM_Types all;
+
 
 modulepar {
 	/* IP/port on which we run our internal GSUP/HLR emulation */
@@ -286,23 +288,65 @@ altstep as_mm_identity() runs on BSSGP_ConnHdlr {
 	}
 }
 
-/* perform GMM authentication (if expected) */
-function f_gmm_auth () runs on BSSGP_ConnHdlr {
+/* perform GMM authentication (if expected).
+ * Note, for umts_aka_challenge to work, the revisionLevelIndicatior needs to
+ * be 1 to mark R99 capability, in the GMM Attach Request, see f_gmm_attach(). */
+function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres := false) runs on BSSGP_ConnHdlr {
 	var BssgpDecoded bd;
 	var PDU_L3_MS_SGSN l3_mo;
 	var PDU_L3_SGSN_MS l3_mt;
 	var default di := activate(as_mm_identity());
 	if (g_pars.net.expect_auth) {
-		g_pars.vec := f_gen_auth_vec_2g();
-		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
-									 g_pars.vec.sres,
-									 g_pars.vec.kc));
+		var GSUP_IE auth_tuple;
+		var template AuthenticationParameterAUTNTLV autn;
+
+		if (umts_aka_challenge) {
+			g_pars.vec := f_gen_auth_vec_3g();
+			autn := {
+				elementIdentifier := '28'O,
+				lengthIndicator := lengthof(g_pars.vec.autn),
+				autnValue := g_pars.vec.autn
+				};
+
+			auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+								       g_pars.vec.sres,
+								       g_pars.vec.kc,
+								       g_pars.vec.ik,
+								       g_pars.vec.ck,
+								       g_pars.vec.autn,
+								       g_pars.vec.res));
+			log("GSUP sends 2G and 3G auth tuples", auth_tuple);
+		} else {
+			g_pars.vec := f_gen_auth_vec_2g();
+			autn := omit;
+			auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
+								     g_pars.vec.sres,
+								     g_pars.vec.kc));
+			log("GSUP sends only 2G auth tuple", auth_tuple);
+		}
 		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
 		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
-		BSSGP.receive(tr_BD_L3_MT(tr_GMM_AUTH_REQ(g_pars.vec.rand))) -> value bd;
+
+		var template PDU_L3_SGSN_MS auth_ciph_req := tr_GMM_AUTH_REQ(g_pars.vec.rand);
+		auth_ciph_req.msgs.gprs_mm.authenticationAndCipheringRequest.authenticationParameterAUTN := autn;
+		BSSGP.receive(tr_BD_L3_MT(auth_ciph_req)) -> value bd;
 		l3_mt := bd.l3_mt;
 		var BIT4 ac_ref := l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.acReferenceNumber.valueField;
-		l3_mo := valueof(ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres));
+		var template PDU_L3_MS_SGSN auth_ciph_resp := ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres);
+
+		if (umts_aka_challenge and not force_gsm_sres) {
+			/* set UMTS response instead */
+			auth_ciph_resp.msgs.gprs_mm.authenticationAndCipheringResponse.authenticationParResp := {
+				valueField := substr(g_pars.vec.res, 0, 4)
+			};
+			auth_ciph_resp.msgs.gprs_mm.authenticationAndCipheringResponse.authenticationRespParExt := {
+				elementIdentifier := '21'O,
+				lengthIndicator := lengthof(g_pars.vec.res) - 4,
+				valueField := substr(g_pars.vec.res, 4, lengthof(g_pars.vec.res) - 4)
+			};
+		}
+
+		l3_mo := valueof(auth_ciph_resp);
 		if (ispresent(l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest) and
 		    l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest.valueField == '001'B) {
 			l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
@@ -402,12 +446,20 @@ private function f_gmm_gsup_lu_isd() runs on BSSGP_ConnHdlr {
 	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
 }
 
-private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
+private function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres) runs on BSSGP_ConnHdlr {
 	var BssgpDecoded bd;
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
+	var template PDU_L3_MS_SGSN attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit);
 
-	BSSGP.send(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
-	f_gmm_auth();
+	/* indicate R99 capability of the MS to enable UMTS AKA in presence of
+	 * 3G auth vectors */
+	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.revisionLevelIndicatior := '1'B;
+	/* The thing is, if the solSACapability is 'omit', then the
+	 * revisionLevelIndicatior is at the wrong place! */
+	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.solSACapability := '0'B;
+
+	BSSGP.send(attach_req);
+	f_gmm_auth(umts_aka_challenge, force_gsm_sres);
 	/* Expect MSC to perform LU with HLR */
 	f_gmm_gsup_lu_isd();
 
@@ -416,6 +468,10 @@ private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
 	}
 	/* FIXME: Extract P-TMSI, if any. Only send Complete if necessary */
 	BSSGP.send(ts_GMM_ATTACH_COMPL);
+}
+
+private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
+	f_gmm_attach(false, false);
 	setverdict(pass);
 }
 
@@ -432,6 +488,30 @@ testcase TC_attach_mnc3() runs on test_CT {
 	f_init('023042'H);
 	f_sleep(1.0);
 	vc_conn := f_start_handler(refers(f_TC_attach), testcasename(), g_gb[0], 1001);
+	vc_conn.done;
+}
+
+private function f_TC_attach_umts_aka_umts_res(charstring id) runs on BSSGP_ConnHdlr {
+	f_gmm_attach(true, false);
+	setverdict(pass);
+}
+testcase TC_attach_umts_aka_umts_res() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_attach_umts_aka_umts_res), testcasename(), g_gb[0], 1002);
+	vc_conn.done;
+}
+
+private function f_TC_attach_umts_aka_gsm_sres(charstring id) runs on BSSGP_ConnHdlr {
+	f_gmm_attach(true, true);
+	setverdict(pass);
+}
+testcase TC_attach_umts_aka_gsm_sres() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_attach_umts_aka_gsm_sres), testcasename(), g_gb[0], 1003);
 	vc_conn.done;
 }
 
@@ -1153,6 +1233,8 @@ testcase TC_attach_pdp_act_user_deact_mt() runs on test_CT {
 control {
 	execute( TC_attach() );
 	execute( TC_attach_mnc3() );
+	execute( TC_attach_umts_aka_umts_res() );
+	execute( TC_attach_umts_aka_gsm_sres() );
 	execute( TC_attach_auth_id_timeout() );
 	execute( TC_attach_auth_sai_timeout() );
 	execute( TC_attach_auth_sai_reject() );
