@@ -20,7 +20,7 @@ if [ "$(id -u)" = "0" ]; then
 else
 	CMD="sudo $TCPDUMP"
 fi
-$CMD -U -s 0 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
+$CMD -U -s 1500 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
 PID=$!
 echo $PID > $PIDFILE
 
@@ -31,7 +31,7 @@ ping 127.0.0.1 >/dev/null 2>&1 &
 PID=$!
 i=0
 while [ ! -f "$TTCN3_PCAP_PATH/$TESTCASE.pcap" ] ||
-      [ "$($TCPDUMP -r "$TTCN3_PCAP_PATH/$TESTCASE.pcap" 2>/dev/null | wc -l)" -eq 0 ]
+      [ "$(stat -c '%s' "$TTCN3_PCAP_PATH/$TESTCASE.pcap")" -eq 32 ]
 do
 	echo "Waiting for tcpdump to start... $i"
 	sleep 1
