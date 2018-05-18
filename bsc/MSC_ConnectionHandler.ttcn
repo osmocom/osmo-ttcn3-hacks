@@ -674,6 +674,41 @@ return boolean {
 	return false;
 }
 
+/* Determine if the channel mode specified within rsl_chan_nr requires a
+ * MODE MODIFY in to match the channel mode specified by given BSSMAP
+ * ChannelType */
+function f_channel_needs_modify(BSSMAP_IE_ChannelType bssmap, RslChannelNr rsl_chan_nr)
+return boolean {
+
+	/* FIXME: This tests the rsl_chan_nr to determine if we are on a
+	 * signalling channel or not. Unfortunately this may lead to false
+	 * results if we are on a TCH. The problem is that a TCH may be also
+	 * used in signalling mode, but this function assumes that only SDCCH4
+	 * and SDCCH8 are used as signalling channels at all. */
+
+	var boolean current_signalling := false;
+	var boolean desired_signalling := false;
+
+	select (rsl_chan_nr) {
+	       case (t_RslChanNr_SDCCH4(?, ?)) { current_signalling := true; }
+	       case (t_RslChanNr_SDCCH8(?, ?)) { current_signalling := true; }
+	}
+
+	if (bssmap.speechOrDataIndicator == '0011'B) {
+		desired_signalling := true;
+	}
+
+	if (current_signalling == desired_signalling) {
+		/* The desired channel mode is equal to the one we currently
+		 * have, there is no mode modification needed or expected */
+	       return false;
+	} else {
+		/* The desired channel mode and the current channel mode do
+		 * not match. A mode modification is required */
+	       return true;
+	}
+}
+
 /* establish a channel fully, expecting an assignment matching 'exp' */
 function f_establish_fully(template (omit) PDU_BSSAP ass_tpl, template PDU_BSSAP exp_ass_cpl)
 runs on MSC_ConnHdlr {
@@ -698,6 +733,7 @@ runs on MSC_ConnHdlr {
 	timer T := 10.0;
 	var boolean exp_compl := ischosen(exp_ass_cpl.pdu.bssmap.assignmentComplete);
 	var boolean exp_fail := ischosen(exp_ass_cpl.pdu.bssmap.assignmentFailure);
+	var boolean exp_modify;
 	var ExpectCriteria mgcpcrit := {
 		connid := omit,
 		endpoint := omit,
@@ -707,10 +743,22 @@ runs on MSC_ConnHdlr {
 	/* if the channel type is SIGNAL, we're not handling a voice call */
 	if (ass_cmd.pdu.bssmap.assignmentRequest.channelType.speechOrDataIndicator != '0011'B) {
 		st.voice_call := true;
+		exp_modify := true;
 	}
+
 	/* determine if the current channel can support the given service or not */
 	if (not f_channel_compatible(ass_cmd.pdu.bssmap.assignmentRequest.channelType, g_chan_nr)) {
 		st.is_assignment := true;
+
+		/* We decided to assign a new channel, so we do not expect
+		 * any mode modify messages on RSL */
+		exp_modify := false;
+	} else {
+		/* We will continue working with the currently assigned
+		 * channel, we must now check if the mode of the current
+		 * channel is compatible. If not we expect the BSC to modify
+		 * the mode */
+		exp_modify := f_channel_needs_modify(ass_cmd.pdu.bssmap.assignmentRequest.channelType, g_chan_nr);
 	}
 
 	f_create_mgcp_expect(mgcpcrit);
@@ -722,21 +770,20 @@ runs on MSC_ConnHdlr {
 	[st.is_assignment] as_assignment(st);
 
 	/* modify related bits */
-	[not st.is_assignment] as_modify(st);
+	[not st.is_assignment and exp_modify] as_modify(st);
 
 	/* voice call related bits (IPA CRCX/MDCX + MGCP) */
 	[st.voice_call] as_Media();
 
 	/* if we receive exactly what we expected, always return + pass */
-	[st.is_assignment and st.assignment_done or
-	 (not st.is_assignment and st.modify_done)] BSSAP.receive(exp_ass_cpl) -> value bssap {
+	[st.is_assignment and st.assignment_done or (not st.is_assignment and (st.modify_done or not exp_modify))] BSSAP.receive(exp_ass_cpl) -> value bssap {
 		setverdict(pass);
 		}
 	[exp_fail] BSSAP.receive(exp_ass_cpl) -> value bssap {
 		setverdict(pass);
 		}
 	[(st.is_assignment and st.assignment_done or
-	 (not st.is_assignment and st.modify_done)) and
+	 (not st.is_assignment and (st.modify_done or not exp_modify))) and
 	 exp_compl] BSSAP.receive(tr_BSSMAP_AssignmentComplete) {
 		setverdict(fail, "Received non-matching ASSIGNMENT COMPLETE");
 		}
