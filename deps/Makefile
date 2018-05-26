@@ -25,6 +25,7 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 
 ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.M2PA \
+			titan.ProtocolModules.ROSE \
 			titan.ProtocolModules.SCTP \
 			titan.ProtocolModules.SUA \
 			titan.ProtocolModules.SDP \
@@ -70,6 +71,7 @@ titan.ProtocolModules.M3UA_commit=		R.2.A
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
 titan.ProtocolModules.RTP_commit=		R.5.A
+titan.ProtocolModules.ROSE_commit=		R.1.C
 titan.ProtocolModules.SCTP_commit=		R.2.A
 titan.ProtocolModules.SDP_commit=		R.14.A
 titan.ProtocolModules.SMPP_commit=		R.2.A-2-gb7aee69
