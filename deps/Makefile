@@ -2,6 +2,7 @@
 ECLIPSEGIT:=https://github.com/eclipse
 ECLIPSEGIT2:=git://git.eclipse.org/gitroot/titan
 OSMOGITHUB:=https://github.com/osmocom
+OSMOGIT:=git://git.osmocom.org
 
 ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.ICMP \
@@ -46,7 +47,9 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolEmulations.M3UA
 
-ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS)
+OSMOGIT_REPOS=		titan.ProtocolModules.MAP
+
+ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # In order to keep local changes in the repository of a dependency, set its commit to the
@@ -66,6 +69,7 @@ titan.ProtocolModules.IP_commit=		R.10.B-1-g99d0ec9
 titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A
 titan.ProtocolModules.L2TP_commit=		R.2.A
 titan.ProtocolModules.LLC_v7.1.0_commit=	R.2.A
+titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
 titan.ProtocolModules.M2PA_commit=		R.2.A
 titan.ProtocolModules.M3UA_commit=		R.2.A
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
@@ -142,3 +146,6 @@ $(foreach dir,$(ECLIPSEGIT2_REPOS), \
 
 $(foreach dir,$(OSMOGITHUB_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(OSMOGITHUB))))
+
+$(foreach dir,$(OSMOGIT_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(OSMOGIT))))
