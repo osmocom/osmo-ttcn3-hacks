@@ -49,8 +49,18 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
 FILES="BSSAP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.ROSE/src
+FILES="Remote_Operations_Generic_ROS_PDUs.asn  Remote_Operations_Information_Objects.asn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.MAP/src
+FILES="MAP_ApplicationContexts.asn MAP_CH_DataTypes.asn MAP_CallHandlingOperations.asn MAP_CommonDataTypes.asn MAP_DialogueInformation.asn MAP_ER_DataTypes.asn MAP_EncDec.cc MAP_Errors.asn MAP_GR_DataTypes.asn MAP_Group_Call_Operations.asn MAP_LCS_DataTypes.asn MAP_LocationServiceOperations.asn MAP_MS_DataTypes.asn MAP_MobileServiceOperations.asn MAP_OM_DataTypes.asn MAP_OperationAndMaintenanceOperations.asn MAP_PDU_Defs.asn MAP_Protocol.asn MAP_SM_DataTypes.asn MAP_SS_Code.asn MAP_SS_DataTypes.asn MAP_ShortMessageServiceOperations.asn MAP_SupplementaryServiceOperations.asn MAP_TS_Code.asn MAP_Types.ttcn "
+FILES+="MAP_BS_Code.asn MAP_ExtensionDataTypes.asn MobileDomainDefinitions.asn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
-FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn"
+FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn "
+FILES+="SS_DataTypes.asn SS_Errors.asn SS_Operations.asn SS_PDU_Defs.asn SS_Protocol.asn SS_Types.ttcn SS_EncDec.cc"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.SDP/src
