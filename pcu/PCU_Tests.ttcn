@@ -17,6 +17,9 @@ module PCU_Tests {
 	import from GPRS_Context all;
 	import from GPRS_TBF all;
 	import from L1CTL_PortType all;
+	import from MobileL3_Types all;
+	import from MobileL3_CommonIE_Types all;
+	import from L3_Templates all;
 
 	modulepar {
 		BssgpConfig mp_gb_cfg := {
@@ -207,27 +210,58 @@ module PCU_Tests {
 		log("BSSGP successfully initialized");
 	}
 
+	function f_wait_paging_req_type1(hexstring expected_tmsi) runs on dummy_CT {
+		var LAPDm_ph_data ph_data;
+		timer T := 5.0;
+
+		T.start;
+		alt {
+			[] L1.receive(LAPDm_ph_data:{sacch:=?,sapi:=0,lapdm:={bbis:=?}}) -> value ph_data {
+				var octetstring payload := substr(ph_data.lapdm.bbis.payload, 1, lengthof(ph_data.lapdm.bbis.payload) - 1);
+				var PDU_ML3_NW_MS pdu;
+
+				if (dec_PDU_ML3_NW_MS_backtrack(payload, pdu) != 0) {
+					repeat;
+				}
+
+				if (not ischosen(pdu.msgs.rrm)) {
+					repeat;
+				}
+
+				if (match(pdu, tr_PAGING_REQ1(tr_PAGING_REQ1_MI1_TMSI(hex2oct(expected_tmsi))))) {
+					setverdict(pass);
+				} else {
+					repeat;
+				}
+			}
+			[] L1.receive { repeat; }
+			[] T.timeout { setverdict(fail); }
+		}
+	}
+
 	/* Send PS-PAGING via BSSGP to PCU, expect it to show up on L1/Um */
 	testcase TC_paging() runs on dummy_CT {
-		var GsmTmsi tmsi := hex2int('01234567'H);
+		var hexstring tmsi_hex := '01234567'H;
+		var GsmTmsi tmsi := hex2int(tmsi_hex);
+
 		g_mmctx.imsi := '262420123456789'H;
 		g_mmctx.tlli := f_random_tlli();
 		f_init();
 
-		/* Send paging on signalling BVCI 0 since osmo-pcu does not support paging on PTP yet. */
-		BSSGP_SIG[0].send(ts_BSSGP_PS_PAGING_IMSI(0, g_mmctx.imsi));
-		BSSGP_SIG[0].send(ts_BSSGP_PS_PAGING_PTMSI(0, g_mmctx.imsi, tmsi));
+		var BCCH_tune_req tune_req := { { false, 871 }, true };
+		L1.send(tune_req);
+		/* FIXME: wait for confirm */
 
-		while (true) {
-			var BssgpDecoded bd;
-			alt {
-				[] BSSGP[0].receive(tr_BD_L3_MT(?)) -> value bd {
-					log("BSSGP Rx: ", bd);
-				}
-				[] BSSGP[0].receive(t_BssgpStsInd(?, ?, BVC_S_UNBLOCKED)) { repeat; }
-				[] BSSGP[0].receive { repeat; }
-			}
-		}
+		/* Send paging on signalling BVCI 0 since osmo-pcu does not support paging on PTP yet. */
+		/*
+		TODO: Paging by IMSI does not work yet because osmo-pcu does not copy IMSI into paging requests.
+		BSSGP_SIG[0].send(ts_BSSGP_PS_PAGING_IMSI(0, g_mmctx.imsi));
+		f_wait_paging_req_type1(hex2oct(g_mmctx.imsi));
+		*/
+
+		/* Page by TMSI */
+		BSSGP_SIG[0].send(ts_BSSGP_PS_PAGING_PTMSI(0, g_mmctx.imsi, tmsi));
+		f_wait_paging_req_type1(tmsi_hex);
 	}
 
 	/* Establish an UL TBF: Tune to ARFCN, send RACH, receive AGCH, enable TBF Rx */
@@ -633,5 +667,6 @@ value dl {
 		execute(TC_selftest_ns());
 		execute(TC_ul_tbf_single_llc_sizes());
 		execute(TC_ul_tbf());
+		execute(TC_paging());
 	}
 };
