@@ -10,6 +10,7 @@ gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
+FILES+=" TCCEncoding_Functions.ttcn TCCEncoding.cc " # GSM 7-bit coding
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
