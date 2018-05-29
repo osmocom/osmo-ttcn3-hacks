@@ -1,0 +1,579 @@
+module BSC_Tests_LCLS {
+
+/* Integration Tests for OsmoBSC
+ * (C) 2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ *
+ * There are test cases that run in so-called 'handler mode' and test cases
+ * that run directly on top of the BSSAP and RSL CodecPorts.  The "handler mode"
+ * tests abstract the multiplexing/demultiplexing of multiple SCCP connections
+ * and/or RSL channels and are hence suitable for higher-level test cases, while
+ * the "raw" tests directly on top of the CodecPorts are more suitable for lower-
+ * level testing.
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from IPL4asp_Types all;
+
+import from BSSAP_Types all;
+import from BSSAP_Adapter all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from IPA_Emulation all;
+import from IPA_CodecPort all;
+import from IPA_Types all;
+import from RSL_Types all;
+import from RSL_Emulation all;
+import from MGCP_Types all;
+import from MGCP_Emulation all;
+import from MGCP_Templates all;
+import from SDP_Types all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
+
+import from BSSMAP_Templates all;
+import from BSSMAP_Emulation all;
+
+import from MSC_ConnectionHandler all;
+import from BSC_Tests all;
+
+/* The philosophy of this testsuite is to re-use as much as possible the existing components
+ * and functions that we have in BSC_Tests and its dependencies.  However, as opposed to those
+ * normal BSC tests, we here have to run *two* ConnHdlr and synchronize activity between them.
+ *
+ * We do this by adding some special-purpose ports between the main test component running the
+ * test case [lcls_]test_CT and the per-connection [LCLS_]MSC_ConnHdlr.
+ */
+
+
+/* take test_CT from BSC_Tests and extend it with LCLS specific bits */
+type component lcls_test_CT extends test_CT {
+	/* Component references */
+	var LCLS_MSC_ConnHdlr vc_CONN_A;
+	var LCLS_MSC_ConnHdlr vc_CONN_B;
+	/* Ports to the two call legs */
+	port LCLS_InterComp_PT CONN_A;
+	port LCLS_InterComp_PT CONN_B;
+}
+
+/* take MSC_ConnHdlr and extend it with LCLS specific bits */
+type component LCLS_MSC_ConnHdlr extends MSC_ConnHdlr {
+	/* Port back to the controlling lcls_test_CT */
+	port LCLS_InterComp_PT MASTER;
+}
+
+/* port type between lcls_test_CT and LCLS_MSC_ConnHdlr */
+type port LCLS_InterComp_PT message {
+		/* BSSAP from BSSA_ConnHdlr */
+	inout	PDU_BSSAP, BSSAP_Conn_Prim, PDU_DTAP_MO, PDU_DTAP_MT,
+		/* RSL from RSL_DchanHdlr */
+		RSLDC_ChanRqd, RSL_Message,
+		/* MGCP from MGCP_ConnHdlr */
+		MgcpCommand, MgcpResponse,
+		LclsCompSync;
+} with { extension "internal" };
+
+type enumerated LclsCompSync {
+	/* ConnHdlr signals to master component that assignment has completed */
+	LCLS_COMP_SYNC_ASS_COMPL
+}
+
+
+/* forward messages between the RSL/MGCP/BSSAP Emulation and the master component */
+private altstep as_lcls_conn_hdlr_proxy() runs on LCLS_MSC_ConnHdlr {
+	var PDU_BSSAP bssap;
+	var BSSAP_Conn_Prim bssap_p;
+	var PDU_DTAP_MO dtap_mo;
+	var PDU_DTAP_MT dtap_mt;
+	var MgcpCommand mgcp_cmd;
+	var MgcpResponse mgcp_rsp;
+	var RSL_Message rsl_msg;
+	/* from ConnHdlr to master process */
+	[] BSSAP.receive(PDU_BSSAP:?) -> value bssap { MASTER.send(bssap); }
+	[] BSSAP.receive(BSSAP_Conn_Prim:?) -> value bssap_p { MASTER.send(bssap_p); }
+	[] BSSAP.receive(PDU_DTAP_MO:?) -> value dtap_mo { MASTER.send(dtap_mo); }
+	[] BSSAP.receive(PDU_DTAP_MT:?) -> value dtap_mt { MASTER.send(dtap_mt); }
+	[] MGCP.receive(MgcpCommand:?) -> value mgcp_cmd { MASTER.send(mgcp_cmd); }
+	[] MGCP.receive(MgcpResponse:?) -> value mgcp_rsp { MASTER.send(mgcp_rsp); }
+	[] RSL.receive(RSL_Message:?) -> value rsl_msg { MASTER.send(rsl_msg); }
+	/* from master process to ConnHdlr */
+	[] MASTER.receive(PDU_BSSAP:?) -> value bssap { BSSAP.send(bssap); }
+	[] MASTER.receive(PDU_DTAP_MO:?) -> value dtap_mo { BSSAP.send(dtap_mo); }
+	[] MASTER.receive(PDU_DTAP_MT:?) -> value dtap_mt { BSSAP.send(dtap_mt); }
+	[] MASTER.receive(MgcpCommand:?) -> value mgcp_cmd { MGCP.send(mgcp_cmd); }
+	[] MASTER.receive(MgcpResponse:?) -> value mgcp_rsp { MGCP.send(mgcp_rsp); }
+	[] MASTER.receive(RSL_Message:?) -> value rsl_msg { RSL.send(rsl_msg); }
+}
+
+
+private function f_lcls_connhdlr_main(charstring id) runs on LCLS_MSC_ConnHdlr {
+	/* 1) establish the connection between RSL and BSSAP side */
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	var template PDU_BSSAP ass_compl := f_gen_exp_compl();
+	ass_req.pdu.bssmap.assignmentRequest.codecList := g_pars.ass_codec_list;
+	f_establish_fully(ass_req, ass_compl);
+
+	/* 2) notify master that assignment has completed */
+	MASTER.send(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+
+	/* 3) proxy packets between master component and various ports */
+	while (true) {
+		as_lcls_conn_hdlr_proxy();
+	}
+}
+
+type function lcls_void_fn(charstring id) runs on LCLS_MSC_ConnHdlr;
+
+/* first function inside ConnHdlr component; sets g_pars + starts function */
+private function f_handler_init(lcls_void_fn fn, charstring id, template (omit) TestHdlrParams pars := omit)
+runs on LCLS_MSC_ConnHdlr {
+	if (isvalue(pars)) {
+		g_pars := valueof(pars);
+	}
+	fn.apply(id);
+}
+
+/* function creating the two ConnHdlrs, connecting them + starting them */
+private function f_lcls_test_init(TestHdlrParams pars_a, TestHdlrParams pars_b) runs on lcls_test_CT {
+	var charstring id_a := testcasename() & "-A";
+	var charstring id_b := testcasename() & "-B";
+
+	pars_b.imsi := '002029876543210'H;
+	pars_b.media_nr := 2;
+
+	/* create and connect the two ConnHandlers */
+	vc_CONN_A := LCLS_MSC_ConnHdlr.create(id_a);
+	f_connect_handler(vc_CONN_A);
+	connect(vc_CONN_A:MASTER, self:CONN_A);
+
+	vc_CONN_B := LCLS_MSC_ConnHdlr.create(id_b);
+	f_connect_handler(vc_CONN_B);
+	connect(vc_CONN_B:MASTER, self:CONN_B);
+
+	/* start the two components */
+	vc_CONN_A.start(f_handler_init(refers(f_lcls_connhdlr_main), id_a, pars_a));
+	f_sleep(3.0);
+	vc_CONN_B.start(f_handler_init(refers(f_lcls_connhdlr_main), id_b, pars_b));
+}
+
+private function f_lcls_test_fini() runs on lcls_test_CT {
+	vc_CONN_A.stop;
+	vc_CONN_B.stop;
+}
+
+/* ignore some messages which we're not interested in evaluating (yet) */
+private altstep as_ignore() runs on lcls_test_CT {
+	[] CONN_A.receive(tr_DLCX) { repeat; }
+	[] CONN_B.receive(tr_DLCX) { repeat; }
+}
+
+/* fail if any notify is being received */
+private altstep as_fail_on_lcls_notify() runs on lcls_test_CT
+{
+	[] CONN_A.receive(tr_BSSMAP_LclsNotification(?, *)) {
+		setverdict(fail, "Unexpected BSSMAP LCLS Notification");
+	}
+	[] CONN_B.receive(tr_BSSMAP_LclsNotification(?, *)) {
+		setverdict(fail, "Unexpected BSSMAP LCLS Notification");
+	}
+}
+
+private function f_wait_fail_notify() runs on lcls_test_CT
+{
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] as_fail_on_lcls_notify();
+	[] T.timeout { }
+	}
+}
+
+private function f_lcls_init(integer nr_bts := 1) runs on lcls_test_CT
+{
+	var default d;
+
+	d := activate(as_ignore());
+	f_init(nr_bts, true);
+	f_sleep(1.0);
+}
+
+
+/* Send an ASSIGNMENT REQ with LCLS GCR only, without LCLS CFG or CSC */
+testcase TC_lcls_gcr_only() runs on lcls_test_CT {
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	var MSC_ConnHdlr vc_conn;
+
+	f_lcls_init();
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	/* Expect LCLS status to be not reported, as no LCLS config was signalled */
+	pars.lcls.exp_sts := omit;
+
+	f_lcls_test_init(pars, pars);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	f_wait_fail_notify();
+	f_lcls_test_fini();
+}
+
+/* Send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect connect both-way */
+testcase TC_lcls_gcr_bway_connect() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+	var MgcpCommand mgcp_cmd;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_connect;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* second call should then reuslt in LS */
+	pars_b.lcls.exp_sts := LCLS_STS_locally_switched;
+
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	interleave {
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_locally_switched));
+	[] CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	[] CONN_A.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_A.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	}
+
+	f_lcls_test_fini();
+}
+
+/* Send an ASSIGNMENT REQ with LCLS CFG+CSC enabling LCLS but GCR doesn't match! */
+testcase TC_lcls_gcr_nomatch_bway_connect() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+	var MgcpCommand mgcp_cmd;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_connect;
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_b.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090b'O));
+
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	f_wait_fail_notify();
+	f_lcls_test_fini();
+}
+
+
+/* Send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect no connect */
+testcase TC_lcls_gcr_bway_dont_connect() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_do_not_connect;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* Expect LCLS is *NOT* established */
+	pars_b.lcls.exp_sts := LCLS_STS_not_yet_ls;
+
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	f_wait_fail_notify();
+	f_lcls_test_fini();
+}
+
+/* Send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect no connect */
+testcase TC_lcls_gcr_unsuppported_cfg() runs on lcls_test_CT {
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	var MSC_ConnHdlr vc_conn;
+
+	f_lcls_init();
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars.lcls.cfg := LCLS_CFG_both_way_and_send_DL;
+	pars.lcls.csc := LCLS_CSC_connect;
+	/* Expect LCLS is *NOT* established with "LCLS_STS_req_lcls_not_supp" */
+	pars.lcls.exp_sts := LCLS_STS_req_lcls_not_supp;
+
+	f_lcls_test_init(pars, pars);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	f_wait_fail_notify();
+	f_lcls_test_fini();
+}
+
+/* Send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect no connect */
+testcase TC_lcls_gcr_unsuppported_csc() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_bicast_UL_and_recv_DL_at_handover;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* Expect LCLS is *NOT* established */
+	pars_b.lcls.exp_sts := LCLS_STS_not_yet_ls;
+
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	f_lcls_test_fini();
+}
+
+/* Send an ASSIGNMENT REQ with "do not connect" and enable later using LCLS CTRL */
+testcase TC_lcls_gcr_bway_dont_connect_csc() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+	var MgcpCommand mgcp_cmd;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_do_not_connect;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* Expect LCLS is *NOT* established */
+	pars_b.lcls.exp_sts := LCLS_STS_not_yet_ls;
+
+	/* start call and expect it to be "not yet" LS */
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	f_sleep(2.0);
+
+	/* send "connect" on A side, expect call to remain in "not yet" */
+	CONN_A.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_connect)));
+	CONN_A.receive(tr_BSSMAP_LclsConnCtrlAck(tr_BSSMAP_IE_LclsSts(LCLS_STS_not_yet_ls)));
+	f_sleep(2.0);
+
+	/* send "connect" on B side, expect call to go LS, with notify to A side */
+	CONN_B.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_connect)));
+	interleave {
+	[] CONN_B.receive(tr_BSSMAP_LclsConnCtrlAck(tr_BSSMAP_IE_LclsSts(LCLS_STS_locally_switched)));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_locally_switched));
+	[] CONN_A.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_A.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	[] CONN_B.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_B.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	}
+	f_wait_fail_notify();
+	f_lcls_test_fini();
+}
+
+private function f_build_mdcx_rsp(MgcpCommand mdcx) return MgcpResponse
+{
+	var MgcpConnectionId conn_id := f_MgcpCmd_extract_conn_id(mdcx);
+	var SDP_Message sdp_in := mdcx.sdp;
+	var MgcpResponse resp;
+	var SDP_Message sdp_out;
+	var integer rtp_pt := str2int(sdp_in.media_list[0].media_field.fmts[0]);
+
+	sdp_out := valueof(ts_SDP(sdp_in.connection.conn_addr.addr, sdp_in.connection.conn_addr.addr,
+				  "foo", "21", sdp_in.media_list[0].media_field.ports.port_number,
+				  { int2str(rtp_pt) },
+				  { valueof(ts_SDP_rtpmap(rtp_pt, "AMR/8000")),
+				    valueof(ts_SDP_ptime(20)) } ));
+	return valueof(ts_MDCX_ACK(mdcx.line.trans_id, conn_id, sdp_out));
+}
+
+/* Establish LCLS "connect" followed by a MSC-initiated break */
+testcase TC_lcls_connect_break() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+	var MgcpCommand mgcp_cmd;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_connect;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* second call should then reuslt in LS */
+	pars_b.lcls.exp_sts := LCLS_STS_locally_switched;
+
+	/* Expect LS to be established successfully */
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	interleave {
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_locally_switched));
+	[] CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	[] CONN_A.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_A.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+/* not needed, as this MDCX is still handled within MSC_ConnectionHandler
+	[] CONN_B.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_B.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+*/
+	}
+
+	/* request LS release on "A" side; call continues to be locally switched */
+	CONN_A.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_release_lcls)));
+	CONN_A.receive(tr_BSSMAP_LclsConnCtrlAck(tr_BSSMAP_IE_LclsSts(LCLS_STS_locally_switched)));
+	f_sleep(2.0);
+
+	/* request LS release on "B" side; call LS is released */
+	CONN_B.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_release_lcls)));
+	interleave {
+	[] CONN_A.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_A.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	[] CONN_B.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_B.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	[] CONN_B.receive(tr_BSSMAP_LclsConnCtrlAck(tr_BSSMAP_IE_LclsSts(LCLS_STS_no_longer_ls)));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_no_longer_ls));
+	}
+
+	f_lcls_test_fini();
+}
+
+/* Establish LCLS "connect" followed by a SCCP-level release of one leg */
+testcase TC_lcls_connect_clear() runs on lcls_test_CT {
+	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
+	var TestHdlrParams pars_b;
+	var MSC_ConnHdlr vc_conn;
+	var MgcpCommand mgcp_cmd;
+	var RSL_Message rsl;
+
+	f_lcls_init();
+
+	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
+	pars_a.lcls.cfg := LCLS_CFG_both_way;
+	pars_a.lcls.csc := LCLS_CSC_connect;
+	pars_b := pars_a;
+
+	/* first call is not possible to be LS (no second leg yet) */
+	pars_a.lcls.exp_sts := LCLS_STS_not_possible_ls;
+	/* second call should then reuslt in LS */
+	pars_b.lcls.exp_sts := LCLS_STS_locally_switched;
+
+	/* Expect LS to be established successfully */
+	f_lcls_test_init(pars_a, pars_b);
+	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	interleave {
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_locally_switched));
+	[] CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
+	[] CONN_A.receive(tr_MDCX) -> value mgcp_cmd {
+		CONN_A.send(f_build_mdcx_rsp(mgcp_cmd));
+		}
+	}
+
+	/* Perform hard BSSMAP Clear on "A" side, expect no LS on "B" side */
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_CALL_CONTROL;
+	var octetstring l3_rr_chan_rel := '060D00'O;
+	CONN_A.send(ts_BSSMAP_ClearCommand(enum2int(cause_val)));
+	interleave {
+	[] CONN_A.receive(tr_RSL_DATA_REQ(?, tr_RslLinkID_DCCH(0), l3_rr_chan_rel));
+	[] CONN_A.receive(tr_RSL_DEACT_SACCH(?));
+	[] CONN_A.receive(tr_RSL_RF_CHAN_REL(?)) -> value rsl {
+		var RSL_IE_Body ieb;
+		f_rsl_find_ie(rsl, RSL_IE_CHAN_NR, ieb);
+		CONN_A.send(ts_RSL_RF_CHAN_REL_ACK(ieb.chan_nr));
+		}
+	[] CONN_A.receive(BSSAP_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	[] CONN_A.receive(tr_BSSMAP_ClearComplete);
+	[] CONN_B.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_possible_ls));
+	}
+	f_sleep(2.0);
+
+	f_lcls_test_fini();
+}
+
+
+
+
+/* TODO:
+	* verify IP/Port information in LCLS-triggered MDCX
+	* establish with one side connect, then enable using LCLS CTRL
+	* LCLS CTRL for call that doesn't have LCLS enabled
+	* LCLS IEs without GCR in ASS CMD
+	* GCR updates?
+	* Handover related LCLS bits (after we have inter-BSC HO in OsmoBSC)
+*/
+
+
+control {
+
+	execute( TC_lcls_gcr_only() );
+	execute( TC_lcls_gcr_bway_connect() );
+	execute( TC_lcls_gcr_nomatch_bway_connect() );
+	execute( TC_lcls_gcr_bway_dont_connect() );
+	execute( TC_lcls_gcr_unsuppported_cfg() );
+	execute( TC_lcls_gcr_unsuppported_csc() );
+	execute( TC_lcls_gcr_bway_dont_connect_csc() );
+	execute( TC_lcls_connect_break() );
+	execute( TC_lcls_connect_clear() );
+
+
+}
+
+
+}
