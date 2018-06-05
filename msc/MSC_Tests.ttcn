@@ -84,6 +84,8 @@ type component MTC_CT extends CTRL_Adapter_CT {
 	 * handler is not active, which means that also no guard timer is
 	 * set up. The following timer will serve as a replacement */
 	timer Tguard_direct := 60.0;
+
+	port SCCPasp_PT A_PORT; //SCCPuserA for TC_routing_global_title_crash()
 }
 
 modulepar {
@@ -1762,7 +1764,73 @@ testcase TC_cr_before_reset() runs on MTC_CT {
 	[reset_ack_seen == false] T.timeout {
 		setverdict(fail, "no BSSMAP RESET ACK seen!");
 	}
-	}	
+	}
+}
+
+type component system_CT {
+	port SCTPasp_PT sctp;
+};
+
+/* libosmo-sccp does not support global title address as routing indicator,
+* and osmo-msc should not crash if such a message is received (see OS#2666). */
+testcase TC_routing_global_title_crash() runs on MTC_CT system system_CT {
+	timer TL_timer:= 5.0;
+	var SCCP_CT vc_SCCP_A;
+	var M3UA_CT vc_M3UA;
+	var SCCP_PAR_Address v_CallingAddress;
+	var SCCP_PAR_Address v_CalledAddress;
+	var octetstring vl_userdata :='12345678901234567890'O;
+	var SCTP_Association_Address sctp_addr := { 2905, "127.0.0.2", 23905, "127.0.0.1" };
+	var MSC_SCCP_MTP3_parameters v_param := {
+		sio := {
+			ni := substr(oct2bit(mp_bssap_cfg[0].sio),0,2),
+			prio := substr(oct2bit(mp_bssap_cfg[0].sio),2,2),
+			si := substr(oct2bit(mp_bssap_cfg[0].sio),4,4)
+		},
+		opc := mp_bssap_cfg[0].own_pc,
+		dpc := 23, /* hard-coded port in libosmo-sccp's m3ua_example */
+		sls := 0,
+		sccp_serviceType := mp_bssap_cfg[0].sccp_service_type,
+		ssn := mp_bssap_cfg[0].own_ssn
+	};
+	var ASP_SCCP_N_UNITDATA_ind vl_N_UNITDATA_ind;
+
+	/* Create and connect test components for an SCCP connection with M3UA beneath. */
+	vc_SCCP_A:=SCCP_CT.create;
+	vc_M3UA:=M3UA_CT.create;
+	connect(self:A_PORT,vc_SCCP_A:SCCP_SP_PORT);
+	connect(vc_M3UA:MTP3_SP_PORT,vc_SCCP_A:MTP3_SCCP_PORT);
+	map(vc_M3UA:SCTP_PORT,system:sctp);
+
+	vc_M3UA.start(f_M3UA_Emulation(sctp_addr));
+	vc_SCCP_A.start( SCCPStart( v_param ) ); // Bootparameters
+
+	/* Called address with routing indicator set to Global Title Address. This used to trigger the crash. */
+	v_CalledAddress := valueof(ts_SccpAddr_GT('012345'H));
+
+	v_CallingAddress := valueof(ts_SccpAddr_PC_SSN(mp_bssap_cfg[0].own_pc, mp_bssap_cfg[0].own_ssn,
+						       mp_bssap_cfg[0].sio, mp_bssap_cfg[0].sccp_service_type));
+	TL_timer.start;
+	A_PORT.send(t_ASP_N_UNITDATA_req(v_CalledAddress, v_CallingAddress, '00000001'B /* sequence control */,
+					 '00000001'B /* return option */, vl_userdata, omit));
+
+	alt {
+	[] A_PORT.receive( tr_ASP_N_UNITDATA_ind ) -> value vl_N_UNITDATA_ind {
+		repeat;
+	}
+	[] TL_timer.timeout {
+		setverdict( fail );
+		log("Timeout....");
+	}
+	}
+	TL_timer.stop;
+
+	/* Cleanup */
+	all component.stop;
+	unmap(vc_M3UA:SCTP_PORT,system:sctp);
+	disconnect(vc_M3UA:MTP3_SP_PORT,vc_SCCP_A:MTP3_SCCP_PORT);
+	disconnect(self:A_PORT,vc_SCCP_A:SCCP_SP_PORT);
+	self.stop
 }
 
 /* Test MO Call with no response to RAN-side CRCX or DTAP Release */
@@ -2233,6 +2301,7 @@ control {
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_no_cm() );
 	execute( TC_lu_imsi_auth_tmsi_encr_13_2() );
 	execute( TC_lu_imsi_auth_tmsi_encr_013_2() );
+	execute( TC_routing_global_title_crash() );
 	execute( TC_mo_release_timeout() );
 	execute( TC_lu_and_mt_call_no_dlcx_resp() );
 	execute( TC_reset_two() );
