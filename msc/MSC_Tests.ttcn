@@ -2216,6 +2216,73 @@ testcase TC_lu_and_ussd_wrong_code() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* LU followed by MT call and USSD request during this call */
+private function f_tc_lu_and_ussd_during_call(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Call parameters taken from f_tc_lu_and_mt_call */
+	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
+	cpars.mgcp_connection_id_bss := '10004'H;
+	cpars.mgcp_connection_id_mss := '10005'H;
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+	cpars.bss_rtp_port := 1110;
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Establish a MT call */
+	f_mt_call_establish(cpars);
+
+	/* Hold the call for some time */
+	f_sleep(1.0);
+
+	/* Compose a new SS/REGISTER message with request */
+	var template (value) PDU_ML3_MS_NW ussd_req := ts_ML3_MO_SS_REGISTER(
+		tid := 1, /* We just need a single transaction */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := f_USSD_FACILITY_IE_INVOKE(
+			op_code := SS_OP_CODE_PROCESS_USS_REQ,
+			ussd_string := "*#100#"
+		)
+	);
+
+	/* Compose SS/RELEASE_COMPLETE template with expected response */
+	var template PDU_ML3_NW_MS ussd_rsp := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 1, /* Response should arrive within the same transaction */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		facility := f_USSD_FACILITY_IE_RETURN_RESULT(
+			op_code := SS_OP_CODE_PROCESS_USS_REQ,
+			ussd_string := "Your extension is " & hex2str(g_pars.msisdn) & "\r"
+		)
+	);
+
+	/* Request own number request */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_req));
+	alt {
+	/* We expect RELEASE_COMPLETE message with the response */
+	[] BSSAP.receive(tr_PDU_DTAP_MT(ussd_rsp)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Unknown/unexpected BSSAP received");
+		self.stop;
+		}
+	}
+
+	/* Hold the call for some time */
+	f_sleep(1.0);
+
+	/* Release the call (does Clear Complete itself) */
+	f_call_hangup(cpars, true);
+}
+testcase TC_lu_and_ussd_during_call() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_lu_and_ussd_during_call), 48);
+	vc_conn.done;
+}
+
 /* TODO (SMS):
    * different user data lengths
    * SMPP transaction mode with unsuccessful delivery
@@ -2299,6 +2366,7 @@ control {
 
 	execute( TC_lu_and_ussd_single_req() );
 	execute( TC_lu_and_ussd_wrong_code() );
+	execute( TC_lu_and_ussd_during_call() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
