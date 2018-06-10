@@ -1769,19 +1769,101 @@ testcase TC_paging_tmsi_200percent() runs on test_CT {
 /***********************************************************************
  * Immediate Assignment / AGCH
  ***********************************************************************/
+const MobileAllocation c_MA_null := {
+	len := 0,
+	ma := ''B
+}
 
-testcase TC_imm_ass() runs on test_CT {
+template (value) ChannelDescription ts_ChanDesc(template (value) RslChannelNr chan_nr, uint3_t tsc := 7,
+						uint12_t arfcn := 871) := {
+	chan_nr := chan_nr,
+	tsc := tsc,
+	h := false,
+	arfcn := arfcn,
+	maio_hsn := omit
+}
+
+private function f_fmt_ia_stats(integer num_tx, integer num_rx, integer num_del) return charstring {
+	return int2str(num_tx) & " sent, "
+		  & int2str(num_rx) & " received, "
+		  & int2str(num_del) & " deleted";
+}
+
+private function f_TC_imm_ass(integer num_total, float sleep_s, float exp_pass) runs on test_CT {
+	var L1ctlDlMessage l1_dl;
+	timer T := 10.0;
+	var integer num_tx := 0;
+	var integer num_rx := 0;
+	var integer num_del := 0;
+	var charstring res_str;
+	var float rx_ratio;
+
 	f_init(testcasename());
-	for (var integer i := 0; i < 1000; i := i+1) {
-		var octetstring ia_enc := f_rnd_octstring(8);
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	for (var integer i := 0; i < num_total; i := i+1) {
+		var ChannelDescription ch_desc := valueof(ts_ChanDesc(valueof(t_RslChanNr_SDCCH4(0, 0))));
+		var GsmRrMessage ia := valueof(ts_IMM_ASS(42, i, 5, ch_desc, c_MA_null));
+		var octetstring ia_enc := enc_GsmRrMessage(ia);
 		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_IMM_ASSIGN(ia_enc, 0)));
-		f_sleep(0.02);
+		num_tx := num_tx+1;
+		f_sleep(sleep_s);
 	}
 	/* FIXME: check if imm.ass arrive on Um side */
-	/* FIXME: check for DELETE INDICATION */
-	f_sleep(100.0);
-	f_shutdown();
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_DELETE_IND(?, 0))) {
+		num_del := num_del+1;
+		repeat;
+		}
+	[] RSL_CCHAN.receive {
+		repeat;
+		}
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0), ?)) -> value l1_dl {
+		/* somehow dec_SystemInformation will try to decode even non-RR as SI */
+		var GsmRrMessage rr := dec_GsmRrMessage(l1_dl.payload.data_ind.payload);
+		if (not match(rr, tr_IMM_ASS(42, ?, 5, ?, ?))) {
+			/* FIXME: Why are we seeing paging requests on PCH/AGCH? */
+			//setverdict(fail, "Unexpected IMM-ASS values on AGCH: ", rr);
+			//self.stop;
+		} else {
+			num_rx := num_rx+1;
+		}
+		repeat;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout { }
+	}
+	res_str := f_fmt_ia_stats(num_tx, num_rx, num_del);
+	log("AGCH test: " & res_str);
+	if (num_rx + num_del != num_tx) {
+		setverdict(fail, "RX + DEL != TX ?!?: " & res_str);
+	}
+	rx_ratio := int2float(num_rx) / int2float(num_tx);
+	if (rx_ratio < exp_pass*0.8 or rx_ratio > exp_pass*1.2) {
+		setverdict(fail, "RX ratio ("&float2str(rx_ratio)&") far from expected ("&float2str(exp_pass)&") " & res_str);
+	} else {
+		setverdict(pass);
+	}
 }
+
+/* send a long burst of 1000 IMM.ASS with 20ms spacing (50 per s); expect 75% of them to be deleted */
+testcase TC_imm_ass_1000_20ms() runs on test_CT {
+	f_TC_imm_ass(1000, 0.02, 0.25);
+}
+
+/* send a short burst of 200 IMM.ASS without any spacing; expect 95% of them to be deleted */
+testcase TC_imm_ass_200_0ms() runs on test_CT {
+	f_TC_imm_ass(200, 0.0, 0.05);
+}
+
+/* send 150 IMM.ASS at rate of 13/s; expect none of them to be deleted */
+testcase TC_imm_ass_200_76ms() runs on test_CT {
+	f_TC_imm_ass(150, 0.076, 1.00);
+}
+
+
 
 /***********************************************************************
  * BCCH
