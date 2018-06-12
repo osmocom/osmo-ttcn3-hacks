@@ -8,6 +8,12 @@ import from General_Types all;
 import from Osmocom_Types all;
 import from Osmocom_CTRL_Adapter all;
 
+import from TCCEncoding_Functions all;
+import from SS_Types all;
+import from SS_Templates all;
+import from MAP_Errors all;
+import from USSD_Helpers all;
+
 import from Osmocom_VTY_Functions all;
 import from TELNETasp_PortType all;
 
@@ -60,7 +66,12 @@ type component HLR_ConnHdlr extends GSUP_ConnHdlr {
 }
 
 type record HLR_ConnHdlrPars {
-	HlrSubscriber sub
+	HlrSubscriber sub,
+	HLR_ConnHdlrParsUssd ussd optional
+}
+
+type record HLR_ConnHdlrParsUssd {
+	OCT4 sid
 }
 
 template (value) HLR_ConnHdlrPars t_Pars(hexstring imsi, hexstring msisdn := ''H) := {
@@ -69,11 +80,13 @@ template (value) HLR_ConnHdlrPars t_Pars(hexstring imsi, hexstring msisdn := ''H
 		msisdn := msisdn,
 		aud2g := omit,
 		aud3g := omit
-	}
+	},
+	ussd := omit
 }
 
 template (value) HLR_ConnHdlrPars t_Pars_sub(HlrSubscriber sub) := {
-	sub := sub
+	sub := sub,
+	ussd := omit
 }
 
 type function void_fn() runs on HLR_ConnHdlr;
@@ -450,6 +463,91 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 	return ret;
 }
 
+function f_SS_xceive(hexstring imsi, OCT4 sid, GSUP_SessionState state, octetstring ss,
+			 template (omit) integer exp_err_cause := omit)
+runs on HLR_ConnHdlr return GSUP_PDU {
+	var GSUP_PDU ret;
+	timer T := 3.0;
+	var boolean exp_fail := false;
+	if (not istemplatekind(exp_err_cause, "omit")) {
+		exp_fail := true;
+	}
+
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(imsi, sid, state, ss)));
+	T.start;
+	alt {
+	[exp_fail] GSUP.receive(tr_GSUP_PROC_SS_ERR(imsi, sid, exp_err_cause)) -> value ret {
+		setverdict(pass);
+		}
+	[exp_fail] GSUP.receive(tr_GSUP_PROC_SS_ERR(imsi, sid, ?)) -> value ret {
+		setverdict(fail, "Unexpected PROC_SS ERROR Cause");
+		}
+	[exp_fail] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, ?, ?)) -> value ret {
+		setverdict(fail, "Unexpected PROC_SS.res for unknown IMSI");
+		}
+	[not exp_fail] GSUP.receive(tr_GSUP_PROC_SS_ERR(imsi, sid, ?)) -> value ret {
+		setverdict(fail, "Unexpected PROC_SS ERROR");
+		}
+	[not exp_fail] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, ?, ?)) -> value ret {
+		setverdict(pass);
+		}
+	[] GSUP.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PROC_SS response");
+		self.stop;
+		}
+	}
+	return ret;
+}
+
+private function f_SS_expect(hexstring imsi, OCT4 sid, GSUP_SessionState state,
+			     template SS_FacilityInformation facility := *)
+runs on HLR_ConnHdlr return GSUP_PDU {
+	var GSUP_PDU ret;
+	timer T := 3.0;
+	var boolean exp_ss := true;
+	if (istemplatekind(facility, "omit")) {
+		exp_ss := false;
+	}
+	T.start;
+	alt {
+	[] GSUP.receive(tr_GSUP_PROC_SS_ERR(imsi, sid, ?)) -> value ret {
+		setverdict(fail, "Unexpected PROC_SS ERROR Cause");
+		}
+	[not exp_ss] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, state, omit)) -> value ret {
+		setverdict(pass);
+		}
+	[exp_ss] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, state, omit)) -> value ret {
+		setverdict(fail, "Unexpected PROC_SS.res without SS IE");
+		}
+/*
+	[exp_ss] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, state, decmatch facility)) -> value ret {
+		setverdict(pass);
+		}
+*/
+
+	[exp_ss] GSUP.receive(tr_GSUP_PROC_SS_RES(imsi, sid, state, ?)) -> value ret {
+		var GSUP_IeValue ss_ie;
+		f_gsup_find_ie(ret, OSMO_GSUP_SS_INFO_IE, ss_ie);
+		var SS_FacilityInformation dec_fac := dec_SS_FacilityInformation(ss_ie.ss_info);
+		log("pattern: ", facility);
+		if (match(dec_fac, facility)) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Unexpected PROC_SS.res with non-matching facility IE");
+		}
+		}
+	[] GSUP.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for PROC_SS response");
+		self.stop;
+		}
+	}
+
+	return ret;
+}
+
+
 
 /***********************************************************************
  * Testcases
@@ -675,6 +773,235 @@ testcase TC_gsup_purge_unknown() runs on test_CT {
 	setverdict(pass);
 }
 
+import from HLR_EUSE all;
+
+/* Test for USSD request to undefined/unrouted short-code. Expect ss-NotAvailable(18) */
+private function f_TC_mo_ussd_unknown() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*#200#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_FACILITY_RETURN_ERROR(1, 18));
+}
+testcase TC_mo_ussd_unknown() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_unknown), pars);
+		vc_conn.done;
+	}
+}
+
+/* Test for USSD request to currently disconnected EUSE. Expect ss-SystemFailure(34) */
+private function f_TC_mo_ussd_euse_disc() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*100#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_FACILITY_RETURN_ERROR(1, 34));
+}
+testcase TC_mo_ussd_euse_disc() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_euse_disc), pars);
+		vc_conn.done;
+	}
+}
+
+/* Test for USSD request to internal own-imsi IUSE. */
+private function f_TC_mo_ussd_iuse_imsi() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	var charstring resp_str;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*#101#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	resp_str := "Your IMSI is " & hex2str(g_pars.sub.imsi);
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS, f_encGSM7bit(resp_str)));
+}
+testcase TC_mo_ussd_iuse_imsi() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_iuse_imsi), pars);
+		vc_conn.done;
+	}
+}
+
+/* Test for USSD request to internal own-msisdn IUSE. */
+private function f_TC_mo_ussd_iuse_msisdn() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	var charstring resp_str;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*#100#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	resp_str := "Your extension is " & hex2str(g_pars.sub.msisdn);
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS, f_encGSM7bit(resp_str)));
+}
+testcase TC_mo_ussd_iuse_msisdn() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_iuse_msisdn), pars);
+		vc_conn.done;
+	}
+}
+
+/* Test routing of USSD to EUSE by a specific route */
+private function f_TC_mo_ussd_100() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	/* invoke / invoke id 1 / processUSS-req */
+	//var octetstring ss := 'a11202010102013b300a04010f0405aa180c3602'O;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*100#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS, f_encGSM7bit("*100#")));
+}
+testcase TC_mo_ussd_euse() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	var HLR_EUSE_CT vc_EUSE := HLR_EUSE_CT.create("EUSE-" & testcasename());
+	vc_EUSE.start(HLR_EUSE.f_main_mo(mp_hlr_ip, mp_hlr_gsup_port, "foobar", refers(f_ss_echo)));
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_100), pars);
+		vc_conn.done;
+	}
+
+	vc_EUSE.stop;
+}
+
+/* Test routing of USSD to EUSE by a specific route, with CONTINUE */
+private function f_TC_mo_ussd_100_continue() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	/* Simulate BEGIN from MS/MSC */
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(op_code := SS_OP_CODE_PROCESS_USS_REQ,
+							ussd_string := "*100#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	/* expect echo response from EUSE */
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_CONTINUE,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS, f_encGSM7bit("*100#")));
+
+	/* Simulate CONTINUE from MS/MSC */
+	ss := f_USSD_FACILITY_IE_INVOKE(op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "mahlzeit");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_CONTINUE, ss)));
+
+	/* expect echo response from EUSE */
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS,
+						      f_encGSM7bit("mahlzeit")));
+}
+testcase TC_mo_ussd_euse_continue() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	var HLR_EUSE_CT vc_EUSE := HLR_EUSE_CT.create("EUSE-" & testcasename());
+	vc_EUSE.start(HLR_EUSE.f_main_mo(mp_hlr_ip, mp_hlr_gsup_port, "foobar",
+					 refers(f_ss_echo_continue)));
+
+	f_init(false);
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_100_continue), pars);
+		vc_conn.done;
+	}
+
+	vc_EUSE.stop;
+}
+
+
+/* Test routing of USSD to EUSE by default-route */
+private function f_TC_mo_ussd_999() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	var octetstring ss := f_USSD_FACILITY_IE_INVOKE(
+					op_code := SS_OP_CODE_PROCESS_USS_REQ,
+					ussd_string := "*999#");
+	GSUP.send(valueof(ts_GSUP_PROC_SS_REQ(g_pars.sub.imsi, g_pars.ussd.sid,
+						OSMO_GSUP_SESSION_STATE_BEGIN, ss)));
+	f_SS_expect(g_pars.sub.imsi, g_pars.ussd.sid, OSMO_GSUP_SESSION_STATE_END,
+		    tr_SS_USSD_FACILITY_RETURN_RESULT(1, 59, SS_USSD_DEFAULT_DCS, f_encGSM7bit("*999#")));
+}
+testcase TC_mo_ussd_euse_defaultroute() runs on test_CT {
+	var HlrSubscriberList sl;
+	var HLR_ConnHdlr vc_conn;
+
+	var HLR_EUSE_CT vc_EUSE := HLR_EUSE_CT.create("EUSE-" & testcasename());
+	vc_EUSE.start(HLR_EUSE.f_main_mo(mp_hlr_ip, mp_hlr_gsup_port, "foobar", refers(f_ss_echo)));
+
+	f_init(false);
+	f_vty_config(VTY, "hlr", "ussd default-route external foobar");
+
+	sl := f_gen_subs();
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sl[i]));
+		pars.ussd.sid := f_rnd_octstring(4);
+		f_vty_subscr_create(VTY, pars.sub);
+		vc_conn := f_start_handler(refers(f_TC_mo_ussd_999), pars);
+		vc_conn.done;
+	}
+
+	f_vty_config(VTY, "hlr", "no ussd default-route");
+	vc_EUSE.stop;
+}
+
+
+/* TODO USSD:
+   * MO USSD for IMSI of non-existant subscriber
+   * MT USSD from EUSE
+   * timeout cases
+ */
+
 /* TODO:
   * UL with ISD error
   * UL with ISD timeout
@@ -700,6 +1027,14 @@ control {
 	execute( TC_gsup_purge_cs() );
 	execute( TC_gsup_purge_ps() );
 	execute( TC_gsup_purge_unknown() );
+
+	execute( TC_mo_ussd_unknown() );
+	execute( TC_mo_ussd_euse_disc() );
+	execute( TC_mo_ussd_iuse_imsi() );
+	execute( TC_mo_ussd_iuse_msisdn() );
+	execute( TC_mo_ussd_euse() );
+	execute( TC_mo_ussd_euse_continue() );
+	execute( TC_mo_ussd_euse_defaultroute() );
 };
 
 };
