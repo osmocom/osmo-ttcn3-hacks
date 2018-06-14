@@ -1,6 +1,7 @@
 module HLR_Tests {
 
 import from GSUP_Types all;
+import from GSUP_Emulation all;
 import from IPA_Emulation all;
 
 import from General_Types all;
@@ -13,7 +14,12 @@ import from TELNETasp_PortType all;
 type component test_CT extends CTRL_Adapter_CT {
 	var IPA_Emulation_CT vc_IPA;
 	var IPA_CCM_Parameters ccm_pars;
+	/* legacy tests without ConnHdlr */
 	port IPA_GSUP_PT GSUP;
+	/* new tests using ConnHdlr + GSUP_Emulation */
+	var GSUP_Emulation_CT vc_GSUP;
+	/* only to get events from IPA underneath GSUP */
+	port IPA_CTRL_PT GSUP_IPA_EVENT;
 
 	port TELNETasp_PT VTY;
 
@@ -46,6 +52,135 @@ type record HlrSubscriber {
 }
 
 type record of HlrSubscriber HlrSubscriberList;
+
+type component HLR_ConnHdlr extends GSUP_ConnHdlr {
+	timer g_Tguard := 10.0;
+	var HLR_ConnHdlrPars g_pars;
+	port TELNETasp_PT VTY;
+}
+
+type record HLR_ConnHdlrPars {
+	HlrSubscriber sub
+}
+
+template (value) HLR_ConnHdlrPars t_Pars(hexstring imsi, hexstring msisdn := ''H) := {
+	sub := {
+		imsi := imsi,
+		msisdn := msisdn,
+		aud2g := omit,
+		aud3g := omit
+	}
+}
+
+template (value) HLR_ConnHdlrPars t_Pars_sub(HlrSubscriber sub) := {
+	sub := sub
+}
+
+type function void_fn() runs on HLR_ConnHdlr;
+
+/***********************************************************************
+ * Main Component
+ ***********************************************************************/
+
+function f_init_vty() runs on test_CT {
+	map(self:VTY, system:VTY);
+	f_vty_set_prompts(VTY);
+	f_vty_transceive(VTY, "enable");
+}
+
+private altstep as_Tguard() runs on test_CT {
+	[] g_Tguard.timeout {
+		setverdict(fail, "g_Tguard timeout");
+		self.stop;
+	}
+}
+
+function f_init_gsup(charstring id, boolean legacy) runs on test_CT {
+	id := id & "-GSUP";
+	var GsupOps ops := {
+		create_cb := refers(GSUP_Emulation.ExpectedCreateCallback)
+	}
+
+	ccm_pars := c_IPA_default_ccm_pars;
+	ccm_pars.name := "Osmocom TTCN-3 GSUP Simulator";
+
+	vc_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	log("legacy= ", legacy);
+	if (not legacy) {
+		log("in not legacy case 1");
+		vc_GSUP := GSUP_Emulation_CT.create(id);
+	}
+
+	map(vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	if (not legacy) {
+		log("in not legacy case 2");
+		connect(vc_GSUP:GSUP, vc_IPA:IPA_GSUP_PORT);
+		connect(vc_IPA:IPA_CTRL_PORT, self:GSUP_IPA_EVENT);
+		vc_GSUP.start(GSUP_Emulation.main(ops, id));
+	} else {
+		connect(vc_IPA:IPA_GSUP_PORT, self:GSUP);
+	}
+
+	vc_IPA.start(IPA_Emulation.main_client(mp_hlr_ip, mp_hlr_gsup_port, "", -1, ccm_pars));
+
+	/* wait for incoming connection to GSUP port before proceeding */
+	timer T := 10.0;
+	T.start;
+	alt {
+		[not legacy] GSUP_IPA_EVENT.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP)) { }
+		[legacy] GSUP.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
+		[] T.timeout {
+			setverdict(fail, "No connection to GSUP Port");
+			self.stop;
+		}
+	}
+}
+
+function f_init(boolean legacy := true) runs on test_CT {
+
+	/* activate default guard timer to ensure all tests eventually terminate */
+	g_Tguard.start;
+	activate(as_Tguard());
+
+	f_init_gsup("HLR_Test", legacy);
+	f_init_vty();
+
+	f_ipa_ctrl_start(mp_hlr_ip, mp_hlr_ctrl_port);
+}
+
+function f_start_handler(void_fn fn, HLR_ConnHdlrPars pars) runs on test_CT return HLR_ConnHdlr {
+	var HLR_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := HLR_ConnHdlr.create(id);
+	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
+	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+private function f_handler_init_vty() runs on HLR_ConnHdlr {
+	map(self:VTY, system:VTY);
+	f_vty_set_prompts(VTY);
+	f_vty_transceive(VTY, "enable");
+}
+
+/* first function inside ConnHdlr component; sets g_pars + starts function */
+function f_handler_init(void_fn fn, charstring id, template (omit) HLR_ConnHdlrPars pars := omit)
+runs on HLR_ConnHdlr
+{
+	if (isvalue(pars)) {
+		g_pars := valueof(pars);
+		f_create_gsup_expect(hex2str(g_pars.sub.imsi));
+	}
+	f_handler_init_vty();
+	fn.apply();
+}
+
+/***********************************************************************
+ * Subscriber creation via VTY
+ ***********************************************************************/
 
 template (value) HlrSubscriber t_SubNoAuth(hexstring imsi, hexstring msisdn) := {
 	imsi := imsi,
@@ -131,52 +266,19 @@ function f_gen_subs() runs on test_CT return HlrSubscriberList {
 	return sl;
 }
 
-function f_init_vty() runs on test_CT {
-	map(self:VTY, system:VTY);
-	f_vty_set_prompts(VTY);
-	f_vty_transceive(VTY, "enable");
-}
-
-private altstep as_Tguard() runs on test_CT {
-	[] g_Tguard.timeout {
-		setverdict(fail, "g_Tguard timeout");
+function f_vty_transceive_match(TELNETasp_PT pt, charstring cmd, template charstring exp_ret) {
+	var charstring ret := f_vty_transceive_ret(pt, cmd);
+	if (not match(ret, exp_ret)) {
+		setverdict(fail, "Non-matching VTY response: ", ret);
 		self.stop;
 	}
-}
-
-function f_init() runs on test_CT {
-
-	/* activate default guard timer to ensure all tests eventually terminate */
-	g_Tguard.start;
-	activate(as_Tguard());
-
-	ccm_pars := c_IPA_default_ccm_pars;
-	ccm_pars.name := "Osmocom TTCN-3 GSUP Simulator";
-
-	vc_IPA := IPA_Emulation_CT.create("IPA");
-	map(vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
-	connect(vc_IPA:IPA_GSUP_PORT, self:GSUP);
-	vc_IPA.start(IPA_Emulation.main_client(mp_hlr_ip, mp_hlr_gsup_port, "", -1, ccm_pars));
-
-	timer T:= 10.0;
-	alt {
-	[] GSUP.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for GSUP IPA Link to come up");
-		self.stop;
-		}
-	}
-
-	f_init_vty();
-
-	f_ipa_ctrl_start(mp_hlr_ip, mp_hlr_ctrl_port);
 }
 
 private template (value) charstring t_subscr_prefix(hexstring imsi) :=
 	"subscriber imsi " & hex2str(imsi) & " ";
 
 /* create a given subscriber using the VTY */
-function f_vty_subscr_create(HlrSubscriber sub) runs on test_CT {
+function f_vty_subscr_create(TELNETasp_PT VTY, HlrSubscriber sub) {
 	var charstring prefix := valueof(t_subscr_prefix(sub.imsi));
 	f_vty_transceive_match(VTY, prefix & "create", pattern "% Created subscriber *");
 	f_vty_transceive_match(VTY, prefix & "update msisdn " & hex2str(sub.msisdn),
@@ -202,29 +304,33 @@ function f_vty_subscr_create(HlrSubscriber sub) runs on test_CT {
 	}
 }
 
-function f_vty_subscr_update_msisdn(HlrSubscriber sub, hexstring new_msisdn) runs on test_CT {
+function f_vty_subscr_update_msisdn(TELNETasp_PT VTY, HlrSubscriber sub, hexstring new_msisdn) {
 	var charstring prefix := valueof(t_subscr_prefix(sub.imsi));
 	f_vty_transceive_match(VTY, prefix & "update msisdn " & hex2str(new_msisdn),
 				pattern "% Updated subscriber *");
 }
 
 /* perform 'delete' on subscriber */
-function f_vty_subscr_delete(HlrSubscriber sub) runs on test_CT {
+function f_vty_subscr_delete(TELNETasp_PT VTY, HlrSubscriber sub) {
 	var charstring prefix := valueof(t_subscr_prefix(sub.imsi));
 	f_vty_transceive_match(VTY, prefix & "delete",
 				pattern "% Deleted subscriber for IMSI *");
 }
 
 /* perform 'show' on subscriber; match result with pattern 'exp' */
-function f_vty_subscr_show(HlrSubscriber sub, template charstring exp) runs on test_CT {
+function f_vty_subscr_show(TELNETasp_PT VTY, HlrSubscriber sub, template charstring exp) {
 	var charstring prefix := valueof(t_subscr_prefix(sub.imsi));
 	f_vty_transceive_match(VTY, prefix & "show", exp);
 }
 
 
+/***********************************************************************
+ * Helper functions for ConnHdlr
+ ***********************************************************************/
+
 /* perform SendAuthInfo for given imsi, return the GSUP response/error */
 function f_perform_SAI(hexstring imsi, template (omit) integer exp_err_cause := omit)
-runs on test_CT return GSUP_PDU {
+runs on HLR_ConnHdlr return GSUP_PDU {
 	var GSUP_PDU ret;
 	timer T := 3.0;
 	var boolean exp_fail := false;
@@ -261,7 +367,7 @@ runs on test_CT return GSUP_PDU {
 
 function f_perform_UL(hexstring imsi, template hexstring msisdn,
 			template (omit) integer exp_err_cause := omit)
-runs on test_CT return GSUP_PDU {
+runs on HLR_ConnHdlr return GSUP_PDU {
 	var GSUP_PDU ret;
 	timer T := 3.0;
 	var boolean exp_fail := false;
@@ -308,7 +414,7 @@ runs on test_CT return GSUP_PDU {
 /* perform PurgeMS for given imsi, return the GSUP response/error */
 function f_perform_PURGE(hexstring imsi, GSUP_CnDomain cn_dom,
 			 template (omit) integer exp_err_cause := omit)
-runs on test_CT return GSUP_PDU {
+runs on HLR_ConnHdlr return GSUP_PDU {
 	var GSUP_PDU ret;
 	timer T := 3.0;
 	var boolean exp_fail := false;
@@ -344,75 +450,101 @@ runs on test_CT return GSUP_PDU {
 }
 
 
-testcase TC_gsup_sai_err_invalid_imsi() runs on test_CT {
-	/* 23.003 Section 2.2 clearly states that an IMSI with less
-	 * than 5 digits is impossible. Even 5 digits is still questionable */
-	var hexstring imsi := '0123'H;
+/***********************************************************************
+ * Testcases
+ ***********************************************************************/
+
+/* 23.003 Section 2.2 clearly states that an IMSI with less
+ * than 5 digits is impossible. Even 5 digits is still questionable */
+private function f_TC_gsup_sai_err_invalid_imsi() runs on HLR_ConnHdlr {
 	var GSUP_PDU res;
+	res := f_perform_SAI(g_pars.sub.imsi, 96); /* Invalid Mandatory information */
+	setverdict(pass);
+}
+testcase TC_gsup_sai_err_invalid_imsi() runs on test_CT {
+	var HLR_ConnHdlr vc_conn;
+	var HLR_ConnHdlrPars pars := valueof(t_Pars('0123'H));
+	f_init(false);
+	vc_conn := f_start_handler(refers(f_TC_gsup_sai_err_invalid_imsi), pars);
+	vc_conn.done;
+}
 
-	f_init();
 
-	res := f_perform_SAI(imsi, 96); /* Invalid Mandatory information */
+private function f_TC_gsup_sai_err_unknown_imsi() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_SAI(g_pars.sub.imsi, 2);
 	setverdict(pass);
 }
 
 testcase TC_gsup_sai_err_unknown_imsi() runs on test_CT {
-	var hexstring imsi := f_rnd_imsi('26242'H);
-	var GSUP_PDU res;
-
-	f_init();
-
-	res := f_perform_SAI(imsi, 2);
-	setverdict(pass);
+	var HLR_ConnHdlr vc_conn;
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(f_rnd_imsi('26242'H)));
+	f_init(false);
+	vc_conn := f_start_handler(refers(f_TC_gsup_sai_err_unknown_imsi), pars);
+	vc_conn.done;
 }
 
+function f_start_handler_per_sub(void_fn fn, HlrSubscriberList sl) runs on test_CT {
+	for (var integer i := 0; i < sizeof(sl); i := i+1) {
+		var HlrSubscriber sub := sl[i];
+		var HLR_ConnHdlrPars pars := valueof(t_Pars_sub(sub));
+		var HLR_ConnHdlr vc_conn;
+
+		f_vty_subscr_create(VTY, sub);
+		vc_conn := f_start_handler(fn, pars);
+		vc_conn.done;
+		f_vty_subscr_delete(VTY, sub);
+	}
+}
 
 /* test SAI for a number of different subscriber cases (algo, 2g/3g, ...) */
+private function f_TC_gsup_sai() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_SAI(g_pars.sub.imsi);
+	/* TODO: match if tuple[s] matches expectation */
+	setverdict(pass);
+}
 testcase TC_gsup_sai() runs on test_CT {
 	var HlrSubscriberList sl;
 	var GSUP_PDU res;
 
-	f_init();
+	f_init(false);
 
 	sl := f_gen_subs();
-	for (var integer i := 0; i < sizeof(sl); i := i+1) {
-		var HlrSubscriber sub := sl[i];
-		log("Testing SAI for ", sub);
-		f_vty_subscr_create(sub);
-		res := f_perform_SAI(sub.imsi);
-		/* TODO: match if tuple[s] matches expectation */
-		f_vty_subscr_delete(sub);
-	}
+	f_start_handler_per_sub(refers(f_TC_gsup_sai), sl);
 
 	setverdict(pass);
 }
 
 /* test UL for unknown IMSI */
-testcase TC_gsup_ul_unknown_imsi() runs on test_CT {
-	var hexstring imsi := f_rnd_imsi('26242'H);
+private function f_TC_ul_unknown_imsi() runs on HLR_ConnHdlr {
 	var GSUP_PDU res;
-
-	f_init();
-
-	res := f_perform_UL(imsi, ?, 2);
+	res := f_perform_UL(g_pars.sub.imsi, ?, 2);
 	setverdict(pass);
 }
+testcase TC_gsup_ul_unknown_imsi() runs on test_CT {
+	var hexstring imsi := f_rnd_imsi('26242'H);
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(imsi));
+	var HLR_ConnHdlr vc_conn;
 
-/* test SAI for a number of different subscriber cases (algo, 2g/3g, ...) */
+	f_init(false);
+	vc_conn := f_start_handler(refers(f_TC_ul_unknown_imsi), pars);
+	vc_conn.done;
+}
+
+/* test UL for a number of different subscriber cases (algo, 2g/3g, ...) */
+private function f_TC_gsup_ul() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
+	setverdict(pass);
+}
 testcase TC_gsup_ul() runs on test_CT {
 	var HlrSubscriberList sl;
 	var GSUP_PDU res;
 
-	f_init();
-
+	f_init(false);
 	sl := f_gen_subs();
-	for (var integer i := 0; i < sizeof(sl); i := i+1) {
-		var HlrSubscriber sub := sl[i];
-		log("Testing UL for ", sub);
-		f_vty_subscr_create(sub);
-		res := f_perform_UL(sub.imsi, sub.msisdn);
-		f_vty_subscr_delete(sub);
-	}
+	f_start_handler_per_sub(refers(f_TC_gsup_ul), sl);
 
 	setverdict(pass);
 }
@@ -426,53 +558,49 @@ testcase TC_vty() runs on test_CT {
 	/* we're not using f_gen_subs() here as the expect pattern for the 'show' are different
 	 * from case to case */
 	sub := valueof(t_Sub2G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9), "comp128v1"));
-	f_vty_subscr_create(sub);
-	f_vty_subscr_show(sub, pattern "*IMSI: *2G auth: COMP128v1*");
-	f_vty_subscr_delete(sub);
+	f_vty_subscr_create(VTY, sub);
+	f_vty_subscr_show(VTY, sub, pattern "*IMSI: *2G auth: COMP128v1*");
+	f_vty_subscr_delete(VTY, sub);
 
 	sub := valueof(t_Sub3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9),
 				"milenage", false));
-	f_vty_subscr_create(sub);
-	f_vty_subscr_show(sub, pattern "*IMSI: *3G auth: MILENAGE*");
-	f_vty_subscr_delete(sub);
+	f_vty_subscr_create(VTY, sub);
+	f_vty_subscr_show(VTY, sub, pattern "*IMSI: *3G auth: MILENAGE*");
+	f_vty_subscr_delete(VTY, sub);
 
 	sub := valueof(t_Sub2G3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9),
 				 "comp128v1", "milenage", false));
-	f_vty_subscr_create(sub);
-	f_vty_subscr_show(sub, pattern "*IMSI: *2G auth: COMP128v1*3G auth: MILENAGE*");
-	f_vty_subscr_delete(sub);
+	f_vty_subscr_create(VTY, sub);
+	f_vty_subscr_show(VTY, sub, pattern "*IMSI: *2G auth: COMP128v1*3G auth: MILENAGE*");
+	f_vty_subscr_delete(VTY, sub);
 
 	setverdict(pass);
 }
 
 /* VTY changes to MSISDN should result in ISD to current VLR */
-testcase TC_vty_msisdn_isd() runs on test_CT {
-	var HlrSubscriber sub;
+private function f_TC_vty_msisdn_isd() runs on HLR_ConnHdlr {
 	var hexstring new_msisdn;
 	var GSUP_PDU res;
 	timer T := 5.0;
 
-	f_init();
-
 	/* Create Subscriber */
-	sub := valueof(t_Sub2G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9), "comp128v1"));
-	f_vty_subscr_create(sub);
+	f_vty_subscr_create(VTY, g_pars.sub);
 
 	/* Perform UpdateLocation (VLR now known to HLR) */
-	res := f_perform_UL(sub.imsi, sub.msisdn);
+	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
 
 	/* Then change IMSI via VTY */
 	new_msisdn := '49161'H & f_rnd_hexstring(7, 9);
-	f_vty_subscr_update_msisdn(sub, new_msisdn);
+	f_vty_subscr_update_msisdn(VTY, g_pars.sub, new_msisdn);
 	/* And expect InsertSubscriberData as result */
 	T.start;
 	alt {
-	[] GSUP.receive(tr_GSUP_ISD_REQ(sub.imsi, new_msisdn)) {
-		GSUP.send(ts_GSUP_ISD_RES(sub.imsi));
-		sub.msisdn := new_msisdn;
+	[] GSUP.receive(tr_GSUP_ISD_REQ(g_pars.sub.imsi, new_msisdn)) {
+		GSUP.send(ts_GSUP_ISD_RES(g_pars.sub.imsi));
+		g_pars.sub.msisdn := new_msisdn;
 		setverdict(pass);
 		}
-	[] GSUP.receive(tr_GSUP_ISD_REQ(sub.imsi, sub.msisdn)) {
+	[] GSUP.receive(tr_GSUP_ISD_REQ(g_pars.sub.imsi, g_pars.sub.msisdn)) {
 		log("received ISD req with old MSISDN");
 		setverdict(fail);
 		}
@@ -482,59 +610,69 @@ testcase TC_vty_msisdn_isd() runs on test_CT {
 		}
 	}
 }
+testcase TC_vty_msisdn_isd() runs on test_CT {
+	var HlrSubscriber sub;
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+
+	/* Create Subscriber */
+	sub := valueof(t_Sub2G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9), "comp128v1"));
+
+	vc_conn := f_start_handler(refers(f_TC_vty_msisdn_isd), valueof(t_Pars_sub(sub)));
+	vc_conn.done;
+}
 
 /* Test PURGE MS for CS services */
+private function f_TC_gsup_purge_cs() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
+	res := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_CS);
+}
 testcase TC_gsup_purge_cs() runs on test_CT {
 	var HlrSubscriberList sl;
 	var GSUP_PDU res;
 
-	f_init();
-
+	f_init(false);
 	sl := f_gen_subs();
-	for (var integer i := 0; i < sizeof(sl); i := i+1) {
-		var HlrSubscriber sub := sl[i];
-		log("Testing CS Purge for ", sub);
-		f_vty_subscr_create(sub);
-		res := f_perform_UL(sub.imsi, sub.msisdn);
-		res := f_perform_PURGE(sub.imsi, OSMO_GSUP_CN_DOMAIN_CS);
-		f_vty_subscr_delete(sub);
-	}
+	f_start_handler_per_sub(refers(f_TC_gsup_purge_cs), sl);
 
 	setverdict(pass);
 }
 
 /* Test PURGE MS for PS services */
+private function f_TC_gsup_purge_ps() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
+	res := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_PS);
+}
 testcase TC_gsup_purge_ps() runs on test_CT {
 	var HlrSubscriberList sl;
-	var GSUP_PDU res;
 
-	f_init();
-
+	f_init(false);
 	sl := f_gen_subs();
-	for (var integer i := 0; i < sizeof(sl); i := i+1) {
-		var HlrSubscriber sub := sl[i];
-		log("Testing PS Purge for ", sub);
-		f_vty_subscr_create(sub);
-		res := f_perform_UL(sub.imsi, sub.msisdn);
-		res := f_perform_PURGE(sub.imsi, OSMO_GSUP_CN_DOMAIN_PS);
-		f_vty_subscr_delete(sub);
-	}
+	f_start_handler_per_sub(refers(f_TC_gsup_purge_ps), sl);
 
 	setverdict(pass);
 }
 
 /* Test PURGEG MS procedure for unknown IMSI */
+
+private function f_TC_gsup_purge_unknown() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_CS, 2);
+}
 testcase TC_gsup_purge_unknown() runs on test_CT {
 	var hexstring imsi := '2345743413463'H;
-	var GSUP_PDU res;
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(imsi));
+	var HLR_ConnHdlr vc_conn;
 
-	f_init();
-
-	res := f_perform_PURGE(imsi, OSMO_GSUP_CN_DOMAIN_CS, 2);
+	f_init(false);
+	vc_conn := f_start_handler(refers(f_TC_ul_unknown_imsi), pars);
+	vc_conn.done;
 
 	setverdict(pass);
 }
-
 
 /* TODO:
   * UL with ISD error
