@@ -1,0 +1,153 @@
+/* (C) 2018 by sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Stefan Sperling <ssperling@sysmocom.de>
+ * All Rights Reserved
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+module SCCP_Tests {
+
+import from M3UA_Emulation all;
+
+import from SCCPasp_Types all;
+import from SCCP_Types all;
+import from SCCP_Emulation all;
+import from SCCP_Templates all;
+
+import from SCTPasp_PortType all;
+
+import from Osmocom_CTRL_Adapter all;
+
+import from TELNETasp_PortType all;
+import from Osmocom_VTY_Functions all;
+
+type component system_CT {
+     port SCTPasp_PT sctp;
+};
+
+type component MTC_CT extends CTRL_Adapter_CT {
+	/* VTY to sccp_demo_user (not used yet) */
+	port TELNETasp_PT SCCP_DEMO_USER_VTY;
+
+	/* SCCP protocol runs on top of M3UA Emulation.
+	 * "System Under Test" is libosmo-sccp's sccp_demo_user example program. */
+	var SCCP_CT vc_SCCP_A;
+	var M3UA_CT vc_M3UA;
+	port SCCPasp_PT A_PORT;
+}
+
+type record SCCP_Configuration {
+	charstring sccp_service_type,
+	SCTP_Association_Address sctp_addr,
+	integer own_pc,
+	integer own_ssn,
+	integer peer_pc,
+	integer peer_ssn,
+	octetstring sio,
+	integer rctx
+};
+
+type record of SCCP_Configuration SCCP_Configurations;
+modulepar {
+	SCCP_Configurations sccp_cfg;
+}
+
+function f_init(SCCP_Configuration cfg) runs on MTC_CT {
+	var MSC_SCCP_MTP3_parameters v_param := {
+		sio := {
+			ni := substr(oct2bit(cfg.sio),0,2),
+			prio := substr(oct2bit(cfg.sio),2,2),
+			si := substr(oct2bit(cfg.sio),4,4)
+		},
+		opc := cfg.own_pc,
+		dpc := cfg.peer_pc,
+		sls := 0,
+		sccp_serviceType := cfg.sccp_service_type,
+		ssn := cfg.own_ssn
+	};
+
+	map(self:SCCP_DEMO_USER_VTY, system:SCCP_DEMO_USER_VTY);
+	f_vty_set_prompts(SCCP_DEMO_USER_VTY);
+	f_vty_transceive(SCCP_DEMO_USER_VTY, "enable");
+
+	/* Create and connect test components for an SCCP connection with M3UA beneath. */
+	vc_SCCP_A := SCCP_CT.create;
+	vc_M3UA := M3UA_CT.create;
+	connect(self:A_PORT, vc_SCCP_A:SCCP_SP_PORT);
+	connect(vc_M3UA:MTP3_SP_PORT, vc_SCCP_A:MTP3_SCCP_PORT);
+	map(vc_M3UA:SCTP_PORT, system:sctp);
+
+	vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr));
+	vc_SCCP_A.start(SCCPStart(v_param));
+}
+
+function f_cleanup() runs on MTC_CT {
+	all component.stop;
+	unmap(vc_M3UA:SCTP_PORT, system:sctp);
+	disconnect(vc_M3UA:MTP3_SP_PORT, vc_SCCP_A:MTP3_SCCP_PORT);
+	disconnect(self:A_PORT, vc_SCCP_A:SCCP_SP_PORT);
+	self.stop
+}
+
+/*
+ * libosmo-sccp does not support Global Title address as a routing indicator.
+ * But sccp_demo_user should not crash if such a message is received (see OS#2666).
+ */
+testcase TC_routing_global_title_crash() runs on MTC_CT system system_CT {
+	timer TL_timer:= 10.0; /* twice the sccp_demo_user connection attempt interval */
+	var SCCP_PAR_Address v_CallingAddress;
+	var SCCP_PAR_Address v_CalledAddress;
+	var octetstring vl_userdata :='12345678901234567890'O;
+	var ASP_SCCP_N_UNITDATA_ind vl_N_UNITDATA_ind;
+
+	f_init(sccp_cfg[0]);
+
+	/* Called address with routing indicator set to Global Title Address. This used to trigger the crash. */
+	v_CalledAddress := valueof(ts_SccpAddr_GT('012345'H));
+
+	v_CallingAddress := valueof(ts_SccpAddr_PC_SSN(sccp_cfg[0].own_pc, sccp_cfg[0].own_ssn,
+						       sccp_cfg[0].sio, sccp_cfg[0].sccp_service_type));
+	A_PORT.send(t_ASP_N_UNITDATA_req(v_CalledAddress, v_CallingAddress, '00000001'B /* sequence control */,
+					 '00000001'B /* return option */, vl_userdata, omit));
+
+	/*
+	 * Start a timeout within which our DATA packet will be sent out.
+	 * The M3UA Emulation layer has buffered the packet and is going
+	 * to send it when the sccp_demo_user SCCP client connects.
+	 *
+	 * libosmo-sccp will echo the packet back at us in an SCCP UDTS packet.
+	 * However, the current M3UA Emulation implementation will discard this
+	 * response because it arrives on a separate SCTP association and the
+	 * emulation only supports one association at a time.
+	 *
+	 * As a workaround, we wait for a fixed amount of time and then issue
+	 * another command to the VTY of sccp_demo_user. If sccp_demo_user
+	 * has crashed, this will result in a test failure.
+	 */
+	TL_timer.start;
+	alt {
+		[] A_PORT.receive(tr_ASP_N_UNITDATA_ind) -> value vl_N_UNITDATA_ind {
+			log("Received data from SCCP client.");
+			repeat;
+		}
+
+		[] TL_timer.timeout {
+			log("Timeout....");
+		}
+	}
+	TL_timer.stop;
+
+	/* Check that the VTY is still active (implying that the process hasn't crashed). */
+	f_vty_transceive_ret(SCCP_DEMO_USER_VTY, "?");
+	setverdict(pass);
+
+	f_cleanup();
+}
+
+control {
+	execute( TC_routing_global_title_crash() );
+}
+
+
+}
