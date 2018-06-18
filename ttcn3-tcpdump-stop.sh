@@ -23,6 +23,8 @@ else
 	printf "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m\n\n"
 fi
 
+exit 0
+
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi
