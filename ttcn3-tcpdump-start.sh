@@ -20,6 +20,8 @@ kill_rm_pidfile() {
 echo "------ $TESTCASE ------"
 date
 
+exit 0
+
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi
