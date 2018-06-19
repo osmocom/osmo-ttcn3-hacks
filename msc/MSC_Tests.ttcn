@@ -2260,6 +2260,109 @@ testcase TC_lu_and_mo_ussd_single_request() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* LU followed by MT USSD notification */
+private function f_tc_lu_and_mt_ussd_notification(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+
+	f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Facility IE with network-originated USSD notification */
+	var template OCTN facility_req := f_USSD_FACILITY_IE_INVOKE(
+		op_code := SS_OP_CODE_USS_NOTIFY,
+		ussd_string := "Mahlzeit!"
+	);
+
+	/* Facility IE with acknowledgment to the USSD notification */
+	var template OCTN facility_rsp := enc_SS_FacilityInformation(
+		/* In case of USSD notification, Return Result is empty */
+		valueof(ts_SS_USSD_FACILITY_RETURN_RESULT_EMPTY())
+	);
+
+	/* Compose a new MT SS/REGISTER message with USSD notification */
+	var template PDU_ML3_NW_MS ussd_ntf := tr_ML3_MT_SS_REGISTER(
+		tid := 0, /* FIXME: most likely, it should be 0 */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := valueof(facility_req)
+	);
+
+	/* Compose HLR -> MSC GSUP message */
+	var template (value) GSUP_PDU gsup_req := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := valueof(facility_req)
+	);
+
+	/* Send it to MSC and expect Paging Request */
+	GSUP.send(gsup_req);
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi)) {
+		setverdict(pass);
+		}
+	/* We don't expect anything else */
+	[] as_unexp_gsup_or_bssap_msg();
+	}
+
+	/* Send Paging Response and expect USSD notification */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+	/* Expect MT REGISTER message with USSD notification */
+	f_expect_mt_dtap_msg(ussd_ntf);
+
+	/* Compose a new MO SS/FACILITY message with empty response */
+	var template (value) PDU_ML3_MS_NW ussd_rsp := ts_ML3_MO_SS_FACILITY(
+		tid := 0, /* FIXME: it shall match the request tid */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		facility := valueof(facility_rsp)
+	);
+
+	/* Compose expected MSC -> HLR GSUP message */
+	var template GSUP_PDU gsup_rsp := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_CONTINUE,
+		ss := valueof(facility_rsp)
+	);
+
+	/* MS sends response to the notification */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_rsp));
+	/* Expect GSUP message containing the SS payload */
+	f_expect_gsup_msg(gsup_rsp);
+
+	/* Compose expected MT SS/RELEASE COMPLETE message */
+	var template PDU_ML3_NW_MS ussd_term := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 0, /* FIXME: it shall match the request tid */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := omit
+	);
+
+	/* Compose MSC -> HLR GSUP message */
+	var template GSUP_PDU gsup_term := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_END
+	);
+
+	/* Finally, HLR terminates the session */
+	GSUP.send(gsup_term)
+	/* Expect MT RELEASE COMPLETE without Facility IE */
+	f_expect_mt_dtap_msg(ussd_term);
+
+	f_expect_clear();
+}
+testcase TC_lu_and_mt_ussd_notification() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_lu_and_mt_ussd_notification), 47);
+	vc_conn.done;
+}
+
 /* LU followed by MT call and MO USSD request during this call */
 private function f_tc_lu_and_mo_ussd_during_mt_call(charstring id, BSC_ConnHdlrPars pars)
 runs on BSC_ConnHdlr {
@@ -2388,6 +2491,108 @@ testcase TC_mo_cc_bssmap_clear() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* LU followed by MT call and MT USSD request during this call */
+private function f_tc_lu_and_mt_ussd_during_mt_call(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Call parameters taken from f_tc_lu_and_mt_call */
+	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
+	cpars.mgcp_connection_id_bss := '10004'H;
+	cpars.mgcp_connection_id_mss := '10005'H;
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+	cpars.bss_rtp_port := 1110;
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Establish a MT call */
+	f_mt_call_establish(cpars);
+
+	/* Hold the call for some time */
+	f_sleep(1.0);
+
+	var template OCTN facility_req := f_USSD_FACILITY_IE_INVOKE(
+		op_code := SS_OP_CODE_USS_REQUEST,
+		ussd_string := "Please type anything..."
+	);
+
+	var template OCTN facility_rsp := f_USSD_FACILITY_IE_RETURN_RESULT(
+		op_code := SS_OP_CODE_USS_REQUEST,
+		ussd_string := "Nope."
+	)
+
+	/* Compose MT SS/REGISTER message with network-originated request */
+	var template (value) PDU_ML3_NW_MS ussd_req := ts_ML3_MT_SS_REGISTER(
+		tid := 0, /* FIXME: most likely, it should be 0 */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := valueof(facility_req)
+	);
+
+	/* Compose HLR -> MSC GSUP message */
+	var template (value) GSUP_PDU gsup_req := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := valueof(facility_req)
+	);
+
+	/* Send it to MSC */
+	GSUP.send(gsup_req);
+	/* Expect MT REGISTER message with USSD request */
+	f_expect_mt_dtap_msg(ussd_req);
+
+	/* Compose a new MO SS/FACILITY message with response */
+	var template (value) PDU_ML3_MS_NW ussd_rsp := ts_ML3_MO_SS_FACILITY(
+		tid := 0, /* FIXME: it shall match the request tid */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		facility := valueof(facility_rsp)
+	);
+
+	/* Compose expected MSC -> HLR GSUP message */
+	var template GSUP_PDU gsup_rsp := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_CONTINUE,
+		ss := valueof(facility_rsp)
+	);
+
+	/* MS sends response */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_rsp));
+	f_expect_gsup_msg(gsup_rsp);
+
+	/* Compose expected MT SS/RELEASE COMPLETE message */
+	var template PDU_ML3_NW_MS ussd_term := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 0, /* FIXME: it shall match the request tid */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := omit
+	);
+
+	/* Compose MSC -> HLR GSUP message */
+	var template GSUP_PDU gsup_term := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := '20000101'O,
+		state := OSMO_GSUP_SESSION_STATE_END
+	);
+
+	/* Finally, HLR terminates the session */
+	GSUP.send(gsup_term);
+	/* Expect MT RELEASE COMPLETE without Facility IE */
+	f_expect_mt_dtap_msg(ussd_term);
+
+	/* Hold the call for some time */
+	f_sleep(1.0);
+
+	/* Release the call (does Clear Complete itself) */
+	f_call_hangup(cpars, true);
+}
+testcase TC_lu_and_mt_ussd_during_mt_call() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_lu_and_mt_ussd_during_mt_call), 49);
+	vc_conn.done;
+}
+
 /* TODO (SMS):
    * different user data lengths
    * SMPP transaction mode with unsuccessful delivery
@@ -2470,7 +2675,9 @@ control {
 	execute( TC_smpp_mt_sms() );
 
 	execute( TC_lu_and_mo_ussd_single_request() );
+	execute( TC_lu_and_mt_ussd_notification() );
 	execute( TC_lu_and_mo_ussd_during_mt_call() );
+	execute( TC_lu_and_mt_ussd_during_mt_call() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
