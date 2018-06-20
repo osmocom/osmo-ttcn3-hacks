@@ -2593,6 +2593,103 @@ testcase TC_lu_and_mt_ussd_during_mt_call() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* LU followed by MO USSD request and MO Release during transaction */
+private function f_tc_lu_and_mo_ussd_mo_release(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Send CM Service Request for SS/USSD */
+	f_establish_fully(EST_TYPE_SS_ACT);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	var template OCTN facility_ms_req := f_USSD_FACILITY_IE_INVOKE(
+		invoke_id := 1, /* Initial request */
+		op_code := SS_OP_CODE_PROCESS_USS_REQ,
+		ussd_string := "*6766*266#"
+	);
+
+	var template OCTN facility_net_req := f_USSD_FACILITY_IE_INVOKE(
+		invoke_id := 2, /* Counter request */
+		op_code := SS_OP_CODE_USS_REQUEST,
+		ussd_string := "Password?!?"
+	)
+
+	/* Compose MO SS/REGISTER message with request */
+	var template (value) PDU_ML3_MS_NW ussd_ms_req := ts_ML3_MO_SS_REGISTER(
+		tid := 1, /* We just need a single transaction */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := valueof(facility_ms_req)
+	);
+
+	/* Compose expected MSC -> HLR message */
+	var template GSUP_PDU gsup_ms_req := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := valueof(facility_ms_req)
+	);
+
+	/* To be used for sending response with correct session ID */
+	var GSUP_PDU gsup_ms_req_complete;
+
+	/* Initiate a new transaction */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_ms_req));
+	/* Expect GSUP request with original Facility IE */
+	gsup_ms_req_complete := f_expect_gsup_msg(gsup_ms_req);
+
+	/* Compose the response from HLR using received session ID */
+	var template (value) GSUP_PDU gsup_net_req := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := gsup_ms_req_complete.ies[1].val.session_id,
+		state := OSMO_GSUP_SESSION_STATE_CONTINUE,
+		ss := valueof(facility_net_req)
+	);
+
+	/* Compose expected MT SS/FACILITY template with counter request */
+	var template PDU_ML3_NW_MS ussd_net_req := tr_ML3_MT_SS_FACILITY(
+		tid := 1, /* Response should arrive within the same transaction */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		facility := valueof(facility_net_req)
+	);
+
+	/* Send response over GSUP */
+	GSUP.send(gsup_net_req);
+	/* Expect MT SS/FACILITY message with counter request */
+	f_expect_mt_dtap_msg(ussd_net_req);
+
+	/* Compose MO SS/RELEASE COMPLETE */
+	var template (value) PDU_ML3_MS_NW ussd_abort := ts_ML3_MO_SS_RELEASE_COMPLETE(
+		tid := 1, /* Response should arrive within the same transaction */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := omit
+		/* TODO: cause? */
+	);
+
+	/* Compose expected HLR -> MSC abort message */
+	var template GSUP_PDU gsup_abort := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := gsup_ms_req_complete.ies[1].val.session_id,
+		state := OSMO_GSUP_SESSION_STATE_END
+	);
+
+	/* Abort transaction */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_abort));
+	/* Expect GSUP message indicating abort */
+	f_expect_gsup_msg(gsup_abort);
+
+	f_expect_clear();
+}
+testcase TC_lu_and_mo_ussd_mo_release() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_lu_and_mo_ussd_mo_release), 50);
+	vc_conn.done;
+}
+
 /* TODO (SMS):
    * different user data lengths
    * SMPP transaction mode with unsuccessful delivery
@@ -2678,6 +2775,7 @@ control {
 	execute( TC_lu_and_mt_ussd_notification() );
 	execute( TC_lu_and_mo_ussd_during_mt_call() );
 	execute( TC_lu_and_mt_ussd_during_mt_call() );
+	execute( TC_lu_and_mo_ussd_mo_release() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
