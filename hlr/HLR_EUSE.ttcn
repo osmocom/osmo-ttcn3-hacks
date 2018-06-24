@@ -1,0 +1,124 @@
+/* Simple / General implementation of an External USSD Entity using OsmoHLR's GSUP Protocol
+ *
+ * The idea is that a test case can simply start an instance of this component in parallel to its
+ * normal test components.   HLR_EUSE_CT will then connect via GSUP to the HLR as the specified EUSE
+ * name.  Any USSD related GSUP message received will be passed to a user-provided call-back
+ * function, which will return whatever PDU to send in response back to the HLR.
+ */
+
+/* (C) 2018 by Harald Welte <laforge@gnumonks.org> */
+
+module HLR_EUSE {
+
+import from GSUP_Types all;
+import from IPA_Emulation all;
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from SS_Types all;
+import from SS_Templates all;
+
+/* emulating an external USSD Entity towards OsmoHLR */
+type component HLR_EUSE_CT {
+	/* Component reference + config of underlying IPA emulation */
+	var IPA_Emulation_CT vc_IPA_EUSE;
+	var IPA_CCM_Parameters ccm_pars;
+	/* port towards the underlying IPA emulation */
+	port IPA_GSUP_PT EUSE;
+}
+
+private function f_init(charstring hlr_ip, uint16_t hlr_gsup_port, charstring name) runs on HLR_EUSE_CT {
+	var charstring id := "EUSE-" & name;
+	ccm_pars := c_IPA_default_ccm_pars;
+	ccm_pars.name := "Osmocom TTCN-3 EUSE Simulator";
+	ccm_pars.ser_nr := id;
+
+	vc_IPA_EUSE := IPA_Emulation_CT.create("IPA-" & id);
+	map(vc_IPA_EUSE:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_IPA_EUSE:IPA_GSUP_PORT, self:EUSE);
+	vc_IPA_EUSE.start(IPA_Emulation.main_client(hlr_ip, hlr_gsup_port, "", 0, ccm_pars));
+
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] EUSE.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { repeat; }
+	[] EUSE.receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) { }
+	[] T.timeout {
+		setverdict(fail, "EUSE: Timeout waiting for GSUP IPA Link to come up");
+		self.stop;
+		}
+	}
+}
+
+type function f_euse_cb(GSUP_SessionState ss_state, GSUP_PDU rx_pdu) return GSUP_PDU;
+
+function f_ss_echo_continue(GSUP_SessionState ss_state, GSUP_PDU rx_pdu) return GSUP_PDU {
+	var GSUP_SessionState ss_next_state;
+	var GSUP_IeValue ss_ie;
+	var SS_FacilityInformation dec_fac, rsp_fac;
+	var octetstring ss_rsp;
+
+	f_gsup_find_ie(rx_pdu, OSMO_GSUP_SS_INFO_IE, ss_ie);
+	dec_fac := dec_SS_FacilityInformation(ss_ie.ss_info);
+	log("dec_fac: ", dec_fac);
+	rsp_fac := valueof(ts_SS_USSD_FACILITY_RETURN_RESULT(dec_fac[0].invoke.invokeId.present_,
+					SS_OP_CODE_PROCESS_USS_REQ,
+					dec_fac[0].invoke.argument.uSSD_Arg.ussd_DataCodingScheme,
+					dec_fac[0].invoke.argument.uSSD_Arg.ussd_String));
+	ss_rsp := enc_SS_FacilityInformation(rsp_fac);
+	select (ss_state) {
+	case (OSMO_GSUP_SESSION_STATE_BEGIN) { ss_next_state := OSMO_GSUP_SESSION_STATE_CONTINUE; }
+	case (OSMO_GSUP_SESSION_STATE_CONTINUE) { ss_next_state := OSMO_GSUP_SESSION_STATE_END; }
+	}
+	return valueof(ts_GSUP_PROC_SS_RES(rx_pdu.ies[0].val.imsi, rx_pdu.ies[1].val.session_id,
+					   ss_next_state, ss_rsp));
+}
+
+function f_ss_echo(GSUP_SessionState ss_state, GSUP_PDU rx_pdu) return GSUP_PDU {
+	var GSUP_IeValue ss_ie;
+	var SS_FacilityInformation dec_fac, rsp_fac;
+	var octetstring ss_rsp;
+
+	f_gsup_find_ie(rx_pdu, OSMO_GSUP_SS_INFO_IE, ss_ie);
+	dec_fac := dec_SS_FacilityInformation(ss_ie.ss_info);
+	log("dec_fac: ", dec_fac);
+	rsp_fac := valueof(ts_SS_USSD_FACILITY_RETURN_RESULT(dec_fac[0].invoke.invokeId.present_,
+					SS_OP_CODE_PROCESS_USS_REQ,
+					dec_fac[0].invoke.argument.uSSD_Arg.ussd_DataCodingScheme,
+					dec_fac[0].invoke.argument.uSSD_Arg.ussd_String));
+	ss_rsp := enc_SS_FacilityInformation(rsp_fac);
+	return valueof(ts_GSUP_PROC_SS_RES(rx_pdu.ies[0].val.imsi, rx_pdu.ies[1].val.session_id,
+					   OSMO_GSUP_SESSION_STATE_END, ss_rsp));
+}
+
+/* main function for handling mobile-originated USSD via GSUP */
+function f_main_mo(charstring hlr_ip, uint16_t hlr_gsup_port, charstring name, f_euse_cb cb_fn)
+runs on HLR_EUSE_CT {
+	var GSUP_PDU rx_pdu, tx_pdu;
+
+	f_init(hlr_ip, hlr_gsup_port, name);
+
+	while (true) {
+		alt {
+		[] EUSE.receive(tr_GSUP_PROC_SS_REQ(?, ?, OSMO_GSUP_SESSION_STATE_BEGIN)) -> value rx_pdu {
+			EUSE.send(cb_fn.apply(OSMO_GSUP_SESSION_STATE_BEGIN, rx_pdu));
+			}
+		[] EUSE.receive(tr_GSUP_PROC_SS_REQ(?, ?, OSMO_GSUP_SESSION_STATE_CONTINUE)) -> value rx_pdu {
+			EUSE.send(cb_fn.apply(OSMO_GSUP_SESSION_STATE_CONTINUE, rx_pdu));
+			}
+
+		[] EUSE.receive(tr_GSUP_PROC_SS_REQ(?, ?, OSMO_GSUP_SESSION_STATE_END)) -> value rx_pdu {
+			EUSE.send(cb_fn.apply(OSMO_GSUP_SESSION_STATE_END, rx_pdu));
+			}
+
+
+		[] EUSE.receive {
+			setverdict(fail, "EUSE: Unexpected Rx from HLR");
+			self.stop;
+			}
+		}
+	}
+}
+
+
+}
