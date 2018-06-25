@@ -1,6 +1,10 @@
 SUBDIRS=bsc bsc-nat bts ggsn_tests hlr lapdm mgw msc pcu selftest sgsn sip sysinfo
 
-PARALLEL_MAKE ?= -j8
+NPROC=$(shell nproc 2>/dev/null)
+ifeq ($(NPROC),)
+NPROC=1
+endif
+PARALLEL_MAKE ?= -j$(NPROC)
 
 # This master makefile allows you to do things like
 # 	make clean	(remove all generated binary, c++ and symlinks)
