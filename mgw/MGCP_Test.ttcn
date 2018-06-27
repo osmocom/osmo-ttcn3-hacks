@@ -22,8 +22,8 @@ module MGCP_Test {
 		var ConnectionId g_mgcp_conn_id := -1;
 		var integer g_trans_id;
 
-		var RTP_Emulation_CT vc_RTPEM[2];
-		port RTPEM_CTRL_PT RTPEM[2];
+		var RTP_Emulation_CT vc_RTPEM[3];
+		port RTPEM_CTRL_PT RTPEM[3];
 	};
 
 	function get_next_trans_id() runs on dummy_CT return MgcpTransId {
@@ -246,10 +246,10 @@ module MGCP_Test {
 		MgcpConnectionId mgcp_conn_id optional
 	}
 
-	function f_flow_create(RTPEM_CTRL_PT pt, MgcpEndpoint ep, inout RtpFlowData flow,
+	/* Create an RTP flow (bidirectional, or receive-only) */
+	function f_flow_create(RTPEM_CTRL_PT pt, MgcpEndpoint ep, MgcpCallId call_id, charstring mode, inout RtpFlowData flow,
 				boolean one_phase := true)
 	runs on dummy_CT {
-		var MgcpCallId call_id := '1226'H;
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
 
@@ -257,8 +257,12 @@ module MGCP_Test {
 		f_rtpem_bind(pt, flow.em.hostname, flow.em.portnr);
 
 		if (one_phase) {
-			/* Connect flow to MGW */
-			cmd := ts_CRCX(get_next_trans_id(), ep, "sendrecv", call_id);
+			/* Connect flow to MGW using a CRCX that also contains an SDP
+			 * part that tells the MGW where we are listening for RTP streams
+			 * that come from the MGW. We get a fully working connection in
+			 * one go. */
+
+			cmd := ts_CRCX(get_next_trans_id(), ep, mode, call_id);
 			cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
 					  flow.em.portnr, { int2str(flow.pt) },
 					  { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)),
@@ -269,25 +273,63 @@ module MGCP_Test {
 			flow.mgw.portnr :=
 				resp.sdp.media_list[0].media_field.ports.port_number;
 		} else {
-			/* first create the MGW side RTP socket */
-			cmd := ts_CRCX(get_next_trans_id(), ep, "recvonly", call_id);
+			/* Create a half-open connection only. We do not tell the MGW
+			 * where it can send RTP streams to us. This means this
+			 * connection will only be able to receive but can not send
+			 * data back to us. In order to turn the connection in a fully
+			 * bi-directional one, a separate MDCX is needed. */
+
+			cmd := ts_CRCX(get_next_trans_id(), ep, mode, call_id);
 			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK);
 			flow.mgcp_conn_id := extract_conn_id(resp);
 			/* extract MGW-side port number from response */
 			flow.mgw.portnr :=
 				resp.sdp.media_list[0].media_field.ports.port_number;
-
-			/* then connect it to the emulation-side RTP socket using SDP */
-			cmd := ts_MDCX(get_next_trans_id(), ep, "sendrecv", call_id, flow.mgcp_conn_id);
-			cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
-					  flow.em.portnr, { int2str(flow.pt) },
-					  { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)),
-					    valueof(ts_SDP_ptime(20)) });
-			resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
-
 		}
 		/* finally, connect the emulation-side RTP socket to the MGW */
 		f_rtpem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
+	}
+
+	/* Modify an existing RTP flow */
+	function f_flow_modify(RTPEM_CTRL_PT pt, MgcpEndpoint ep, MgcpCallId call_id, charstring mode, inout RtpFlowData flow)
+	runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+
+		/* rebind local RTP emulation socket to the new address */
+		f_rtpem_bind(pt, flow.em.hostname, flow.em.portnr);
+
+		/* connect MGW side RTP socket to the emulation-side RTP socket using SDP */
+		cmd := ts_MDCX(get_next_trans_id(), ep, mode, call_id, flow.mgcp_conn_id);
+		cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
+				  flow.em.portnr, { int2str(flow.pt) },
+				  { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)),
+				    valueof(ts_SDP_ptime(20)) });
+		resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
+
+		/* extract MGW-side port number from response. (usually this
+		 * will not change, but thats is up to the MGW) */
+		flow.mgw.portnr :=
+			resp.sdp.media_list[0].media_field.ports.port_number;
+
+		/* reconnect the emulation-side RTP socket to the MGW */
+		f_rtpem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
+	}
+
+	/* Delete an existing RTP flow */
+	function f_flow_delete(RTPEM_CTRL_PT pt, template MgcpEndpoint ep := omit, template MgcpCallId call_id := omit)
+	runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+
+		/* Switch off RTP flow */
+		f_rtpem_mode(pt, RTPEM_MODE_NONE);
+
+		/* Delete connection on MGW (if needed) */
+		if (isvalue(call_id) and isvalue(ep)) {
+			f_sleep(0.1);
+			f_dlcx_ok(valueof(ep), call_id);
+		}
 	}
 
 	function f_crcx(charstring ep_prefix) runs on dummy_CT {
@@ -862,14 +904,92 @@ module MGCP_Test {
 		setverdict(pass);
 	}
 
-	/* create two local RTP emulations; create two connections on MGW EP, exchange some data */
-	testcase TC_two_crcx_and_rtp() runs on dummy_CT {
+	/* Create one half open connection in receive-only mode. The MGW must accept
+	 * the packets but must not send any. */
+	testcase TC_one_crcx_receive_only_rtp() runs on dummy_CT {
+		var RtpFlowData flow;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "1@" & c_mgw_domain;
+		var MgcpCallId call_id := '1225'H;
+		var RtpemStats stats;
+
+		f_init(ep);
+		flow := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 112, "AMR/8000/1"));
+		flow.em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "recvonly", flow, false);
+
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
+		f_sleep(1.0);
+		f_flow_delete(RTPEM[0], ep, call_id);
+
+		stats := f_rtpem_stats_get(RTPEM[0]);
+
+		if (stats.num_pkts_tx < 40) {
+			setverdict(fail);
+		}
+		if (stats.bytes_payload_tx < 190) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx != 0) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_seq != 0) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_ts != 0) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail);
+		}
+
+		setverdict(pass);
+	}
+
+	/* Create one connection in loopback mode, test if the RTP packets are
+	 * actually reflected */
+	testcase TC_one_crcx_loopback_rtp() runs on dummy_CT {
+		var RtpFlowData flow;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "1@" & c_mgw_domain;
+		var MgcpCallId call_id := '1225'H;
+		var RtpemStats stats;
+
+		f_init(ep);
+		flow := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 111, "GSM-HR-08/8000/1"));
+		flow.em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "loopback", flow);
+
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		f_sleep(1.0);
+		f_flow_delete(RTPEM[0], ep, call_id);
+
+		stats := f_rtpem_stats_get(RTPEM[0]);
+
+		if (stats.num_pkts_tx != stats.num_pkts_rx) {
+			setverdict(fail);
+		}
+		if (stats.bytes_payload_tx != stats.bytes_payload_rx) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_seq != 0) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_ts != 0) {
+			setverdict(fail);
+		}
+		if (stats.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail);
+		}
+
+		setverdict(pass);
+	}
+
+	function f_TC_two_crcx_and_rtp(boolean bidir) runs on dummy_CT {
 		var RtpFlowData flow[2];
 		var RtpemStats stats[2];
-		var template MgcpCommand cmd;
 		var MgcpResponse resp;
 		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
 		var MgcpCallId call_id := '1226'H;
+		var integer tolerance := 0;
 
 		f_init(ep);
 
@@ -877,20 +997,181 @@ module MGCP_Test {
 		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
 		/* bind local RTP emulation sockets */
 		flow[0].em.portnr := 10000;
-		f_flow_create(RTPEM[0], ep, flow[0]);
+		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
 
 		/* from MGW back to us */
 		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
 		flow[1].em.portnr := 20000;
-		f_flow_create(RTPEM[1], ep, flow[1]);
+		f_flow_create(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
+
+		if (bidir) {
+				f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+				f_rtpem_mode(RTPEM[1], RTPEM_MODE_BIDIR);
+
+				/* Note: When we test bidirectional we may
+				 * loose packets during switch off because
+				 * both ends are transmitting and we only
+				 * can switch them off one by one. */
+				tolerance := 3;
+		} else {
+				f_rtpem_mode(RTPEM[0], RTPEM_MODE_RXONLY);
+				f_rtpem_mode(RTPEM[1], RTPEM_MODE_TXONLY);
+		}
+
+		f_sleep(1.0);
+
+		f_flow_delete(RTPEM[1]);
+		f_flow_delete(RTPEM[0], ep, call_id);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (not f_rtpem_stats_compare(stats[0], stats[1], tolerance)) {
+			setverdict(fail, "RTP endpoint statistics don't match");
+		}
+
+		setverdict(pass);
+	}
+
+	/* create two local RTP emulations; create two connections on MGW EP, exchange some data */
+	testcase TC_two_crcx_and_rtp() runs on dummy_CT {
+		 f_TC_two_crcx_and_rtp(false);
+	}
+
+	/* create two local RTP emulations; create two connections on MGW EP,
+	 * exchange some data in both directions */
+	testcase TC_two_crcx_and_rtp_bidir() runs on dummy_CT {
+		 f_TC_two_crcx_and_rtp(true);
+	}
+
+	/* create two local RTP emulations and pass data in both directions */
+	testcase TC_two_crcx_mdcx_and_rtp() runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats[2];
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1227'H;
+		var integer num_pkts_tx[2];
+		var integer temp;
+
+		f_init(ep);
+
+		/* Create the first connection in receive only mode */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 3, "GSM/8000/1"));
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "recvonly", flow[0], false);
+
+		/* Create the second connection. This connection will be also
+		 * in receive only mode */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 3, "GSM/8000/1"));
+		flow[1].em.portnr := 20000;
+		f_flow_create(RTPEM[1], ep, call_id, "recvonly", flow[1], false);
+
+		/* The first leg starts transmitting */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
+		f_sleep(0.5);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[0].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+
+		/* The second leg starts transmitting a little later */
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_TXONLY);
+		f_sleep(1.0);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[0].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+
+		/* The first leg will now be switched into bidirectional
+		 * mode, but we do not expect any data comming back yet. */
+		f_flow_modify(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+		f_sleep(0.5);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection");
+		}
+
+		/* When the second leg is switched into bidirectional mode
+		 * as well, then the MGW will connect the two together and
+		 * we should see RTP streams passing through from both ends. */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_BIDIR);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		num_pkts_tx[0] := stats[0].num_pkts_tx
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		num_pkts_tx[1] := stats[1].num_pkts_tx
+
+		f_flow_modify(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
+		f_sleep(2.0);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+
+		temp := stats[0].num_pkts_tx - num_pkts_tx[0] - stats[1].num_pkts_rx;
+		if (temp > 3 or temp < -3) {
+			setverdict(fail, "number of packets not within normal parameters");
+		}
+
+		temp := stats[1].num_pkts_tx - num_pkts_tx[1] - stats[0].num_pkts_rx;
+		if (temp > 3 or temp < -3) {
+			setverdict(fail, "number of packets not within normal parameters");
+		}
+
+		/* Tear down */
+		f_flow_delete(RTPEM[0]);
+		f_flow_delete(RTPEM[1], ep, call_id);
+		setverdict(pass);
+	}
+
+	/* Test what happens when two RTP streams from different sources target
+	 * a single connection. Is the unsolicited stream properly ignored? */
+	testcase TC_two_crcx_and_unsolicited_rtp() runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats[2];
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1234321326'H;
+		var integer unsolicited_port := 10002;
+
+		f_init(ep);
+
+		/* from us to MGW */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
+		/* bind local RTP emulation sockets */
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+
+		/* from MGW back to us */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 98, "AMR/8000"));
+		flow[1].em.portnr := 20000;
+		f_flow_create(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
 
 		f_rtpem_mode(RTPEM[1], RTPEM_MODE_RXONLY);
 		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
 
-		f_sleep(1.0);
+		f_sleep(0.5);
 
-		f_rtpem_mode(RTPEM[0], RTPEM_MODE_NONE);
-		f_sleep(0.1);
+		/* Start inserting unsolicited RTP packets */
+		f_rtpem_bind(RTPEM[2], "127.0.0.1", unsolicited_port);
+		f_rtpem_connect(RTPEM[2], "127.0.0.1", flow[0].mgw.portnr);
+		f_rtpem_mode(RTPEM[2], RTPEM_MODE_TXONLY);
+
+		f_sleep(0.5);
+
+		f_flow_delete(RTPEM[0]);
+		f_flow_delete(RTPEM[1], ep, call_id);
 
 		stats[0] := f_rtpem_stats_get(RTPEM[0]);
 		stats[1] := f_rtpem_stats_get(RTPEM[1]);
@@ -898,9 +1179,68 @@ module MGCP_Test {
 			setverdict(fail, "RTP endpoint statistics don't match");
 		}
 
-		f_dlcx_ok(ep, call_id);
 		setverdict(pass);
+	}
 
+	/* Test a handover situation. We first create two connections transmit
+	 * some data bidirectionally. Then we will simulate a handover situation. */
+	testcase TC_two_crcx_and_one_mdcx_rtp_ho() runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats[3];
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "4@" & c_mgw_domain;
+		var MgcpCallId call_id := '76338'H;
+		var integer port_old;
+
+		f_init(ep);
+
+		/* First connection (BTS) */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 110, "GSM-EFR/8000"));
+		/* bind local RTP emulation sockets */
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+
+		/* Second connection (PBX) */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 110, "GSM-EFR/8000"));
+		flow[1].em.portnr := 20000;
+		f_flow_create(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
+
+		/* Normal rtp flow for one second */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_BIDIR);
+		f_sleep(1.0);
+
+		/* Now switch the flow over to a new port (BTS) */
+		port_old := flow[0].em.portnr;
+		flow[0].em.portnr := 10002;
+		f_flow_modify(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+
+		/* When handing over a call, the old source may still keep
+		 * transmitting for a while. We simulate this by injecting
+		 * some unsolicited packets on the behalf of the old source,
+		 * (old remote port) */
+		f_rtpem_bind(RTPEM[2], "127.0.0.1", port_old);
+		f_rtpem_connect(RTPEM[2], "127.0.0.1", flow[0].mgw.portnr);
+		f_rtpem_mode(RTPEM[2], RTPEM_MODE_TXONLY);
+		f_sleep(1.0);
+		f_rtpem_mode(RTPEM[2], RTPEM_MODE_NONE);
+		f_sleep(1.0);
+
+		/* Terminate call */
+		f_flow_delete(RTPEM[0]);
+		f_flow_delete(RTPEM[1], ep, call_id);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (not f_rtpem_stats_compare(stats[0], stats[1], 5)) {
+			setverdict(fail, "RTP endpoint statistics don't match");
+		}
+		stats[2] := f_rtpem_stats_get(RTPEM[2]);
+		if (stats[2].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets on old leg after handover");
+		}
+
+		setverdict(pass);
 	}
 
 	/* TODO: Double-DLCX (no retransmission) */
@@ -943,6 +1283,13 @@ module MGCP_Test {
 		execute(TC_crcx_dlcx_30ep());
 
 		execute(TC_rtpem_selftest());
+
+		execute(TC_one_crcx_receive_only_rtp());
+		execute(TC_one_crcx_loopback_rtp());
 		execute(TC_two_crcx_and_rtp());
+		execute(TC_two_crcx_and_rtp_bidir());
+		execute(TC_two_crcx_mdcx_and_rtp());
+		execute(TC_two_crcx_and_unsolicited_rtp());
+		execute(TC_two_crcx_and_one_mdcx_rtp_ho());
 	}
 }
