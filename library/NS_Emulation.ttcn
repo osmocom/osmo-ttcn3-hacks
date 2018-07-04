@@ -116,7 +116,9 @@ module NS_Emulation {
 		PortNumber remote_udp_port,
 		charstring remote_ip,
 		Nsvci nsvci,
-		Nsvci nsei
+		Nsvci nsei,
+		boolean role_sgsn,
+		boolean handle_sns
 	}
 
 	private function f_change_state(NseState new_state) runs on NS_CT {
@@ -192,6 +194,8 @@ module NS_Emulation {
 			/* FIXME */
 		}
 
+		[config.role_sgsn and config.handle_sns] as_sns_sgsn();
+
 		/* default case of handling unknown PDUs */
 		[] NSCP.receive(t_NS_RecvFrom(?)) -> value rf {
 			log("Rx Unexpected NS PDU ", rf.msg," in state ", g_state);
@@ -199,6 +203,46 @@ module NS_Emulation {
 		}
 		/* Forwarding of ASP_Evet to user */
 		[] NSCP.receive(ASP_Event:?) -> value evt { NS_SP.send(evt); }
+	}
+
+	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
+	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
+	altstep as_sns_sgsn() runs on NS_CT {
+		var NS_RecvFrom rf;
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_SIZE(config.nsei))) -> value rf {
+			/* blindly acknowledge whatever the PCU sends */
+			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_SIZE_ACK(config.nsei, omit)));
+		}
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_SIZE(?))) {
+			setverdict(fail, "SNS-SIZE from unexpected NSEI");
+			self.stop;
+		}
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, true,
+				    {tr_SNS_IPv4(config.remote_ip, config.remote_udp_port)}))) -> value rf {
+			/* blindly acknowledge whatever the PCU sends */
+			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_CONFIG_ACK(config.nsei, omit)));
+			/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
+			var IP4_Elements v4 := { valueof(ts_SNS_IPv4(config.local_ip, config.local_udp_port)) };
+			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_CONFIG(config.nsei, true, v4)));
+			alt {
+			[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG_ACK(config.nsei, omit))) {
+				/* success */
+				}
+			[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG_ACK(config.nsei, ?))) {
+				setverdict(fail, "Unexpected SNS-CONFIG-NACK");
+				self.stop;
+				}
+			}
+		}
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, false, ?))) { /* ignore */}
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, true, ?))) {
+			setverdict(fail, "Unexpected SNS-CONFIG content");
+			self.stop;
+		}
+		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(?, ?, ?))) {
+			setverdict(fail, "SNS-CONFIG from unexpected NSEI");
+			self.stop;
+		}
 	}
 
 	private function f_ScanEvents() runs on NS_CT {
