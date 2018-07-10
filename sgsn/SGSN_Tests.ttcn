@@ -64,6 +64,7 @@ type component test_CT {
 	port TELNETasp_PT SGSNVTY;
 
 	var boolean g_initialized := false;
+	var boolean g_use_echo := false;
 };
 
 type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr, GTP_ConnHdlr {
@@ -160,6 +161,14 @@ private function f_init_vty() runs on test_CT {
 	f_vty_config(SGSNVTY, "sgsn", "auth-policy remote");
 }
 
+private function f_vty_enable_echo_interval(boolean enable) runs on test_CT {
+	if (enable) {
+		f_vty_config(SGSNVTY, "sgsn", "ggsn 0 echo-interval 5");
+	} else {
+		f_vty_config(SGSNVTY, "sgsn", "ggsn 0 no echo-interval");
+	}
+}
+
 
 function f_init(BcdMccMnc mcc_mnc := '26242F'H) runs on test_CT {
 	if (g_initialized == true) {
@@ -184,6 +193,7 @@ function f_init(BcdMccMnc mcc_mnc := '26242F'H) runs on test_CT {
 	f_init_gsup("SGSN_Test");
 	f_init_gtp("SGSN_Test");
 	f_init_vty();
+	f_vty_enable_echo_interval(g_use_echo);
 }
 
 type function void_fn(charstring id) runs on BSSGP_ConnHdlr;
@@ -874,6 +884,7 @@ type record PdpActPars {
 	OCT4			ggsn_tei_u,			/* GGSN TEI User */
 	octetstring		ggsn_ip_c,			/* GGSN IP Control */
 	octetstring		ggsn_ip_u,			/* GGSN IP User */
+	OCT1			ggsn_restart_ctr,		/* GGSN Restart Counter */
 
 	OCT4			sgsn_tei_c optional,		/* SGSN TEI Control */
 	OCT4			sgsn_tei_u optional,		/* SGSN TEI User */
@@ -1025,6 +1036,7 @@ template (value) PdpActPars t_PdpActPars(charstring ggsn_ip) := {
 	ggsn_tei_u := f_rnd_octstring(4),
 	ggsn_ip_c := f_inet_addr(ggsn_ip),
 	ggsn_ip_u := f_inet_addr(ggsn_ip),
+	ggsn_restart_ctr := int2oct(2, 1),
 
 	sgsn_tei_c := omit,
 	sgsn_tei_u := omit,
@@ -1249,6 +1261,46 @@ testcase TC_attach_second_attempt() runs on test_CT {
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_attach_forget_tlli_attach), testcasename(), g_gb[0], 22);
 	vc_conn.done;
+}
+
+private function f_TC_attach_restart_ctr_dettach(charstring id) runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	/* first perform regular attach */
+	f_TC_attach(id);
+	/* Activate a pdp context against the  GGSN */
+	f_pdp_ctx_act(apars);
+	/* Wait to receive first echo request and send initial Restart counter */
+	GTP.receive(tr_GTPC_MsgType(?, echoRequest, ?)) -> value g_ud {
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP.send(ts_GTPC_PONG(g_ud.peer, seq_nr, apars.ggsn_restart_ctr));
+	}
+	/* Wait to receive second echo request and send incremented Restart
+	   counter. This will fake a restarted GGSN, and pdp ctx allocated
+	   should be released by SGSN */
+	apars.ggsn_restart_ctr := int2oct(oct2int(apars.ggsn_restart_ctr) + 1, 1);
+	GTP.receive(tr_GTPC_MsgType(?, echoRequest, ?)) -> value g_ud {
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP.send(ts_GTPC_PONG(g_ud.peer, seq_nr, apars.ggsn_restart_ctr));
+	}
+	var OCT1 cause_network_failure := int2oct(38, 1)
+	alt {
+	[] BSSGP.receive(tr_BD_L3_MT(tr_SM_DEACT_PDP_REQ_MT(apars.tid, cause_network_failure, true))) {
+		BSSGP.send(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
+		setverdict(pass);
+		}
+	[] as_xid(apars);
+	}
+	setverdict(pass);
+}
+testcase TC_attach_restart_ctr_dettach() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	g_use_echo := true
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_restart_ctr_dettach), testcasename(), g_gb[0], 23, 30.0);
+	vc_conn.done;
+	g_use_echo := false
 }
 
 private function f_TC_hlr_location_cancel_request_update(charstring id) runs on BSSGP_ConnHdlr {
@@ -1625,6 +1677,7 @@ control {
 	execute( TC_attach_pdp_act_user_deact_mo() );
 	execute( TC_attach_pdp_act_user_deact_mt() );
 	execute( TC_attach_second_attempt() );
+	execute( TC_attach_restart_ctr_dettach() );
 }
 
 
