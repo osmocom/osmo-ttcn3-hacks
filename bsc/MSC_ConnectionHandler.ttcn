@@ -58,7 +58,10 @@ type record HostPort {
 
 /* State encapsulating one MGCP Connection */
 type record MgcpConnState {
-	boolean crcx_seen,
+	integer crcx_seen,		/* Counts how many CRCX operations happend */
+	integer mdcx_seen,		/* Counts how many MDCX operations happend C */
+	integer crcx_seen_exp,		/* Sets the expected number of CRCX operations */
+	integer mdcx_seen_exp,		/* Sets the expected number of MDCX operations */
 	MgcpConnectionId conn_id,
 	charstring mime_type,		/* e.g. AMR */
 	integer sample_rate,		/* 8000 */
@@ -115,7 +118,10 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 		g_media.mgcp_conn[i].sample_rate := 8000;
 		g_media.mgcp_conn[i].ptime := 20;
 		g_media.mgcp_conn[i].rtp_pt := enum2int(f_get_mgcp_pt(codecType));
-		g_media.mgcp_conn[i].crcx_seen := false;
+		g_media.mgcp_conn[i].crcx_seen := 0;
+		g_media.mgcp_conn[i].mdcx_seen := 0;
+		g_media.mgcp_conn[i].crcx_seen_exp := 0;
+		g_media.mgcp_conn[i].mdcx_seen_exp := 0;
 		g_media.mgcp_conn[i].conn_id := f_mgcp_alloc_conn_id();
 	}
 
@@ -129,9 +135,11 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 	}
 }
 
+/* Helper function to get the next free MGCP connection identifier. We can
+ * recognize free connection identifiers by the fact that no CRCX happend yet */
 private function f_get_free_mgcp_conn() runs on MSC_ConnHdlr return integer {
 	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
-		if (not g_media.mgcp_conn[i].crcx_seen) {
+		if (not g_media.mgcp_conn[i].crcx_seen >= 1) {
 			return i;
 		}
 	}
@@ -139,9 +147,12 @@ private function f_get_free_mgcp_conn() runs on MSC_ConnHdlr return integer {
 	self.stop;
 }
 
+/* Helper function to pick a specific connection by its cid. Since we reach out
+ * for a connection that is in-use we also check if there was already exactly
+ * one CRCX happening on that connection. */
 private function f_get_mgcp_conn(MgcpConnectionId cid) runs on MSC_ConnHdlr return integer {
 	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
-		if (g_media.mgcp_conn[i].conn_id == cid and g_media.mgcp_conn[i].crcx_seen) {
+		if (g_media.mgcp_conn[i].conn_id == cid and g_media.mgcp_conn[i].crcx_seen == 1) {
 			return i;
 		}
 	}
@@ -278,7 +289,7 @@ altstep as_Media_mgw() runs on MSC_ConnHdlr {
 		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
 		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(g_media.mgcp_ep));
 		MGCP.send(mgcp_resp);
-		g_media.mgcp_conn[cid].crcx_seen := true;
+		g_media.mgcp_conn[cid].crcx_seen := g_media.mgcp_conn[cid].crcx_seen + 1;
 		repeat;
 		}
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
@@ -299,7 +310,7 @@ altstep as_Media_mgw() runs on MSC_ConnHdlr {
 							int2str(mgcp_conn.sample_rate))),
 				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
 		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
-		//g_media.mgcp_mdcx_seen := true;
+		g_media.mgcp_conn[cid].mdcx_seen := g_media.mgcp_conn[cid].mdcx_seen + 1;
 		repeat;
 	}
 }
@@ -781,11 +792,31 @@ function f_ass_patch_lcls(inout template (omit) PDU_BSSAP ass_tpl,
 	}
 }
 
+/* Helper function to check if the activity on the MGCP matches what we
+ * expected */
+function f_check_mgcp_expectations() runs on MSC_ConnHdlr {
+	for (var integer i:= 0; i < sizeof(g_media.mgcp_conn); i := i+1) {
+		if(g_media.mgcp_conn[i].crcx_seen != g_media.mgcp_conn[i].crcx_seen_exp) {
+			setverdict(fail, "unexpected number of MGW-CRCX transactions");
+		}
+		if(g_media.mgcp_conn[i].mdcx_seen != g_media.mgcp_conn[i].mdcx_seen_exp) {
+			setverdict(fail, "unexpected number of MGW-MDCX transactions");
+		}
+	}
+}
+
 /* establish a channel fully, expecting an assignment matching 'exp' */
 function f_establish_fully(template (omit) PDU_BSSAP ass_tpl, template PDU_BSSAP exp_ass_cpl)
 runs on MSC_ConnHdlr {
 
 	var BSSMAP_FIELD_CodecType codecType;
+	var boolean sccplite := false;
+
+	/* Check if we run on SCCPLITE instead of SCCP by looking if a CIC is
+	 * present or not. */
+	if (isvalue(ass_tpl.pdu.bssmap.assignmentRequest.circuitIdentityCode)) {
+		sccplite := true;
+	}
 
 	if (isvalue(ass_tpl.pdu.bssmap.assignmentRequest.codecList)) {
 		codecType := valueof(ass_tpl.pdu.bssmap.assignmentRequest.codecList.codecElements[0].codecType);
@@ -847,6 +878,31 @@ runs on MSC_ConnHdlr {
 		exp_modify := f_channel_needs_modify(ass_cmd.pdu.bssmap.assignmentRequest.channelType, g_chan_nr);
 	}
 
+	/* Some test situations will involve MGCP transactions on a media
+	 * gateway. Depending on the situation, we set up how many of each MGCP
+	 * message type are expected to be exchanged. */
+	if (isbound(exp_ass_cpl.pdu.bssmap.assignmentFailure)) {
+		/* For tests that expect the assignment to fail, assume that
+		 * there will be no MGW communication as well. */
+		g_media.mgcp_conn[0].crcx_seen_exp := 0;
+		g_media.mgcp_conn[0].mdcx_seen_exp := 0;
+		g_media.mgcp_conn[1].crcx_seen_exp := 0;
+		g_media.mgcp_conn[1].mdcx_seen_exp := 0;
+	} else if (st.voice_call) {
+		/* For voice calls we expect the following MGCP activity */
+		if (sccplite) {
+			g_media.mgcp_conn[0].crcx_seen_exp := 1;
+			g_media.mgcp_conn[0].mdcx_seen_exp := 1;
+			g_media.mgcp_conn[1].crcx_seen_exp := 0;
+			g_media.mgcp_conn[1].mdcx_seen_exp := 0;
+		} else {
+			g_media.mgcp_conn[0].crcx_seen_exp := 1;
+			g_media.mgcp_conn[0].mdcx_seen_exp := 1;
+			g_media.mgcp_conn[1].crcx_seen_exp := 1;
+			g_media.mgcp_conn[1].mdcx_seen_exp := 0;
+		}
+	}
+
 	f_create_mgcp_expect(mgcpcrit);
 	BSSAP.send(ass_cmd);
 
@@ -890,6 +946,8 @@ runs on MSC_ConnHdlr {
 	if (not isbound(bssap)) {
 		self.stop;
 	}
+
+	f_check_mgcp_expectations();
 }
 
 type record HandoverState {
