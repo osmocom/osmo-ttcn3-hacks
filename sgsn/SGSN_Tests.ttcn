@@ -903,9 +903,14 @@ private function f_process_gtp_ctx_act_req(inout PdpActPars apars, PDU_GTPC gtpc
 	f_gtp_register_teid(apars.ggsn_tei_u);
 }
 
-function f_pdp_ctx_act(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
+function f_pdp_ctx_act(inout PdpActPars apars, boolean send_recovery := false) runs on BSSGP_ConnHdlr {
 	var boolean exp_rej := ispresent(apars.exp_rej_cause);
 	var Gtp1cUnitdata g_ud;
+	var template Recovery_gtpc recovery := omit;
+
+	if (send_recovery) {
+		recovery := ts_Recovery(apars.ggsn_restart_ctr);
+	}
 
 	BSSGP.send(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco));
@@ -916,7 +921,8 @@ function f_pdp_ctx_act(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
 						apars.sgsn_tei_c, apars.gtp_resp_cause,
 						apars.ggsn_tei_c, apars.ggsn_tei_u,
 						apars.nsapi,
-						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id));
+						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
+						omit, recovery));
 	}
 	alt {
 	[exp_rej] BSSGP.receive(tr_BD_L3_MT(tr_SM_ACT_PDP_REJ(apars.tid, apars.exp_rej_cause))) {
@@ -1263,7 +1269,7 @@ testcase TC_attach_second_attempt() runs on test_CT {
 	vc_conn.done;
 }
 
-private function f_TC_attach_restart_ctr_dettach(charstring id) runs on BSSGP_ConnHdlr {
+private function f_TC_attach_restart_ctr_echo(charstring id) runs on BSSGP_ConnHdlr {
 	var Gtp1cUnitdata g_ud;
 	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
 
@@ -1294,13 +1300,53 @@ private function f_TC_attach_restart_ctr_dettach(charstring id) runs on BSSGP_Co
 	}
 	setverdict(pass);
 }
-testcase TC_attach_restart_ctr_dettach() runs on test_CT {
+/* ATTACH + trigger Recovery procedure through EchoResp */
+testcase TC_attach_restart_ctr_echo() runs on test_CT {
 	var BSSGP_ConnHdlr vc_conn;
 	g_use_echo := true
 	f_init();
-	vc_conn := f_start_handler(refers(f_TC_attach_restart_ctr_dettach), testcasename(), g_gb[0], 23, 30.0);
+	vc_conn := f_start_handler(refers(f_TC_attach_restart_ctr_echo), testcasename(), g_gb[0], 23, 30.0);
 	vc_conn.done;
 	g_use_echo := false
+}
+
+private function f_TC_attach_restart_ctr_create(charstring id) runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+	var integer seq_nr := 23;
+	var GtpPeer peer;
+	/* first perform regular attach */
+	f_TC_attach(id);
+
+	/* Use this CTX ACT to send initial Restart counter to SGSN. */
+	apars.gtp_resp_cause := int2oct(199, 1);	/* no resources available */
+	apars.exp_rej_cause := '1a'O;			/* insufficient resources */
+	f_pdp_ctx_act(apars, true);
+
+	/* Increment restart_ctr. This will fake a restarted GGSN when CreatePdpResp is
+/* received. */
+	apars.ggsn_restart_ctr := int2oct(oct2int(apars.ggsn_restart_ctr) + 1, 1);
+
+	/* FIXME: Once we can easily handle different pdp ctx simultaneously, it
+	   would be great to have an active pdp context here before triggering
+	   Recovery, and making sure the the DEACT request is sent by the SGSN.
+	*/
+
+	/* Activate a pdp context against the GGSN, send incremented Recovery
+	   IE. This should trigger the recovery path, but still this specific
+	   CTX activation should work. */
+	apars.exp_rej_cause := omit; /* default value for tests */
+	apars.gtp_resp_cause := int2oct(128, 1);  /* default value for tests */
+	f_pdp_ctx_act(apars, true);
+
+	setverdict(pass);
+}
+/* ATTACH + trigger Recovery procedure through CreatePdpResp */
+testcase TC_attach_restart_ctr_create() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_restart_ctr_create), testcasename(), g_gb[0], 24, 30.0);
+	vc_conn.done;
 }
 
 /* ATTACH + PDP CTX ACT + user plane traffic + PDP CTX DEACT in MT direction + trigger T3395 */
@@ -1713,7 +1759,8 @@ control {
 	execute( TC_attach_pdp_act_user_deact_mo() );
 	execute( TC_attach_pdp_act_user_deact_mt() );
 	execute( TC_attach_second_attempt() );
-	execute( TC_attach_restart_ctr_dettach() );
+	execute( TC_attach_restart_ctr_echo() );
+	execute( TC_attach_restart_ctr_create() );
 	execute( TC_attach_pdp_act_deact_mt_t3395_expire() );
 }
 
