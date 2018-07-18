@@ -74,6 +74,7 @@ type record MgcpConnState {
 /* BTS media state */
 type record BtsMediaState {
 	boolean ipa_crcx_seen,
+	boolean ipa_mdcx_seen,
 	uint16_t conn_id,
 	uint7_t rtp_pt,
 	HostPort bts,
@@ -91,6 +92,7 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 	/* BTS Side */
 	g_media.bts := {
 		ipa_crcx_seen := false,
+		ipa_mdcx_seen := false,
 		conn_id := nr,
 		rtp_pt := 0,
 		bts := {
@@ -102,6 +104,7 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 
 	g_media.bts1 := {
 		ipa_crcx_seen := false,
+		ipa_mdcx_seen := false,
 		conn_id := nr,
 		rtp_pt := 0,
 		bts := {
@@ -204,7 +207,7 @@ altstep as_Media_ipacc() runs on MSC_ConnHdlr {
 						oct2int(f_inet_addr(g_media.bts.peer.host)),
 						g_media.bts.peer.port_nr,
 						g_media.bts.rtp_pt));
-		//g_media.bts.ipa_mdcx_seen := true;
+		g_media.bts.ipa_mdcx_seen := true;
 		repeat;
 		}
 
@@ -248,7 +251,7 @@ altstep as_Media_ipacc() runs on MSC_ConnHdlr {
 						oct2int(f_inet_addr(g_media.bts1.peer.host)),
 						g_media.bts1.peer.port_nr,
 						g_media.bts1.rtp_pt));
-		//g_media.bts1.ipa_mdcx_seen := true;
+		g_media.bts1.ipa_mdcx_seen := true;
 		repeat;
 		}
 
@@ -257,7 +260,7 @@ altstep as_Media_ipacc() runs on MSC_ConnHdlr {
 
 /* altstep for handling of MGCP media related commands. Activated by as_Media() to test
  * MGW level media handling */
-altstep as_Media_mgw() runs on MSC_ConnHdlr {
+altstep as_Media_mgw(boolean norepeat := false) runs on MSC_ConnHdlr {
 	var MgcpCommand mgcp_cmd;
 
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
@@ -290,7 +293,9 @@ altstep as_Media_mgw() runs on MSC_ConnHdlr {
 		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(g_media.mgcp_ep));
 		MGCP.send(mgcp_resp);
 		g_media.mgcp_conn[cid].crcx_seen := g_media.mgcp_conn[cid].crcx_seen + 1;
-		repeat;
+		if(norepeat == false) {
+			repeat;
+		}
 		}
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
 		var SDP_Message sdp;
@@ -311,7 +316,9 @@ altstep as_Media_mgw() runs on MSC_ConnHdlr {
 				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
 		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
 		g_media.mgcp_conn[cid].mdcx_seen := g_media.mgcp_conn[cid].mdcx_seen + 1;
-		repeat;
+		if(norepeat == false) {
+			repeat;
+		}
 	}
 }
 
@@ -969,6 +976,7 @@ runs on MSC_ConnHdlr {
 type record HandoverState {
 	/* Assignment related bits */
 	boolean rr_ho_cmpl_seen,
+	integer mdcx_seen_before_ho,
 	boolean handover_done,
 	RslChannelNr old_chan_nr
 };
@@ -1004,13 +1012,18 @@ altstep as_handover(inout HandoverState st) runs on MSC_ConnHdlr {
 			st.old_chan_nr := g_chan_nr;
 			g_chan_nr := new_chan_nr;
 			st.rr_ho_cmpl_seen := true;
+
+			/* Memorize how many MDCX we have seen before. We need this number to detect
+			 * that we have received the handover related MDCX */
+			st.mdcx_seen_before_ho := g_media.mgcp_conn[0].mdcx_seen;
 			repeat;
 		} else {
 			setverdict(fail, "Unexpected L3 received", l3);
 			self.stop;
 		}
 		}
-	[st.rr_ho_cmpl_seen] as_Media();
+	[st.rr_ho_cmpl_seen] as_Media_ipacc();
+	[st.rr_ho_cmpl_seen] as_Media_mgw(true);	
 	[st.rr_ho_cmpl_seen] RSL.receive(tr_RSL_REL_REQ(st.old_chan_nr, tr_RslLinkID_DCCH(0))) {
 		RSL.send(ts_RSL_REL_CONF(st.old_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
 		repeat;
@@ -1020,7 +1033,19 @@ altstep as_handover(inout HandoverState st) runs on MSC_ConnHdlr {
 		/* unregister for old channel number in RSL emulation */
 		/* FIXME: Determine TRX NR by ARFCN, instead of hard-coded TRX0! */
 		f_rslem_unregister(0, st.old_chan_nr);
-		st.handover_done := true;
+
+		/* The channel release must not necessarly be synchronized to the RSL handover
+		 * procedure since those events may happen independently nearly at the same
+		 * time. When we receive the RSL_RF_CHAN_REL command the media negotiation on
+		 * IPACC or MGCP level may be still in progress. In order to make sure that
+		 * we do only stop when we have seen an MDCX on MGCP level and another a CRCX
+		 * as well as an MDCX on IPACC level. */
+		if (g_media.mgcp_conn[0].mdcx_seen <= st.mdcx_seen_before_ho or
+		    g_media.bts1.ipa_mdcx_seen == false or g_media.bts1.ipa_crcx_seen == false) {
+			repeat;
+		} else {
+			st.handover_done := true;
+		}
 		}
 }
 
