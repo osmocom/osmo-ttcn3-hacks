@@ -72,7 +72,8 @@ module NS_Emulation {
 		out	NsUnitdataRequest;
 	} with { extension "internal" };
 
-	function NSStart() runs on NS_CT {
+	function NSStart(NSConfiguration init_config) runs on NS_CT {
+		config := init_config;
 		f_init();
 		f_ScanEvents();
 	}
@@ -80,7 +81,7 @@ module NS_Emulation {
 	private function f_init() runs on NS_CT {
 		var Result res;
 		/* Connect the UDP socket */
-		res := f_IPL4_connect(NSCP, mp_remote_ip, mp_remote_udp_port, mp_local_ip, mp_local_udp_port, 0, { udp := {}});
+		res := f_IPL4_connect(NSCP, config.remote_ip, config.remote_udp_port, config.local_ip, config.local_udp_port, 0, { udp := {}});
 		if (not ispresent(res.connId)) {
 			setverdict(fail, "Could not connect NS UDP socket, check your configuration");
 			mtc.stop;
@@ -97,6 +98,8 @@ module NS_Emulation {
 		/* NS-User SAP towards the user */
 		port NS_SP_PT NS_SP;
 
+		var NSConfiguration config;
+
 		var NseState		g_state := NSE_S_DEAD_BLOCKED;
 		var ConnectionId	g_conn_id := -1;
 
@@ -105,24 +108,24 @@ module NS_Emulation {
 		timer Tns_block := 10.0;
 	}
 
-	modulepar {
-		PortNumber mp_local_udp_port := 23000;
-		charstring mp_local_ip := "127.0.0.1";
-		PortNumber mp_remote_udp_port := 21000;
-		charstring mp_remote_ip := "127.0.0.1";
-		Nsvci mp_nsvci := 0;
-		Nsvci mp_nsei := 2342;
-	};
+	type record NSConfiguration {
+		PortNumber local_udp_port,
+		charstring local_ip,
+		PortNumber remote_udp_port,
+		charstring remote_ip,
+		Nsvci nsvci,
+		Nsvci nsei
+	}
 
 	private function f_change_state(NseState new_state) runs on NS_CT {
 		var NseState old_state := g_state;
 		g_state := new_state;
 		log("NS State Transition: ", old_state, " -> ", new_state);
-		NS_SP.send(t_NsStsInd(mp_nsei, mp_nsvci, old_state, new_state));
+		NS_SP.send(t_NsStsInd(config.nsei, config.nsvci, old_state, new_state));
 	}
 
 	private function f_sendReset() runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, t_NS_RESET(NS_CAUSE_OM_INTERVENTION, mp_nsvci, mp_nsei)));
+		NSCP.send(t_NS_Send(g_conn_id, t_NS_RESET(NS_CAUSE_OM_INTERVENTION, config.nsvci, config.nsei)));
 		g_state := NSE_S_WAIT_RESET;
 	}
 
@@ -137,7 +140,7 @@ module NS_Emulation {
 	}
 
 	private function f_sendBlock(NsCause cause) runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK(cause, mp_nsvci)));
+		NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK(cause, config.nsvci)));
 		Tns_block.start;
 	}
 
@@ -176,9 +179,9 @@ module NS_Emulation {
 		}
 
 		/* Respond to RESET with correct NSEI/NSVCI */
-		[] NSCP.receive(t_NS_RecvFrom(t_NS_RESET(?, mp_nsvci, mp_nsei))) -> value rf {
+		[] NSCP.receive(t_NS_RecvFrom(t_NS_RESET(?, config.nsvci, config.nsei))) -> value rf {
 			f_change_state(NSE_S_ALIVE_BLOCKED);
-			NSCP.send(t_NS_Send(g_conn_id, t_NS_RESET_ACK(mp_nsvci, mp_nsei)));
+			NSCP.send(t_NS_Send(g_conn_id, t_NS_RESET_ACK(config.nsvci, config.nsei)));
 		}
 
 		/* Respond to RESET with wrong NSEI/NSVCI */
@@ -210,7 +213,7 @@ module NS_Emulation {
 			}
 		} else if (g_state == NSE_S_WAIT_RESET) {
 			alt {
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_RESET_ACK(mp_nsvci, mp_nsei))) -> value rf {
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_RESET_ACK(config.nsvci, config.nsei))) -> value rf {
 					f_change_state(NSE_S_ALIVE_BLOCKED);
 					f_sendAlive();
 					f_sendUnblock();
@@ -219,8 +222,8 @@ module NS_Emulation {
 		} else if (g_state == NSE_S_ALIVE_BLOCKED) {
 			alt {
 				/* bogus block, just respond with ACK */
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK(?, mp_nsvci))) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK_ACK(mp_nsvci)));
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK(?, config.nsvci))) -> value rf {
+					NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK_ACK(config.nsvci)));
 				}
 				/* Respond to UNBLOCK with UNBLOCK-ACK + change state */
 				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value rf {
@@ -244,26 +247,26 @@ module NS_Emulation {
 					NSCP.send(t_NS_Send(g_conn_id, t_NS_UNBLOCK_ACK));
 				}
 				/* Respond to BLOCK with BLOCK-ACK + change state */
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK(?, mp_nsvci))) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK_ACK(mp_nsvci)));
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK(?, config.nsvci))) -> value rf {
+					NSCP.send(t_NS_Send(g_conn_id, t_NS_BLOCK_ACK(config.nsvci)));
 					Tns_block.stop;
 					f_change_state(NSE_S_ALIVE_BLOCKED);
 				}
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK_ACK(mp_nsvci))) -> value rf {
+				[] NSCP.receive(t_NS_RecvFrom(t_NS_BLOCK_ACK(config.nsvci))) -> value rf {
 					Tns_block.stop;
 				}
 				/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
 				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNITDATA(?, ?, ?))) -> value rf {
-					NS_SP.send(t_NsUdInd(mp_nsei,
+					NS_SP.send(t_NsUdInd(config.nsei,
 							     oct2int(rf.msg.pDU_NS_Unitdata.bVCI),
 							     rf.msg.pDU_NS_Unitdata.nS_SDU));
 				}
 				/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
-				[] NS_SP.receive(t_NsUdReq(mp_nsei, ?, ?, omit)) -> value ud_req {
+				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, ?, omit)) -> value ud_req {
 					/* using raw octetstring PDU */
 					NSCP.send(t_NS_Send(g_conn_id, t_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu)));
 				}
-				[] NS_SP.receive(t_NsUdReq(mp_nsei, ?, omit, ?)) -> value ud_req {
+				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, omit, ?)) -> value ud_req {
 					/* using decoded BSSGP PDU that we need to encode first */
 					var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
 					NSCP.send(t_NS_Send(g_conn_id, t_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc)));
