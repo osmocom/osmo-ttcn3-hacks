@@ -5,8 +5,8 @@ BASEDIR=../deps
 . ../gen_links.sh.inc
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc
-TCCInterface.cc TCCInterface_ip.h"
+FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
+FILES+=" TCCEncoding_Functions.ttcn TCCEncoding.cc " # GSM 7-bit coding
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
@@ -21,10 +21,26 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.ROSE/src
+FILES="Remote_Operations_Generic_ROS_PDUs.asn  Remote_Operations_Information_Objects.asn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.MAP/src
+FILES="MAP_ApplicationContexts.asn MAP_CH_DataTypes.asn MAP_CallHandlingOperations.asn MAP_CommonDataTypes.asn MAP_DialogueInformation.asn MAP_ER_DataTypes.asn MAP_EncDec.cc MAP_Errors.asn MAP_GR_DataTypes.asn MAP_Group_Call_Operations.asn MAP_LCS_DataTypes.asn MAP_LocationServiceOperations.asn MAP_MS_DataTypes.asn MAP_MobileServiceOperations.asn MAP_OM_DataTypes.asn MAP_OperationAndMaintenanceOperations.asn MAP_PDU_Defs.asn MAP_Protocol.asn MAP_SM_DataTypes.asn MAP_SS_Code.asn MAP_SS_DataTypes.asn MAP_ShortMessageServiceOperations.asn MAP_SupplementaryServiceOperations.asn MAP_TS_Code.asn MAP_Types.ttcn "
+FILES+="MAP_BS_Code.asn MAP_ExtensionDataTypes.asn MobileDomainDefinitions.asn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
+FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn MobileL3_SMS_Types.ttcn MobileL3_SS_Types.ttcn MobileL3_Types.ttcn "
+FILES+="SS_DataTypes.asn SS_Errors.asn SS_Operations.asn SS_PDU_Defs.asn SS_Protocol.asn SS_Types.ttcn SS_EncDec.cc"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp GSUP_Types.ttcn GSUP_Emulation.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
+FILES+="SS_Templates.ttcn USSD_Helpers.ttcn "
+
 
 gen_links $DIR $FILES
 
