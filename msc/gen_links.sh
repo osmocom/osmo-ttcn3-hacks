@@ -90,7 +90,7 @@ FILES+="BSSMAP_Emulation.ttcn BSSAP_CodecPort.ttcn BSSMAP_Templates.ttcn BSSAP_A
 FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 FILES+="MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="SMPP_CodecPort.ttcn SMPP_CodecPort_CtrlFunct.ttcn SMPP_CodecPort_CtrlFunctDef.cc SMPP_Emulation.ttcn SMPP_Templates.ttcn "
-FILES+="SS_Templates.ttcn SCCP_Templates.ttcn"
+FILES+="SS_Templates.ttcn SCCP_Templates.ttcn USSD_Helpers.ttcn"
 gen_links $DIR $FILES
 
 ignore_pp_results
