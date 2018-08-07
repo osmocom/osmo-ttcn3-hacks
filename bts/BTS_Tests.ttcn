@@ -3794,6 +3794,187 @@ testcase TC_lapdm_selftest() runs on test_CT {
 	f_assert_lapdm('03e00d063505'O, tr_LAPDm_I(0, true, false, 7, 0, '063505'O), "I/7/0");
 }
 
+/***********************************************************************
+ * DTX Related (see GSM 05.08, section 8.3)
+ ***********************************************************************/
+
+/* XXX These functions must be kept in sync with g_AllChannels defined on test_CT. */
+function f_g_chan_is_tchf() runs on ConnHdlr return boolean {
+	return (g_chan_nr == valueof(ts_RslChanNr_Bm(1)) or
+		g_chan_nr == valueof(ts_RslChanNr_Bm(2)) or
+		g_chan_nr == valueof(ts_RslChanNr_Bm(3)) or
+		g_chan_nr == valueof(ts_RslChanNr_Bm(4)));
+}
+function f_g_chan_is_tchh() runs on ConnHdlr return boolean {
+	return (g_chan_nr == valueof(ts_RslChanNr_Lm(5,0)) or
+		g_chan_nr == valueof(ts_RslChanNr_Lm(5,1)));
+}
+function f_g_chan_is_sdcch4() runs on ConnHdlr return boolean {
+	return (g_chan_nr == valueof(ts_RslChanNr_SDCCH4(0,0)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH4(0,1)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH4(0,2)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH4(0,3)));
+}
+function f_g_chan_is_sdcch8() runs on ConnHdlr return boolean {
+	return (g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,0)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,1)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,2)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,3)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,4)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,5)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,6)) or
+		g_chan_nr == valueof(ts_RslChanNr_SDCCH8(6,7)));
+}
+
+function f_test_l2_fill_frames(boolean dtxd) runs on ConnHdlr {
+	var L1ctlDlMessage dl;
+	var octetstring l2_fill_frame := '0303012B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B'O;
+	var octetstring l2_fill_frame_sacch := substr(l2_fill_frame, 0, lengthof(l2_fill_frame) - 2);
+	var GsmFrameNumber first_fn;
+	var boolean is_first_frame := true;
+	var integer nfill_frames := 0;
+	const integer dtx_tchf_mod := 104;
+	/* Frames numbers (mod 104) for which a fill frame is expected on TCHF if DTX is enabled. */
+	var Integers required_tdma_frames_dtx_tchf := { 52, 53, 54, 55, 56, 57, 58, 59 };
+	timer T := 5.0;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+	L1CTL.clear;
+
+	/* activate TCHF signalling channel */
+	f_est_dchan(false);
+
+	T.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, ?)) -> value dl {
+		var GsmFrameNumber fn := dl.dl_info.frame_nr;
+		var octetstring l2 := dl.payload.data_ind.payload;
+
+		if (is_first_frame) {
+			is_first_frame := false;
+			first_fn := dl.dl_info.frame_nr;
+		}
+
+		if (dl.dl_info.link_id.c == SACCH) {
+			l2 := substr(l2, 2, lengthof(l2) - 2); /* remove L1 header */
+			if (not match(l2_fill_frame_sacch, l2)) {
+				repeat;
+			}
+		} else if (not match(l2_fill_frame, l2)) {
+			repeat;
+		}
+
+		if (dtxd) {
+			if (not f_g_chan_is_tchf()) {
+				T.stop;
+				f_rsl_chan_deact();
+				f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+				setverdict(fail, "Received fill frame on non-TCH/F channel; DTX is only allowed on TCH/F!");
+			}
+			if (fn >= first_fn + dtx_tchf_mod) {
+				T.stop;
+				f_rsl_chan_deact();
+				f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+				/* With DTX enabled we can expect at least 1 fill frame every 104 frames. */
+				if (nfill_frames < 1) {
+					setverdict(fail);
+				} else {
+					setverdict(pass);
+				}
+			}
+			for (var integer i := 0; i < lengthof(required_tdma_frames_dtx_tchf); i := i + 1) {
+				if (fn mod dtx_tchf_mod == required_tdma_frames_dtx_tchf[i]) {
+					nfill_frames := nfill_frames + 1;
+					repeat;
+				}
+			}
+			log("Received DTX TCH fill frame with bad frame number: ", fn,
+			    " (mod ", dtx_tchf_mod, ": ", fn mod dtx_tchf_mod, ")");
+			f_rsl_chan_deact();
+			f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+			setverdict(fail, "Unexpected L2 fill frame received on Um");
+		} else {
+			nfill_frames := nfill_frames + 1;
+			if (fn >= first_fn + dtx_tchf_mod) {
+				var integer expected_fill_frames;
+				T.stop;
+				if (f_g_chan_is_tchf()) {
+					/* Without DTX we can expect 25 fill frames for every 104 frames.
+					 * (24 FACCH + 1 SACCH filling) */
+					 expected_fill_frames := 25;
+				} else if (f_g_chan_is_tchh()) {
+					/* We can expect 2 fill frames for every 104 frames. */
+					 expected_fill_frames := 2;
+				} else if (f_g_chan_is_sdcch4() or f_g_chan_is_sdcch8()) {
+					/* We can expect 5 fill frames for every 104 frames. */
+					 expected_fill_frames := 5;
+				} else {
+					f_rsl_chan_deact();
+					f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+					setverdict(fail, "Unknown channel type");
+				}
+
+				f_rsl_chan_deact();
+				f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+				if (nfill_frames >= expected_fill_frames) {
+					setverdict(pass);
+				} else {
+					setverdict(fail, "Not enough fill frames received");
+				}
+			} else {
+				repeat;
+			}
+		}
+	}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		f_rsl_chan_deact();
+		f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+		setverdict(fail, "Timeout waiting for L2 fill frames on Um");
+		mtc.stop;
+	}
+	}
+}
+
+function f_TC_tch_sign_l2_fill_frame(charstring id) runs on ConnHdlr {
+	f_test_l2_fill_frames(false);
+}
+
+function f_TC_tch_sign_l2_fill_frame_dtxd(charstring id) runs on ConnHdlr {
+	f_test_l2_fill_frames(true);
+}
+
+function f_tch_sign_l2_fill_frame(boolean dtxd) runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	pars.t_guard := 60.0;
+	f_init(testcasename());
+	for (var integer i := 0; i < sizeof(g_AllChannels); i := i + 1) {
+		pars := valueof(t_Pars(g_AllChannels[i], ts_RSL_ChanMode_SIGN(dtxd)));
+		if (dtxd) {
+			if (i >= 4) { /* DTX is only allowed on TCH/F */
+				break;
+			}
+			vc_conn := f_start_handler(refers(f_TC_tch_sign_l2_fill_frame_dtxd), pars);
+		} else {
+			vc_conn := f_start_handler(refers(f_TC_tch_sign_l2_fill_frame), pars);
+		}
+		vc_conn.done;
+	}
+}
+
+/* Verify that L2 fill frames are sent on TCH in signaling mode if
+ * there is nothing to transmit while DTX is disabled on downlink. */
+testcase TC_tch_sign_l2_fill_frame() runs on test_CT {
+	f_tch_sign_l2_fill_frame(false);
+}
+
+/* Verify that particular L2 fill frames are sent on TCH in signaling mode if
+ * there is nothing to transmit while DTX is enabled on downlink. */
+testcase TC_tch_sign_l2_fill_frame_dtxd() runs on test_CT {
+	f_tch_sign_l2_fill_frame(true);
+}
 
 /* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
 /*	protocol error as per 44.006 */
@@ -3926,6 +4107,9 @@ control {
 	execute( TC_encr_cmd_a53() );
 
 	execute( TC_lapdm_selftest() );
+
+	execute( TC_tch_sign_l2_fill_frame() );
+	execute( TC_tch_sign_l2_fill_frame_dtxd() );
 }
 
 
