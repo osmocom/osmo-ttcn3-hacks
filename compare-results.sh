@@ -112,7 +112,7 @@ while read line; do
     fi
     matched="1"
     break
-  done <<< "$(grep "<testcase" "$results_file")"
+  done <<< "$(grep "<testcase.*$exp_test_name" "$results_file")"
 
   if [ "x$matched" = "x0" ]; then
     echo "skipped $exp_suite_name.$exp_test_name"
@@ -140,7 +140,7 @@ while read line; do
 
     matched="1"
     break
-  done <<< "$(grep "<testcase" "$expected_file")"
+  done <<< "$(grep "<testcase.*$test_name" "$expected_file")"
 
   if [ "x$matched" = "x0" ]; then
     echo "NEW-$got_test_result $got_suite_name.$got_test_name"
