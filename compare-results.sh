@@ -152,6 +152,8 @@ done <<< "$(grep "<testcase" "$results_file")"
 echo "--------------------"
 overall_verdict=0
 
+ask_update=""
+
 if [ "x$pass" != x0 ]; then
   echo "$pass pass"
 fi
@@ -162,25 +164,25 @@ fi
 
 if [ "x$skipped" != x0 ]; then
   echo "$skipped skipped"
+  ask_update="$ask_update removed=$skipped"
   if [ "x$allow_skip" = x0 ]; then
     overall_verdict=4
-    echo "   Failing due to skipped tests. If tests were removed, update the expected results!"
   fi
 fi
 
 if [ "x$new" != x0 ]; then
   echo "$new new"
+  ask_update="$ask_update new=$new"
   if [ "x$allow_new" = x0 ]; then
     overall_verdict=3
-    echo "   Failing due to new tests. Update the expected results!"
   fi
 fi
 
 if [ "x$more_successes" != x0 ]; then
   echo "$more_successes pass unexpectedly"
+  ask_update="$ask_update xpass=$more_successes"
   if [ "x$allow_xpass" = x0 ]; then
     overall_verdict=2
-    echo "   Update the expected results!"
   fi
 fi
 
@@ -189,10 +191,9 @@ if [ "x$more_failures" != x0 ]; then
   overall_verdict=1
 fi
 
-echo
-if [ "x$overall_verdict" != x0 ]; then
-  echo "FAILURE"
-else
-  echo "ok"
+if [ -n "$ask_update" ]; then
+  echo
+  echo "(Please update the expected results:$ask_update)"
 fi
+
 exit $overall_verdict
