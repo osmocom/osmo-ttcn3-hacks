@@ -2015,6 +2015,136 @@ testcase TC_attach_gmm_attach_req_while_gmm_attach() runs on test_CT {
 	vc_conn.done;
 }
 
+private function f_TC_attach_usim_resync(charstring id) runs on BSSGP_ConnHdlr {
+	var BssgpDecoded bd;
+	var RoutingAreaIdentificationV old_ra := f_random_RAI();
+
+	var template PDU_L3_MS_SGSN attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit);
+
+	/* send Attach Request */
+	/* indicate R99 capability of the MS to enable UMTS AKA in presence of
+	 * 3G auth vectors */
+	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.revisionLevelIndicatior := '1'B;
+	/* The thing is, if the solSACapability is 'omit', then the
+	 * revisionLevelIndicatior is at the wrong place! */
+	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.solSACapability := '0'B;
+	f_send_l3_gmm_llc(attach_req);
+
+	/* do the auth */
+	var PDU_L3_MS_SGSN l3_mo;
+	var PDU_L3_SGSN_MS l3_mt;
+	var default di := activate(as_mm_identity());
+
+	var GSUP_IE auth_tuple;
+	var template AuthenticationParameterAUTNTLV autn;
+
+	g_pars.vec := f_gen_auth_vec_3g();
+	autn := {
+		elementIdentifier := '28'O,
+		lengthIndicator := lengthof(g_pars.vec.autn),
+		autnValue := g_pars.vec.autn
+		};
+	auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+							g_pars.vec.sres,
+							g_pars.vec.kc,
+							g_pars.vec.ik,
+							g_pars.vec.ck,
+							g_pars.vec.autn,
+							g_pars.vec.res));
+	log("GSUP sends 2G and 3G auth tuples", auth_tuple);
+	GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+
+	var template PDU_L3_SGSN_MS auth_ciph_req := tr_GMM_AUTH_REQ(g_pars.vec.rand);
+	auth_ciph_req.msgs.gprs_mm.authenticationAndCipheringRequest.authenticationParameterAUTN := autn;
+	BSSGP[0].receive(tr_BD_L3_MT(auth_ciph_req)) -> value bd;
+
+	/* send the gmm auth failure with resync IE */
+	f_send_l3_gmm_llc(ts_GMM_AUTH_FAIL_UMTS_AKA_RESYNC(g_pars.vec.auts));
+
+	/* wait for the GSUP resync request */
+	GSUP.receive(tr_GSUP_SAI_REQ_UMTS_AKA_RESYNC(
+		g_pars.imsi,
+		g_pars.vec.auts,
+		g_pars.vec.rand));
+
+	/* generate new key material */
+	g_pars.vec := f_gen_auth_vec_3g();
+	autn := {
+		elementIdentifier := '28'O,
+		lengthIndicator := lengthof(g_pars.vec.autn),
+		autnValue := g_pars.vec.autn
+		};
+
+	auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+							g_pars.vec.sres,
+							g_pars.vec.kc,
+							g_pars.vec.ik,
+							g_pars.vec.ck,
+							g_pars.vec.autn,
+							g_pars.vec.res));
+	/* send new key material */
+	GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+
+	/* wait for the new Auth Request */
+	auth_ciph_req := tr_GMM_AUTH_REQ(g_pars.vec.rand);
+	auth_ciph_req.msgs.gprs_mm.authenticationAndCipheringRequest.authenticationParameterAUTN := autn;
+	BSSGP[0].receive(tr_BD_L3_MT(auth_ciph_req)) -> value bd;
+	l3_mt := bd.l3_mt;
+	var BIT4 ac_ref := l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.acReferenceNumber.valueField;
+	var template PDU_L3_MS_SGSN auth_ciph_resp := ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres);
+	auth_ciph_resp := ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres);
+	auth_ciph_resp.msgs.gprs_mm.authenticationAndCipheringResponse.authenticationParResp := {
+		valueField := substr(g_pars.vec.res, 0, 4)
+	};
+	auth_ciph_resp.msgs.gprs_mm.authenticationAndCipheringResponse.authenticationRespParExt := {
+		elementIdentifier := '21'O,
+		lengthIndicator := lengthof(g_pars.vec.res) - 4,
+		valueField := substr(g_pars.vec.res, 4, lengthof(g_pars.vec.res) - 4)
+	};
+	l3_mo := valueof(auth_ciph_resp);
+	if (ispresent(l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest) and
+		l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.imeisvRequest.valueField == '001'B) {
+		l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
+					valueof(ts_MI_IMEISV_TLV(g_pars.imei & '0'H));
+	}
+	f_send_l3_gmm_llc(l3_mo);
+	deactivate(di);
+
+	/* Expect SGSN to perform LU with HLR */
+	f_gmm_gsup_lu_isd();
+
+	BSSGP[0].receive(tr_BD_L3_MT(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?))) -> value bd {
+		f_process_attach_accept(bd.l3_mt.msgs.gprs_mm.attachAccept);
+	}
+	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+	setverdict(pass);
+}
+
+testcase TC_attach_usim_resync() runs on test_CT {
+	/* MS -> SGSN: Attach Request
+	 * MS <- SGSN: Identity Request IMSI
+	 * MS -> SGSN: Identity Response IMSI
+	 * MS <- SGSN: Identity Request IMEI
+	 * MS -> SGSN: Identity Response IMEI
+	 * HLR<- SGSN: SAI Request
+	 * HLR-> SGSN: SAI Response
+	 * MS <- SGSN: Auth Request
+	 * MS -> SGSN: Auth Failure (with AUTS)
+	 * HLR<- SGSN: SAI Request (with AUTS & RAND)
+	 * HLR-> SGSN: SAI Response (new key material)
+	 * MS <- SGSN: Auth Request (new key material)
+	 * MS -> SGSN: Auth Response
+	 * MS <- SGSN: Attach Accept
+	 * MS -> SGSN: Attach Complete
+	 */
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_attach_usim_resync), testcasename(), g_gb, 40);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_attach() );
 	execute( TC_attach_mnc3() );
@@ -2042,6 +2172,7 @@ control {
 	execute( TC_attach_rau() );
 	execute( TC_attach_rau_a_a() );
 	execute( TC_attach_rau_a_b() );
+	execute( TC_attach_usim_resync() );
 	execute( TC_detach_unknown_nopoweroff() );
 	execute( TC_detach_unknown_poweroff() );
 	execute( TC_detach_nopoweroff() );
