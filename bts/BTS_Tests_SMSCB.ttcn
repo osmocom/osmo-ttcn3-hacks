@@ -1,0 +1,347 @@
+module BTS_Tests_SMSCB {
+
+/* Integration Tests for OsmoBTS
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * This test suite tests the SMSCB (Cell Broadcast) related functionality of
+ * OsmoBTS by attaching to the A-bis RSL and Um interface and emulating both
+ * BSC and MS.
+ */
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from L1CTL_PortType all;
+import from L1CTL_Types all;
+import from LAPDm_Types all;
+
+import from RSL_Types all;
+
+import from Osmocom_VTY_Functions all;
+
+import from BTS_Tests all;
+
+/***********************************************************************
+ * Cell Broadcast related tests
+ ***********************************************************************/
+
+type record CbchTestPars {
+	boolean		use_sdcch4,
+	CbchTestMsgs	msgs
+};
+
+type record CbchTestMsg {
+	/* config / input data */
+	RSL_CbCommand	rsl_cb_cmd,
+	uint2_t		last_block, /* 0..3 */
+	octetstring	payload,
+	/* computed / result data */
+	CbchBlocks	blocks optional
+};
+type record of CbchTestMsg CbchTestMsgs;
+
+/* a single 22byte block within a CbchTestMsg */
+type record CbchBlock {
+	uint4_t		seq_nr, /* as per TS 04.12 */
+	boolean		is_last,
+	OCT22		payload,
+	boolean 	seen_once
+};
+type record of CbchBlock CbchBlocks;
+
+/* compute the expected blocks for given test parameters */
+private function f_cbch_compute_exp_blocks(inout CbchTestPars pars) {
+	var integer i;
+
+	for (i := 0; i < lengthof(pars.msgs); i := i+1) {
+		pars.msgs[i].blocks := f_comp_blocks(pars.msgs[i]);
+	}
+}
+private function f_comp_blocks(in CbchTestMsg msg) return CbchBlocks {
+	var CbchBlocks blocks := {};
+	var integer i;
+
+	for (i := 0; i <= msg.last_block; i := i+1) {
+		var CbchBlock block := {
+			seq_nr := i,
+			is_last := false,
+			payload := substr(msg.payload, 22*i, 22),
+			seen_once := false
+			};
+		if (msg.rsl_cb_cmd == RSL_CB_CMD_SCHEDULE and i == 0) {
+			block.seq_nr := 8;
+		}
+		if (i == msg.last_block) {
+			block.is_last := true;
+		}
+		blocks := blocks & {block};
+	}
+
+	return blocks;
+};
+
+/* TS 48.058 Section 9.3.41 */
+private function f_cbch_block_nr2rsl(uint2_t nr) return uint2_t {
+	select (nr) {
+	case (0) { return 1; }
+	case (1) { return 2; }
+	case (2) { return 3; }
+	case (3) { return 0; }
+	}
+	setverdict(fail, "Invalid block number");
+	mtc.stop;
+}
+
+/* Verify the CBCH TB scheduling rules of TS 05.02 Section 6.5.4 */
+private function f_cbch_fn_verify(uint32_t fn, CBCH_Block cb)
+{
+	var integer tb := (fn/51) mod 8; /* TS 05.02 Section 6.5.4 */
+	if (cb.block_type.seq_nr == 15 /* null */) {
+		/* always permitted */
+		return;
+	} else if (cb.block_type.seq_nr == 8 /* schedule */) {
+		if (tb != 0) {
+			setverdict(fail, "Schedule block at TB=", tb);
+		}
+	} else if (cb.block_type.seq_nr < 4) {
+		if (cb.block_type.seq_nr != tb and cb.block_type.seq_nr+4 != tb) {
+			setverdict(fail, "Normal block at wrong TB=", tb, ": ", cb);
+		}
+	}
+}
+
+/* shared function doing the heavy lifting for most CBCH tests */
+private function f_TC_smscb(CbchTestPars pars) runs on test_CT {
+	var L1ctlDlMessage dl;
+	var boolean cmd_seen_once := false;
+	var integer i, j;
+	timer T := 5.0;
+
+	f_cbch_compute_exp_blocks(pars);
+
+	f_init_vty_bsc();
+	/* ensure that a CBCH is present in channel combination */
+	if (pars.use_sdcch4) {
+		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 0"},
+					"phys_chan_config CCCH+SDCCH4+CBCH");
+		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 6"},
+					"phys_chan_config SDCCH8");
+	} else {
+		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 0"},
+					"phys_chan_config CCCH+SDCCH4");
+		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 6"},
+					"phys_chan_config SDCCH8+CBCH");
+	}
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+	f_sleep(2.0);
+	f_init(testcasename());
+
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+	/* FIXME: switch to dedicated mode for SDCCH/8 */
+
+	/* send SMSCB[s] via RSL */
+	for (i := 0; i < lengthof(pars.msgs); i := i+1) {
+		var CbchTestMsg msg := pars.msgs[i];
+		var uint2_t rsl_last_block := f_cbch_block_nr2rsl(msg.last_block);
+		var RSL_IE_CbCommandType cmd_type :=
+					valueof(ts_RSL_IE_CbCmdType(msg.rsl_cb_cmd, rsl_last_block));
+		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_SMSCB_CMD(cmd_type, msg.payload)));
+	}
+	T.start;
+	/* Expect this to show up exactly once on the basic CBCH (four blocks) */
+	alt {
+					   /* FIXME: Channel Nr for SDCCH/8 */
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_CBCH(0))) -> value dl {
+		log("CBCH: ", dl);
+		var CBCH_Block cb := dec_CBCH_Block(dl.payload.data_ind.payload);
+		/* detect the proper CBCH messages; check frame number */
+		f_cbch_fn_verify(dl.dl_info.frame_nr, cb);
+		if (not match(cb, tr_CBCH_Block)) {
+			setverdict(fail, "Illegal CBCH Block received: ", cb);
+		} else {
+			var boolean matched := false;
+			/* ignore NULL messages */
+			if (match(cb, tr_CBCH_Block(15, ?, ?))) { repeat; }
+			for (i := 0; i < lengthof(pars.msgs); i := i+1) {
+				for (j := 0; j < lengthof(pars.msgs[i].blocks); j := j+1) {
+					var CbchBlock b := pars.msgs[i].blocks[j];
+					if (match(cb, tr_CBCH_Block(b.seq_nr, b.is_last, b.payload))) {
+						if (not pars.msgs[i].blocks[j].seen_once) {
+							pars.msgs[i].blocks[j].seen_once := true;
+							setverdict(pass);
+						} else {
+							setverdict(fail, "Received SMSCB twice! ", cb);
+						}
+						matched := true;
+						continue;
+					}
+				}
+			}
+			if (not matched) {
+				setverdict(fail, "Received unexpected CBCH block: ", cb);
+			}
+			repeat;
+		}
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		for (i := 0; i < lengthof(pars.msgs); i := i+1) {
+			for (j := 0; j < lengthof(pars.msgs[i].blocks); j := j+1) {
+				var CbchBlock b := pars.msgs[i].blocks[j];
+				if (not b.seen_once) {
+					setverdict(fail, "Timeout waiting for CBCH");
+				}
+			}
+		}
+		}
+	}
+
+	/* reset timeslot 0 channel combination to default */
+	f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 0"},
+				"phys_chan_config CCCH+SDCCH4");
+	f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 6"},
+				"phys_chan_config SDCCH8");
+}
+
+private const CbchTestMsgs msgs_1m_1b_norm := {
+	{ RSL_CB_CMD_NORMAL, 0, '001000320f1141660c344dd3cba09a0c000000000000'O, omit }
+}
+
+private const CbchTestMsgs msgs_1m_2b_norm := {
+	{ RSL_CB_CMD_NORMAL, 1, '001000320f1141660c344dd3cba09a0c000000000000'O &
+				'000102030405060708090a0b0c0d0e0f101213141516'O,
+	  omit }
+}
+
+private const CbchTestMsgs msgs_1m_3b_norm := {
+	{ RSL_CB_CMD_NORMAL, 2, '001000320f1141660c344dd3cba09a0c000000000000'O &
+				'000102030405060708090a0b0c0d0e0f101213141516'O &
+				'101112131415161718191a1b1c1d1e1f202223242526'O,
+	  omit }
+}
+
+private const CbchTestMsgs msgs_1m_4b_norm := {
+	{ RSL_CB_CMD_NORMAL, 3, '001000320f1141660c344dd3cba09a0c000000000000'O &
+				'000102030405060708090a0b0c0d0e0f101213141516'O &
+				'101112131415161718191a1b1c1d1e1f202223242526'O &
+				'202122232425262728292a2b2c2d2e2f303233343536'O,
+	  omit }
+}
+
+private const CbchTestMsgs msgs_1m_4b_sched := {
+	{ RSL_CB_CMD_SCHEDULE, 3, '001000320f1141660c344dd3cba09a0c000000000000'O &
+				  '000102030405060708090a0b0c0d0e0f101213141516'O &
+				  '101112131415161718191a1b1c1d1e1f202223242526'O &
+				  '202122232425262728292a2b2c2d2e2f303233343536'O,
+	  omit }
+}
+
+/* transmit single-block SMSCB COMMAND */
+testcase TC_sms_cb_cmd_sdcch4_1block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		msgs := msgs_1m_1b_norm
+	};
+	f_TC_smscb(pars);
+}
+testcase TC_sms_cb_cmd_sdcch8_1block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := false,
+		msgs := msgs_1m_1b_norm
+	};
+	f_TC_smscb(pars);
+}
+
+/* transmit dual-block SMSCB COMMAND */
+testcase TC_sms_cb_cmd_sdcch4_2block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		msgs := msgs_1m_2b_norm
+	};
+	f_TC_smscb(pars);
+}
+testcase TC_sms_cb_cmd_sdcch8_2block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := false,
+		msgs := msgs_1m_2b_norm
+	};
+	f_TC_smscb(pars);
+}
+
+/* transmit triple-block SMSCB COMMAND */
+testcase TC_sms_cb_cmd_sdcch4_3block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		msgs := msgs_1m_3b_norm
+	};
+	f_TC_smscb(pars);
+}
+testcase TC_sms_cb_cmd_sdcch8_3block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := false,
+		msgs := msgs_1m_3b_norm
+	};
+	f_TC_smscb(pars);
+}
+
+/* transmit quad-block SMSCB COMMAND */
+testcase TC_sms_cb_cmd_sdcch4_4block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		msgs := msgs_1m_4b_norm
+	};
+	f_TC_smscb(pars);
+}
+testcase TC_sms_cb_cmd_sdcch8_4block() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := false,
+		msgs := msgs_1m_4b_norm
+	};
+	f_TC_smscb(pars);
+}
+
+/* transmit SMSCB COMMAND with SCHEDULE payload */
+testcase TC_sms_cb_cmd_sdcch4_schedule() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		msgs := msgs_1m_4b_sched
+	};
+	f_TC_smscb(pars);
+}
+testcase TC_sms_cb_cmd_sdcch8_schedule() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := false,
+		msgs := msgs_1m_4b_sched
+	};
+	f_TC_smscb(pars);
+}
+
+/* SMSCB TODO:
+   * multiple SMS BC CMD at the same time: Ensure all of them are sent exactly once
+   * extended CBCH vs. normal CBCH
+   * 
+ */
+
+control {
+	execute( TC_sms_cb_cmd_sdcch4_1block() );
+	execute( TC_sms_cb_cmd_sdcch4_2block() );
+	execute( TC_sms_cb_cmd_sdcch4_3block() );
+	execute( TC_sms_cb_cmd_sdcch4_4block() );
+	execute( TC_sms_cb_cmd_sdcch4_schedule() );
+	if (false) { /* FIXME: SDCCH/8 support broken, needs trxcon + L1CTL work */
+	execute( TC_sms_cb_cmd_sdcch8_1block() );
+	execute( TC_sms_cb_cmd_sdcch8_2block() );
+	execute( TC_sms_cb_cmd_sdcch8_3block() );
+	execute( TC_sms_cb_cmd_sdcch8_4block() );
+	execute( TC_sms_cb_cmd_sdcch8_schedule() );
+	}
+}
+
+
+}
