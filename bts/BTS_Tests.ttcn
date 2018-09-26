@@ -1687,26 +1687,16 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 	}
 	var float pch_blocks_per_sec := max_pch_imsi_per_sec * cfg.load_factor;
 	var float interval := 1.0 / pch_blocks_per_sec;
-	log("pch_blocks_per_sec=", pch_blocks_per_sec, " interval=", interval);
+	var float time_total := 20.0;
+	var integer pkt_total := float2int(time_total * pch_blocks_per_sec);
+	log("pch_blocks_total=", pkt_total," pch_blocks_per_sec=", pch_blocks_per_sec, " interval=", interval);
 
-	for (var integer i := 0; i < float2int(20.0/interval); i := i+1) {
-		/* build mobile Identity */
-		var MobileL3_CommonIE_Types.MobileIdentityLV mi;
-		if (cfg.use_tmsi) {
-			mi := valueof(ts_MI_TMSI_LV(f_rnd_octstring(4)));
-		} else {
-			mi := valueof(ts_MI_IMSI_LV(f_gen_imsi(i)));
-		}
-		var octetstring mi_enc_lv := enc_MobileIdentityLV(mi);
-		var octetstring mi_enc := substr(mi_enc_lv, 1, lengthof(mi_enc_lv)-1);
+	timer T_total := 300.0; /* big value (far bigger than time_total), used to count elapsed time */
+	T_total.start;
 
-		/* Send RSL PAGING COMMAND */
-		RSL_CCHAN.send(ts_RSL_UD(ts_RSL_PAGING_CMD(mi_enc, i mod 4)));
-		st.num_paging_sent := st.num_paging_sent + 1;
-
-		/* Wait for interval to next PAGING COMMAND */
-		timer T_itv := interval;
-		T_itv.start;
+	timer T_itv := 0.0;
+	T_itv.start;
+	while (st.num_paging_sent < pkt_total) {
 		alt {
 		/* check for presence of CCCH LOAD IND (paging load) */
 		[cfg.exp_overload] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_PAGING_LOAD_IND(0))) {
@@ -1725,7 +1715,40 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 		/* check if paging requests arrive on Um side */
 		[] as_l1_count_paging(st.num_paging_rcv_msgs, st.num_paging_rcv_ids, cfg);
 		[] L1CTL.receive { repeat; }
-		[] T_itv.timeout { }
+		[] T_itv.timeout {
+			/* Send paging cmds based on elapsed time */
+			var integer new_sent := f_min(pkt_total, float2int(T_total.read * pch_blocks_per_sec) + 1);
+			while (st.num_paging_sent < new_sent) {
+				/* build mobile Identity */
+				var MobileL3_CommonIE_Types.MobileIdentityLV mi;
+				if (cfg.use_tmsi) {
+					mi := valueof(ts_MI_TMSI_LV(f_rnd_octstring(4)));
+				} else {
+					mi := valueof(ts_MI_IMSI_LV(f_gen_imsi(st.num_paging_sent)));
+				}
+				var octetstring mi_enc_lv := enc_MobileIdentityLV(mi);
+				var octetstring mi_enc := substr(mi_enc_lv, 1, lengthof(mi_enc_lv)-1);
+
+				/* Send RSL PAGING COMMAND */
+				RSL_CCHAN.send(ts_RSL_UD(ts_RSL_PAGING_CMD(mi_enc, st.num_paging_sent mod 4)));
+
+				st.num_paging_sent := st.num_paging_sent + 1;
+			}
+			if (st.num_paging_sent < pkt_total) {
+				/* Wait for interval to next PAGING COMMAND */
+				var float time_now := T_total.read;
+				var float next_sched := int2float(st.num_paging_sent)*interval;
+				if (next_sched > time_now) {
+					T_itv.start(next_sched - time_now);
+				} else {
+					T_itv.start(0.0);
+				}
+			} else {
+				/* We are done, no need to keep counting */
+				T_total.stop;
+			}
+			}
+		[] T_total.timeout { }
 		[] as_rsl_res_ind();
 		}
 	}
@@ -1816,7 +1839,7 @@ testcase TC_paging_imsi_200percent() runs on test_CT {
 	var PagingTestState st := f_TC_paging(cfg);
 	/* We expect about 80-85% to pass, given that we can fill the paging buffer of 200
 	 * slots and will fully drain that buffer before returning */
-	var template integer tpl := (st.num_paging_sent*80/100 .. st.num_paging_sent *85/100);
+	var template integer tpl := (st.num_paging_sent*78/100 .. st.num_paging_sent *85/100);
 	if (not match(st.num_paging_rcv_ids, tpl)) {
 		setverdict(fail, "Expected ", tpl, " pagings but have ", st.num_paging_rcv_ids);
 	} else {
@@ -1842,7 +1865,7 @@ testcase TC_paging_tmsi_200percent() runs on test_CT {
 	var PagingTestState st := f_TC_paging(cfg);
 	/* We expect about 70% to pass, given that we can fill the paging buffer of 200
 	 * slots and will fully drain that buffer before returning */
-	var template integer tpl := (st.num_paging_sent*66/100 .. st.num_paging_sent *72/100);
+	var template integer tpl := (st.num_paging_sent*64/100 .. st.num_paging_sent *72/100);
 	if (not match(st.num_paging_rcv_ids, tpl)) {
 		setverdict(fail, "Expected ", tpl, " pagings but have ", st.num_paging_rcv_ids);
 	} else {
