@@ -1,0 +1,170 @@
+/* (C) 2018 by sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Stefan Sperling <ssperling@sysmocom.de>
+ * All Rights Reserved
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+/*
+ * This module provides functions which implement IPA protocol tests.
+ * There are no test cases defined here. Instead, there are test functions which
+ * can be called by test cases in our test suites. Each such function will create
+ * an IPA_CT component and execute a test on this component, and expects destination
+ * IP address, TCP port, and connection mode parameters. Depending on the connection
+ * mode, a test function will either connect to an IPA server on the specified
+ * address and port, or listen for an IPA client on the specified address and port.
+ * This allows IPA tests to be run against any IPA speakers used by various test suites.
+ */
+
+module IPA_Testing {
+
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from IPA_Types all;
+import from Osmocom_Types all;
+
+type enumerated IPA_ConnectionMode {
+	CONNECT_TO_SERVER,
+	LISTEN_FOR_CLIENT
+};
+
+/* Encoded IPA messages (network byte order) */
+const octetstring ipa_msg_ping := '0001FE00'O;
+const octetstring ipa_msg_pong := '0001FE01'O;
+
+/* A component which represents the system on which the IPA speaker is running. */
+type component system_CT {
+	port IPL4asp_PT IPL4;
+}
+
+/* Main component provided by this module. */
+type component IPA_CT {
+	port IPL4asp_PT IPL4;
+	timer g_Tguard;
+}
+
+/* This guard timer prevents us from waiting too long if the IPA TCP connection hangs. */
+private altstep as_Tguard() runs on IPA_CT {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		mtc.stop;
+	}
+}
+
+/* Send an encoded IPA message across an IPA TCP connection. */
+private function f_send_ipa_data(charstring ipa_ip, integer ipa_tcp_port, ConnectionId connId,
+				 octetstring data) runs on IPA_CT {
+	var IPL4asp_Types.Result res;
+	var ASP_SendTo asp := {
+		connId := connId,
+		remName := ipa_ip,
+		remPort := ipa_tcp_port,
+		proto := {tcp := {}},
+		msg := data
+	};
+	IPL4.send(asp);
+}
+
+/* Match an incoming IPA message. */
+private template ASP_RecvFrom t_recvfrom(template octetstring msg) := {
+	connId := ?,
+	remName := ?,
+	remPort := ?,
+	locName := ?,
+	locPort := ?,
+	proto := {tcp := {}},
+	userData := ?,
+	msg := msg
+}
+
+/* Perform set up steps for a test function. */
+private function f_init(charstring ipa_ip, integer ipa_tcp_port,
+			IPA_ConnectionMode conmode) runs on IPA_CT return ConnectionId {
+	var IPL4asp_Types.Result res;
+	var ConnectionId connId;
+
+	map(self:IPL4, system:IPL4);
+	if (conmode == CONNECT_TO_SERVER) {
+		/* Create an IPA connection over TCP. */
+		res := IPL4asp_PortType.f_IPL4_connect(IPL4, ipa_ip, ipa_tcp_port, "", -1, 0, {tcp := {}});
+		if (not ispresent(res.connId)) {
+			setverdict(fail, "Could not connect IPA socket to ", ipa_ip, " port ",
+				   ipa_tcp_port, "; check your configuration");
+			mtc.stop;
+		}
+	} else {
+		/* Listen for an incoming IPA connection on TCP. */
+		res := IPL4asp_PortType.f_IPL4_listen(IPL4, ipa_ip, ipa_tcp_port, {tcp := {}});
+		if (not ispresent(res.connId)) {
+			setverdict(fail, "Could not listen on address ", ipa_ip, " port ",
+				   ipa_tcp_port, "; check your configuration");
+			mtc.stop;
+		}
+	}
+
+	/*
+	 * Activate guard timer. When changing the timeout value, keep in mind
+	 * that test functions below may wait for some amount of time, which
+	 * this guard timer should always exceed to avoid spurious failures.
+	 */
+	g_Tguard.start(60.0);
+	activate(as_Tguard());
+
+	return res.connId;
+}
+
+/*
+ * Individual test case implementations.
+ */
+
+private function f_send_chopped_ipa_msg(charstring ipa_ip, integer ipa_tcp_port, ConnectionId connId,
+					octetstring msg) runs on IPA_CT {
+	const float delay := 6.0;
+	for (var integer i := 0; i < lengthof(msg); i := i + 1) {
+		log("sending byte ", msg[i]);
+		f_send_ipa_data(ipa_ip, ipa_tcp_port, connId, msg[i]);
+		f_sleep(delay);
+	}
+}
+
+/* Send a ping message one byte at a time, waiting for TCP buffer to flush between each byte. */
+private function f_TC_chopped_ipa_ping(charstring ipa_ip, integer ipa_tcp_port,
+				       IPA_ConnectionMode conmode) runs on IPA_CT system system_CT {
+	var ConnectionId connId;
+	var ASP_RecvFrom asp_rx;
+
+	connId := f_init(ipa_ip, ipa_tcp_port, conmode);
+
+	if (conmode == CONNECT_TO_SERVER) {
+		f_send_chopped_ipa_msg(ipa_ip, ipa_tcp_port, connId, ipa_msg_ping);
+	} else {
+		IPL4.receive(t_recvfrom(omit)) -> value asp_rx {
+			f_send_chopped_ipa_msg(asp_rx.remName, asp_rx.remPort, connId, ipa_msg_ping);
+		}
+	}
+
+	/* Expect a pong response. */
+	alt {
+		[] IPL4.receive(t_recvfrom(ipa_msg_pong)) -> value asp_rx {
+			log("received pong from ", asp_rx.remName, " port ", asp_rx.remPort, ": ", asp_rx.msg);
+			setverdict(pass);
+		}
+		[] IPL4.receive {
+			repeat;
+		}
+	}
+}
+
+/*
+ * Public functions.
+ * Test suites may call these functions to create an IPA_CT component and run a test to completion.
+ */
+
+function f_run_TC_chopped_ipa_ping(charstring ipa_ip, integer ipa_tcp_port, IPA_ConnectionMode conmode) {
+	var IPA_Testing.IPA_CT vc_IPA_Testing := IPA_Testing.IPA_CT.create;
+	vc_IPA_Testing.start(IPA_Testing.f_TC_chopped_ipa_ping(ipa_ip, ipa_tcp_port, conmode));
+	vc_IPA_Testing.done;
+}
+
+}
