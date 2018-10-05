@@ -81,6 +81,9 @@ DIR=$BASEDIR/titan.ProtocolModules.SMPP/src
 FILES="SMPP_EncDec.cc  SMPP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.SGsAP_13.2.0/src
+FILES="SGsAP_Types.ttcn"
+gen_links $DIR $FILES
 
 DIR=../library
 FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h MNCC_Emulation.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
@@ -90,7 +93,8 @@ FILES+="BSSMAP_Emulation.ttcn BSSAP_CodecPort.ttcn BSSMAP_Templates.ttcn BSSAP_A
 FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 FILES+="MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="SMPP_CodecPort.ttcn SMPP_CodecPort_CtrlFunct.ttcn SMPP_CodecPort_CtrlFunctDef.cc SMPP_Emulation.ttcn SMPP_Templates.ttcn "
-FILES+="SS_Templates.ttcn SCCP_Templates.ttcn USSD_Helpers.ttcn"
+FILES+="SS_Templates.ttcn SCCP_Templates.ttcn USSD_Helpers.ttcn "
+FILES+="SGsAP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
