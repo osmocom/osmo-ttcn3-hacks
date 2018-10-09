@@ -2274,6 +2274,214 @@ testcase TC_ho_out_of_this_bsc() runs on test_CT {
 	vc_conn.done;
 }
 
+/* BSC asks for inter-BSC HO, but the MSC decides that it won't happen and
+ * simply never sends a BSSMAP Handover Command. */
+private function f_tc_ho_out_fail_no_msc_response(charstring id) runs on MSC_ConnHdlr {
+	g_pars := valueof(t_def_TestHdlrPars);
+
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	f_vty_transceive(BSCVTY, "handover any to arfcn 123 bsic any");
+
+	BSSAP.receive(tr_BSSMAP_HandoverRequired);
+
+	/* osmo-bsc should time out 10 seconds after the handover started.
+	 * Let's give it a bit extra. */
+	f_sleep(15.0);
+
+	/* The old lchan and conn should still be active. See that arbitrary L3
+	 * is still going through. */
+	var octetstring l3 := '0123456789'O;
+	RSL.send(ts_RSL_DATA_IND(g_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	var template PDU_BSSAP exp_data := {
+		    discriminator := '1'B,
+		    spare := '0000000'B,
+		    dlci := '00'O,
+		    lengthIndicator := 5,
+		    pdu := {
+			dtap := l3
+		    }
+		};
+	BSSAP.receive(exp_data);
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_ho_out_fail_no_msc_response() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler(refers(f_tc_ho_out_fail_no_msc_response));
+	vc_conn.done;
+}
+
+/* BSC asks for inter-BSC HO, receives BSSMAP Handover Command, but MS reports
+ * RR Handover Failure. */
+private function f_tc_ho_out_fail_rr_ho_failure(charstring id) runs on MSC_ConnHdlr {
+	g_pars := valueof(t_def_TestHdlrPars);
+
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	f_vty_transceive(BSCVTY, "handover any to arfcn 123 bsic any");
+
+	BSSAP.receive(tr_BSSMAP_HandoverRequired);
+
+	f_sleep(0.5);
+	/* The MSC negotiates Handover Request and Handover Request Ack with
+	 * the other BSS and comes back with a BSSMAP Handover Command
+	 * containing an RR Handover Command coming from the target BSS... */
+
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	log("Remote cell's RR Handover Command passed through as L3 Info: ", rr_ho_cmd);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	log("Remote cell's RR Handover Command passed through as L3 Info, encoded: ", rr_ho_cmd_enc);
+	BSSAP.send(ts_BSSMAP_HandoverCommand(rr_ho_cmd_enc));
+
+	/* expect the Handover Command to go out on RR */
+	var RSL_Message rsl_ho_cmd
+	RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, ?)) -> value rsl_ho_cmd;
+	log("RSL Data Req went out to first BTS: ", rsl_ho_cmd);
+	var RSL_IE_Body rsl_ho_cmd_l3;
+	if (not f_rsl_find_ie(rsl_ho_cmd, RSL_IE_L3_INFO, rsl_ho_cmd_l3)) {
+		log("RSL message contains no L3 Info IE, expected RR Handover Command");
+		setverdict(fail);
+	} else {
+		log("Found L3 Info: ", rsl_ho_cmd_l3);
+		if (rsl_ho_cmd_l3.l3_info.payload != rr_ho_cmd_enc) {
+			log("FAIL: the BSC sent out a different L3 Info, not matching the RR Handover Command the other BSS forwarded.");
+			setverdict(fail);
+		} else {
+			log("Success: the BSC sent out the same RR Handover Command the other BSS forwarded.");
+			setverdict(pass);
+		}
+	}
+
+	f_sleep(0.2);
+	f_rsl_send_l3(ts_RRM_HandoverFailure('00'O));
+
+	/* Should tell the MSC about the failure */
+	BSSAP.receive(tr_BSSMAP_HandoverFailure);
+
+	f_sleep(1.0);
+
+	/* The old lchan and conn should still be active. See that arbitrary L3
+	 * is still going through. */
+	var octetstring l3 := '0123456789'O;
+	RSL.send(ts_RSL_DATA_IND(g_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	var template PDU_BSSAP exp_data := {
+		    discriminator := '1'B,
+		    spare := '0000000'B,
+		    dlci := '00'O,
+		    lengthIndicator := 5,
+		    pdu := {
+			dtap := l3
+		    }
+		};
+	BSSAP.receive(exp_data);
+	setverdict(pass);
+	f_sleep(1.0);
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_ho_out_fail_rr_ho_failure() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler(refers(f_tc_ho_out_fail_rr_ho_failure));
+	vc_conn.done;
+}
+
+/* BSC asks for inter-BSC HO, receives BSSMAP Handover Command, but MS reports
+ * RR Handover Failure. */
+private function f_tc_ho_out_fail_no_ho_detect(charstring id) runs on MSC_ConnHdlr {
+	g_pars := valueof(t_def_TestHdlrPars);
+
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	f_vty_transceive(BSCVTY, "handover any to arfcn 123 bsic any");
+
+	BSSAP.receive(tr_BSSMAP_HandoverRequired);
+
+	f_sleep(0.5);
+	/* The MSC negotiates Handover Request and Handover Request Ack with
+	 * the other BSS and comes back with a BSSMAP Handover Command
+	 * containing an RR Handover Command coming from the target BSS... */
+
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	log("Remote cell's RR Handover Command passed through as L3 Info: ", rr_ho_cmd);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	log("Remote cell's RR Handover Command passed through as L3 Info, encoded: ", rr_ho_cmd_enc);
+	BSSAP.send(ts_BSSMAP_HandoverCommand(rr_ho_cmd_enc));
+
+	/* expect the Handover Command to go out on RR */
+	var RSL_Message rsl_ho_cmd
+	RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, ?)) -> value rsl_ho_cmd;
+	log("RSL Data Req went out to first BTS: ", rsl_ho_cmd);
+	var RSL_IE_Body rsl_ho_cmd_l3;
+	if (not f_rsl_find_ie(rsl_ho_cmd, RSL_IE_L3_INFO, rsl_ho_cmd_l3)) {
+		log("RSL message contains no L3 Info IE, expected RR Handover Command");
+		setverdict(fail);
+	} else {
+		log("Found L3 Info: ", rsl_ho_cmd_l3);
+		if (rsl_ho_cmd_l3.l3_info.payload != rr_ho_cmd_enc) {
+			log("FAIL: the BSC sent out a different L3 Info, not matching the RR Handover Command the other BSS forwarded.");
+			setverdict(fail);
+		} else {
+			log("Success: the BSC sent out the same RR Handover Command the other BSS forwarded.");
+			setverdict(pass);
+		}
+	}
+
+	/* The MS never shows up on the remote BSS. Eventually the BSC times
+	 * out and we run into 3GPP TS 48.008 3.1.5.3.3 "Abnormal Conditions":
+	 * RR should be released and Clear Request should go to the MSC. */
+
+	var MgcpCommand mgcp;
+	interleave {
+	[] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			log("Got RF Chan Rel");
+			RSL.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearRequest) {
+			log("Got BSSMAP Clear Request");
+		}
+	[] MGCP.receive(tr_DLCX()) -> value mgcp {
+			log("Got first DLCX: ", mgcp);
+		}
+	[] MGCP.receive(tr_DLCX()) -> value mgcp {
+			log("Got second DLCX: ", mgcp);
+		}
+	}
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_ho_out_fail_no_ho_detect() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler(refers(f_tc_ho_out_fail_no_ho_detect));
+	vc_conn.done;
+}
+
 private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
 	/* Hack: the proper way would be to wait for the BSSMAP Handover Request ACK and extract the
 	 * actual assigned chan_nr from its L3 (RR Handover Command) message. But osmo-bsc starts acting
@@ -2847,6 +3055,9 @@ control {
 
 	execute( TC_ho_int() );
 	execute( TC_ho_out_of_this_bsc() );
+	execute( TC_ho_out_fail_no_msc_response() );
+	execute( TC_ho_out_fail_rr_ho_failure() );
+	execute( TC_ho_out_fail_no_ho_detect() );
 	execute( TC_ho_into_this_bsc() );
 
 	execute( TC_bssap_rlsd_does_not_cause_bssmap_reset() );
