@@ -42,6 +42,7 @@ FILES+="L3_Templates.ttcn L3_Common.ttcn "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="TRXC_Types.ttcn TRXC_CodecPort.ttcn TRXC_CodecPort_CtrlFunct.ttcn TRXC_CodecPort_CtrlFunctDef.cc "
 FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
+FILES+="IPA_Testing.ttcn"
 gen_links $DIR $FILES
 
 ignore_pp_results
