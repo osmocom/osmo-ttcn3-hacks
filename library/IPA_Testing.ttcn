@@ -32,6 +32,8 @@ type enumerated IPA_ConnectionMode {
 /* Encoded IPA messages (network byte order) */
 const octetstring ipa_msg_ping := '0001FE00'O;
 const octetstring ipa_msg_pong := '0001FE01'O;
+const octetstring ipa_msg_id_req_hdr := '0007FE'O;
+const octetstring ipa_msg_id_req_payload := '04010801070102'O;
 
 /* A component which represents the system on which the IPA speaker is running. */
 type component system_CT {
@@ -158,6 +160,60 @@ private function f_TC_chopped_ipa_ping(charstring ipa_ip, integer ipa_tcp_port,
 	}
 }
 
+/* Send a complete IPA "ID REQ" message header in one piece, and then send the payload one byte at a time,
+ * waiting for TCP buffer to flush between each byte. */
+private function f_TC_chopped_ipa_payload(charstring ipa_ip, integer ipa_tcp_port,
+					  IPA_ConnectionMode conmode) runs on IPA_CT system system_CT {
+	var ConnectionId connId;
+	var ASP_RecvFrom asp_rx;
+
+	connId := f_init(ipa_ip, ipa_tcp_port, conmode);
+
+	if (conmode == CONNECT_TO_SERVER) {
+		var PortEvent port_evt;
+		f_send_ipa_data(ipa_ip, ipa_tcp_port, connId, ipa_msg_id_req_hdr);
+		f_send_chopped_ipa_msg(ipa_ip, ipa_tcp_port, connId, ipa_msg_id_req_payload);
+		/* Server will close the connection upon receiving an ID REQ. */
+		alt {
+			[] IPL4.receive(PortEvent:{connClosed := ?}) -> value port_evt {
+				if (port_evt.connClosed.connId == connId) {
+					setverdict(pass);
+				} else {
+					repeat;
+				}
+			}
+			[] IPL4.receive {
+				repeat;
+			}
+		}
+	} else {
+		var PortEvent port_evt;
+		IPL4.receive(PortEvent:{connOpened := ?}) -> value port_evt {
+			var ConnectionOpenedEvent conn := port_evt.connOpened;
+			f_send_ipa_data(conn.remName, conn.remPort, conn.connId, ipa_msg_id_req_hdr);
+			f_send_chopped_ipa_msg(conn.remName, conn.remPort, conn.connId, ipa_msg_id_req_payload);
+		}
+
+		/* Expect an encoded IPA ID RESP message from the client. */
+		alt {
+			[] IPL4.receive(t_recvfrom(?)) -> value asp_rx {
+				log("received IPA message from ", asp_rx.remName, " port ", asp_rx.remPort, ": ",
+				    asp_rx.msg);
+				if (lengthof(asp_rx.msg) > 4
+				    and asp_rx.msg[2] == 'FE'O /* PROTO_IPACCESS */
+				    and asp_rx.msg[3] == '05'O /* ID RESP */) {
+					setverdict(pass);
+				} else {
+					repeat;
+				}
+			}
+			[] IPL4.receive {
+				repeat;
+			}
+		}
+	}
+}
+
 /*
  * Public functions.
  * Test suites may call these functions to create an IPA_CT component and run a test to completion.
@@ -166,6 +222,12 @@ private function f_TC_chopped_ipa_ping(charstring ipa_ip, integer ipa_tcp_port,
 function f_run_TC_chopped_ipa_ping(charstring ipa_ip, integer ipa_tcp_port, IPA_ConnectionMode conmode) {
 	var IPA_Testing.IPA_CT vc_IPA_Testing := IPA_Testing.IPA_CT.create;
 	vc_IPA_Testing.start(IPA_Testing.f_TC_chopped_ipa_ping(ipa_ip, ipa_tcp_port, conmode));
+	vc_IPA_Testing.done;
+}
+
+function f_run_TC_chopped_ipa_payload(charstring ipa_ip, integer ipa_tcp_port, IPA_ConnectionMode conmode) {
+	var IPA_Testing.IPA_CT vc_IPA_Testing := IPA_Testing.IPA_CT.create;
+	vc_IPA_Testing.start(IPA_Testing.f_TC_chopped_ipa_payload(ipa_ip, ipa_tcp_port, conmode));
 	vc_IPA_Testing.done;
 }
 
