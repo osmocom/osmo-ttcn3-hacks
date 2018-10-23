@@ -52,7 +52,7 @@ gen_links $DIR $FILES
 
 
 DIR=../library
-FILES="General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn "
+FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "

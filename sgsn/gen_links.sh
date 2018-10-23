@@ -54,7 +54,7 @@ FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
+FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
 FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
