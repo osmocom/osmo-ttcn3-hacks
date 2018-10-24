@@ -47,12 +47,17 @@ type component RSL_DchanHdlr {
 
 type record RSLDC_ChanRqd {
 	OCT1		ra,
-	GsmFrameNumber	fn
+	GsmFrameNumber	fn optional
 };
 
-template RSLDC_ChanRqd ts_RSLDC_ChanRqd(OCT1 ra, GsmFrameNumber fn) := {
+template (value) RSLDC_ChanRqd ts_RSLDC_ChanRqd(OCT1 ra, GsmFrameNumber fn) := {
 	ra := ra,
 	fn := fn
+}
+
+template (value) RSLDC_ChanRqd ts_RSLDC_ChanRqd_anyFN(OCT1 ra) := {
+	ra := ra,
+	fn := omit
 }
 
 type port RSL_DCHAN_PT message {
@@ -183,15 +188,36 @@ runs on RSL_Emulation_CT return integer {
 	return -1;
 }
 
+/* Matches by only RA if FN is ommited in one of the connections allocated */
+private function f_cid_by_ra_fn2(OCT1 ra, RSL_IE_FrameNumber fn)
+runs on RSL_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ispresent(ConnectionTable[i].ra) and
+		    ConnectionTable[i].ra == ra) {
+			if (not ispresent(ConnectionTable[i].ra_fn) or
+			    fn == valueof(ts_RSL_IE_FrameNumber(ConnectionTable[i].ra_fn))) {
+					return i;
+			}
+		}
+	}
+	log("No Dchan handler for ", ra, fn);
+	return -1;
+}
+
 /* create an ew client with given RA and FN */
-private function f_cid_create(OCT1 ra, GsmFrameNumber fn, RSL_DchanHdlr comp_ref)
+private function f_cid_create(OCT1 ra, template (omit) GsmFrameNumber fn, RSL_DchanHdlr comp_ref)
 runs on RSL_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
 		if (not ispresent(ConnectionTable[i].ra) and
 		    not ispresent(ConnectionTable[i].trx_nr)) {
 			ConnectionTable[i].ra := ra;
-			ConnectionTable[i].ra_fn := fn;
+			if (ispresent(fn)) {
+				ConnectionTable[i].ra_fn := valueof(fn);
+			} else {
+				ConnectionTable[i].ra_fn := omit;
+			}
 			ConnectionTable[i].comp_ref := comp_ref;
 			return;
 		}
@@ -394,6 +420,17 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 				}
 			}
 		}
+		[not bts_role] IPA_PT.receive(tr_RSL(tr_RSL_CHAN_RQD(?))) -> value rx_rsl {
+			var RSL_IE_RequestRef req_ref;
+			req_ref := rx_rsl.rsl.ies[1].body.req_ref;
+			cid := f_cid_by_ra_fn2(req_ref.ra, req_ref.frame_nr);
+			if (cid != -1) {
+				CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[cid].comp_ref;
+				f_cid_clear(cid);
+			} else {
+				CCHAN_PT.send(rx_rsl);
+			}
+		}
 
 		[bts_role] IPA_PT.receive(tr_RSL(tr_RSL_PAGING_CMD(?, ?))) -> value rx_rsl {
 			/* broadcast to all clients? */
@@ -444,6 +481,11 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 			f_cid_create(chan_rqd.ra, chan_rqd.fn, vc_conn);
 			IPA_PT.send(ts_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0,
 						 ts_RSL_CHAN_RQD(chan_rqd.ra, chan_rqd.fn)));
+			}
+
+		[not bts_role] CLIENT_PT.receive(RSLDC_ChanRqd:?) -> value chan_rqd sender vc_conn {
+			/* Store the knowledge that this sender has requested a certain RQ+time */
+			f_cid_create(chan_rqd.ra, chan_rqd.fn, vc_conn);
 			}
 
 		[] CLIENT_PT.receive(tr_RSL_MsgType(?)) -> value rx_rsl_msg sender vc_conn {
