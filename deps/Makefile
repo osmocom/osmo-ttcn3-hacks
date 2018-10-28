@@ -40,11 +40,11 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.NS_v7.3.0 \
-			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
 			titan.ProtocolEmulations.SCCP
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
+			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolEmulations.M3UA
 
@@ -78,7 +78,7 @@ titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
 titan.ProtocolModules.RTP_commit=		R.5.A
 titan.ProtocolModules.ROSE_commit=		R.1.C
 titan.ProtocolModules.SCTP_commit=		R.2.A
-titan.ProtocolModules.SGsAP_13.2.0_commit=	R.1.B
+titan.ProtocolModules.SGsAP_13.2.0_commit=	520dc48dd41ee15c9fd77e71d2ea7a05c58770b9
 titan.ProtocolModules.SDP_commit=		R.14.A
 titan.ProtocolModules.SMPP_commit=		R.2.A-2-gb7aee69
 titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A
