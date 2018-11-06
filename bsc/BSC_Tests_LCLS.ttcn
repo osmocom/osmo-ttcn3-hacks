@@ -36,6 +36,7 @@ import from MGCP_Types all;
 import from MGCP_Emulation all;
 import from MGCP_Templates all;
 import from SDP_Types all;
+import from Native_Functions all;
 
 import from Osmocom_CTRL_Functions all;
 import from Osmocom_CTRL_Types all;
@@ -226,13 +227,20 @@ private function f_wait_fail_notify() runs on lcls_test_CT
 	}
 }
 
-private function f_lcls_init(integer nr_bts := 1) runs on lcls_test_CT
+private function f_lcls_init(boolean bts_mode := false, integer nr_bts := 1) runs on lcls_test_CT
 {
 	var default d;
 
 	d := activate(as_ignore());
 	f_init(nr_bts, true);
 	f_sleep(1.0);
+
+	f_init_vty();
+	if (bts_mode == true) {
+		f_vty_config(BSCVTY, "msc", "lcls-mode bts-loop");
+	} else {
+		f_vty_config(BSCVTY, "msc", "lcls-mode mgw-loop");
+	}
 }
 
 
@@ -273,12 +281,62 @@ private function f_tc_lcls_recv_ls_exp_mgcp() runs on lcls_test_CT {
 	}
 }
 
-private function f_tc_lcls_gcr_bway_connect(boolean hr) runs on lcls_test_CT {
+private function f_tc_lcls_ack_rsl_mdcx(RSL_Message rsl_msg, boolean send_on_a) runs on lcls_test_CT {
+	var boolean fixme_unused;
+	var RSL_IE_Body ie;
+	var RslChannelNr chan_nr;
+	var uint16_t conn_id;
+	var uint7_t rtp_pt := 0;
+	var HostName host;
+	var PortNumber port_num;
+
+	if (f_rsl_find_ie(rsl_msg, RSL_IE_CHAN_NR, ie) == true) {
+		chan_nr := ie.chan_nr;
+	} else {
+		log("Unable to find chan# in ", rsl_msg);
+	}
+
+        fixme_unused := f_rsl_find_ie(rsl_msg, RSL_IE_IPAC_CONN_ID, ie);
+        conn_id := ie.ipa_conn_id;
+
+        /* mandatory fields */
+	fixme_unused := f_rsl_find_ie(rsl_msg, RSL_IE_IPAC_REMOTE_IP, ie);
+	host := f_inet_ntoa(int2oct(ie.ipa_remote_ip, 4));
+
+        fixme_unused := f_rsl_find_ie(rsl_msg, RSL_IE_IPAC_REMOTE_PORT, ie);
+	port_num := ie.ipa_remote_port;
+	log("LCLS IPA MDCX for lchan ", chan_nr, " connection ID ", conn_id, " host ", host, ":", port_num);
+
+        /* optional */
+	if (f_rsl_find_ie(rsl_msg, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+		rtp_pt := ie.ipa_rtp_pt;
+	}
+
+	if (send_on_a == true) {
+		CONN_A.send(ts_RSL_IPA_MDCX_ACK(chan_nr, conn_id, oct2int(f_inet_addr(host)), port_num, rtp_pt));
+	} else {
+		CONN_B.send(ts_RSL_IPA_MDCX_ACK(chan_nr, conn_id, oct2int(f_inet_addr(host)), port_num, rtp_pt));
+	}
+}
+
+private function f_tc_lcls_recv_ls_exp_rsl() runs on lcls_test_CT {
+	var RSL_Message rsl_msg;
+	interleave {
+		[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_not_yet_ls)) {}
+		[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(LCLS_STS_locally_switched)) {}
+		[] CONN_B.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL) {}
+		[] CONN_A.receive(tr_RSL_IPA_MDCX(?, ?)) -> value rsl_msg {
+			f_tc_lcls_ack_rsl_mdcx(rsl_msg, true)
+		}
+	}
+}
+
+private function f_tc_lcls_gcr_bway_connect(boolean hr, boolean bts_mode := false) runs on lcls_test_CT {
 	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
 	var TestHdlrParams pars_b;
 	var MSC_ConnHdlr vc_conn;
 
-	f_lcls_init();
+	f_lcls_init(bts_mode);
 
 	if (hr == true) {
 		pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecHR}));
@@ -288,6 +346,7 @@ private function f_tc_lcls_gcr_bway_connect(boolean hr) runs on lcls_test_CT {
 	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
 	pars_a.lcls.cfg := LCLS_CFG_both_way;
 	pars_a.lcls.csc := LCLS_CSC_connect;
+        pars_a.lcls.adjust_cx_exp := not bts_mode;
 	pars_b := pars_a;
 
 	/* first call is not possible to be LS (no second leg yet) */
@@ -299,7 +358,11 @@ private function f_tc_lcls_gcr_bway_connect(boolean hr) runs on lcls_test_CT {
 
 	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
 
-	f_tc_lcls_recv_ls_exp_mgcp();
+	if (bts_mode == true) {
+		f_tc_lcls_recv_ls_exp_rsl();
+	} else {
+		f_tc_lcls_recv_ls_exp_mgcp();
+	}
 
 	f_lcls_test_fini();
 }
@@ -311,7 +374,17 @@ testcase TC_lcls_gcr_bway_connect() runs on lcls_test_CT {
 
 /* Send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect connect both-way (half rate) */
 testcase TC_lcls_gcr_bway_connect_hr() runs on lcls_test_CT {
-	 f_tc_lcls_gcr_bway_connect(true)
+	f_tc_lcls_gcr_bway_connect(true)
+}
+
+/* BTS-loop: send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect connect both-way (full rate)*/
+testcase TC_lcls_bts_gcr_bway_connect() runs on lcls_test_CT {
+	f_tc_lcls_gcr_bway_connect(false, true)
+}
+
+/* BTS-loop: send an ASSIGNMENT REQ with LCLS GCR+CFG+CSC; expect connect both-way (half rate) */
+testcase TC_lcls_bts_gcr_bway_connect_hr() runs on lcls_test_CT {
+	f_tc_lcls_gcr_bway_connect(true, true)
 }
 
 /* Unless explicitly enabled, osmo-bsc will avoid LCLSs when the codecs or rates
@@ -470,6 +543,26 @@ private function f_lcls_sts_mgcp(BIT4 expected_status) runs on lcls_test_CT {
 	}
 }
 
+private function f_lcls_sts_rsl(BIT4 expected_status) runs on lcls_test_CT {
+	var RSL_Message rsl_msg;
+
+	interleave {
+	[] CONN_B.receive(tr_BSSMAP_LclsConnCtrlAck(tr_BSSMAP_IE_LclsSts(expected_status)));
+	[] CONN_A.receive(tr_BSSMAP_LclsNotificationSts(expected_status));
+        /*
+	[] CONN_A.receive(RSL_Message:?) -> value rsl_msg {
+		log("f_lcls_sts_rsl CONN_A top RSL is ", rsl_msg)
+	}
+	Ex. placeholder to catch any RSL message */
+	[] CONN_A.receive(tr_RSL_IPA_MDCX(?, ?)) -> value rsl_msg {
+		f_tc_lcls_ack_rsl_mdcx(rsl_msg, true)
+	}
+	[] CONN_B.receive(tr_RSL_IPA_MDCX(?, ?)) -> value rsl_msg {
+		f_tc_lcls_ack_rsl_mdcx(rsl_msg, false)
+	}
+	}
+}
+
 /* Send an ASSIGNMENT REQ with "do not connect" and enable later using LCLS CTRL */
 testcase TC_lcls_gcr_bway_dont_connect_csc() runs on lcls_test_CT {
 	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
@@ -523,18 +616,18 @@ private function f_build_mdcx_rsp(MgcpCommand mdcx) return MgcpResponse
 	return valueof(ts_MDCX_ACK(mdcx.line.trans_id, conn_id, sdp_out));
 }
 
-/* Establish LCLS "connect" followed by a MSC-initiated break */
-testcase TC_lcls_connect_break() runs on lcls_test_CT {
+private function f_lcls_connect_break(boolean bts_mode := false) runs on lcls_test_CT {
 	var TestHdlrParams pars_a := valueof(t_def_TestHdlrPars);
 	var TestHdlrParams pars_b;
 	var MSC_ConnHdlr vc_conn;
 
-	f_lcls_init();
+	f_lcls_init(bts_mode);
 
 	pars_a.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
 	pars_a.lcls.gcr := valueof(ts_GCR('010203'O, '0405'O, '060708090a'O));
 	pars_a.lcls.cfg := LCLS_CFG_both_way;
 	pars_a.lcls.csc := LCLS_CSC_connect;
+        pars_a.lcls.adjust_cx_exp := not bts_mode;
 	pars_b := pars_a;
 
 	/* first call is not possible to be LS (no second leg yet) */
@@ -546,7 +639,11 @@ testcase TC_lcls_connect_break() runs on lcls_test_CT {
 	f_lcls_test_init(pars_a, pars_b);
 	CONN_A.receive(LclsCompSync:LCLS_COMP_SYNC_ASS_COMPL);
 
-	f_tc_lcls_recv_ls_exp_mgcp()
+	if (bts_mode == true) {
+		f_tc_lcls_recv_ls_exp_rsl();
+	} else {
+		f_tc_lcls_recv_ls_exp_mgcp();
+	}
 
 	/* request LS release on "A" side; call continues to be locally switched */
 	CONN_A.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_release_lcls)));
@@ -556,9 +653,22 @@ testcase TC_lcls_connect_break() runs on lcls_test_CT {
 	/* request LS release on "B" side; call LS is released */
 	CONN_B.send(ts_BSSMAP_LclsConnCtrl(omit, ts_BSSMAP_IE_LclsCsc(LCLS_CSC_release_lcls)));
 
-	f_lcls_sts_mgcp(LCLS_STS_no_longer_ls)
+	if (bts_mode == true) {
+		f_lcls_sts_rsl(LCLS_STS_no_longer_ls);
+	} else {
+		f_lcls_sts_mgcp(LCLS_STS_no_longer_ls);
+	}
 
 	f_lcls_test_fini();
+}
+
+/* Establish LCLS "connect" followed by a MSC-initiated break */
+testcase TC_lcls_connect_break() runs on lcls_test_CT {
+	f_lcls_connect_break()
+}
+
+testcase TC_lcls_bts_connect_break() runs on lcls_test_CT {
+	f_lcls_connect_break(true)
 }
 
 /* Establish LCLS "connect" followed by a SCCP-level release of one leg */
@@ -640,7 +750,9 @@ control {
 	execute( TC_lcls_connect_break() );
 	execute( TC_lcls_connect_clear() );
 
-
+	execute( TC_lcls_bts_gcr_bway_connect() );
+	execute( TC_lcls_bts_gcr_bway_connect_hr() );
+	execute( TC_lcls_bts_connect_break() );
 }
 
 
