@@ -44,6 +44,7 @@ import from BSC_ConnectionHandler all;
 
 import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
+import from MobileL3_SMS_Types all;
 import from L3_Templates all;
 import from L3_Common all;
 
@@ -2028,6 +2029,75 @@ testcase TC_smpp_mo_sms() runs on MTC_CT {
 	f_vty_config2(MSCVTY, { "smpp", "esme msc_tester"}, "no default-route");
 }
 
+/* Test MO-SMS from MS/BTS/BSC towards HLR (via GSUP) */
+private function f_tc_gsup_mo_sms(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+	var GSUP_PDU gsup_msg_rx;
+	var octetstring sm_tpdu;
+
+	f_init_handler(pars);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Send CM Service Request for SMS */
+	f_establish_fully(EST_TYPE_MO_SMS);
+
+	/* Prepare expected SM-RP-UI (SM TPDU) */
+	enc_TPDU_RP_DATA_MS_SGSN_fast(
+		valueof(ts_SMS_SUBMIT(spars.tp.msg_ref,
+			spars.tp.da, spars.tp.pid, spars.tp.dcs,
+			spars.tp.udl, spars.tp.ud)),
+		sm_tpdu);
+
+	var template GSUP_PDU mo_forwardSM := tr_GSUP_MO_FORWARD_SM_REQ(
+		imsi := g_pars.imsi,
+		sm_rp_mr := spars.rp.msg_ref,
+		/* FIXME: extract SM-RP-DA from spars.rp.dest */
+		sm_rp_da := tr_GSUP_SM_RP_DA_SMSC_ADDR(?),
+		/* FIXME: MSISDN coding troubles */
+		sm_rp_oa := tr_GSUP_SM_RP_OA_MSISDN(?),
+		/* TODO: can we use decmatch here? */
+		sm_rp_ui := sm_tpdu
+	);
+
+	/* Submit an SMS on DTAP and expect MO-forwardSM-Req on GSUP */
+	f_mo_sms_submit(spars);
+	alt {
+	[] GSUP.receive(mo_forwardSM) -> value gsup_msg_rx {
+		log("RX MO-forwardSM-Req");
+		log(gsup_msg_rx);
+		setverdict(pass);
+		}
+	[] GSUP.receive {
+		log("RX unexpected GSUP message");
+		setverdict(fail);
+		mtc.stop;
+		}
+	}
+
+	/* Trigger RP-ACK by sending MO-forwardSM-Res */
+	GSUP.send(valueof(ts_GSUP_MO_FORWARD_SM_RES(
+		imsi := g_pars.imsi,
+		sm_rp_mr := spars.rp.msg_ref)));
+	/* Expect RP-ACK on DTAP */
+	f_mo_sms_wait_rp_ack(spars);
+
+	f_expect_clear();
+}
+testcase TC_gsup_mo_sms() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "sms-over-gsup");
+	vc_conn := f_start_handler(refers(f_tc_gsup_mo_sms), 88);
+	vc_conn.done;
+	f_vty_config(MSCVTY, "msc", "no sms-over-gsup");
+}
+
 /* convert GSM L3 TON to SMPP_TON enum */
 function f_sm_ton_from_gsm(BIT3 ton) return SMPP_TON {
 	select (ton) {
@@ -2912,6 +2982,8 @@ control {
 	execute( TC_lu_and_mt_sms() );
 	execute( TC_smpp_mo_sms() );
 	execute( TC_smpp_mt_sms() );
+
+	execute( TC_gsup_mo_sms() );
 
 	execute( TC_lu_and_mo_ussd_single_request() );
 	execute( TC_lu_and_mt_ussd_notification() );
