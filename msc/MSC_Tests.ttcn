@@ -2196,6 +2196,153 @@ testcase TC_gsup_mo_smma() runs on MTC_CT {
 	f_vty_config(MSCVTY, "msc", "no sms-over-gsup");
 }
 
+/* Helper for sending MT SMS over GSUP */
+private function f_gsup_forwardSM_req(SmsParameters spars, OCT1 mms := '00'O)
+runs on BSC_ConnHdlr {
+	GSUP.send(ts_GSUP_MT_FORWARD_SM_REQ(
+		imsi := g_pars.imsi,
+		/* NOTE: MSC should assign RP-MR itself */
+		sm_rp_mr := 'FF'O,
+		/* FIXME: extract SM-RP-DA from spars.rp.dest */
+		/* TODO: fix encoding of ts_GSUP_SM_RP_DA_IMSI */
+		sm_rp_da := valueof(ts_GSUP_SM_RP_DA_MSISDN(g_pars.msisdn)),
+		sm_rp_oa := valueof(ts_GSUP_SM_RP_OA_SMSC_ADDR(g_pars.msisdn)),
+		/* Encoded SMS TPDU (taken from Wireshark)
+		 * FIXME: we should encode spars somehow */
+		sm_rp_ui := '00068021436500008111328130858200'O,
+		sm_rp_mms := mms
+	));
+}
+
+/* Test successful MT-SMS (RP-ACK) over GSUP */
+private function f_tc_gsup_mt_sms_ack(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+
+	f_init_handler(pars);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Register an 'expect' for given IMSI (+TMSI) */
+	if (isvalue(g_pars.tmsi)) {
+		f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
+	} else {
+		f_bssmap_register_imsi(g_pars.imsi, 'FFFFFFFF'O);
+	}
+
+	var template GSUP_PDU mt_forwardSM_res := tr_GSUP_MT_FORWARD_SM_RES(
+		imsi := g_pars.imsi,
+		/* NOTE: MSC should assign RP-MR itself */
+		sm_rp_mr := ?
+	);
+
+	/* Submit a MT SMS on GSUP */
+	f_gsup_forwardSM_req(spars);
+
+	/* Expect Paging Request and Establish DTAP / BSSAP / SCCP connection */
+	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	f_establish_fully(EST_TYPE_PAG_RESP);
+
+	/* Wait for MT SMS on DTAP */
+	f_mt_sms_expect(spars);
+
+	/* Send RP-ACK and expect MT-forwardSM-Res on GSUP */
+	f_mt_sms_send_rp_ack(spars);
+	alt {
+	[] GSUP.receive(mt_forwardSM_res) {
+		log("RX MT-forwardSM-Res (RP-ACK)");
+		setverdict(pass);
+		}
+	[] GSUP.receive {
+		log("RX unexpected GSUP message");
+		setverdict(fail);
+		mtc.stop;
+		}
+	}
+
+	f_expect_clear();
+}
+testcase TC_gsup_mt_sms_ack() runs on MTC_CT {
+	var BSC_ConnHdlrPars pars;
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	pars := f_init_pars(90);
+	f_vty_config(MSCVTY, "msc", "sms-over-gsup");
+	vc_conn := f_start_handler_with_pars(refers(f_tc_gsup_mt_sms_ack), pars);
+	vc_conn.done;
+	f_vty_config(MSCVTY, "msc", "no sms-over-gsup");
+}
+
+/* Test rejected MT-SMS (RP-ERROR) over GSUP */
+private function f_tc_gsup_mt_sms_err(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+	var OCT1 sm_rp_cause := '78'O; /* dummy RP-Cause value */
+
+	f_init_handler(pars);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Register an 'expect' for given IMSI (+TMSI) */
+	if (isvalue(g_pars.tmsi)) {
+		f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
+	} else {
+		f_bssmap_register_imsi(g_pars.imsi, 'FFFFFFFF'O);
+	}
+
+	var template GSUP_PDU mt_forwardSM_err := tr_GSUP_MT_FORWARD_SM_ERR(
+		imsi := g_pars.imsi,
+		/* NOTE: MSC should assign RP-MR itself */
+		sm_rp_mr := ?,
+		sm_rp_cause := sm_rp_cause
+	);
+
+	/* Submit a MT SMS on GSUP */
+	f_gsup_forwardSM_req(spars);
+
+	/* Expect Paging Request and Establish DTAP / BSSAP / SCCP connection */
+	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	f_establish_fully(EST_TYPE_PAG_RESP);
+
+	/* Wait for MT SMS on DTAP */
+	f_mt_sms_expect(spars);
+
+	/* Send RP-ERROR and expect MT-forwardSM-Err on GSUP */
+	f_mt_sms_send_rp_error(spars, oct2int(sm_rp_cause));
+	alt {
+	[] GSUP.receive(mt_forwardSM_err) {
+		log("RX MT-forwardSM-Err (RP-ERROR)");
+		setverdict(pass);
+		mtc.stop;
+		}
+	[] GSUP.receive {
+		log("RX unexpected GSUP message");
+		setverdict(fail);
+		mtc.stop;
+		}
+	}
+
+	f_expect_clear();
+}
+testcase TC_gsup_mt_sms_err() runs on MTC_CT {
+	var BSC_ConnHdlrPars pars;
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	pars := f_init_pars(91);
+	f_vty_config(MSCVTY, "msc", "sms-over-gsup");
+	vc_conn := f_start_handler_with_pars(refers(f_tc_gsup_mt_sms_err), pars);
+	vc_conn.done;
+	f_vty_config(MSCVTY, "msc", "no sms-over-gsup");
+}
+
 /* convert GSM L3 TON to SMPP_TON enum */
 function f_sm_ton_from_gsm(BIT3 ton) return SMPP_TON {
 	select (ton) {
@@ -4057,6 +4204,8 @@ control {
 
 	execute( TC_gsup_mo_sms() );
 	execute( TC_gsup_mo_smma() );
+	execute( TC_gsup_mt_sms_ack() );
+	execute( TC_gsup_mt_sms_err() );
 
 	execute( TC_lu_and_mo_ussd_single_request() );
 	execute( TC_lu_and_mt_ussd_notification() );
