@@ -2694,6 +2694,78 @@ testcase TC_lu_and_mo_ussd_mo_release() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* LU followed by MO USSD request and MT Release due to timeout */
+private function f_tc_lu_and_ss_session_timeout(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* Send CM Service Request for SS/USSD */
+	f_establish_fully(EST_TYPE_SS_ACT);
+
+	/* We need to inspect GSUP activity */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	var template OCTN facility_ms_req := f_USSD_FACILITY_IE_INVOKE(
+		invoke_id := 1,
+		op_code := SS_OP_CODE_PROCESS_USS_REQ,
+		ussd_string := "#release_me");
+
+	/* Compose MO SS/REGISTER message with request */
+	var template (value) PDU_ML3_MS_NW ussd_ms_req := ts_ML3_MO_SS_REGISTER(
+		tid := 1, /* An arbitrary transaction identifier */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := valueof(facility_ms_req));
+
+	/* Compose expected MSC -> HLR message */
+	var template GSUP_PDU gsup_ms_req := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := valueof(facility_ms_req));
+
+	/* To be used for sending response with correct session ID */
+	var GSUP_PDU gsup_ms_req_complete;
+
+	/* Initiate a new SS transaction */
+	BSSAP.send(ts_PDU_DTAP_MO(ussd_ms_req));
+	/* Expect GSUP request with original Facility IE */
+	gsup_ms_req_complete := f_expect_gsup_msg(gsup_ms_req);
+
+	/* Don't respond, wait for timeout */
+	f_sleep(3.0);
+
+	var template PDU_ML3_NW_MS dtap_rel := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 1, /* Should match the request's tid */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		cause := *, /* TODO: expect some specific value */
+		facility := omit);
+
+	var template GSUP_PDU gsup_rel := tr_GSUP_PROC_SS_ERR(
+		imsi := g_pars.imsi,
+		sid := gsup_ms_req_complete.ies[1].val.session_id,
+		state := OSMO_GSUP_SESSION_STATE_END,
+		cause := ?); /* TODO: expect some specific value */
+
+	/* Expect release on both interfaces */
+	interleave {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(dtap_rel)) {  };
+	[] GSUP.receive(gsup_rel) {  };
+	}
+
+	f_expect_clear();
+	setverdict(pass);
+}
+testcase TC_lu_and_ss_session_timeout() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "ss-guard-timeout 3");
+	vc_conn := f_start_handler(refers(f_tc_lu_and_ss_session_timeout), 51);
+	vc_conn.done;
+	f_vty_config(MSCVTY, "msc", "ss-guard-timeout 0");
+}
+
 /* TODO (SMS):
    * different user data lengths
    * SMPP transaction mode with unsuccessful delivery
@@ -2780,6 +2852,7 @@ control {
 	execute( TC_lu_and_mo_ussd_during_mt_call() );
 	execute( TC_lu_and_mt_ussd_during_mt_call() );
 	execute( TC_lu_and_mo_ussd_mo_release() );
+	execute( TC_lu_and_ss_session_timeout() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
