@@ -32,6 +32,7 @@ import from SGsAP_Templates all;
 import from Osmocom_Types all;
 import from IPL4asp_Types all;
 import from DNS_Helpers all;
+import from MobileL3_Types all;
 
 type component SGsAP_ConnHdlr {
 	port SGsAP_Conn_PT SGsAP;
@@ -41,7 +42,7 @@ type component SGsAP_ConnHdlr {
 
 /* port between individual per-connection components and this dispatcher */
 type port SGsAP_Conn_PT message {
-	inout PDU_SGsAP;
+	inout PDU_SGsAP, PDU_ML3_MS_NW, PDU_ML3_NW_MS;
 } with { extension "internal" };
 
 /* represents a single SGsAP Association */
@@ -292,6 +293,8 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 
 	while (true) {
 		var SGsAP_ConnHdlr vc_conn;
+		var PDU_ML3_MS_NW l3_mo;
+		var PDU_ML3_NW_MS l3_mt;
 		var template IMSI imsi_t;
 		var hexstring imsi;
 		var SGsAP_RecvFrom mrf;
@@ -305,6 +308,38 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 			/* TODO: check which ConnectionID client has allocated + store in table? */
 			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
 			}
+		/* DTAP/MobileL3 from client (emulated MS): wrap in SGsAP-UL-UD and send */
+		[] SGsAP_CLIENT.receive(PDU_ML3_MS_NW:?) -> value l3_mo sender vc_conn {
+			var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_mo);
+			imsi := f_imsi_by_comp(vc_conn);
+			msg := valueof(ts_SGsAP_UL_UD(imsi, l3_enc));
+			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
+			}
+		[] SGsAP_CLIENT.receive(PDU_ML3_NW_MS:?) -> value l3_mt sender vc_conn {
+			var octetstring l3_enc := enc_PDU_ML3_NW_MS(l3_mt);
+			imsi := f_imsi_by_comp(vc_conn);
+			msg := valueof(ts_SGsAP_DL_UD(imsi, l3_enc));
+			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
+			}
+
+		/* DTAP/MobileL3 from MSC/VLR to MS wrapped in SGsAP-DL-UD: Extract, decode, forward */
+		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(tr_SGsAP_DL_UD(?,?))) -> value mrf {
+			var octetstring l3_enc := mrf.msg.sGsAP_DOWNLINK_UNITDATA.nAS_MessageContainer.nAS_MessageContainer;
+			imsi := mrf.msg.sGsAP_DOWNLINK_UNITDATA.iMSI.iMSI.digits;
+			vc_conn := f_comp_by_imsi(imsi);
+			l3_mt := dec_PDU_ML3_NW_MS(l3_enc);
+			SGsAP_CLIENT.send(l3_mt) to vc_conn;
+			}
+		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(tr_SGsAP_UL_UD(?,?))) -> value mrf {
+			var octetstring l3_enc := mrf.msg.sGsAP_UPLINK_UNITDATA.nAS_MessageContainer.nAS_MessageContainer;
+			imsi := mrf.msg.sGsAP_UPLINK_UNITDATA.iMSI.iMSI.digits;
+			l3_mo := dec_PDU_ML3_MS_NW(l3_enc);
+			vc_conn := f_comp_by_imsi(imsi);
+			SGsAP_CLIENT.send(l3_mo) to vc_conn;
+			}
+
+
+		/* any other SGsAP from MSC/VLR */
 		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(?)) -> value mrf {
 			imsi_t := f_SGsAP_get_imsi(mrf.msg);
 			if (isvalue(imsi_t)) {

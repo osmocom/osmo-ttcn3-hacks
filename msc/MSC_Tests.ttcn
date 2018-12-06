@@ -42,6 +42,10 @@ import from BSSMAP_Templates all;
 import from BSSMAP_Emulation all;
 import from BSC_ConnectionHandler all;
 
+import from SGsAP_Templates all;
+import from SGsAP_Types all;
+import from SGsAP_Emulation all;
+
 import from MobileL3_Types all;
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_SMS_Types all;
@@ -57,9 +61,13 @@ import from SCCP_Templates all;
 import from SS_Types all;
 import from SS_Templates all;
 import from USSD_Helpers all;
+import from DNS_Helpers all;
 
 const integer NUM_BSC := 2;
 type record of BSSAP_Configuration BSSAP_Configurations;
+
+/* Needed for SGsAP SMS */
+import from MobileL3_SMS_Types all;
 
 type component MTC_CT extends CTRL_Adapter_CT {
 	var boolean g_initialized := false;
@@ -72,6 +80,7 @@ type component MTC_CT extends CTRL_Adapter_CT {
 	var GSUP_Emulation_CT vc_GSUP;
 	var IPA_Emulation_CT vc_GSUP_IPA;
 	var SMPP_Emulation_CT vc_SMPP;
+	var SGsAP_Emulation_CT vc_SGsAP;
 
 	/* only to get events from IPA underneath GSUP */
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
@@ -107,6 +116,8 @@ modulepar {
 	integer mp_msc_smpp_port := 2775;
 	charstring mp_smpp_system_id := "msc_tester";
 	charstring mp_smpp_password := "osmocom1";
+	charstring mp_mme_name := "mmec01.mmegi0001.mme.epc.mnc070.mcc901.3gppnetwork.org";
+	charstring mp_vlr_name := "vlr.example.net";
 
 	BSSAP_Configurations mp_bssap_cfg := {
 		{
@@ -193,6 +204,25 @@ function f_init_mgcp(charstring id) runs on MTC_CT {
 	vc_MGCP.start(MGCP_Emulation.main(ops, pars, id));
 }
 
+function f_init_sgsap(charstring id) runs on MTC_CT {
+	id := id & "-SGsAP";
+	var SGsAPOps ops := {
+		create_cb := refers(SGsAP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(SGsAP_Emulation.DummyUnitdataCallback)
+	}
+	var SGsAP_conn_parameters pars := {
+		remote_ip := mp_msc_ip,
+		remote_sctp_port := 29118,
+		local_ip := "",
+		local_sctp_port := -1
+	}
+
+	vc_SGsAP := SGsAP_Emulation_CT.create(id);
+	map(vc_SGsAP:SGsAP, system:SGsAP_CODEC_PT);
+	vc_SGsAP.start(SGsAP_Emulation.main(ops, pars, id));
+}
+
+
 function f_init_gsup(charstring id) runs on MTC_CT {
 	id := id & "-GSUP";
 	var GsupOps ops := {
@@ -247,6 +277,7 @@ function f_init(integer num_bsc := 1) runs on MTC_CT {
 	f_init_mgcp("MSC_Test");
 	f_init_gsup("MSC_Test");
 	f_init_smpp("MSC_Test");
+	f_init_sgsap("MSC_Test");
 
 	map(self:MSCVTY, system:MSCVTY);
 	f_vty_set_prompts(MSCVTY);
@@ -485,6 +516,9 @@ function f_start_handler_with_pars(void_fn fn, BSC_ConnHdlrPars pars) runs on MT
 	/* SMPP part */
 	connect(vc_conn:SMPP, vc_SMPP:SMPP_CLIENT);
 	connect(vc_conn:SMPP_PROC, vc_SMPP:SMPP_PROC);
+	/* SGs part */
+	connect(vc_conn:SGsAP, vc_SGsAP:SGsAP_CLIENT);
+	connect(vc_conn:SGsAP_PROC, vc_SGsAP:SGsAP_PROC);
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
@@ -2985,6 +3019,980 @@ testcase TC_cipher_complete_with_invalid_cipher() runs on MTC_CT {
    * too long / short TLV values
  */
 
+/* Perform a location updatye at the A-Interface and run some checks to confirm
+ * that everything is back to normal. */
+private function f_sgsap_bssmap_screening()  runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+
+	/* Perform a location update, the SGs association is expected to fall
+	 * back to NULL */
+	f_perform_lu();
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	/* Trigger a paging request and expect the paging on BSSMAP, this is
+	 * to make sure that pagings are sent throught the A-Interface again
+	 * and not throught the SGs interface.*/
+	f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi)); {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Send an SMS to make sure that also payload messages are routed
+	 * throught the A-Interface again */
+	f_establish_fully(EST_TYPE_MO_SMS);
+	f_mo_sms(spars);
+	f_expect_clear();
+}
+
+private function f_tc_sgsap_reset(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var charstring vlr_name;
+	f_init_handler(pars);
+
+	vlr_name := f_sgsap_reset_mme(mp_mme_name);
+	log("VLR name: ", vlr_name);
+	setverdict(pass);
+}
+
+testcase TC_sgsap_reset() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_reset), 10);
+	vc_conn.done;
+}
+
+/* like f_mm_auth() but for SGs */
+function f_mm_auth_sgs() runs on BSC_ConnHdlr {
+	if (g_pars.net.expect_auth) {
+		g_pars.vec := f_gen_auth_vec_3g();
+		var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+									   g_pars.vec.sres,
+									   g_pars.vec.kc,
+									   g_pars.vec.ik,
+									   g_pars.vec.ck,
+									   g_pars.vec.autn,
+									   g_pars.vec.res));
+		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
+		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+		SGsAP.receive(tr_ML3_MT_MM_AUTH_REQ_3G(g_pars.vec.rand, g_pars.vec.autn));
+		SGsAP.send(ts_ML3_MT_MM_AUTH_RESP_3G(g_pars.vec.sres, g_pars.vec.res));
+	}
+}
+
+/* like f_perform_lu(), but on SGs rather than BSSAP */
+function f_sgs_perform_lu() runs on BSC_ConnHdlr {
+	var octetstring mme_name := f_enc_dns_hostname(mp_mme_name);
+	var PDU_SGsAP lur;
+	var PDU_SGsAP lua;
+	var PDU_SGsAP mm_info;
+	var octetstring mm_info_dtap;
+
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	lur := valueof(ts_SGsAP_LU_REQ(g_pars.imsi, mme_name, IMSI_attach,
+					ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	/* Old LAI, if MS sends it */
+	/* TMSI status, if MS has no valid TMSI */
+	/* IMEISV, if it supports "automatic device detection" */
+	/* TAI, if available in MME */
+	/* E-CGI, if available in MME */
+	SGsAP.send(lur);
+
+	/* FIXME: is this really done over SGs?  The Ue is already authenticated
+	 * via the MME ... */
+	f_mm_auth_sgs();
+
+	/* Expect MSC to perform LU with HLR */
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	GSUP.receive(tr_GSUP_ISD_RES(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
+
+	alt {
+	[] SGsAP.receive(tr_SGsAP_LU_ACCEPT(g_pars.imsi, ?)) -> value lua {
+		if (isvalue(lua.sGsAP_LOCATION_UPDATE_ACCEPT.newTMSIorIMSI.iD.iD.tmsi_ptmsi.octets)) {
+			g_pars.tmsi :=lua.sGsAP_LOCATION_UPDATE_ACCEPT.newTMSIorIMSI.iD.iD.tmsi_ptmsi.octets
+			SGsAP.send(ts_SGsAP_TMSI_REALL_CMPL(g_pars.imsi));
+		}
+		setverdict(pass);
+		}
+	[] SGsAP.receive(tr_SGsAP_LU_REJECT(g_pars.imsi, ?, ?)) {
+		setverdict(fail, "Received LU-REJECT instead of ACCEPT");
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Check MM information */
+	if (mp_mm_info == true) {
+		SGsAP.receive(tr_SGsAP_MM_INFO_REQ(g_pars.imsi, ?)) -> value mm_info;
+		mm_info_dtap := '0532'O & mm_info.sGsAP_MM_INFORMATION_REQUEST.mM_Information.information;
+		if (not match(dec_PDU_ML3_NW_MS(mm_info_dtap), tr_ML3_MT_MM_Info)) {
+			setverdict(fail, "Unexpected MM Information");
+		}
+	}
+
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+}
+
+private function f_tc_sgsap_lu(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_lu() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_lu), 10);
+	vc_conn.done;
+}
+
+/* Do LU by IMSI, refuse it on GSUP and expect LU REJ back to MS */
+private function f_tc_sgsap_lu_imsi_reject(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	var PDU_SGsAP lur;
+
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	var octetstring mme_name := f_enc_dns_hostname(mp_mme_name);
+	lur := valueof(ts_SGsAP_LU_REQ(g_pars.imsi, mme_name, IMSI_attach,
+					ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	SGsAP.send(lur);
+
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_ERR(g_pars.imsi, 23));
+	alt {
+	[] SGsAP.receive(tr_SGsAP_LU_REJECT(g_pars.imsi, ?, ?)) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive(tr_SGsAP_LU_ACCEPT(g_pars.imsi, ?)) {
+		setverdict(fail, "Expecting LU REJ, but got ACCEPT");
+		mtc.stop;
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_lu_imsi_reject() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_sgsap_lu_imsi_reject), 3);
+	vc_conn.done;
+}
+
+/* Do LU by IMSI, but then remain silent so that Ts6-1 times out */
+private function f_tc_sgsap_lu_and_nothing(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var octetstring mme_name := f_enc_dns_hostname(mp_mme_name);
+	var PDU_SGsAP lur;
+
+	f_init_handler(pars);
+
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	lur := valueof(ts_SGsAP_LU_REQ(g_pars.imsi, mme_name, IMSI_attach,
+					ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	/* Old LAI, if MS sends it */
+	/* TMSI status, if MS has no valid TMSI */
+	/* IMEISV, if it supports "automatic device detection" */
+	/* TAI, if available in MME */
+	/* E-CGI, if available in MME */
+	SGsAP.send(lur);
+
+	/* FIXME: is this really done over SGs?  The Ue is already authenticated
+	 * via the MME ... */
+	f_mm_auth_sgs();
+
+	/* Expect MSC to perform LU with HLR */
+	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
+	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
+	GSUP.receive(tr_GSUP_ISD_RES(g_pars.imsi));
+	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
+
+	alt {
+	[] SGsAP.receive(tr_SGsAP_LU_ACCEPT(g_pars.imsi, ?)) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive(tr_SGsAP_LU_REJECT(g_pars.imsi, ?, ?)) {
+		setverdict(fail, "Received LU-REJECT instead of ACCEPT");
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	/* Wait until the VLR has abort the TMSI reallocation procedure */
+	f_sleep(45.0);
+
+	/* The outcome does not change the SGs state, see also 5.2.3.4 */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_lu_and_nothing() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_sgsap_lu_and_nothing), 3);
+	vc_conn.done;
+}
+
+private function f_tc_sgsap_expl_imsi_det_eps(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(3.0);
+
+	var octetstring mme_name := f_enc_dns_hostname(mp_mme_name);
+	SGsAP.send(ts_SGsAP_EPS_DETACH_IND(g_pars.imsi, mme_name, UE_initiated));
+	SGsAP.receive(tr_SGsAP_EPS_DETACH_ACK(g_pars.imsi));
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_expl_imsi_det_eps() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_expl_imsi_det_eps), 10);
+	vc_conn.done;
+}
+
+private function f_tc_sgsap_expl_imsi_det_noneps(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(3.0);
+
+	var octetstring mme_name := f_enc_dns_hostname(mp_mme_name);
+	SGsAP.send(ts_SGsAP_IMSI_DETACH_IND(g_pars.imsi, mme_name, combined_UE_initiated));
+	SGsAP.receive(tr_SGsAP_IMSI_DETACH_ACK(g_pars.imsi));
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+	/* FIXME: How to verify that VLR has removed MM context? */
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_expl_imsi_det_noneps() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_expl_imsi_det_noneps), 1081);
+	vc_conn.done;
+}
+
+/* Trigger a paging request via VTY and send a paging reject in response */
+private function f_tc_sgsap_paging_rej(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_resp := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, CS_call_indicator, omit);
+	var template  LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_resp.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Initiate paging via VTY */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(exp_resp) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Now reject the paging */
+	SGsAP.send(ts_SGsAP_PAGING_REJ(g_pars.imsi, IMSI_unknown));
+
+	/* Wait for the states inside the MSC to settle and check the state
+	 * of the SGs Association */
+	f_sleep(1.0);
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	/* FIXME: At the moment we send an IMSI_unknown as cause code, which is fine,
+	 * but we also need to cover tha case where the cause code indicates an
+	 * "IMSI detached for EPS services". In those cases the VLR is expected to
+	 * try paging on tha A/Iu interface. This will be another testcase similar to
+	 * this one, but extended with checks for the presence of the A/Iu paging
+	 * messages. */
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_paging_rej() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_paging_rej), 1082);
+	vc_conn.done;
+}
+
+/* Trigger a paging request via VTY and send a paging reject that indicates
+ * that the subscriber intentionally rejected the call. */
+private function f_tc_sgsap_paging_subscr_rej(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_resp := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, CS_call_indicator, omit);
+	var template  LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_resp.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Initiate paging via VTY */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(exp_resp) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Now reject the paging */
+	SGsAP.send(ts_SGsAP_PAGING_REJ(g_pars.imsi, user_rejected_mobile_terminating_CS_fallback_call));
+
+	/* Wait for the states inside the MSC to settle and check the state
+	 * of the SGs Association */
+	f_sleep(1.0);
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	/* FIXME: The VLR is supposed to trigger an User Determined User Busy (UDUB) as specified
+	 * in 3GPP TS 24.082, this is not yet implemented in the MSC or in this tests, we need
+	 * to check back how this works and how it can be tested */
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_paging_subscr_rej() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_paging_subscr_rej), 1083);
+	vc_conn.done;
+}
+
+/* Trigger a paging request via VTY and send an UE unreacable messge in response */
+private function f_tc_sgsap_paging_ue_unr(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_resp := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, CS_call_indicator, omit);
+	var template  LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_resp.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Initiate paging via VTY */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(exp_resp) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Now pretend that the UE is unreachable */
+	SGsAP.send(ts_SGsAP_UE_UNREACHABLE(g_pars.imsi, UE_unreachable));
+
+	/* Wait for the states inside the MSC to settle and check the state
+	 * of the SGs Association. */
+	f_sleep(1.0);
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_paging_ue_unr() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_paging_ue_unr), 10);
+	vc_conn.done;
+}
+
+/* Trigger a paging request via VTY but don't respond to it */
+private function f_tc_sgsap_paging_and_nothing(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_resp := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, CS_call_indicator, omit);
+	var template  LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_resp.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Initiate paging via VTY */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(exp_resp) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Now do nothing, the MSC/VLR should fail silently to page after a
+	 * few seconds, The SGs association must remain unchanged. */
+	f_sleep(15.0);
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_paging_and_nothing() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_paging_and_nothing), 92);
+	vc_conn.done;
+}
+
+/* Trigger a paging request via VTY and slip in an LU */
+private function f_tc_sgsap_paging_and_lu(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	f_init_handler(pars);
+
+	/* First we prepar the situation, where the SGs association is in state
+	 * NULL and the confirmed by radio contact indicator is set to false
+	 * as well. This can be archived by performing an SGs LU and then
+	 * resetting the VLR */
+	f_sgs_perform_lu();
+	f_sgsap_reset_mme(mp_mme_name);
+	f_sleep(1.0);
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	/* Perform a paging, expect the paging messages on the SGs interface */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(tr_SGsAP_PAGING_REQ(pars.imsi, vlr_name, CS_call_indicator, omit)) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Perform the LU as normal */
+	f_sgs_perform_lu();
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	/* Expect a new paging request right after the LU */
+	alt {
+	[] SGsAP.receive(tr_SGsAP_PAGING_REQ(pars.imsi, vlr_name, CS_call_indicator, omit)) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	/* Test is done now, lets round everything up by rejecting the paging
+	 * cleanly. */
+	SGsAP.send(ts_SGsAP_PAGING_REJ(g_pars.imsi, user_rejected_mobile_terminating_CS_fallback_call));
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_paging_and_lu() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_paging_and_lu), 9792);
+	vc_conn.done;
+}
+
+/* Send unexpected unit-data through the SGs interface */
+private function f_tc_sgsap_unexp_ud(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sleep(1.0);
+
+	/* This simulates what happens when a subscriber without SGs
+	 * association gets unitdata via the SGs interface. */
+
+	/* Make sure the subscriber exists and the SGs association
+	 * is in NULL state */
+	f_perform_lu();
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	/* Send some random unit data, the MSC/VLR should send a release
+	 * immediately. */
+	SGsAP.send(ts_SGsAP_UL_UD(pars.imsi,'1234'O));
+	SGsAP.receive(tr_SGsAP_RELEASE_REQ(pars.imsi, IMSI_detached_for_EPS_nonEPS_services));
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_unexp_ud() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_unexp_ud), 2145);
+	vc_conn.done;
+}
+
+/* Send unsolicited unit-data through the SGs interface */
+private function f_tc_sgsap_unsol_ud(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sleep(1.0);
+
+	/* This simulates what happens when the MME attempts to send unitdata
+	 * to a subscriber that is completely unknown to the VLR */
+
+	/* Send some random unit data, the MSC/VLR should send a release
+	 * immediately. */
+	SGsAP.send(ts_SGsAP_UL_UD(pars.imsi,'1234'O));
+	SGsAP.receive(tr_SGsAP_RELEASE_REQ(pars.imsi, IMSI_unknown));
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_unsol_ud() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_unsol_ud), 146);
+	vc_conn.done;
+}
+
+private altstep as_other_sms_sgs() runs on BSC_ConnHdlr {
+	/* FIXME: Match an actual payload (second questionmark), the type is
+	 * octetstring, how do we use a tr_PDU_DTAP_MT here? */
+	[] SGsAP.receive(tr_SGsAP_DL_UD(?,?)) {
+		setverdict(fail, "Unexpected SMS related PDU from MSC");
+		mtc.stop;
+	}
+}
+
+/* receive a MT-SMS delivered from the MSC/SMSC over an already existing SGsAP connection */
+function f_mt_sms_sgs(inout SmsParameters spars)
+runs on BSC_ConnHdlr {
+	var template (value) TPDU_RP_DATA_MS_SGSN tp_mo;
+	var template (value) RPDU_MS_SGSN rp_mo;
+	var template (value) PDU_ML3_MS_NW l3_mo;
+
+	var template TPDU_RP_DATA_SGSN_MS tp_mt;
+	var template RPDU_SGSN_MS rp_mt;
+	var template PDU_ML3_NW_MS l3_mt;
+
+	var PDU_ML3_NW_MS sgsap_l3_mt;
+
+	var default d := activate(as_other_sms_sgs());
+
+	/* Expect CP-DATA(RP-DATA(SMS-DELIVER)) */
+	tp_mt := tr_SMS_DELIVER(?, spars.tp.ud, spars.tp.pid, spars.tp.dcs, ?);
+	rp_mt := tr_RP_DATA_MT(?, ?, omit, tp_mt);
+	l3_mt := tr_ML3_MT_SMS(?, c_TIF_ORIG, tr_CP_DATA_MT(rp_mt));
+
+	SGsAP.receive(l3_mt) -> value sgsap_l3_mt;
+
+	/* Extract relevant identifiers */
+	spars.tid := bit2int(sgsap_l3_mt.tiOrSkip.transactionId.tio);
+	spars.rp.msg_ref := sgsap_l3_mt.msgs.sms.cP_DATA.cP_User_Data.cP_RPDU.rP_DATA_SGSN_MS.rP_MessageReference;
+
+	/* send CP-ACK for CP-DATA just received */
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_REPL, ts_CP_ACK_MO);
+
+	SGsAP.send(l3_mo);
+
+	/* send RP-ACK for RP-DATA */
+	rp_mo := ts_RP_ACK_MO(spars.rp.msg_ref);
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_REPL, ts_CP_DATA_MO(rp_mo));
+
+	SGsAP.send(l3_mo);
+
+	/* expect CP-ACK for CP-DATA(RP-ACK) just sent */
+	l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_ORIG, tr_CP_ACK_MT);
+
+	SGsAP.receive(l3_mt);
+
+	deactivate(d);
+
+	setverdict(pass);
+}
+
+/* submit a MO-SMS to MSC/SMSC over an already existing SGsAP connection */
+function f_mo_sms_sgs(inout SmsParameters spars)
+runs on BSC_ConnHdlr {
+	var template (value) TPDU_RP_DATA_MS_SGSN tp_mo;
+	var template (value) RPDU_MS_SGSN rp_mo;
+	var template (value) PDU_ML3_MS_NW l3_mo;
+
+	var template TPDU_RP_DATA_SGSN_MS tp_mt;
+	var template RPDU_SGSN_MS rp_mt;
+	var template PDU_ML3_NW_MS l3_mt;
+
+	var default d := activate(as_other_sms_sgs());
+
+	/* just in case this is routed to SMPP.. */
+	f_create_smpp_expect(hex2str(spars.tp.da.tP_DA_NoPad.tP_DAValue));
+
+	tp_mo := ts_SMS_SUBMIT(spars.tp.msg_ref, spars.tp.da, spars.tp.pid, spars.tp.dcs,
+				 spars.tp.udl, spars.tp.ud);
+	rp_mo := ts_RP_DATA_MO(spars.rp.msg_ref, spars.rp.orig, spars.rp.dest, tp_mo);
+	l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_DATA_MO(rp_mo));
+
+	SGsAP.send(l3_mo);
+
+	/* receive CP-ACK for CP-DATA above */
+	SGsAP.receive(tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_ACK_MT));
+
+	if (ispresent(spars.exp_rp_err)) {
+		/* expect an RP-ERROR message from MSC with given cause */
+		rp_mt := tr_RP_ERROR_MT(spars.rp.msg_ref, spars.exp_rp_err);
+		l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_DATA_MT(rp_mt));
+		SGsAP.receive(l3_mt);
+		/* send CP-ACK for CP-DATA just received */
+		l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_ACK_MO);
+		SGsAP.send(l3_mo);
+	} else {
+		/* expect RP-ACK for RP-DATA */
+		rp_mt := tr_RP_ACK_MT(spars.rp.msg_ref);
+		l3_mt := tr_ML3_MT_SMS(spars.tid, c_TIF_REPL, tr_CP_DATA_MT(rp_mt));
+		SGsAP.receive(l3_mt);
+		/* send CP-ACO for CP-DATA just received */
+		l3_mo := ts_ML3_MO_SMS(spars.tid, c_TIF_ORIG, ts_CP_ACK_MO);
+		SGsAP.send(l3_mo);
+	}
+
+	deactivate(d);
+
+	setverdict(pass);
+}
+
+private function f_vty_sms_send_conn_hdlr(charstring imsi, charstring msisdn, charstring text)
+runs on BSC_ConnHdlr {
+	f_vty_transceive(MSCVTY, "subscriber imsi "&imsi&" sms sender msisdn "&msisdn&" send "&text);
+}
+
+/* Send a MT SMS via SGs interface */
+private function f_tc_sgsap_mt_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+	var SmsParameters spars := valueof(t_SmsPars);
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+
+	/* Trigger SMS via VTY */
+	f_vty_sms_send_conn_hdlr(hex2str(pars.imsi), "2342", "Hello SMS");
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+
+	/* Expect a paging request and respond accordingly with a service request */
+	SGsAP.receive(tr_SGsAP_PAGING_REQ(pars.imsi, vlr_name, SMS_indicator, omit));
+	SGsAP.send(ts_SGsAP_SERVICE_REQ(pars.imsi, SMS_indicator, EMM_CONNECTED));
+
+	/* Connection is now live, receive the MT-SMS */
+	f_mt_sms_sgs(spars);
+
+	/* Expect a concluding release from the MSC */
+	SGsAP.receive(tr_SGsAP_RELEASE_REQ(pars.imsi, omit));
+
+	/* Make sure that subscriber is still present and the SGs association is in tact (ref-counting) */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+testcase TC_sgsap_mt_sms() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_mt_sms), 1145);
+	vc_conn.done;
+}
+
+/* Send a MO SMS via SGs interface */
+private function f_tc_sgsap_mo_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+	var SmsParameters spars := valueof(t_SmsPars);
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+
+	/* Send the MO-SMS */
+	f_mo_sms_sgs(spars);
+
+	/* Expect a concluding release from the MSC/VLR */
+	SGsAP.receive(tr_SGsAP_RELEASE_REQ(pars.imsi, omit));
+
+	/* Make sure that subscriber is still present and the SGs association is in tact (ref-counting) */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	setverdict(pass);
+
+	f_sgsap_bssmap_screening()
+}
+testcase TC_sgsap_mo_sms() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_mo_sms), 3145);
+	vc_conn.done;
+}
+
+/* Trigger sending of an MT sms via VTY but never respond to anything  */
+private function f_tc_sgsap_mt_sms_and_nothing(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars, 170.0);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var SmsParameters spars := valueof(t_SmsPars);
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+	var integer page_count := 0;
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_pag_req := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, SMS_indicator, omit);
+	var template LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_pag_req.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Trigger SMS via VTY */
+	f_vty_sms_send_conn_hdlr(hex2str(pars.imsi), "2342", "Hello SMS");
+
+	/* Expect the MSC/VLR to page exactly 10 times before giving up */
+	alt {
+		[] SGsAP.receive(exp_pag_req)
+		{
+			page_count := page_count + 1;
+
+			if (page_count < 10) {
+				repeat;
+			}
+		}
+		[] SGsAP.receive {
+			setverdict(fail, "unexpected SGsAP message received");
+			self.stop;
+		}
+	}
+
+	/* Wait some time to make sure the MSC is not delivering any further
+	 * paging messages or anything else that could be unexpected. */
+	timer T := 20.0;
+	T.start
+	alt {
+		[] SGsAP.receive(exp_pag_req)
+		{
+			setverdict(fail, "paging seems not to stop!");
+			mtc.stop;
+		}
+		[] SGsAP.receive {
+			setverdict(fail, "unexpected SGsAP message received");
+			self.stop;
+		}
+		[] T.timeout {
+			setverdict(pass);
+		}
+	}
+
+	/* Even on a failed paging the SGs Association should stay intact */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	/* Note: We do not execute f_sgsap_bssmap_screening() here since the
+	 * MSC/VLR would re-try to deliver the test SMS trigered above and
+	 * so the screening would fail. */
+
+	/* Expire the subscriber now to avoid that the MSC will try the SMS
+	 * delivery at some later point. */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " expire");
+
+	setverdict(pass);
+}
+testcase TC_sgsap_mt_sms_and_nothing() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_mt_sms_and_nothing), 4581);
+	vc_conn.done;
+}
+
+/* Trigger sending of an MT sms via VTY but reject the paging immediately */
+private function f_tc_sgsap_mt_sms_and_reject(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars, 150.0);
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var SmsParameters spars := valueof(t_SmsPars);
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+	var integer page_count := 0;
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var template PDU_SGsAP exp_pag_req := tr_SGsAP_PAGING_REQ(g_pars.imsi, vlr_name, SMS_indicator, omit);
+	var template LocationAreaId exp_lai := ts_SGsAP_IE_Lai(valueof(ts_SGsAP_LAI('901'H, '70'H, 2342)));
+	exp_pag_req.sGsAP_PAGING_REQUEST.locationAreaId := exp_lai;
+
+	/* Trigger SMS via VTY */
+	f_vty_sms_send_conn_hdlr(hex2str(pars.imsi), "2342", "Hello SMS");
+
+	/* Expect a paging request and reject it immediately */
+	SGsAP.receive(exp_pag_req);
+	SGsAP.send(ts_SGsAP_PAGING_REJ(g_pars.imsi, IMSI_unknown));
+
+	/* The MSC/VLR should no longer try to page once the paging has been
+	 * rejected. Wait some time and check if there are no unexpected
+	 * messages on the SGs interface. */
+	timer T := 20.0;
+	T.start
+	alt {
+		[] SGsAP.receive(exp_pag_req)
+		{
+			setverdict(fail, "paging seems not to stop!");
+			mtc.stop;
+		}
+		[] SGsAP.receive {
+			setverdict(fail, "unexpected SGsAP message received");
+			self.stop;
+		}
+		[] T.timeout {
+			setverdict(pass);
+		}
+	}
+
+	/* A rejected paging with IMSI_unknown (see above) should always send
+	 * the SGs association to NULL. */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-NULL");
+
+	f_sgsap_bssmap_screening();
+
+	/* Expire the subscriber now to avoid that the MSC will try the SMS
+	 * delivery at some later point. */
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " expire");
+
+	setverdict(pass);
+}
+testcase TC_sgsap_mt_sms_and_reject() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_sgsap_mt_sms_and_reject), 4145);
+	vc_conn.done;
+}
+
+/* Perform an MT CSDB call including LU */
+private function f_mt_lu_and_csfb_call(charstring id, BSC_ConnHdlrPars pars, boolean bssmap_lu) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+
+	/* Be sure that the BSSMAP reset is done before we begin. */
+	f_sleep(2.0);
+
+	/* Testcase variation: See what happens when we do a regular BSSMAP
+	 * LU first (this should not hurt in any way!) */
+	if (bssmap_lu) {
+		f_perform_lu();
+	}
+
+	f_sgs_perform_lu();
+	f_sleep(1.0);
+
+	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	cpars.bss_rtp_port := 1110;
+	cpars.mgcp_connection_id_bss := '10004'H;
+	cpars.mgcp_connection_id_mss := '10005'H;
+
+	/* Note: This is an optional parameter. When the call-agent (MSC) does
+	 * supply a full endpoint name this setting will be overwritten. */
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+
+	/* Initiate a call via MNCC interface */
+	f_mt_call_initate(cpars);
+
+	/* Expect a paging request and respond accordingly with a service request */
+	SGsAP.receive(tr_SGsAP_PAGING_REQ(pars.imsi, vlr_name, CS_call_indicator, omit));
+	SGsAP.send(ts_SGsAP_SERVICE_REQ(pars.imsi, CS_call_indicator, EMM_CONNECTED));
+
+	/* Complete the call, hold it for some time and then tear it down */
+	f_mt_call_complete(cpars);
+	f_sleep(3.0);
+	f_call_hangup(cpars, true);
+
+	/* Make sure that subscriber is still present and the SGs association is in tact (ref-counting) */
+	f_ctrl_get_exp(IPA_CTRL, "fsm.SGs-UE.id.imsi:" & hex2str(g_pars.imsi) & ".state", "SGs-ASSOCIATED");
+
+	/* Finally simulate the return of the UE to the 4G network */
+	SGsAP.send(ts_SGsAP_MO_CSFB_IND(pars.imsi));
+
+	/* Test for successful return by triggering a paging, when the paging
+	 * request is received via SGs, we can be sure that the MSC/VLR has
+	 * recognized that the UE is now back on 4G */
+	f_sleep(1.0);
+	f_vty_transceive(MSCVTY, "subscriber imsi " & hex2str(g_pars.imsi) & " paging");
+	alt {
+	[] SGsAP.receive(tr_SGsAP_PAGING_REQ(pars.imsi, vlr_name, CS_call_indicator, omit)) {
+		setverdict(pass);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected message on SGs");
+		}
+	}
+
+	f_sgsap_bssmap_screening();
+
+	setverdict(pass);
+}
+
+/* Perform a regular BSSAP LU first, do a SGSAP LU and then make a CSFB call */
+private function f_tc_bssap_lu_sgsap_lu_and_mt_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_mt_lu_and_csfb_call(id, pars, true);
+}
+testcase TC_bssap_lu_sgsap_lu_and_mt_call() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_bssap_lu_sgsap_lu_and_mt_call), 139);
+	vc_conn.done;
+}
+
+
+/* Perform a SGSAP LU and then make a CSFB call */
+private function f_tc_sgsap_lu_and_mt_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_mt_lu_and_csfb_call(id, pars, false);
+}
+testcase TC_sgsap_lu_and_mt_call() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_sgsap_lu_and_mt_call), 239);
+	vc_conn.done;
+}
+
+/* SGs TODO:
+   * LU attempt for IMSI without NAM_PS in HLR
+   * LU attempt with AUTH FAIL due to invalid RES/SRES
+   * LU attempt with no response from HLR (VLR should timeout + LU REJ)
+   * LU attempt with new TMSI but without TMSI REALL CMPL baco to VLR
+   * implicit IMSI detach from EPS
+   * implicit IMSI detach from non-EPS
+   * MM INFO
+   *
+ */
 
 control {
 	execute( TC_cr_before_reset() );
@@ -3050,6 +4058,26 @@ control {
 	execute( TC_lu_and_ss_session_timeout() );
 
 	execute( TC_cipher_complete_with_invalid_cipher() );
+
+	execute( TC_sgsap_reset() );
+	execute( TC_sgsap_lu() );
+	execute( TC_sgsap_lu_imsi_reject() );
+	execute( TC_sgsap_lu_and_nothing() );
+	execute( TC_sgsap_expl_imsi_det_eps() );
+	execute( TC_sgsap_expl_imsi_det_noneps() );
+	execute( TC_sgsap_paging_rej() );
+	execute( TC_sgsap_paging_subscr_rej() );
+	execute( TC_sgsap_paging_ue_unr() );
+	execute( TC_sgsap_paging_and_nothing() );
+	execute( TC_sgsap_paging_and_lu() );
+	execute( TC_sgsap_mt_sms() );
+	execute( TC_sgsap_mo_sms() );
+	execute( TC_sgsap_mt_sms_and_nothing() );
+	execute( TC_sgsap_mt_sms_and_reject() );
+	execute( TC_sgsap_unexp_ud() );
+	execute( TC_sgsap_unsol_ud() );
+	execute( TC_bssap_lu_sgsap_lu_and_mt_call() );
+	execute( TC_sgsap_lu_and_mt_call() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );

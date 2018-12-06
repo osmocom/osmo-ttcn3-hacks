@@ -39,8 +39,10 @@ import from Osmocom_CTRL_Adapter all;
 import from TELNETasp_PortType all;
 import from Osmocom_VTY_Functions all;
 
+import from SGsAP_Emulation all;
+
 /* this component represents a single subscriber connection */
-type component BSC_ConnHdlr extends BSSAP_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr, MGCP_ConnHdlr, SMPP_ConnHdlr, CTRL_Adapter_CT {
+type component BSC_ConnHdlr extends BSSAP_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr, MGCP_ConnHdlr, SMPP_ConnHdlr, CTRL_Adapter_CT, SGsAP_ConnHdlr {
 	var BSC_ConnHdlrPars g_pars;
 	timer g_Tguard := 60.0;
 	port TELNETasp_PT MSCVTY;
@@ -135,6 +137,8 @@ function f_init_handler(BSC_ConnHdlrPars pars, float t_guard := 60.0) runs on BS
 	activate(as_Tguard());
 	/* Route all SMPP messages for our MSISDN to us */
 	f_create_smpp_expect(hex2str(pars.msisdn));
+	/* Route all SGs message for our IMSI to us */
+	f_create_sgsap_expect(pars.imsi);
 
 	if (g_pars.ipa_ctrl_enable == true) {
 		f_ipa_ctrl_start(g_pars.ipa_ctrl_ip, g_pars.ipa_ctrl_port);
@@ -452,20 +456,21 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	mgcp_connection_id_mss := '0'H //
 };
 
-function f_mt_call_establish(inout CallParameters cpars)
+/* Allocate a call reference and send SETUP via MNCC to MSC */
+function f_mt_call_initate(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
+	cpars.mncc_callref := f_rnd_int(2147483648);
+	MNCC.send(ts_MNCC_SETUP_req(cpars.mncc_callref, hex2str(g_pars.msisdn),
+					hex2str(cpars.called_party), hex2str(g_pars.imsi)));
+}
 
+/* Complete call, begin with a paging response message via BSSAP */
+function f_mt_call_complete(inout CallParameters cpars)
+runs on BSC_ConnHdlr {
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
 
 	f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
-
-	/* Allocate a call reference and send SETUP via MNCC to MSC */
-	cpars.mncc_callref := f_rnd_int(2147483648);
-	MNCC.send(ts_MNCC_SETUP_req(cpars.mncc_callref, hex2str(g_pars.msisdn),
-					hex2str(cpars.called_party), hex2str(g_pars.imsi)));
-	/* BSC <- MSC: Expect paging. FIXME: By TMSI or not? */
-	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
 
 	f_establish_fully(EST_TYPE_PAG_RESP);
 
@@ -475,7 +480,6 @@ runs on BSC_ConnHdlr {
 	/* MS -> MSC: ALERTING */
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_ALERTING(cpars.transaction_id)));
 	MNCC.receive(tr_MNCC_ALERT_ind(cpars.mncc_callref));
-
 
 	/* Create MGCP expect */
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
@@ -531,6 +535,20 @@ runs on BSC_ConnHdlr {
 	/* MS -> MSC: ALERTING */
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT(cpars.transaction_id)));
 	MNCC.receive(tr_MNCC_SETUP_cnf(cpars.mncc_callref));
+}
+
+function f_mt_call_establish(inout CallParameters cpars)
+runs on BSC_ConnHdlr {
+
+	/* Initiate the call via MNCC */
+	f_mt_call_initate(cpars);
+
+	/* BSC <- MSC: Expect paging. FIXME: By TMSI or not? */
+	f_bssmap_register_imsi(g_pars.imsi, g_pars.tmsi);
+	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+
+	/* Complete the call via BSSAP */
+	f_mt_call_complete(cpars);
 
 	setverdict(pass);
 }
@@ -1006,7 +1024,6 @@ runs on BSC_ConnHdlr {
 	f_mt_sms_expect(spars);
 	f_mt_sms_send_rp_ack(spars);
 }
-
 
 
 }

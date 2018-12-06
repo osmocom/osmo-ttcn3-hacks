@@ -94,7 +94,7 @@ FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 FILES+="MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="SMPP_CodecPort.ttcn SMPP_CodecPort_CtrlFunct.ttcn SMPP_CodecPort_CtrlFunctDef.cc SMPP_Emulation.ttcn SMPP_Templates.ttcn "
 FILES+="SS_Templates.ttcn SCCP_Templates.ttcn USSD_Helpers.ttcn "
-FILES+="SGsAP_Templates.ttcn "
+FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
