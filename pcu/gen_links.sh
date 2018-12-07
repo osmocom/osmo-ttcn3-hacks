@@ -50,6 +50,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Native_Functions.ttcn Native_Functio
 FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
+FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
