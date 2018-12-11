@@ -6,6 +6,8 @@
 # the binaries to different paths without patching the make file
 # generator, leading in inconsistent non-working Makefiles.
 #
+# See https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=884303 for details.
+#
 # The regexes below patch the generated Makefile to work on Debian 9 and
 # unstable, so far tested with TITAN 6.1.0, 6.2.0 and 6.3.0
 #
