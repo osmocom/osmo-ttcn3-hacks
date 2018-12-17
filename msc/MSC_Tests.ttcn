@@ -2766,6 +2766,63 @@ testcase TC_lu_and_ss_session_timeout() runs on MTC_CT {
 	f_vty_config(MSCVTY, "msc", "ncss guard-timeout 0");
 }
 
+/* A5/1 only permitted on network side; attempt an invalid CIPHER MODE COMPLETE with A5/3 which MSC should reject. */
+private function f_tc_cipher_complete_with_invalid_cipher(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_auth := true;
+	pars.net.expect_ciph := true;
+	pars.net.kc_support := '02'O;	/* A5/1 only */
+	f_init_handler(pars);
+
+	g_pars.vec := f_gen_auth_vec_2g();
+
+	/* Can't use f_perform_lu() directly. Code below is based on it. */
+
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
+	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi)
+	f_bssap_compl_l3(l3_lu);
+
+	f_mm_auth();
+
+	var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2);
+	var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) {
+		BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(4 /* "accept" A5/3 */, 1)));
+		}
+	[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
+		setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
+		mtc.stop;
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Unknown/unexpected BSSAP received");
+		mtc.stop;
+		}
+	}
+
+	/* Expect LU reject from MSC. */
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Unknown/unexpected BSSAP received");
+		mtc.stop;
+		}
+	}
+}
+
+testcase TC_cipher_complete_with_invalid_cipher() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "encryption a5 1");
+
+	vc_conn := f_start_handler(refers(f_tc_cipher_complete_with_invalid_cipher), 52);
+	vc_conn.done;
+}
+
 /* TODO (SMS):
    * different user data lengths
    * SMPP transaction mode with unsuccessful delivery
@@ -2853,6 +2910,8 @@ control {
 	execute( TC_lu_and_mt_ussd_during_mt_call() );
 	execute( TC_lu_and_mo_ussd_mo_release() );
 	execute( TC_lu_and_ss_session_timeout() );
+
+	execute( TC_cipher_complete_with_invalid_cipher() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
