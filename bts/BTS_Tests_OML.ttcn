@@ -1,0 +1,624 @@
+module BTS_Tests_OML {
+
+/* Integration Tests for OsmoBTS A-bis OML (Organization & Maintenance Link)
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from AbisOML_Types all;
+import from IPA_Emulation all;
+import from IPA_Types all;
+
+const integer NUM_TRX := 8;
+
+type record of uint16_t ArfcnList;
+
+modulepar {
+	charstring mp_oml_ip := "127.0.0.1";
+	integer mp_oml_port := 3002;
+	ArfcnList mp_arfcn := { 100, 101, 102, 103, 104, 105, 106, 107 };
+	OML_FOM_InterfLevBoundaries mp_interf_bound := { 85, 91, 97, 103, 109, 115 };
+	OML_FOM_T200 mp_t200 := {
+		sdcch_5ms := 30,
+		facch_f_5ms := 36,
+		facch_h_5ms := 36,
+		sacch_tch_sapi0_10ms := 168,
+		sacch_sdcch_10ms := 52,
+		sdcch_sapi3_5ms := 33,
+		sacch_rch_sapi3_10ms := 168
+	};
+	uint8_t mp_max_ta := 63;
+	uint8_t mp_load_threshold := 10;
+	uint8_t mp_load_ind_period := 1;
+	uint8_t mp_rach_b_thresh := 90;
+	uint16_t mp_loadavg_slots := 1000;
+	uint8_t mp_air_timer := 100;
+	uint8_t mp_ny1 := 10;
+	uint8_t mp_bsic := 63;
+};
+
+/* BSC side OML component */
+type component BSC_OML_CT {
+	/* IPA emulation component underneath OML */
+	var IPA_Emulation_CT vc_IPA_OML;
+	/* Port for OML */
+	port IPA_OML_PT OML;
+	var uint8_t g_bts_nr := 0;
+
+	/* global test case guard timer */
+	timer T_oml_guard := 60.0;
+};
+
+private altstep as_Tguard() runs on BSC_OML_CT {
+	[] T_oml_guard.timeout {
+		setverdict(fail, "Timeout of T_guard");
+		mtc.stop;
+		}
+}
+
+private altstep as_SwAct() runs on BSC_OML_CT {
+	var OML_PDU rx;
+	[] OML.receive(tr_OML_SwActReq(?, ?, ?, ?)) -> value rx {
+		var OML_FOM_ObjectClass obj_class := rx.u.fom.hdr.obj_class;
+		var OML_FOM_ObjectInstance obj_inst := rx.u.fom.hdr.obj_inst;
+
+		/* acknowledge the activate request */
+		OML.send(f_OML_make_ack(rx));
+		var octetstring file_id := ''O;
+		var octetstring sw_desc := ''O;
+
+		/* Request activation of software and check for ACK */
+		OML.send(ts_OML_ActivateSw(obj_class, obj_inst, file_id, sw_desc));
+		interleave {
+		[] OML.receive(tr_OML_ActivateSwACK(obj_class, obj_inst, file_id, sw_desc));
+		[] OML.receive(tr_OML_SwActivatedRep(obj_class, obj_inst));
+		}
+		repeat;
+		}
+}
+
+private altstep as_IPA_evt() runs on BSC_OML_CT {
+	var ASP_IPA_Event evt;
+	[] OML.receive(ASP_IPA_Event:?) -> value evt {
+		log("Ignoring ", evt);
+		repeat;
+		}
+}
+
+function f_init_oml(charstring id) runs on BSC_OML_CT {
+	vc_IPA_OML := IPA_Emulation_CT.create(id & "-OML-IPA");
+	map(vc_IPA_OML:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_IPA_OML:IPA_OML_PORT, self:OML);
+	vc_IPA_OML.start(IPA_Emulation.main_server(mp_oml_ip, mp_oml_port));
+
+	T_oml_guard.start;
+	activate(as_Tguard());
+
+	OML.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP));
+	//OML.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_ID_ACK));
+
+	activate(as_SwAct());
+	activate(as_IPA_evt());
+}
+
+
+/* Perform an "OPSTART" procedure with the speciifed MO" */
+private function f_oml_opstart(template (value) OML_FOM_ObjectClass obj_class,
+				template (value) OML_FOM_ObjectInstance obj_inst,
+				boolean exp_fail := false)
+runs on BSC_OML_CT {
+	OML.send(ts_OML_Opstart(obj_class, obj_inst));
+	alt {
+	[not exp_fail] OML.receive(tr_OML_OpstartACK(obj_class, obj_inst)) {
+		setverdict(pass);
+		}
+	[not exp_fail] OML.receive(tr_OML_OpstartNACK(obj_class, obj_inst)) {
+		setverdict(fail, "Unexpected OPSTART NACK for ", obj_class, " ", obj_inst);
+		}
+	[exp_fail] OML.receive(tr_OML_OpstartACK(obj_class, obj_inst)) {
+		setverdict(fail, "Unexpected OPSTART ACK for ", obj_class, " ", obj_inst);
+		}
+	[exp_fail] OML.receive(tr_OML_OpstartNACK(obj_class, obj_inst)) {
+		setverdict(pass);
+		}
+	[] OML.receive { repeat; }
+	}
+}
+
+/* Perform a "CHANGE ADMINISTRATIVE STATE" procedure with the speciifed MO" */
+private function f_oml_chg_adm_st(template (value) OML_FOM_ObjectClass obj_class,
+				  template (value) OML_FOM_ObjectInstance obj_inst,
+				  template (value) OML_FOM_AdministrativeState adm_st,
+				  boolean exp_fail := false)
+runs on BSC_OML_CT {
+	OML.send(ts_OML_ChangeAdmState(obj_class, obj_inst, adm_st));
+	alt {
+	[not exp_fail] OML.receive(tr_OML_ChangeAdmStateACK(obj_class, obj_inst, adm_st)) {
+		setverdict(pass);
+		}
+	[not exp_fail] OML.receive(tr_OML_ChangeAdmStateNACK(obj_class, obj_inst)) {
+		setverdict(fail, "Unexpected CHANGE ADM STATE NACK for ", obj_class, " ", obj_inst);
+		}
+	[exp_fail] OML.receive(tr_OML_ChangeAdmStateACK(obj_class, obj_inst, adm_st)) {
+		setverdict(fail, "Unexpected CHANGE ADM STATE ACK for ", obj_class, " ", obj_inst);
+		}
+	[exp_fail] OML.receive(tr_OML_ChangeAdmStateNACK(obj_class, obj_inst)) {
+		setverdict(pass);
+		}
+	[] OML.receive { repeat; }
+	}
+}
+
+/* Perform a "SET RADIO CARRIER ATTRIBUTES" procedure with the BTS */
+private function f_oml_radio_attr(uint8_t trx_nr)
+runs on BSC_OML_CT {
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, trx_nr, 255));
+	var OML_PDU cmd := valueof(ts_OML_SetRadioAttr(obj_inst, 0, {mp_arfcn[trx_nr]}));
+	var template OML_PDU exp_ack := f_OML_make_ack_exp(cmd);
+	var template OML_PDU exp_nack := f_OML_make_nack_exp(cmd, ?);
+	var OML_PDU rx;
+
+	OML.send(cmd);
+	alt {
+	[] OML.receive(exp_ack) -> value rx {
+		setverdict(pass);
+		}
+	[] OML.receive(exp_nack) -> value rx {
+		setverdict(fail, "SET RADIO CARRIER ATTRIBUTES NACK ", exp_nack);
+		}
+	[] OML.receive(tr_OML_MsgType(NM_MT_SET_RADIO_ATTR_ACK, NM_OC_RADIO_CARRIER, obj_inst, omit)) {
+		setverdict(fail, "SET RADIO CARRIER ATTRIBUTES ACK without IEs");
+		}
+	[] OML.receive { repeat; }
+	}
+}
+
+/* Perform a "SET CHANNEL ATTRIBUTES" procedure with the BTS */
+private function f_oml_ts_attr(uint8_t trx_nr, uint8_t ts_nr)
+runs on BSC_OML_CT {
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, trx_nr, ts_nr));
+	var OML_PDU cmd := valueof(ts_OML_SetChanAttr(obj_inst, NM_CHANC_TCHFull, tsc := 7));
+	var template OML_PDU exp_ack := f_OML_make_ack_exp(cmd);
+	var template OML_PDU exp_nack := f_OML_make_nack_exp(cmd, ?);
+	var OML_PDU rx;
+
+	OML.send(cmd);
+	alt {
+	[] OML.receive(exp_ack) -> value rx {
+		setverdict(pass);
+		}
+	[] OML.receive(exp_nack) -> value rx {
+		setverdict(fail, "SET CHANNEL ATTRIBUTES NACK ", exp_nack);
+		}
+	[] OML.receive(tr_OML_MsgType(NM_MT_SET_CHAN_ATTR_ACK, NM_OC_CHANNEL, obj_inst, omit)) {
+		setverdict(fail, "SET CHANNEL ATTRIBUTES ACK without IEs");
+		}
+	[] OML.receive { repeat; }
+	}
+
+}
+
+/* Perform a "SET BTS ATTRIBUTES" procedure with the BTS */
+private function f_oml_bts_attr()
+runs on BSC_OML_CT {
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+	var template (value) OML_FOM_IE_List ies := {
+		ts_OML_IE(NM_ATT_INTERF_BOUND, OML_FOM_IE_Body:{interf_bound:=mp_interf_bound}),
+		ts_OML_IE(NM_ATT_BCCH_ARFCN, OML_FOM_IE_Body:{bcch_arfcn:=mp_arfcn[0]}),
+		ts_OML_IE(NM_ATT_CONN_FAIL_CRIT, OML_FOM_IE_Body:{other := ts_OML_IE_L16V(2, '0120'O)}),
+		ts_OML_IE(NM_ATT_T200, OML_FOM_IE_Body:{t200 := mp_t200}),
+		ts_OML_IE(NM_ATT_MAX_TA, OML_FOM_IE_Body:{max_ta := mp_max_ta}),
+		ts_OML_IE(NM_ATT_OVERL_PERIOD, OML_FOM_IE_Body:{other := ts_OML_IE_L16V(1, '0a'O)}),
+		ts_OML_IE(NM_ATT_CCCH_L_T, OML_FOM_IE_Body:{load_threshold := mp_load_threshold}),
+		ts_OML_IE(NM_ATT_CCCH_L_I_P, OML_FOM_IE_Body:{load_ind_period := mp_load_ind_period}),
+		ts_OML_IE(NM_ATT_RACH_B_THRESH, OML_FOM_IE_Body:{rach_b_thresh := mp_rach_b_thresh}),
+		ts_OML_IE(NM_ATT_LDAVG_SLOTS,  OML_FOM_IE_Body:{loadavg_slots := mp_loadavg_slots}),
+		ts_OML_IE(NM_ATT_BTS_AIR_TIMER, OML_FOM_IE_Body:{air_timer := mp_air_timer}),
+		ts_OML_IE(NM_ATT_NY1, OML_FOM_IE_Body:{ny1 := mp_ny1}),
+		ts_OML_IE(NM_ATT_BSIC, OML_FOM_IE_Body:{bsic := mp_bsic})
+		//ts_OML_IE(NM_ATT_IPACC_CGI, ...)
+		};
+	var OML_PDU cmd := valueof(ts_OML_SetBtsAttr(obj_inst, ies));
+	var template OML_PDU exp_ack := f_OML_make_ack_exp(cmd);
+	var template OML_PDU exp_nack := f_OML_make_nack_exp(cmd, ?);
+	var OML_PDU rx;
+
+	OML.send(cmd);
+	alt {
+	[] OML.receive(exp_ack) -> value rx {
+		setverdict(pass);
+		}
+	[] OML.receive(exp_nack) -> value rx {
+		setverdict(fail, "SET BTS ATTRIBUTES NACK ", exp_nack);
+		}
+
+	[] OML.receive(tr_OML_MsgType(NM_MT_SET_BTS_ATTR_ACK, NM_OC_BTS, obj_inst, omit)) {
+		setverdict(fail, "SET BTS ATTRIBUTES ACK without IEs");
+		}
+	[] OML.receive { repeat; }
+	}
+}
+
+/* Send an OML message and expect no response at all */
+private function f_oml_send_exp_no_resp(template (value) OML_PDU tx, charstring err_msg,
+					float tout := 5.0) runs on BSC_OML_CT
+{
+	timer T := 5.0;
+
+	OML.send(tx);
+	T.start;
+	alt {
+	[] OML.receive {
+		setverdict(fail, err_msg);
+		}
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+private function f_oml_exp_rx(template OML_PDU exp_rx, charstring err_msg) runs on BSC_OML_CT
+{
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] OML.receive(exp_rx) {
+		setverdict(pass);
+		}
+	[] OML.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", err_msg);
+		}
+	}
+}
+
+/* Send an OML message and expect a failure event report in response */
+private function f_oml_send_exp_fail_rep(template (value) OML_PDU tx, charstring err_msg,
+					 template OML_FOM_EventType evt := ?,
+					 template OML_FOM_Severity severity := ?,
+					 template OML_FOM_ProbableCause cause := ?,
+					 float tout := 5.0) runs on BSC_OML_CT
+{
+	var template OML_FOM_ObjectClass obj_class := ?;
+	var template OML_FOM_ObjectInstance obj_inst := ?;
+	if (ischosen(tx.u.fom)) {
+		obj_class := tx.u.fom.hdr.obj_class;
+		obj_inst := tx.u.fom.hdr.obj_inst;
+	}
+	var template OML_PDU exp_fail := tr_OML_FailureEvtRep(obj_class,obj_inst, evt, severity, cause);
+
+	OML.send(tx);
+	f_oml_exp_rx(exp_fail, "Failure Event Report");
+}
+
+/* Send an OML message and expect it to be NACKed with specified cause */
+private function f_oml_send_exp_nack(template (value) OML_PDU tx, template OML_FOM_NackCause exp_cause,
+				     float tout := 5.0) runs on BSC_OML_CT
+{
+	timer T := 5.0;
+
+	var template OML_PDU exp_nack := f_OML_make_nack_exp(valueof(tx), exp_cause);
+	var template OML_PDU exp_ack := f_OML_make_ack_exp(valueof(tx));
+	var OML_PDU rx;
+
+	OML.send(tx);
+	T.start;
+	alt {
+	[] OML.receive(exp_ack) -> value rx {
+		setverdict(fail, "Unexpected ACK ", rx);
+		}
+	[] OML.receive(exp_nack) -> value rx {
+		setverdict(pass);
+		}
+	[] OML.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for NACK ", exp_nack);
+		}
+	}
+}
+
+
+
+
+
+
+testcase TC_oml_selftest() runs on BSC_OML_CT {
+	const octetstring state_chg_bts := '8080000d610100ffff'O & '2401'O & '07000107'O & '0401'O;
+	const octetstring set_attr_bts := '80800033410100ffff19555b61676d7318060e00020110331e2424a83421a81f3f2500010a0c1e0b642a0a2b03e80a80230a08007b0920'O
+	const octetstring set_attr_radio := '8080000c44020000ff2d00050002007b'O;
+	const octetstring set_attr_ts0 := '8080000947030000000d074000'O;
+	const octetstring ipa_rsl_connect := '1080000a0d636f6d2e697061636365737300e0040000ff8500810bbb'O;
+
+	log(dec_OML_PDU(state_chg_bts));
+	log(dec_OML_PDU(set_attr_bts));
+	log(dec_OML_PDU(set_attr_radio));
+	log(dec_OML_PDU(set_attr_ts0));
+	log(dec_OML_PDU(ipa_rsl_connect));
+};
+
+testcase TC_oml_nothing() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+	f_sleep(100.0);
+}
+
+/* test behavior for unsupported message discriminator */
+testcase TC_wrong_mdisc() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_PDU mmi_pdu := {
+		mdisc := ABIS_OM_MDISC_MMI,
+		placement := ABIS_OM_PLACEMENT_ONLY,
+		sequence := 0,
+		u := {
+			other := '01020304'O
+		}
+	};
+
+	f_oml_send_exp_fail_rep(mmi_pdu, "Unexpected response to MMI message");
+}
+
+/* send a message of unknown/unsupported type */
+testcase TC_wrong_msgtype() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+	var OML_PDU tx := valueof(ts_OML_MsgType(NM_MT_ESTABLISH_TEI, NM_OC_BTS,
+						 ts_OML_ObjectInstance(0, 255, 255), omit));
+	f_oml_send_exp_fail_rep(tx, "ESTABLISH_TEI");
+}
+
+/* send message shorter than OML header length indicates */
+testcase TC_short_length() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	/* Send "Change Adm State (Locked) to BTS, but with length 09 instead of 07 */
+	OML.send('80800009690100ffff0401'O);
+
+	template OML_PDU exp_fail := tr_OML_FailureEvtRep(NM_OC_BTS,
+							  ts_OML_ObjectInstance(0, 255, 255),
+							  ?, ?, ?);
+	f_oml_exp_rx(exp_fail, "Failure Event Report");
+}
+
+/* send message longer than OML header length indicates */
+testcase TC_long_length() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+	/* Send "Change Adm State (Locked) to BTS, but with two extra bytes at the end */
+	OML.send('80800007690100ffff04010402'O);
+
+	template OML_PDU exp :=
+		tr_OML_ChangeAdmStateACK(NM_OC_BTS, ts_OML_ObjectInstance(0, 255, 255),
+					 NM_STATE_LOCKED);
+	f_oml_exp_rx(exp, "Change ADM State ACK");
+}
+
+/* test behavior for unsupported placement (!= ONLY) */
+testcase TC_wrong_placement() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+
+	pdu.placement := ABIS_OM_PLACEMENT_FIRST;
+	f_oml_send_exp_fail_rep(pdu, "Unexpected response to PLACEMENT_FIRST");
+
+	pdu.placement := ABIS_OM_PLACEMENT_MIDDLE;
+	f_oml_send_exp_fail_rep(pdu, "Unexpected response to PLACEMENT_MIDDLE");
+
+	pdu.placement := ABIS_OM_PLACEMENT_LAST;
+	f_oml_send_exp_fail_rep(pdu, "Unexpected response to PLACEMENT_LAST");
+}
+
+/* test behavior for sequence != 0 (invalid if mdisc == ONLY) */
+testcase TC_wrong_seq() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+
+	OML.clear;
+
+	pdu.sequence := 23;
+	f_oml_send_exp_fail_rep(pdu, "Unexpected response to sequence != 0");
+}
+
+/* test behavior for unsupported obj_class */
+testcase TC_wrong_obj_class() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+	pdu.u.fom.hdr.obj_class := NM_OC_NULL;
+
+	/* NM_NACK_OBJCLASS_INVAL */
+	f_oml_send_exp_nack(pdu, NM_NACK_OBJCLASS_NOTSUPP);
+}
+
+/* test behavior for wrong BTS number in object instance */
+testcase TC_wrong_bts_nr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(250, 255, 255));
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+
+	f_oml_send_exp_nack(pdu, NM_NACK_BTSNR_UNKN);
+}
+
+/* test behavior for wrong TRX number in object instance */
+testcase TC_wrong_trx_nr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_RADIO_CARRIER;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 250, 255));
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+
+	f_oml_send_exp_nack(pdu, NM_NACK_TRXNR_UNKN);
+}
+
+/* test behavior for wrong TS number in object instance */
+testcase TC_wrong_ts_nr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_RADIO_CARRIER;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 0, 250));
+	var OML_PDU pdu := valueof(ts_OML_ChangeAdmState(obj_class, obj_inst, NM_STATE_LOCKED));
+
+	f_oml_send_exp_nack(pdu, NM_NACK_OBJINST_UNKN);
+}
+
+/* RADIO CARRIER: Test OPSTART with SET BTS ATTRIBUTES; expect ACK */
+testcase TC_radio_carrier_opstart() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_RADIO_CARRIER;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 0, 255));
+
+	f_oml_radio_attr(0);
+	f_oml_opstart(obj_class, obj_inst);
+}
+
+/* RADIO CARRIER: Test OPSTART without SET BTS ATTRIBUTES; expect NACK */
+testcase TC_radio_carrier_opstart_noattr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_RADIO_CARRIER;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 0, 255));
+
+	/* we are *not* setting any attributes here */
+	f_oml_opstart(obj_class, obj_inst, exp_fail := true);
+}
+
+
+/* BTS: Test OPSTART after SET BTS ATTRIBUTES; expect ACK */
+testcase TC_bts_opstart() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+
+	f_oml_bts_attr();
+	f_oml_opstart(obj_class, obj_inst);
+}
+
+
+/* BTS: Test OPSTART without SET BTS ATTRIBUTES; expect NACK */
+testcase TC_bts_opstart_noattr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_BTS;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+
+	/* we are *not* setting any attributes here */
+	f_oml_opstart(obj_class, obj_inst, exp_fail := true);
+}
+
+/* CHANNEL: Test OPSTART after SET CHANNEL ATTRIBUTES; expect ACK */
+testcase TC_ts_opstart() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_CHANNEL;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 0, 1));
+
+	f_oml_ts_attr(trx_nr := 0, ts_nr := 1);
+	f_oml_opstart(obj_class, obj_inst);
+}
+
+
+/* CHANNEL: Test OPSTART without SET CHANNEL ATTRIBUTES; expect NACK */
+testcase TC_ts_opstart_noattr() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	var OML_FOM_ObjectClass obj_class := NM_OC_CHANNEL;
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 0, 1));
+
+	/* we are *not* setting any attributes here */
+	f_oml_opstart(obj_class, obj_inst, exp_fail := true);
+}
+
+/* Ensure the initial Event State Change Reports after OML connect match our expectation */
+testcase TC_initial_state_reports() runs on BSC_OML_CT {
+	f_init_oml(testcasename());
+
+	interleave {
+	[] OML.receive(tr_OML_StateChgEvtRep(NM_OC_SITE_MANAGER, ts_OML_ObjectInstance(255, 255, 255),
+					     NM_OPSTATE_ENABLED, NM_AVSTATE_OK));
+	[] OML.receive(tr_OML_StateChgEvtRep(NM_OC_BTS, ts_OML_ObjectInstance(0, 255, 255),
+					     NM_OPSTATE_DISABLED, NM_AVSTATE_DEPENDENCY));
+	[] OML.receive(tr_OML_StateChgEvtRep(NM_OC_BTS, ts_OML_ObjectInstance(0, 255, 255),
+					     NM_OPSTATE_DISABLED, NM_AVSTATE_DEPENDENCY));
+	}
+}
+
+
+control {
+	execute( TC_wrong_mdisc() );
+	execute( TC_wrong_msgtype() );
+	execute( TC_short_length() );
+	execute( TC_long_length() );
+	execute( TC_wrong_placement() );
+	execute( TC_wrong_seq() );
+	execute( TC_wrong_obj_class() );
+	execute( TC_wrong_bts_nr() );
+	execute( TC_wrong_trx_nr() );
+	execute( TC_radio_carrier_opstart_noattr() );
+	execute( TC_bts_opstart() );
+	execute( TC_bts_opstart_noattr() );
+	execute( TC_ts_opstart() );
+	execute( TC_ts_opstart_noattr() );
+	execute( TC_initial_state_reports() );
+}
+
+/* BTS:
+ * - Evt: Disabled/Locked
+ * - SW ACT
+ * - Evt: Disabled/Dependency
+ * - SET BTS ATTR
+ * - Opstart
+ * - Chg Adm State Unlocked
+ * - Evt: Disabled/Dependency/Unlocked
+ * - Evt: Enabled/0 (after last channel unlocked?)
+ */
+
+/* Radio Carrier:
+ * - Evt: Disabled/Offline after SW ACT
+ * - Set Radio Carrier Attributes ? (->NACL)
+ * - Evt: Disabled/Dependency
+ * - Set Radio Carrier Attributes ?
+ * - Opstart
+ * - Chg Adm State Unlocked
+ * - Evt:
+ */
+
+/* Baseband Transceiver:
+ * - Evt: Disabled/Locked
+ * - SW Activation
+ * - Evt: Disabled/Dependency after SW ACT
+ * - IPA RSL Connect
+ * - Opstart
+ * - Chg Admin Unlocked
+ * - Evt: Disabled/Dependency/Unlocked
+ */
+
+/* Channel:
+ * - Evt: Not Installed/Locked
+ * - Evt: Disabled/Dependency (after SW ACT Rep on BB Transc)
+ * - Set Channel Attr
+ * - Opstart
+ * - Evt: Disabled/Offline
+ * - Chg Admin Unlocked
+ * - Evt: Disabled/OK/Unlocked
+ * - Evt: Enabled/OK (after BB TRANSC Opstart)
+ */
+
+};
