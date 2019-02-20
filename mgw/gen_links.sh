@@ -29,10 +29,20 @@ DIR=$BASEDIR/titan.ProtocolModules.RTP/src
 FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.IP/src
+FILES="IP_EncDec.cc  IP_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
+FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn
 MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="RTP_CodecPort.ttcn RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttcn IuUP_EncDec.cc "
+FILES+="Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
+FILES+="Osmocom_VTY_Functions.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
