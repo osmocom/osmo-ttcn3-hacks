@@ -55,7 +55,7 @@ endef
 
 define DIR_compile_template
 .PHONY: $(1)/compile
-$(1)/compile: deps $(1)/Makefile
+$(1)/compile: $(1)/Makefile
 	$(MAKE) -C $(1) compile
 endef
 
@@ -69,7 +69,7 @@ endef
 define DIR_all_template
 $(1): $(1)/all
 .PHONY: $(1)/all
-$(1)/all: deps $(1)/Makefile
+$(1)/all: $(1)/Makefile
 	$(MAKE) -C $(1) compile
 	$(MAKE) $(PARALLEL_MAKE) -C $(1)
 endef
