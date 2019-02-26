@@ -36,7 +36,8 @@ for t in $TEST_CASES; do
 	PREFIX="$BASE_NAME-$t"
 	OUTPUT="$BASE_NAME.$t.merged"
 	ttcn3_logmerge $PREFIX-*.log > "$OUTPUT"
-	echo "Generated $OUTPUT"
+	ttcn3_logformat "$OUTPUT" > "_$OUTPUT"
+	echo "Generated _$OUTPUT"
 done
 
 if [ "$2" = "--rm" ]; then
