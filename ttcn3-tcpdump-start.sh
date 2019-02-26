@@ -4,6 +4,9 @@ PIDFILE=/tmp/tcpdump.pid
 TCPDUMP=/usr/sbin/tcpdump
 TESTCASE=$1
 
+echo "------ $TESTCASE ------"
+date
+
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi

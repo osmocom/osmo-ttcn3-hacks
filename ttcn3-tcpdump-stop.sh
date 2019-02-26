@@ -4,6 +4,8 @@ PIDFILE=/tmp/tcpdump.pid
 TESTCASE=$1
 VERDICT="$2"
 
+date
+
 if [ x"$VERDICT" = x"pass" ]; then
 	echo "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
 else
