@@ -22,6 +22,7 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
+			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.M3UA \
 			titan.ProtocolModules.SMPP \
@@ -30,6 +31,8 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.RTP \
 			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
 			titan.TestPorts.Common_Components.Socket-API \
+			titan.TestPorts.Common_Components.Abstract_Socket \
+			titan.TestPorts.HTTPmsg \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
@@ -84,6 +87,7 @@ titan.ProtocolModules.ICMP_commit=		R.2.A
 titan.ProtocolModules.ICMPv6_commit=		R.2.A
 titan.ProtocolModules.IP_commit=		R.10.B-1-g99d0ec9
 titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A
+titan.ProtocolModules.JSON_v07_2006_commit=	R.1.A
 titan.ProtocolModules.L2TP_commit=		R.2.A
 titan.ProtocolModules.LLC_v7.1.0_commit=	2a3c09fbf7bae22f802aa88689800f38a1f3732d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
@@ -104,7 +108,9 @@ titan.ProtocolModules.SUA_commit=		R.5.A
 titan.ProtocolModules.TCP_commit=		R.3.A
 titan.ProtocolModules.UDP_commit=		R.4.A
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A
+titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B
 titan.TestPorts.GPIO_commit=			R.3.A
+titan.TestPorts.HTTPmsg_commit=			R.9.B
 titan.TestPorts.IPL4asp_commit=			R.29.A
 titan.TestPorts.LANL2asp_commit=		R.8.B
 titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11

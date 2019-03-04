@@ -1,0 +1,247 @@
+module REMSIM_Tests {
+
+/* Implementation of RSPRO Client in TTCN-3.
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from IPL4asp_Types all;
+import from RSPRO all;
+import from RSPRO_Types all;
+import from IPA_Types all;
+import from IPA_Emulation all;
+
+
+modulepar {
+	charstring mp_bankd_ip := "127.0.0.1";
+	integer mp_bankd_port := 9999;
+
+	charstring mp_server_ip := "127.0.0.1";
+	integer mp_server_port := 9998;
+
+	integer mp_rsres_port := 9997;
+}
+
+const integer NUM_CLIENT := 3;
+
+type record RSPRO_Client {
+	IPA_Emulation_CT	vc_IPA,
+	IPA_CCM_Parameters	ccm_pars,
+	charstring		id,
+	ComponentIdentity	rspro_id,
+
+	ClientSlot		rspro_client_slot optional,
+	BankId			rspro_bank_id optional,
+	SlotNumber		rspro_bank_nslots optional
+};
+
+type component rspro_client_CT {
+	var RSPRO_Client	rspro[NUM_CLIENT];
+	port IPA_RSPRO_PT	RSPRO[NUM_CLIENT];
+};
+
+private altstep as_ignore_id_ack(integer i := 0) runs on rspro_client_CT {
+	[] RSPRO[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) { repeat; }
+}
+
+function f_rspro_init(inout RSPRO_Client clnt, charstring dst_host, integer dst_port,
+		      ComponentIdentity rspro_id, integer i)
+runs on rspro_client_CT
+{
+	timer T := 4.0;
+
+	clnt.id := "RSPRO" & int2str(i);
+	clnt.vc_IPA := IPA_Emulation_CT.create(clnt.id);
+	clnt.ccm_pars := c_IPA_default_ccm_pars;
+	clnt.ccm_pars.name := "Osmocom TTCN-3 RSPRO client simulator";
+	clnt.rspro_id := rspro_id;
+
+	/* leave it up to the caller to set those */
+	clnt.rspro_client_slot := omit;
+	clnt.rspro_bank_id := omit;
+	clnt.rspro_bank_nslots := omit;
+
+	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(clnt.vc_IPA:IPA_RSPRO_PORT, self:RSPRO[i]);
+
+	clnt.vc_IPA.start(IPA_Emulation.main_client(dst_host, dst_port, "", 10000+i, clnt.ccm_pars));
+
+	T.start;
+	alt {
+	[] RSPRO[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ASP_IPA_EVENT_UP");
+		mtc.stop;
+		}
+	}
+	T.start;
+	alt {
+	[] RSPRO[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ASP_IPA_EVENT_ID_ACK");
+		mtc.stop;
+		}
+	}
+
+
+	activate(as_ignore_id_ack(i));
+}
+
+function f_rspro_fini(inout RSPRO_Client clnt, integer i)
+runs on rspro_client_CT {
+	clnt.vc_IPA.stop;
+	disconnect(clnt.vc_IPA:IPA_RSPRO_PORT, self:RSPRO[i]);
+	unmap(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+}
+
+
+function f_rspro_exp(template RsproPDU exp, integer i := 0)
+runs on rspro_client_CT return RsproPDU
+{
+	var RsproPDU pdu;
+
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] RSPRO[i].receive(exp) -> value pdu {
+		setverdict(pass);
+		}
+	[] RSPRO[i].receive(RsproPDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected RPSRO", pdu);
+		mtc.stop;
+		}
+	[] RSPRO[i].receive {
+		setverdict(fail, "Received unexpected != RPSRO");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", exp);
+		mtc.stop;
+		}
+	}
+	return pdu;
+}
+
+function f_rspro_exp_disconnect(integer i := 0)
+runs on rspro_client_CT {
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] RSPRO[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_DOWN}) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout expecting disconnect");
+		mtc.stop;
+		}
+	}
+}
+
+
+function f_rspro_connect_client(integer i, template ResultCode exp_res := ok) runs on rspro_client_CT
+{
+	select (rspro[i].rspro_id.type_) {
+	case (remsimClient) {
+		RSPRO[i].send(ts_RSPRO_ConnectClientReq(rspro[i].rspro_id, rspro[i].rspro_client_slot));
+		f_rspro_exp(tr_RSPRO_ConnectClientRes(?, exp_res), i);
+		}
+	case (remsimBankd) {
+		var template IpAddress ip := ts_IPv4(mp_bankd_ip);
+		RSPRO[i].send(ts_RSPRO_ConnectBankReq(rspro[i].rspro_id, rspro[i].rspro_bank_id,
+						      rspro[i].rspro_bank_nslots,
+						      ts_IpPort(ip, mp_bankd_port)));
+		f_rspro_exp(tr_RSPRO_ConnectBankRes(?, exp_res), i);
+		}
+	case else {
+		setverdict(fail, "Unsupported type ", rspro[i].rspro_id.type_);
+		mtc.stop;
+		}
+	}
+}
+
+function f_rspro_connect_clients() runs on rspro_client_CT
+{
+	var integer i;
+
+	for (i := 0; i < NUM_CLIENT; i := i+1) {
+		select (rspro[i].rspro_id.type_) {
+		case (remsimClient) {
+			RSPRO[i].send(ts_RSPRO_ConnectClientReq(rspro[i].rspro_id,
+								rspro[i].rspro_client_slot));
+			}
+		case (remsimBankd) {
+			var template IpAddress ip := ts_IPv4(mp_bankd_ip);
+			RSPRO[i].send(ts_RSPRO_ConnectBankReq(rspro[i].rspro_id, rspro[i].rspro_bank_id,
+							      rspro[i].rspro_bank_nslots,
+							      ts_IpPort(ip, mp_bankd_port)));
+			}
+		}
+	}
+	for (i := 0; i < NUM_CLIENT; i := i+1) {
+		select (rspro[i].rspro_id.type_) {
+		case (remsimClient) {
+			f_rspro_exp(tr_RSPRO_ConnectClientRes(?, ResultCode:ok), i);
+			}
+		case (remsimBankd) {
+			f_rspro_exp(tr_RSPRO_ConnectBankRes(?, ResultCode:ok), i);
+			}
+		}
+	}
+}
+
+/* transceive a TPDU from modem to card (and back) */
+function f_rspro_xceive_mdm2card(integer idx, BankSlot bs, template (value) octetstring data,
+				 template (value) TpduFlags flags) runs on rspro_client_CT return octetstring {
+	var RsproPDU rx;
+	RSPRO[idx].send(ts_RSPRO_TpduModemToCard(rspro[idx].rspro_client_slot, bs, flags, data));
+	rx := f_rspro_exp(tr_RSPRO_TpduCardToModem(bs, rspro[idx].rspro_client_slot, ?, ?));
+	return rx.msg.tpduCardToModem.data;
+}
+
+/* handle an incoming CreateMapping + ACK it */
+altstep as_rspro_create_mapping(integer i, template ClientSlot cslot := ?, template BankSlot bslot := ?,
+				template ResultCode res := ok)
+runs on rspro_client_CT {
+	var RsproPDU rx;
+	[] RSPRO[i].receive(tr_RSPRO_CreateMappingReq(cslot, bslot)) -> value rx {
+		RSPRO[i].send(ts_RSPRO_CreateMappingRes(res));
+		}
+}
+
+/* handle an incoming RemoveMapping + ACK it */
+altstep as_rspro_remove_mapping(integer i, template ClientSlot cslot := ?, template BankSlot bslot := ?,
+				template ResultCode res := ok)
+runs on rspro_client_CT {
+	var RsproPDU rx;
+	[] RSPRO[i].receive(tr_RSPRO_RemoveMappingReq(cslot, bslot)) -> value rx {
+		RSPRO[i].send(ts_RSPRO_RemoveMappingRes(res));
+		}
+}
+
+altstep as_rspro_cfg_client_id(integer i, template ClientSlot cslot := ?,
+				template (value) ResultCode res := ok)
+runs on rspro_client_CT {
+	var RsproPDU rx;
+	[] RSPRO[i].receive(tr_RSPRO_ConfigClientIdReq(cslot)) -> value rx {
+		RSPRO[i].send(ts_RSPRO_ConfigClientIdRes(res));
+		}
+}
+
+altstep as_rspro_cfg_client_bank(integer i, template BankSlot bslot := ?,
+				 template IpPort ip_port := ?,
+				template (value) ResultCode res := ok)
+runs on rspro_client_CT {
+	var RsproPDU rx;
+	[] RSPRO[i].receive(tr_RSPRO_ConfigClientBankReq(bslot, ip_port)) -> value rx {
+		RSPRO[i].send(ts_RSPRO_ConfigClientBankRes(res));
+		}
+}
+
+
+
+}

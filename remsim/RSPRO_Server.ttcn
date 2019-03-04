@@ -1,0 +1,174 @@
+module RSPRO_Server {
+
+/* Utility functions implementing an RSRPO server.
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+
+import from IPL4asp_Types all;
+import from RSPRO all;
+import from RSPRO_Types all;
+import from IPA_Types all;
+import from IPA_Emulation all;
+
+
+type record RSPRO_Server {
+	IPA_Emulation_CT	vc_IPA,
+	IPA_CCM_Parameters	ccm_pars,
+	charstring		id,
+	ComponentIdentity	rspro_id//,
+
+	//ClientSlot		rspro_client_slot optional,
+	//BankId			rspro_bank_id optional,
+	//SlotNumber		rspro_bank_nslots optional
+};
+
+const integer NUM_SERVER := 2;
+
+type component rspro_server_CT {
+	var RSPRO_Server	g_rspro_srv[NUM_SERVER];
+	port IPA_RSPRO_PT	RSPRO_SRV[NUM_SERVER];
+};
+
+
+altstep as_ignore_id_ack(integer i) runs on rspro_server_CT {
+	[] RSPRO_SRV[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_ID_ACK}) { repeat; }
+}
+
+
+function f_rspro_srv_exp_connect(integer i)
+runs on rspro_server_CT
+{
+	timer T := 20.0;
+	T.start;
+	alt {
+	[] RSPRO_SRV[i].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_UP}) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ASP_IPA_EVENT_UP");
+		mtc.stop;
+		}
+	}
+}
+
+function f_rspro_srv_init(integer i, charstring bind_host, integer bind_port,
+			  ComponentIdentity rspro_id, boolean exp_connect := true)
+runs on rspro_server_CT
+{
+	g_rspro_srv[i].id := "RSPRO_SRV" & int2str(i);
+	g_rspro_srv[i].vc_IPA := IPA_Emulation_CT.create(g_rspro_srv[i].id);
+	g_rspro_srv[i].ccm_pars := c_IPA_default_ccm_pars;
+	g_rspro_srv[i].ccm_pars.name := "Osmocom TTCN-3 RSPRO server simulator";
+	g_rspro_srv[i].rspro_id := rspro_id;
+
+	map(g_rspro_srv[i].vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(g_rspro_srv[i].vc_IPA:IPA_RSPRO_PORT, self:RSPRO_SRV[i]);
+
+	g_rspro_srv[i].vc_IPA.start(IPA_Emulation.main_server(bind_host, bind_port));
+
+	activate(as_ignore_id_ack(i));
+
+	if (exp_connect) {
+		f_rspro_srv_exp_connect(i);
+	}
+}
+
+function f_rspro_srv_fini(integer i)
+runs on rspro_server_CT
+{
+	g_rspro_srv[i].vc_IPA.stop;
+	disconnect(g_rspro_srv[i].vc_IPA:IPA_RSPRO_PORT, self:RSPRO_SRV[i]);
+	unmap(g_rspro_srv[i].vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+}
+
+
+function f_rspro_srv_restart(integer i, charstring bind_host, integer bind_port)
+runs on rspro_server_CT
+{
+	g_rspro_srv[i].vc_IPA.stop;
+	g_rspro_srv[i].vc_IPA.start(IPA_Emulation.main_server(bind_host, bind_port));
+}
+
+
+function f_rspro_srv_exp(template RsproPDU exp, integer i := 0, float tout := 10.0)
+runs on rspro_server_CT return RsproPDU
+{
+	var RsproPDU pdu;
+
+	timer T := tout;
+	T.start;
+	alt {
+	[] RSPRO_SRV[i].receive(exp) -> value pdu {
+		setverdict(pass);
+		}
+	[] RSPRO_SRV[i].receive(RsproPDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected RPSRO", pdu, " instead of ", exp);
+		mtc.stop;
+		}
+	[] as_ignore_id_ack(i) { repeat; }
+	[] RSPRO_SRV[i].receive {
+		setverdict(fail, "Received unexpected != RPSRO");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", exp);
+		mtc.stop;
+		}
+	}
+	return pdu;
+}
+
+function f_rspro_srv_create_slotmap(ClientSlot cslot, BankSlot bslot,
+				    template ResultCode exp_res := ok, integer i := 0)
+runs on rspro_server_CT
+{
+	RSPRO_SRV[i].send(ts_RSPRO_CreateMappingReq(cslot, bslot));
+	f_rspro_srv_exp(tr_RSPRO_CreateMappingRes(exp_res), i);
+}
+
+function f_rspro_srv_remove_slotmap(ClientSlot cslot, BankSlot bslot,
+				    template ResultCode exp_res := ok, integer i := 0)
+runs on rspro_server_CT
+{
+	RSPRO_SRV[i].send(ts_RSPRO_RemoveMappingReq(cslot, bslot));
+	f_rspro_srv_exp(tr_RSPRO_RemoveMappingRes(exp_res), i);
+}
+
+function f_rspro_config_client_bank(template (value) BankSlot bank_slot,
+				    template (value) IpPort bank_iport,
+				    template ResultCode exp_res := ok, integer i := 0)
+runs on rspro_server_CT {
+	RSPRO_SRV[i].send(ts_RSPRO_ConfigClientBankReq(bank_slot, bank_iport));
+	f_rspro_srv_exp(tr_RSPRO_ConfigClientBankRes(exp_res));
+}
+
+
+altstep as_connectBankReq(template ComponentIdentity comp_id := tr_CompId(remsimBankd, ?,
+									  "remsim-bankd", ?),
+			  template BankId bid := ?,
+			  template SlotNumber nslots := ?,
+			  ResultCode res := ok, integer i := 0)
+runs on rspro_server_CT {
+	[] RSPRO_SRV[i].receive(tr_RSPRO_ConnectBankReq(comp_id, bid, nslots)) {
+		RSPRO_SRV[i].send(ts_RSPRO_ConnectBankRes(g_rspro_srv[i].rspro_id, res));
+		}
+}
+
+altstep as_connectClientReq(template ComponentIdentity comp_id := tr_CompId(remsimClient, ?,
+									  "remsim-client", ?),
+			  template ClientSlot cslot := *,
+			  ResultCode res := ok, integer i := 0)
+runs on rspro_server_CT {
+	[] RSPRO_SRV[i].receive(tr_RSPRO_ConnectClientReq(comp_id, cslot)) {
+		RSPRO_SRV[i].send(ts_RSPRO_ConnectClientRes(g_rspro_srv[i].rspro_id, res));
+		}
+}
+
+
+
+}

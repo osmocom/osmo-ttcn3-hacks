@@ -1,0 +1,485 @@
+module RemsimServer_Tests {
+
+/* Integration Tests for osmo-remsim-server
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests osmo-remsim-server by attaching to the external interfaces
+ * such as RSPRO for simulated clients + bankds and RSRES (REST backend interface).
+ */
+
+import from Osmocom_Types all;
+
+import from RSPRO all;
+import from RSRES all;
+import from RSPRO_Types all;
+import from REMSIM_Tests all;
+
+import from IPA_Emulation all;
+
+import from HTTPmsg_Types all;
+import from HTTPmsg_PortType all;
+import from JSON_Types all;
+
+type component http_CT {
+	port HTTPmsg_PT HTTP;
+	var charstring g_http_host;
+	var integer g_http_port;
+};
+
+function f_http_init(charstring host, integer http_port) runs on http_CT {
+	map(self:HTTP, system:HTTP);
+	g_http_host := host;
+	g_http_port := http_port;
+}
+
+template (value) Connect ts_HTTP_Connect(template (value) charstring hostname,
+					 template (value) integer http_port := 80,
+					 template (value) boolean use_ssl := false) := {
+	hostname := hostname,
+	portnumber := http_port,
+	use_ssl := use_ssl
+}
+template (value) Close ts_HTTP_Close := { client_id := omit };
+
+template (value) HeaderLines ts_HTTP_Header(charstring body) := {
+	{ header_name := "Content-Type", header_value := "application/json" },
+	{ header_name := "Content-Length", header_value := int2str(lengthof(body)) }
+}
+
+template (value) HTTPMessage ts_HTTP_Req(charstring url,
+					 charstring method := "GET",
+					 charstring body := "",
+					 integer v_maj := 1, integer v_min := 1) := {
+	request := {
+		client_id := omit,
+		method := method,
+		uri := url,
+		version_major := v_maj,
+		version_minor := v_min,
+		header := ts_HTTP_Header(body),
+		body := body
+	}
+}
+
+template HTTPMessage tr_HTTP_Resp(template integer sts := ?) := {
+	response := {
+		client_id := ?,
+		version_major := ?,
+		version_minor := ?,
+		statuscode := sts,
+		statustext := ?,
+		header := ?,
+		body := ?
+	}
+};
+
+template HTTPMessage tr_HTTP_Resp2xx := tr_HTTP_Resp((200..299));
+
+/* run a HTTP request and return the response */
+function f_http_transact(charstring url, charstring method := "GET",
+			 charstring body := "", template HTTPMessage exp := tr_HTTP_Resp2xx)
+runs on http_CT return HTTPMessage {
+	var HTTPMessage resp;
+	timer T := 2.0;
+
+	HTTP.send(ts_HTTP_Connect(g_http_host, g_http_port));
+	//HTTP.receive(Connect_result:?);
+	HTTP.send(ts_HTTP_Req(url, method, body));
+	T.start;
+	alt {
+	[] HTTP.receive(exp) -> value resp {
+		setverdict(pass);
+		}
+	[] HTTP.receive(tr_HTTP_Resp) -> value resp {
+		setverdict(fail, "Unexpected HTTP response ", resp);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for HTTP response");
+		self.stop;
+		}
+	}
+	HTTP.send(ts_HTTP_Close);
+	return resp;
+}
+
+/* run a HTTP GET on specified URL expecting json in RSRES format as response */
+function f_rsres_get(charstring url, template integer exp_sts := 200)
+runs on http_CT return JsRoot {
+	var HTTPMessage http_resp;
+	http_resp := f_http_transact(url, exp := tr_HTTP_Resp(exp_sts));
+	return f_dec_JsRoot(char2oct(http_resp.response.body));
+}
+
+/* run a HTTP PUT to add a new slotmap to the remsim-server */
+function f_rsres_post_slotmap(JsSlotmap slotmap, template integer exp_sts := 201)
+runs on http_CT return HTTPResponse {
+	var charstring body := oct2char(f_enc_JsSlotmap(slotmap));
+	var HTTPMessage http_resp;
+	http_resp := f_http_transact(url := "/api/backend/v1/slotmaps", method := "POST",
+				     body := body, exp := tr_HTTP_Resp(exp_sts))
+	return http_resp.response;
+}
+
+/* run a HTTP PUT to add a new slotmap to the remsim-server */
+function f_rsres_post_reset(template integer exp_sts := 200)
+runs on http_CT return HTTPResponse {
+	var HTTPMessage http_resp;
+	http_resp := f_http_transact(url := "/api/backend/v1/global-reset", method := "POST",
+				     body := "", exp := tr_HTTP_Resp(exp_sts))
+	return http_resp.response;
+}
+
+
+/* run a HTTP DELETE to remove a slotmap from te remsim-server */
+function f_rsres_delete_slotmap(BankSlot bs, template integer exp_sts := 200)
+runs on http_CT return HTTPResponse {
+	var HTTPMessage http_resp;
+	var integer slotmap_id := bs.bankId * 65536 + bs.slotNr;
+	http_resp := f_http_transact(url := "/api/backend/v1/slotmaps/" & int2str(slotmap_id),
+				     method := "DELETE", exp := tr_HTTP_Resp(exp_sts));
+	return http_resp.response;
+}
+
+
+function f_rsres_init() runs on http_CT {
+	f_http_init(mp_server_ip, mp_rsres_port);
+	f_rsres_post_reset();
+}
+
+type component test_CT extends rspro_client_CT, http_CT {
+};
+
+
+testcase TC_connect_and_nothing() runs on rspro_client_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimClient, "foobar"));
+	timer T := 20.0;
+
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	T.start;
+	/* expect that we're disconnected if we never send a ConnectClientReq */
+	alt {
+	[] RSPRO[0].receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_ID_ACK)) { repeat; }
+	[] RSPRO[0].receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_DOWN)) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for disconnect");
+		}
+	}
+}
+
+testcase TC_connect_client() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimClient, "foobar"));
+	var JsRoot js;
+
+	f_rsres_init();
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_client_slot := valueof(ts_ClientSlot(3,4));
+
+	js := f_rsres_get("/api/backend/v1/clients");
+	if (not match(js.clients, JsClients:{})) {
+		setverdict(fail, "Initial state not empty");
+		mtc.stop;
+	}
+	f_rspro_connect_client(0);
+	js := f_rsres_get("/api/backend/v1/clients");
+	if (not match(js.clients[0], tr_JsClient(CONNECTED_CLIENT, rspro[0].rspro_id))) {
+		setverdict(fail, "Non-matching JSON response");
+		mtc.stop;
+	}
+	//as_rspro_cfg_client_id(0, cslot);
+	setverdict(pass);
+}
+
+testcase TC_connect_bank() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, "foobar"));
+	var JsRoot js;
+
+	f_rsres_init();
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_bank_id := 1;
+	rspro[0].rspro_bank_nslots := 8;
+
+	js := f_rsres_get("/api/backend/v1/banks");
+	if (not match(js.banks, JsBanks:{})) {
+		setverdict(fail, "Initial state not empty");
+		mtc.stop;
+	}
+	f_rspro_connect_client(0);
+	js := f_rsres_get("/api/backend/v1/banks");
+	if (not match(js.banks[0], tr_JsBank(CONNECTED_BANKD, rspro[0].rspro_id, rspro[0].rspro_bank_id,
+					     rspro[0].rspro_bank_nslots))) {
+		setverdict(fail, "Non-matching JSON response");
+		mtc.stop;
+	}
+	setverdict(pass);
+}
+
+function f_ensure_slotmaps(template JsSlotmaps maps)
+runs on http_CT {
+	var JsRoot js;
+
+	/* check that it is actually added */
+	js := f_rsres_get("/api/backend/v1/slotmaps");
+	if (match(js.slotmaps, maps)) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Unexpected slotmaps: ", js);
+	}
+}
+
+/* verify that exactly only one slotmap exists (the specified one) */
+function f_ensure_slotmap_exists_only(template ClientSlot cslot, template BankSlot bslot,
+					template SlotmapState state := ?)
+runs on http_CT {
+	f_ensure_slotmaps({ tr_JsSlotmap(bslot, cslot, state) } );
+}
+
+/* verify that exactly only one slotmap exists (possibly among others) */
+function f_ensure_slotmap_exists(template ClientSlot cslot, template BankSlot bslot,
+				 template SlotmapState state := ?)
+runs on http_CT {
+	f_ensure_slotmaps({ *, tr_JsSlotmap(bslot, cslot, state), * } );
+}
+
+
+/* test adding a single slotmap */
+testcase TC_slotmap_add() runs on test_CT {
+	f_rsres_init();
+
+	var JsSlotmap sm := valueof(ts_JsSlotmap(ts_BankSlot(1,2), ts_ClientSlot(3,4)));
+	var HTTPResponse res := f_rsres_post_slotmap(sm);
+
+	/* check that it is actually added */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, NEW);
+}
+
+/* test adding a slotmap and then connecting a client + bankd */
+testcase TC_slotmap_add_conn_cl_b() runs on test_CT {
+	/* Simulate one client */
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimClient, testcasename()));
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_client_slot := valueof(ts_ClientSlot(3,4));
+
+	/* Simulate one bankd */
+	var BankSlot bslot := valueof(ts_BankSlot(1,2));
+	var ComponentIdentity rspro_bank_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	f_rspro_init(rspro[1], mp_server_ip, mp_server_port, rspro_bank_id, 1);
+	rspro[1].rspro_bank_id := bslot.bankId;
+	rspro[1].rspro_bank_nslots := 8
+
+	f_rsres_init();
+	var JsSlotmap sm := valueof(ts_JsSlotmap(bslot, rspro[0].rspro_client_slot));
+	var HTTPResponse res;
+
+	/* 1) Create a new slotmap via HTTP */
+	res := f_rsres_post_slotmap(sm);
+
+	/* 2) verify that the slotmap exists and is NEW */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, NEW);
+
+	/* 3) connect a client for that slotmap */
+	f_rspro_connect_client(0);
+
+	/* 4) connect a bankd for that slotmap */
+	f_rspro_connect_client(1);
+
+	/* 5) verify that the slotmap exists and is UNACKNOWLEDGED */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, UNACKNOWLEDGED);
+
+	/* 6) expect bankd to receive that mapping */
+	as_rspro_create_mapping(1, sm.client, sm.bank);
+
+	/* 7) verify that the slotmap exists and is ACTIVE */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, ACTIVE);
+
+	/* 8) expect the client to be configured with bankd side settings */
+	as_rspro_cfg_client_bank(0, bslot, ?);
+}
+
+/* test connecting a client and later adding a slotmap for it */
+testcase TC_conn_cl_b_slotmap_add() runs on test_CT {
+	/* Simulate one client */
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimClient, testcasename()));
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_client_slot := valueof(ts_ClientSlot(3,4));
+
+	/* Simulate one bankd */
+	var BankSlot bslot := valueof(ts_BankSlot(1,2));
+	var ComponentIdentity rspro_bank_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	f_rspro_init(rspro[1], mp_server_ip, mp_server_port, rspro_bank_id, 1);
+	rspro[1].rspro_bank_id := bslot.bankId;
+	rspro[1].rspro_bank_nslots := 8
+
+	f_rsres_init();
+	var JsSlotmap sm := valueof(ts_JsSlotmap(bslot, rspro[0].rspro_client_slot));
+	var HTTPResponse res;
+
+	/* 1) connect a client for that slotmap */
+	f_rspro_connect_client(0);
+
+	/* 2) Create a new slotmap via HTTP */
+	res := f_rsres_post_slotmap(sm);
+
+	/* 3) verify that the slotmap exists and is NEW */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, NEW);
+
+	/* 4) connect a bankd for that slotmap */
+	f_rspro_connect_client(1);
+
+	/* 5) verify that the slotmap exists and is UNACKNOWLEDGED */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, UNACKNOWLEDGED);
+
+	/* 6) expect bankd to receive that mapping */
+	as_rspro_create_mapping(1, sm.client, sm.bank);
+
+	/* 7) verify that the slotmap exists and is ACTIVE */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, ACTIVE);
+
+	/* 8) expect the client to be configured with bankd IP/port */
+	as_rspro_cfg_client_bank(0, bslot, ?);
+}
+
+/* simple delete of a 'NEW' slotmap */
+testcase TC_slotmap_del_new() runs on test_CT {
+	f_rsres_init();
+
+	var JsSlotmap sm := valueof(ts_JsSlotmap(ts_BankSlot(1,2), ts_ClientSlot(3,4)));
+	var HTTPResponse res := f_rsres_post_slotmap(sm);
+	log(res);
+	res := f_rsres_delete_slotmap(sm.bank);
+	log(res);
+}
+
+/* simple delete of a 'UNACKNOWLEDGED' slotmap */
+testcase TC_slotmap_del_unack() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_bank_id := 1;
+	rspro[0].rspro_bank_nslots := 8;
+
+	f_rsres_init();
+	var JsSlotmap sm := valueof(ts_JsSlotmap(ts_BankSlot(1,2), ts_ClientSlot(3,4)));
+	var HTTPResponse res;
+
+	/* Create a new slotmap via HTTP */
+	res := f_rsres_post_slotmap(sm);
+
+	/* verify that the slotmap exists and is NEW */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, NEW);
+
+	/* connect a bankd for that slotmap */
+	f_rspro_connect_client(0);
+
+	/* expect the slotmap to be pushed to bank but don't ACK it */
+	f_rspro_exp(tr_RSPRO_CreateMappingReq(sm.client, sm.bank));
+
+	/* verify that the slotmap exists and is UNACKNOWLEDGED */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, UNACKNOWLEDGED);
+
+	/* delete the slotmap via REST */
+	res := f_rsres_delete_slotmap(sm.bank);
+
+	/* verify the slotmap is gone */
+	f_ensure_slotmaps({});
+}
+
+/* simple delete of a 'ACTIVE' slotmap */
+testcase TC_slotmap_del_active() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_bank_id := 1;
+	rspro[0].rspro_bank_nslots := 8;
+
+	f_rsres_init();
+	var JsSlotmap sm := valueof(ts_JsSlotmap(ts_BankSlot(1,2), ts_ClientSlot(3,4)));
+	var HTTPResponse res;
+
+	/* Create a new slotmap via HTTP */
+	res := f_rsres_post_slotmap(sm);
+
+	/* verify that the slotmap exists and is NEW */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, NEW);
+
+	/* connect a bankd for that slotmap */
+	f_rspro_connect_client(0);
+
+	/* expect the slotmap to be pushed to bank and ACK it */
+	as_rspro_create_mapping(0, sm.client, sm.bank);
+
+	/* verify that the slotmap exists and is ACTIVE */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, ACTIVE);
+
+	f_sleep(1.0);
+
+	/* delete the slotmap via REST */
+	res := f_rsres_delete_slotmap(sm.bank);
+
+	/* verify the slotmap is gone from REST interface immediately */
+	f_ensure_slotmaps({});
+
+	/* verify the slotmap is removed from bankd */
+	as_rspro_remove_mapping(0, sm.client, sm.bank);
+}
+
+
+/* Add a slotmap to a currently active bank */
+testcase TC_slotmap_add_active_bank() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_bank_id := 1;
+	rspro[0].rspro_bank_nslots := 8;
+
+	f_rsres_init();
+	var JsSlotmap sm := valueof(ts_JsSlotmap(ts_BankSlot(1,2), ts_ClientSlot(3,4)));
+	var HTTPResponse res;
+
+	/* connect a bankd for that slotmap */
+	f_rspro_connect_client(0);
+
+	/* Create a new slotmap via HTTP */
+	res := f_rsres_post_slotmap(sm);
+
+	/* expect the slotmap to be pushed to bank and ACK it */
+	as_rspro_create_mapping(0, sm.client, sm.bank);
+
+	/* verify that the slotmap exists and is ACTIVE */
+	f_ensure_slotmap_exists_only(sm.client, sm.bank, ACTIVE);
+}
+
+
+
+
+/* TODO
+ * - add slotmap, then connect matching client (see if slotmap is sent; check slotmap state)
+ * - connect client w/slotmap; delete slotmap via REST (see if it is deleted)
+ *   - don't acknowledge delete from client, disconnect client (see if slotmap is deleted)
+ * - delete non-existing slotmap via REST
+ * - create slotmap with integers out of range via REST
+
+ * - connect from unknown client (name not known, no clientId provisioned?
+ * - add client name/ID mappings from REST API?
+ */
+
+
+control {
+	execute( TC_connect_and_nothing() );
+	execute( TC_connect_client() );
+	execute( TC_connect_bank() );
+	execute( TC_slotmap_add() );
+	execute( TC_slotmap_add_conn_cl_b() );
+	execute( TC_conn_cl_b_slotmap_add() );
+	execute( TC_slotmap_del_new() );
+	execute( TC_slotmap_del_unack() );
+	execute( TC_slotmap_del_active() );
+	execute( TC_slotmap_add_active_bank() );
+}
+
+
+}

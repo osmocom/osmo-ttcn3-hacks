@@ -1,0 +1,298 @@
+module RemsimBankd_Tests {
+
+/* Integration Tests for osmo-remsim-bankd
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests osmo-remsim-bankd by attaching to the external interfaces
+ * such as RSPRO for simulated clients + server.
+ */
+
+import from Osmocom_Types all;
+import from IPA_Emulation all;
+import from Misc_Helpers all;
+
+import from RSPRO all;
+import from RSRES all;
+import from RSPRO_Types all;
+import from RSPRO_Server all;
+import from REMSIM_Tests all;
+
+modulepar {
+	integer mp_bank_id := 1;
+	integer mp_num_slots := 8;
+}
+
+/* We implement a RSPRO server to simulate the remsim-server and a
+   RSPRO client to simulate a remsim-client connecting to bankd */
+type component bankd_test_CT extends rspro_server_CT, rspro_client_CT {
+}
+
+private function f_init(boolean start_client := false) runs on bankd_test_CT {
+	var ComponentIdentity srv_comp_id := valueof(ts_CompId(remsimServer, "ttcn-server"));
+
+	f_rspro_srv_init(0, mp_server_ip, mp_server_port, srv_comp_id);
+
+	if (start_client) {
+		f_init_client(0);
+	}
+}
+
+private function f_init_client(integer i := 0) runs on rspro_client_CT {
+	var ComponentIdentity clnt_comp_id := valueof(ts_CompId(remsimClient, "ttcn-client"));
+	f_rspro_init(rspro[0], mp_bankd_ip, mp_bankd_port, clnt_comp_id, 0);
+	rspro[0].rspro_client_slot := { clientId := 23+i, slotNr := 0 };
+}
+
+
+
+/* Test if the bankd disconnects the TCP/IPA session if we don't respond to connectBankReq */
+testcase TC_connectBankReq_timeout() runs on bankd_test_CT {
+	timer T := 20.0;
+	f_init();
+
+	f_rspro_srv_exp(tr_RSPRO_ConnectBankReq(?, ?, ?));
+	T.start;
+	alt {
+	[] RSPRO_SRV[0].receive(ASP_IPA_Event:{up_down := ASP_IPA_EVENT_DOWN}) {
+		setverdict(pass);
+		}
+	[] RSPRO_SRV[0].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for disconnect");
+		}
+	}
+}
+
+/* accept an inbound connection from bankd to simulated server */
+testcase TC_connectBankReq() runs on bankd_test_CT {
+	f_init();
+
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* attempt to create a mapping */
+testcase TC_createMapping() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_create_slotmap(cs, bs);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* attempt to create a mapping for a slot that already has a mapping */
+testcase TC_createMapping_busySlot() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_create_slotmap(cs, bs);
+	f_rspro_srv_create_slotmap(cs, bs, exp_res := illegalSlotId);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* attempt to create a mapping for an out-of-range slot number */
+testcase TC_createMapping_invalidSlot() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 200 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_create_slotmap(cs, bs, exp_res := illegalSlotId);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* attempt to create a mapping for an invalid bankID */
+testcase TC_createMapping_invalidBank() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := 200, slotNr := 0 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_create_slotmap(cs, bs, exp_res := illegalBankId);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* attempt to remove a non-existant mapping */
+testcase TC_removeMapping_unknownMap() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_remove_slotmap(cs, bs, exp_res := unknownSlotmap);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* add and then remove a mapping, expect both to be successful */
+testcase TC_removeMapping() runs on bankd_test_CT {
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	var ClientSlot cs := { clientId := 23, slotNr := 42 };
+	f_rspro_srv_create_slotmap(cs, bs);
+	f_rspro_srv_remove_slotmap(cs, bs);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* connect from client to bankd without specifying a clientId */
+testcase TC_clientConnect_missingSlot() runs on bankd_test_CT {
+	f_init_client(0);
+	RSPRO[0].send(ts_RSPRO_ConnectClientReq(rspro[0].rspro_id, omit));
+	f_rspro_exp(tr_RSPRO_ConnectClientRes(?, ResultCode:illegalClientId), 0);
+	f_rspro_exp_disconnect(0);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* connect from client to bankd using a clientId for which bankd has no map */
+testcase TC_clientConnect_unknown() runs on bankd_test_CT {
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* connect from client to bankd using a clientSlot for which bankd has no map */
+
+
+/* first connect client, then later add matching mapping from server */
+testcase TC_clientConnect_createMapping() runs on bankd_test_CT {
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	f_rspro_srv_create_slotmap(rspro[0].rspro_client_slot, bs);
+	f_sleep(10.0);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+
+/* first add mapping, then connect matching client */
+testcase TC_createMapping_clientConnect() runs on bankd_test_CT {
+	/* FIXME: this would only be done in f_init_client(), but we need it before */
+	rspro[0].rspro_client_slot := { clientId := 23+0, slotNr := 0 };
+
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	f_rspro_srv_create_slotmap(rspro[0].rspro_client_slot, bs);
+
+	f_sleep(1.0);
+
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+	/* FIXME: how to determine that bank correctly mapped us */
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+
+
+/* add mapping, connect matching client, disconnect + reconnect */
+testcase TC_createMapping_clientReconnect() runs on bankd_test_CT {
+	/* FIXME: this would only be done in f_init_client(), but we need it before */
+	rspro[0].rspro_client_slot := { clientId := 23+0, slotNr := 0 };
+
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	f_rspro_srv_create_slotmap(rspro[0].rspro_client_slot, bs);
+
+	f_sleep(1.0);
+
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+	/* TODO: works only with empty slot, as setAtrReq isn't handled */
+	/* FIXME: how to determine that bank correctly mapped us */
+	f_sleep(5.0);
+	f_rspro_fini(rspro[0], 0);
+
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+	/* FIXME: how to determine that bank correctly mapped us */
+	f_sleep(5.0);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+
+
+/* remove mapping while client is connected */
+testcase TC_removeMapping_connected() runs on bankd_test_CT {
+	f_init_client(0);
+	f_rspro_connect_client(0, tr_Status_ok_or_nocard);
+	/* TODO: works only with empty slot, as setAtrReq isn't handled */
+
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	f_rspro_srv_create_slotmap(rspro[0].rspro_client_slot, bs);
+	/* FIXME: how to determine that bank correctly mapped us */
+	f_sleep(5.0);
+	f_rspro_srv_remove_slotmap(rspro[0].rspro_client_slot, bs);
+	f_rspro_exp_disconnect(0);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+/* first add mapping, then connect matching client and exchange some TPDUs */
+testcase TC_createMapping_exchangeTPDU() runs on bankd_test_CT {
+	/* FIXME: this would only be done in f_init_client(), but we need it before */
+	rspro[0].rspro_client_slot := { clientId := 23+0, slotNr := 0 };
+
+	f_init();
+	as_connectBankReq(bid := mp_bank_id, nslots := mp_num_slots);
+
+	var BankSlot bs := { bankId := mp_bank_id, slotNr := 0 };
+	f_rspro_srv_create_slotmap(rspro[0].rspro_client_slot, bs);
+
+	f_sleep(1.0);
+
+	f_init_client(0);
+	f_rspro_connect_client(0, ok);
+	/* FIXME: how to determine that bank correctly mapped us */
+	f_rspro_exp(tr_RSPRO_SetAtrReq(rspro[0].rspro_client_slot, ?));
+
+	var TpduFlags f := {tpduHeaderPresent:=true, finalPart:=true, procByteContinueTx:=false,
+			    procByteContinueRx:=false};
+	for (var integer i := 0; i < 10; i:=i+1) {
+		f_rspro_xceive_mdm2card(0, bs, 'A0A40000023F00'O, f);
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
+}
+
+
+
+control {
+	execute( TC_connectBankReq_timeout() );
+	execute( TC_connectBankReq() );
+
+	execute( TC_createMapping() );
+	execute( TC_createMapping_busySlot() );
+	execute( TC_createMapping_invalidSlot() );
+	execute( TC_createMapping_invalidBank() );
+
+	execute( TC_removeMapping_unknownMap() );
+	execute( TC_removeMapping() );
+
+	execute( TC_clientConnect_missingSlot() );
+	execute( TC_clientConnect_unknown() );
+	execute( TC_clientConnect_createMapping() );
+	execute( TC_createMapping_clientConnect() );
+	execute( TC_createMapping_clientReconnect() );
+	execute( TC_removeMapping_connected() );
+
+	execute( TC_createMapping_exchangeTPDU() );
+}
+
+
+
+
+
+}
