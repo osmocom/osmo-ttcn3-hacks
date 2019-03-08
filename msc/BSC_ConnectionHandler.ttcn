@@ -551,6 +551,8 @@ type record CallParameters {
 	/* CC related parameters */
 	hexstring called_party,				/* whom are we calling */
 	integer transaction_id optional,		/* which TS 04.08 CC transaction ID to use */
+	boolean mo_call,				/* For a MO call, the transaction_id was allocated by the MS,
+							   important to set the TI flag properly */
 	BearerCapability_TLV bearer_cap,		/* which bearer capabilities to claim */
 	boolean emergency,				/* is this an emergency call? */
 
@@ -581,6 +583,7 @@ type record CallParameters {
 template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	called_party := called,
 	transaction_id := tid,
+	mo_call := false,
 	bearer_cap := valueof(ts_Bcap_voice),
 	emergency := false,
 	mncc_callref := omit,
@@ -595,6 +598,7 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	mgw_rtp_port_mss := 11000,
 	rtp_payload_type := 98,
 	rtp_sdp_format := "AMR/8000",
+	mgw_drop_dlcx := false,
 	mgcp_call_id := omit,
 	mgcp_ep := omit,
 	mgcp_connection_id_bss := '0'H,//
@@ -628,12 +632,15 @@ runs on BSC_ConnHdlr {
 
 	f_establish_fully(EST_TYPE_PAG_RESP);
 
+	log("f_mt_call_complete 1");
+
 	/* MS <- MSC: Expect CC SETUP */
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_SETUP(cpars.transaction_id, *, cpars.called_party)));
 
 	/* MS -> MSC: ALERTING */
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_ALERTING(cpars.transaction_id)));
 	MNCC.receive(tr_MNCC_ALERT_ind(cpars.mncc_callref));
+	log("f_mt_call_complete 2");
 
 	/* Create MGCP expect */
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
@@ -642,6 +649,7 @@ runs on BSC_ConnHdlr {
 
 	/* First MGCP CRCX (for BSS/RAN side) */
 	MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		log("f_mt_call_complete 3");
 		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
 
 		/* When the endpoint contains a wildcard we keep the endpoint
@@ -672,21 +680,64 @@ runs on BSC_ConnHdlr {
 		interleave {
 		/* Second MGCP CRCX (this time for MSS/CN side) */
 		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+			log("f_mt_call_complete 4");
 			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
 			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-			/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
-			MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
 			}
+
+		/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
+		[] MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref)) {
+			log("f_mt_call_complete 5");
+			}
+
 		/* expect the MSC to trigger a BSSMAP ASSIGNMENT */
 		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
 			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
 			var BSSMAP_IE_SpeechCodec codec;
+			log("f_mt_call_complete 6");
 
 			tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
 			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
 
 			BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+
+			BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT(cpars.transaction_id)));
 			}
+
+		[] MNCC.receive(tr_MNCC_SETUP_cnf(cpars.mncc_callref)) {
+			log("f_mt_call_complete 7");
+			MNCC.send(ts_MNCC_RTP_CONNECT(cpars.mncc_callref,
+						      /* ip 42.23.11.5 */ hex2int('42231105'H),
+						      /* port 423 */ 423,
+						      /* payload type 3 = GSM FR */ 3));
+			}
+
+		/* MDCX setting up the RAN side remote RTP address received from Assignment Complete */
+		[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+			log("f_mt_call_complete 8");
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+								hex2str(cpars.mgcp_call_id), "42",
+								cpars.mgw_rtp_port_mss,
+								{ int2str(cpars.rtp_payload_type) },
+								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+											cpars.rtp_sdp_format)),
+								  valueof(ts_SDP_ptime(20)) }));
+			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			}
+
+		/* MDCX setting up the CN side remote RTP address received from MNCC CONNECT */
+		[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+			log("f_mt_call_complete 9");
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+								hex2str(cpars.mgcp_call_id), "42",
+								cpars.mgw_rtp_port_mss,
+								{ int2str(cpars.rtp_payload_type) },
+								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+											cpars.rtp_sdp_format)),
+								  valueof(ts_SDP_ptime(20)) }));
+			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			}
+
 		}
 	} else {
 		var template TransportLayerAddress rab_tla := ? /* FIXME: encode the mgw_rtp_ip_bss/mgw_rtp_port_bss */
@@ -702,12 +753,12 @@ runs on BSC_ConnHdlr {
 		[] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
 			//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
 			}
+
+		/* FIXME: same MNCC and MGCP as in 2G above */
 		}
 	}
 
-	/* MS -> MSC: ALERTING */
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT(cpars.transaction_id)));
-	MNCC.receive(tr_MNCC_SETUP_cnf(cpars.mncc_callref));
+	log("f_mt_call_complete DONE");
 }
 
 function f_expect_paging(boolean by_tmsi := true)
@@ -757,15 +808,20 @@ runs on BSC_ConnHdlr {
 	} else {
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
 	}
+
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+		valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
+
 	interleave {
 	[] MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc {
+		log("f_mo_call_establish 1: rx MNCC SETUP ind");
 		cpars.mncc_callref := mncc.u.signal.callref;
-		/* Call Proceeding */
-		MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
-		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
-		};
+		MNCC.send(ts_MNCC_RTP_CREATE(cpars.mncc_callref));
+		}
+
 	/* First MGCP CRCX (for BSS/RAN side) */
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		log("f_mo_call_establish 2: rx 1st CRCX");
 		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
 
 		/* When the endpoint contains a wildcard we keep the endpoint
@@ -788,62 +844,92 @@ runs on BSC_ConnHdlr {
 		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
 		MGCP.send(mgcp_resp);
 		}
+
+	[] MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref)) {
+		log("f_mo_call_establish 3: rx RTP CREATE");
+		/* Call Proceeding */
+		MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
+		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
+
+		/* Alerting */
+		MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
+		}
+
+	//[g_pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+		log("f_mo_call_establish 4: rx Assignment Request");
+		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+		var BSSMAP_IE_SpeechCodec codec;
+		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
+		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
+		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+		}
+	/*
+	[!g_pars.ran_is_geran] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
+		//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
+		}
+	*/
+
+	/* MDCX setting up the RAN side remote RTP address received from Assignment Complete */
+	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+		log("f_mo_call_establish 5: rx MDCX for the RAN side");
+		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+							hex2str(cpars.mgcp_call_id), "42",
+							cpars.mgw_rtp_port_mss,
+							{ int2str(cpars.rtp_payload_type) },
+							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+										cpars.rtp_sdp_format)),
+							  valueof(ts_SDP_ptime(20)) }));
+		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+		}
+
+	/* Second MGCP CRCX (this time for MSS/CN side) */
+	[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+		log("f_mo_call_establish 6: rx 2nd CRCX, for CN side");
+		var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
+		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+		}
+
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
+		log("f_mo_call_establish 7: rx CC Alerting");
+		cpars.mncc_callref := mncc.u.signal.callref;
+		/* Call Proceeding */
+		MNCC.send(ts_MNCC_RTP_CONNECT(cpars.mncc_callref,
+					      /* ip 42.23.11.5 */ hex2int('42231105'H),
+					      /* port 423 */ 423,
+					      /* payload type 3 = GSM FR */ 3));
+		MNCC.send(ts_MNCC_SETUP_rsp(cpars.mncc_callref));
+		}
+
+	[] MNCC.receive(tr_MNCC_SETUP_COMPL_ind(?)) -> value mncc {
+		log("f_mo_call_establish 8: rx MNCC SETUP COMPLETE ind");
+		}
+
+	/* second MDCX setting up the CN side remote RTP address and codec received from MNCC RTP CONNECT */
+	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+		log("f_mo_call_establish 9: rx MDCX for CN side");
+		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+							hex2str(cpars.mgcp_call_id), "42",
+							cpars.mgw_rtp_port_mss,
+							{ int2str(cpars.rtp_payload_type) },
+							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+										cpars.rtp_sdp_format)),
+							  valueof(ts_SDP_ptime(20)) }));
+		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+		}
+
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CONNECT(cpars.transaction_id))) {
+		log("f_mo_call_establish 10: rx CC CONNECT");
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT_ACK(cpars.transaction_id)));
+		}
 	}
 
-	if (g_pars.ran_is_geran) {
-		var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
-			valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
-
-		interleave {
-		/* Second MGCP CRCX (this time for MSS/CN side) */
-		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
-			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-
-			/* Alerting */
-			MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
-			}
-
-		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
-			}
-		/* expect AoIP IP/Port to match what we returned in CRCX_ACK above */
-		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
-			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
-			var BSSMAP_IE_SpeechCodec codec;
-			tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
-			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
-			BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
-			}
-		}
-	} else {
-		var template TransportLayerAddress rab_tla := ?; /* FIXME: encode the mgw_rtp_ip_bss/mgw_rtp_port_bss */
-		var template RAB_SetupOrModifyList rab_sml := tr_RAB_SML(rab_id := ?, tla := rab_tla, binding_id := ?);
-
-		interleave {
-		/* Second MGCP CRCX (this time for MSS/CN side) */
-		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
-			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-
-			/* Alerting */
-			MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
-			}
-
-		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
-			}
-
-		[] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
-			//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
-			}
-		}
-	}
-
-	/* Answer. MNCC_SETUP_RSP -> CONNECT to MS; CONNECT_ACK from MS */
-	MNCC.send(ts_MNCC_SETUP_rsp(cpars.mncc_callref));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CONNECT(cpars.transaction_id)));
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT_ACK(cpars.transaction_id)));
-
+	log("f_mo_call_establish DONE");
 	setverdict(pass);
+}
+
+private altstep as_optional_mgcp_mdcx() runs on BSC_ConnHdlr {
+	[] MGCP.receive(tr_MDCX) {};
 }
 
 function f_call_hangup(inout CallParameters cpars, boolean release_by_ms, boolean is_csfb := false)
@@ -853,62 +939,80 @@ runs on BSC_ConnHdlr {
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
 	var boolean respond_to_dlcx;
+	var boolean dlcx_contained_ci := false;
+	var template PDU_BSSAP t_clear := tr_BSSMAP_ClearCommand;
+
+	if (is_csfb) {
+		t_clear := tr_BSSMAP_ClearCommandCSFB;
+	}
+
 	MNCC.send(ts_MNCC_DISC_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
 
+	log("f_call_hangup 1: rx DTAP CC DISC");
+
 	if (release_by_ms) {
+		var BIT1 tid_remote := '1'B;
+		if (cpars.mo_call) {
+			tid_remote := '0'B;
+		}
 		/* B-side (MS) Release of call */
-		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_RELEASE(cpars.transaction_id, '1'B, '0000000'B)));
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_RELEASE(cpars.transaction_id, tid_remote, '0000000'B)));
 		MNCC.receive(tr_MNCC_REL_ind(cpars.mncc_callref));
+		log("f_call_hangup 2: rx MNCC REL ind");
 		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_REL_COMPL(cpars.transaction_id)));
+		log("f_call_hangup 3: rx DTAP CC REL COMPL");
 	} else {
 		/* A-side (PLMN) Release of call */
 		MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(42))));
 		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
+		log("f_call_hangup 4: rx DTAP CC RELEASE");
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
 	}
 
 	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
 
-		/* clearing of radio channel */
-	if (g_pars.ran_is_geran) {
-		var template PDU_BSSAP t_clear := tr_BSSMAP_ClearCommand;
-		if (is_csfb) {
-			t_clear := tr_BSSMAP_ClearCommandCSFB;
-		}
+	var default mdcx := activate(as_optional_mgcp_mdcx());
 
-		interleave {
-		[] BSSAP.receive(t_clear) {
-			BSSAP.send(ts_BSSMAP_ClearComplete);
-			BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
-			}
-		[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
-			if (respond_to_dlcx) {
-				/* TODO: For one or all connections on EP? */
-				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-				f_create_mgcp_delete_ep(cpars.mgcp_ep);
-			}
-			}
+	/* clearing of radio channel */
+	interleave {
+	//[g_pars.ran_is_geran] BSSAP.receive(t_clear) {
+	[] BSSAP.receive(t_clear) {
+		log("f_call_hangup 5: rx BSSAP Clear Command");
+		BSSAP.send(ts_BSSMAP_ClearComplete);
+		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+		log("f_call_hangup 6: rx SCCP DISC");
 		}
-	} else {
-		var template RANAP_PDU t_iurel := tr_RANAP_IuReleaseCommand(?);
-		if (is_csfb) {
-			/* FIXME! */
+	/*
+	[!g_pars.ran_is_geran] BSSAP.receive(t_iurel) {
+		BSSAP.send(ts_RANAP_IuReleaseComplete);
+		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
 		}
-		interleave {
-		[] BSSAP.receive(t_iurel) {
-			BSSAP.send(ts_RANAP_IuReleaseComplete);
-			BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
-			}
-		[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+	*/
+	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+			log("f_call_hangup 7: rx MGCP DLCX");
 			if (respond_to_dlcx) {
-				/* TODO: For one or all connections on EP? */
 				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-				f_create_mgcp_delete_ep(cpars.mgcp_ep);
 			}
+			dlcx_contained_ci := f_MgcpCmd_contains_par(mgcp_cmd, "I");
+		}
+	}
+
+	/* Two DLCXes expected, one for RAN and one for CN side.
+	 * Unless the first DLCX did not contain a CI, in which case it was a wildcard DLCX for both. */
+	if (dlcx_contained_ci) {
+		MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+			log("f_call_hangup 8: rx MGCP DLCX");
+			if (respond_to_dlcx) {
+				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
 			}
 		}
 	}
+
+	f_create_mgcp_delete_ep(cpars.mgcp_ep);
+	log("f_call_hangup 9: done");
+
+	deactivate(mdcx);
 
 	setverdict(pass);
 }
