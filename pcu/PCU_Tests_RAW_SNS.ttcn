@@ -67,6 +67,19 @@ runs on RAW_NS_CT {
 	rx := f_ns_exp(tr_SNS_CONFIG_ACK(g_nsconfig[idx].nsei, cause), idx);
 }
 
+/* perform outbound SNS-CONFIG procedure (separate endpoints: 1 for control, 1 for user */
+function f_outgoing_sns_config_1c1u_separate(template (omit) NsCause cause := omit, integer idx := 0)
+runs on RAW_NS_CT {
+	log("f_outgoing_sns_config_1c1u_separate(idx=", idx, ")");
+	var PDU_NS rx;
+	var template (omit) IP4_Elements v4 := { ts_SNS_IPv4(g_nsconfig[1].local_ip,
+							     g_nsconfig[1].local_udp_port, 1, 0),
+						 ts_SNS_IPv4(g_nsconfig[2].local_ip,
+							     g_nsconfig[2].local_udp_port, 0, 1) };
+	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_SNS_CONFIG(g_nsconfig[idx].nsei, true, v4)));
+	rx := f_ns_exp(tr_SNS_CONFIG_ACK(g_nsconfig[idx].nsei, cause), idx);
+}
+
 function f_outgoing_sns_add(integer idx_add, uint8_t w_sig := 1, uint8_t w_user := 1, integer idx := 0)
 runs on RAW_NS_CT {
 	log("f_outgoing_sns_add(idx_add=", idx_add, ")");
@@ -211,6 +224,52 @@ testcase TC_sns_1c1u() runs on RAW_Test_CT {
 	setverdict(pass);
 }
 
+private function f_sns_bringup_1c1u_separate() runs on RAW_Test_CT {
+	/* Activate two NS codec ports */
+	f_init_ns_codec();
+	f_init_ns_codec(1);
+	f_init_ns_codec(2);
+	f_init_pcuif();
+	/* Perform Size + BSS-originated config */
+	f_incoming_sns_size();
+	f_incoming_sns_config();
+	/* perform SGSN-originated config using idx==0 for signalling and idx==1 for user traffic */
+	f_outgoing_sns_config_1c1u_separate();
+
+	/* wait for one ALIVE cycle, then ACK any further ALIVE in the background
+	 * for both NS-VCs */
+	as_rx_alive_tx_ack(oneshot := true, idx := 1);
+	activate(as_rx_alive_tx_ack(idx := 1));
+	as_rx_alive_tx_ack(oneshot := true, idx := 2);
+	activate(as_rx_alive_tx_ack(idx := 2));
+	/* ensure there's no NS-ALIVE received on idx==0 */
+	f_ensure_no_ns(t_NS_ALIVE, idx := 0);
+
+	/* perform outgoing ALIVE procedure for both NS-VCs */
+	f_outgoing_ns_alive(1);
+	f_outgoing_ns_alive(2);
+	/* ensure there's no response to NS-ALIVE sent on idx==0 */
+	f_outgoing_ns_alive_no_ack(idx := 0);
+
+	/* Expect BVC-RESET for signaling BVCI=0 and ptp BVCI */
+	as_rx_bvc_reset_tx_ack(0, oneshot := true, idx := 1);
+	as_rx_bvc_reset_tx_ack(mp_gb_cfg.bvci, oneshot := true, idx := 1);
+	/* Expect UNBLOCK for ptp BVCI on signaling NS-VC (idx==1) */
+	as_rx_bvc_unblock_tx_ack(mp_gb_cfg.bvci, oneshot := true, idx := 1);
+
+	/* wait for one FLOW-CONTROL BVC and then ACK any further in the future. Flow
+	 * control happens on the p-t-p BVCI and hence on index 1 */
+	as_rx_bvc_fc_tx_ack(mp_gb_cfg.bvci, oneshot := true, idx := 2);
+	activate(as_rx_bvc_fc_tx_ack(mp_gb_cfg.bvci, idx := 2));
+}
+
+/* Test full IP-SNS bring-up with two NS-VCs, one sig-only and one user-only - and where
+ * the initial IP/port for the SNS procedure is *not* part of the NS-VCs later */
+testcase TC_sns_1c1u_separate() runs on RAW_Test_CT {
+	f_sns_bringup_1c1u_separate();
+	setverdict(pass);
+}
+
 /* Test adding new IP endpoints at runtime */
 testcase TC_sns_add() runs on RAW_Test_CT {
 	f_sns_bringup_1c1u();
@@ -281,6 +340,7 @@ control {
 	execute( TC_sns_po_config_nack() );
 	execute( TC_sns_so_config_success() );
 	execute( TC_sns_1c1u() );
+	execute( TC_sns_1c1u_separate() );
 	execute( TC_sns_add() );
 	execute( TC_sns_del() );
 	execute( TC_sns_chg_weight() );
