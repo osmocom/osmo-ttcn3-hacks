@@ -2,6 +2,7 @@
 
 PIDFILE=/tmp/dumper.pid
 TCPDUMP=/usr/sbin/tcpdump
+DUMPCAP=/usr/bin/dumpcap
 TESTCASE=$1
 
 echo "------ $TESTCASE ------"
@@ -23,6 +24,21 @@ else
 # "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
 	CMD="sudo $TCPDUMP -U"
 fi
+
+if [ -x $DUMPCAP ]; then
+    CAP_ERR="1"
+    if [ -x /sbin/setcap ]; then
+	# N. B: this check requires libcap2-bin package
+	setcap -q -v 'cap_net_admin,cap_net_raw=pie' $DUMPCAP
+	CAP_ERR="$?"
+    fi
+    if [ -u $DUMPCAP -o "$CAP_ERR" = "0" ]; then
+	CMD="$DUMPCAP -q"
+    else
+ 	echo "NOTE: unable to use dumpcap due to missing capabilities or suid bit"
+    fi
+fi
+
 $CMD -s 1500 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
 PID=$!
 echo $PID > $PIDFILE

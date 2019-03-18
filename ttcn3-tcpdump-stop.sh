@@ -32,7 +32,8 @@ do
 done
 
 if [ -e $PIDFILE ]; then
-	if [ "$(id -u)" = "0" ]; then
+        DUMPER="$(ps -q "$(cat "$PIDFILE")" -o comm=)"
+	if [ "$DUMPER" != "sudo" ]; then
 		kill "$(cat "$PIDFILE")"
 	else
 	# NOTE: This requires you to be root or something like
