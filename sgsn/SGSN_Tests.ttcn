@@ -19,6 +19,7 @@ import from NS_Emulation all;
 import from BSSGP_Types all;
 import from BSSGP_Emulation all;
 import from Osmocom_Gb_Types all;
+import from SCCPasp_Types all;
 
 import from MobileL3_CommonIE_Types all;
 import from MobileL3_GMM_SM_Types all;
@@ -29,6 +30,12 @@ import from L3_Common all;
 import from GSUP_Emulation all;
 import from GSUP_Types all;
 import from IPA_Emulation all;
+
+import from RAN_Adapter all;
+import from RAN_Emulation all;
+import from RANAP_Templates all;
+import from RANAP_PDU_Descriptions all;
+import from RANAP_IEs all;
 
 import from GTP_Emulation all;
 import from GTP_Templates all;
@@ -87,6 +94,20 @@ modulepar {
 			handle_sns := false
 		}
 	};
+
+	RAN_Configurations mp_ranap_cfg := {
+		{
+			transport := RANAP_TRANSPORT_IuCS,
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23908, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 195,
+			own_ssn := 142,
+			peer_pc := 188, /* 0.23.4 */
+			peer_ssn := 142,
+			sio := '83'O,
+			rctx := 2
+		}
+	}
 };
 
 type record GbInstance {
@@ -100,8 +121,12 @@ type record length(NUM_GB) of GbInstance GbInstances;
 type record length(NUM_GB) of NSConfiguration NSConfigurations;
 type record length(NUM_GB) of BssgpCellId BssgpCellIds;
 
+const integer NUM_RNC := 1;
+type record of RAN_Configuration RAN_Configurations;
+
 type component test_CT {
 	var GbInstances g_gb;
+	var RAN_Adapter g_ranap[NUM_RNC];
 
 	var GSUP_Emulation_CT vc_GSUP;
 	var IPA_Emulation_CT vc_GSUP_IPA;
@@ -116,7 +141,7 @@ type component test_CT {
 	var boolean g_use_echo := false;
 };
 
-type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr, GTP_ConnHdlr {
+type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr, GTP_ConnHdlr, RAN_ConnHdlr {
 	var BSSGP_ConnHdlrPars g_pars;
 	timer g_Tguard;
 	var LLC_Entities llc;
@@ -145,7 +170,10 @@ type record BSSGP_ConnHdlrPars {
 	BssgpCellIds bssgp_cell_id,
 	AuthVector vec optional,
 	SGSN_ConnHdlrNetworkPars net,
-	float t_guard
+	float t_guard,
+	/* only in IuPS / RANAP case */
+	SCCP_PAR_Address sccp_addr_local,
+	SCCP_PAR_Address sccp_addr_peer
 };
 
 private function f_cellid_to_RAI(in BssgpCellId cell_id) return RoutingAreaIdentificationV {
@@ -240,6 +268,8 @@ private function f_vty_enable_echo_interval(boolean enable) runs on test_CT {
 
 /* mcc_mnc is 24.008 10.5.5.15 encoded. 262 42 */
 function f_init(BcdMccMnc mcc_mnc := '262F42'H) runs on test_CT {
+	var integer i;
+
 	if (g_initialized == true) {
 		return;
 	}
@@ -288,10 +318,43 @@ function f_init(BcdMccMnc mcc_mnc := '262F42'H) runs on test_CT {
 	f_init_gb(g_gb[0], "SGSN_Test-Gb0", 0);
 	f_init_gb(g_gb[1], "SGSN_Test-Gb1", 1);
 	f_init_gb(g_gb[2], "SGSN_Test-Gb2", 2);
+
+	for (i := 0; i < NUM_RNC; i := i+1) {
+		f_ran_adapter_init(g_ranap[i], mp_ranap_cfg[i], "SGSN_Test_" & int2str(i), RNC_RanOps);
+		f_ran_adapter_start(g_ranap[i]);
+	}
 	f_init_gsup("SGSN_Test");
 	f_init_gtp("SGSN_Test");
 	f_vty_enable_echo_interval(g_use_echo);
 }
+
+private function RncUnitdataCallback(RANAP_PDU ranap)
+runs on RAN_Emulation_CT return template RANAP_PDU {
+	var template RANAP_PDU resp := omit;
+
+	log ("RANAP_RncUnitDataCallback");
+	/* answer all RESET with RESET ACK */
+	if (match(ranap, tr_RANAP_Reset)) {
+		log("RANAP_RncUnitdataCallback: Responding to RESET with RESET-ACK");
+		var CN_DomainIndicator dom;
+		dom := ranap.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator;
+		resp := ts_RANAP_ResetAck(dom);
+	}
+	return resp;
+}
+
+const RanOps RNC_RanOps := {
+	ranap_create_cb := refers(RAN_Emulation.RanapExpectedCreateCallback),
+	ranap_unitdata_cb := refers(RncUnitdataCallback),
+	ps_domain := true,
+	decode_dtap := true,
+	role_ms := true,
+	protocol := RAN_PROTOCOL_RANAP,
+	transport := RANAP_TRANSPORT_IuCS,
+	use_osmux := false,
+	sccp_addr_local := omit,
+	sccp_addr_peer := omit
+};
 
 type function void_fn(charstring id) runs on BSSGP_ConnHdlr;
 
@@ -317,7 +380,9 @@ runs on test_CT return BSSGP_ConnHdlr {
 		bssgp_cell_id := { gb[0].cfg.cell_id, gb[1].cfg.cell_id, gb[2].cfg.cell_id },
 		vec := omit,
 		net := net_pars,
-		t_guard := t_guard
+		t_guard := t_guard,
+		sccp_addr_local := g_ranap[0].sccp_addr_own,
+		sccp_addr_peer := g_ranap[0].sccp_addr_peer
 	};
 
 	vc_conn := BSSGP_ConnHdlr.create(id);
@@ -327,6 +392,10 @@ runs on test_CT return BSSGP_ConnHdlr {
 	connect(vc_conn:BSSGP_PROC[1], gb[1].vc_BSSGP:BSSGP_PROC);
 	connect(vc_conn:BSSGP[2], gb[2].vc_BSSGP:BSSGP_SP);
 	connect(vc_conn:BSSGP_PROC[2], gb[2].vc_BSSGP:BSSGP_PROC);
+
+	/* FIXME: support multiple RNCs */
+	connect(vc_conn:BSSAP, g_ranap[0].vc_RAN:CLIENT);
+	connect(vc_conn:BSSAP_PROC, g_ranap[0].vc_RAN:PROC);
 
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
