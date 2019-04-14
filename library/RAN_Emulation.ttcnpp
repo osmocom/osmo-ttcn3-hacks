@@ -48,6 +48,14 @@ import from MGCP_Types all;
 import from MGCP_Templates all;
 #endif
 
+#ifdef RAN_EMULATION_RANAP
+import from RANAP_CodecPort all;
+import from RANAP_PDU_Descriptions all;
+import from RANAP_Constants all;
+import from RANAP_IEs all;
+import from RANAP_Templates all;
+#endif
+
 /* General "base class" component definition, of which specific implementations
  * derive themselves by means of the "extends" feature */
 type component RAN_ConnHdlr {
@@ -110,6 +118,11 @@ type port RAN_Conn_PT message {
 		/* Client requests us to create SCCP Connection */
 		BSSAP_Conn_Req,
 #endif
+#ifdef RAN_EMULATION_RANAP
+		RANAP_PDU,
+		/* Client requests us to create SCCP Connection */
+		RANAP_Conn_Req,
+#endif
 #ifdef RAN_EMULATION_MGCP
 		/* MGCP, only used for IPA SCCPlite (MGCP in IPA mux) */
 		MgcpCommand, MgcpResponse,
@@ -146,6 +159,9 @@ type component RAN_Emulation_CT {
 	/* SCCP ports on the bottom side, using ASP primitives */
 #ifdef RAN_EMULATION_BSSAP
 	port BSSAP_CODEC_PT BSSAP;
+#endif
+#ifdef RAN_EMULATION_RANAP
+	port RANAP_CODEC_PT RANAP;
 #endif
 	/* BSSAP port to the per-connection clients */
 	port RAN_Conn_PT CLIENT;
@@ -487,16 +503,148 @@ private function f_bssap_l3_is_rr(PDU_BSSAP bssap) return boolean {
 }
 #endif
 
+#ifdef RAN_EMULATION_RANAP
+type record RANAP_Conn_Req {
+	SCCP_PAR_Address	addr_peer,
+	SCCP_PAR_Address	addr_own,
+	RANAP_PDU		ranap
+}
+template (value) RANAP_Conn_Req ts_RANAP_Conn_Req(SCCP_PAR_Address peer, SCCP_PAR_Address own, RANAP_PDU ranap) := {
+	addr_peer := peer,
+	addr_own := own,
+	ranap := ranap
+};
+
+private function fake_dlci_from_sapi(template (omit) SAPI sapi) return template (omit) OCT1
+{
+	if (istemplatekind(sapi, "omit")) {
+		return omit;
+	} else if (valueof(sapi) == sapi_3) {
+		return '03'O;
+	}
+	return '00'O;
+}
+
+private function f_handle_userData_RANAP(RAN_ConnHdlr client, RANAP_PDU ranap)
+runs on RAN_Emulation_CT {
+	/* decode + send decoded RANAP to client */
+	var template (omit) octetstring l3 := f_ranap_extract_l3(ranap);
+	if (istemplatekind(l3, "omit")) {
+		CLIENT.send(ranap) to client;
+	} else {
+		var template (omit) SAPI sapi := f_ranap_extract_sapi(ranap);
+		var template (omit) OCT1 dlci := fake_dlci_from_sapi(sapi);
+		if (g_ran_ops.role_ms) {
+			/* we are the MS, so any message to us must be MT */
+			var PDU_DTAP_MT mt := {
+				dlci := omit,
+				dtap := dec_PDU_ML3_NW_MS(valueof(l3))
+			};
+			if (isvalue(dlci)) {
+				mt.dlci := valueof(dlci)
+			}
+			CLIENT.send(mt) to client;
+		} else {
+			/* we are the Network, so any message to us must be MO */
+			var PDU_DTAP_MO mo := {
+				dlci := omit,
+				dtap := dec_PDU_ML3_MS_NW(valueof(l3))
+			};
+			if (isvalue(dlci)) {
+				mo.dlci := valueof(dlci)
+			}
+			CLIENT.send(mo) to client;
+		}
+	}
+}
+
+/* call-back type, to be provided by specific implementation; called when new SCCP connection
+ * arrives */
+type function RanapCreateCallback(RANAP_N_CONNECT_ind conn_ind, charstring id)
+runs on RAN_Emulation_CT return RAN_ConnHdlr;
+
+type function RanapUnitdataCallback(RANAP_PDU ranap)
+runs on RAN_Emulation_CT return template RANAP_PDU;
+
+private function CommonRanapUnitdataCallback(RANAP_PDU ranap)
+runs on RAN_Emulation_CT return template RANAP_PDU {
+	if (match(ranap, tr_RANAP_Paging(?, ?))) {
+		var RAN_ConnHdlr client := null;
+		/* extract IMSI and (if present) TMSI */
+		var IMSI imsi := ranap.initiatingMessage.value_.paging.protocolIEs[1].value_.permanentNAS_UE_ID.iMSI;
+		var template OCT4 tmsi := omit;
+		if (lengthof(ranap.initiatingMessage.value_.paging.protocolIEs) > 2 and
+		    ranap.initiatingMessage.value_.paging.protocolIEs[2].id == id_TemporaryUE_ID) {
+			var TemporaryUE_ID ue_id;
+			ue_id := ranap.initiatingMessage.value_.paging.protocolIEs[2].value_.temporaryUE_ID;
+			if (ischosen(ue_id.tMSI)) {
+				tmsi := ue_id.tMSI;
+			} else {
+				tmsi := ue_id.p_TMSI;
+			}
+		}
+		client := f_imsi_table_find(oct2hex(imsi), tmsi);
+		if (isvalue(client)) {
+			log("CommonRanapUnitdataCallback: IMSI/TMSI found in table, dispatching to ",
+				client);
+			CLIENT.send(ranap) to client;
+			return omit;
+		}
+		log("CommonRanapUnitdataCallback: IMSI/TMSI not found in table");
+	} else {
+		log("CommonRanapUnitdataCallback: Not a paging message");
+	}
+
+	/* ELSE: handle in user callback */
+	return g_ran_ops.ranap_unitdata_cb.apply(ranap);
+}
+
+private function f_ranap_l3_is_rr(RANAP_PDU ranap) return boolean {
+	var template (omit) SAPI sapi;
+	var template octetstring l3 := f_ranap_extract_l3(ranap);
+	return f_L3_is_rr(l3);
+}
+
+function f_ranap_reset(SCCP_PAR_Address peer, SCCP_PAR_Address own) runs on RAN_Emulation_CT {
+	timer T := 5.0;
+	var CN_DomainIndicator dom;
+	if (g_ran_ops.ps_domain) {
+		dom := ps_domain;
+	} else {
+		dom := cs_domain;
+	}
+
+	RANAP.send(ts_RANAP_UNITDATA_req(peer, own, ts_RANAP_Reset(ts_RanapCause_om_intervention, dom)));
+	T.start;
+	alt {
+	[] RANAP.receive(tr_RANAP_UNITDATA_ind(own, peer, tr_RANAP_ResetAck)) {
+		log("Received RESET-ACK in response to RESET, we're ready to go!");
+		}
+	[] as_reset_ack();
+	[] RANAP.receive { repeat };
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RESET-ACK after sending RESET");
+		mtc.stop;
+		}
+	}
+}
+#endif
 
 
 type enumerated RanProtocol {
-	RAN_PROTOCOL_BSSAP
+	RAN_PROTOCOL_BSSAP,
+	RAN_PROTOCOL_RANAP
 }
 
 type record RanOps {
 #ifdef RAN_EMULATION_BSSAP
 	BssmapCreateCallback create_cb optional,
 	BssmapUnitdataCallback unitdata_cb optional,
+#endif
+#ifdef RAN_EMULATION_RANAP
+	RanapCreateCallback ranap_create_cb optional,
+	RanapUnitdataCallback ranap_unitdata_cb optional,
+	boolean ps_domain,
 #endif
 	boolean decode_dtap,
 	boolean role_ms,
@@ -551,12 +699,24 @@ private altstep as_reset_ack() runs on RAN_Emulation_CT {
 #ifdef RAN_EMULATION_BSSAP
 	var BSSAP_N_UNITDATA_ind ud_ind;
 #endif
+#ifdef RAN_EMULATION_RANAP
+	var RANAP_N_UNITDATA_ind rud_ind;
+#endif
 #ifdef RAN_EMULATION_BSSAP
 	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset)) -> value ud_ind {
 		log("Respoding to inbound RESET with RESET-ACK");
 		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
 			   ts_BSSMAP_ResetAck));
 		repeat;
+	}
+#endif
+#ifdef RAN_EMULATION_RANAP
+	[] RANAP.receive(tr_RANAP_UNITDATA_ind(?, ?, tr_RANAP_Reset)) -> value rud_ind {
+		log("Respoding to inbound IuRESET with IuRESET-ACK");
+		var CN_DomainIndicator dom;
+		dom := rud_ind.userData.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator;
+		RANAP.send(ts_RANAP_UNITDATA_req(rud_ind.callingAddress, rud_ind.calledAddress,
+			   ts_RANAP_ResetAck(dom)));
 	}
 #endif
 }
@@ -666,7 +826,116 @@ private altstep as_main_bssap() runs on RAN_Emulation_CT {
 
 			}
 #else
-		[false] CLIENT.receive(false) {}
+		[false] CLIENT.receive {}
+#endif
+}
+
+private altstep as_main_ranap() runs on RAN_Emulation_CT {
+#ifdef RAN_EMULATION_RANAP
+		var RANAP_N_UNITDATA_ind rud_ind;
+		var RANAP_N_CONNECT_ind rconn_ind;
+		var RANAP_N_CONNECT_cfm rconn_cfm;
+		var RANAP_N_DATA_ind rdata_ind;
+		var RANAP_N_DISCONNECT_ind rdisc_ind;
+		var RANAP_Conn_Req creq;
+		var RANAP_PDU ranap;
+		var RAN_ConnHdlr vc_conn;
+
+		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
+		[] RANAP.receive(RANAP_N_UNITDATA_ind:?) -> value rud_ind {
+			/* Connectionless Procedures like RESET */
+			var template RANAP_PDU resp;
+			resp := CommonRanapUnitdataCallback(rud_ind.userData);
+			if (isvalue(resp)) {
+				RANAP.send(ts_RANAP_UNITDATA_req(rud_ind.callingAddress,
+								 rud_ind.calledAddress, resp));
+			}
+			}
+		/* SCCP -> Client: new connection from BSC */
+		[] RANAP.receive(RANAP_N_CONNECT_ind:?) -> value rconn_ind {
+			vc_conn := g_ran_ops.ranap_create_cb.apply(rconn_ind, g_ran_id);
+			/* store mapping between client components and SCCP connectionId */
+			f_conn_table_add(vc_conn, rconn_ind.connectionId);
+			/* handle user payload */
+			f_handle_userData_RANAP(vc_conn, rconn_ind.userData);
+			/* confirm connection establishment */
+			RANAP.send(ts_RANAP_CONNECT_res(rconn_ind.connectionId, omit));
+			}
+		/* SCCP -> Client: connection-oriented data in existing connection */
+		[] RANAP.receive(RANAP_N_DATA_ind:?) -> value rdata_ind {
+			vc_conn := f_comp_by_conn_id(rdata_ind.connectionId);
+			if (ispresent(rdata_ind.userData)) {
+				f_handle_userData_RANAP(vc_conn, rdata_ind.userData);
+			}
+			}
+		/* SCCP -> Client: disconnect of an existing connection */
+		[] RANAP.receive(RANAP_N_DISCONNECT_ind:?) -> value rdisc_ind {
+			vc_conn := f_comp_by_conn_id(rdisc_ind.connectionId);
+			if (ispresent(rdisc_ind.userData)) {
+				f_handle_userData_RANAP(vc_conn, rdisc_ind.userData);
+			}
+			/* notify client about termination */
+			var RAN_Conn_Prim prim := MSC_CONN_PRIM_DISC_IND;
+			CLIENT.send(prim) to vc_conn;
+			f_conn_table_del(rdisc_ind.connectionId);
+			/* TOOD: return confirm to other side? */
+			}
+		/* SCCP -> Client: connection confirm for outbound connection */
+		[] RANAP.receive(RANAP_N_CONNECT_cfm:?) -> value rconn_cfm {
+			vc_conn := f_comp_by_conn_id(rconn_cfm.connectionId);
+			var RAN_Conn_Prim prim := MSC_CONN_PRIM_CONF_IND;
+			CLIENT.send(prim) to vc_conn;
+			/* handle user payload */
+			if (ispresent(rconn_cfm.userData)) {
+				f_handle_userData_RANAP(vc_conn, rconn_cfm.userData);
+			}
+			}
+
+		[] CLIENT.receive(RANAP_PDU:?) -> value ranap sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* send it to dispatcher */
+			RANAP.send(ts_RANAP_DATA_req(conn_id, ranap));
+			}
+
+		/* Disconnect request client -> SCCP */
+		[] CLIENT.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ) -> sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			RANAP.send(ts_RANAP_DISC_req(conn_id, 0));
+			f_conn_table_del(conn_id);
+			}
+
+		/* BSSAP from client -> SCCP */
+		[] CLIENT.receive(RANAP_Conn_Req:?) -> value creq sender vc_conn {
+			var integer conn_id;
+			/* send to dispatcher */
+
+			if (f_comp_known(vc_conn) == false) {
+				/* unknown client, create new connection */
+				conn_id := f_gen_conn_id();
+
+				/* store mapping between client components and SCCP connectionId */
+				f_conn_table_add(vc_conn, conn_id);
+
+				RANAP.send(ts_RANAP_CONNECT_req(creq.addr_peer, creq.addr_own, conn_id,
+								creq.ranap));
+			} else {
+				/* known client, send via existing connection */
+				conn_id := f_conn_id_by_comp(vc_conn);
+				RANAP.send(ts_RANAP_DATA_req(conn_id, creq.ranap));
+			}
+
+			/* InitialL3 contains RR (PAG RESP) or MM (CM SRV REQ), we must increment
+			 * counter only on MM/CC/SS, but not on RR */
+			if (g_ran_ops.role_ms and not f_ranap_l3_is_rr(creq.ranap)) {
+				/* we have just sent the first MM message, increment the counter */
+				var integer idx := f_idx_by_comp(vc_conn);
+				ConnectionTable[idx].n_sd[0] := 1;
+				log("patch: N(SD) for ConnIdx ", idx, " set to 1");
+			}
+			}
+
+#else
+		[false] CLIENT.receive {}
 #endif
 }
 
@@ -730,6 +999,18 @@ private function f_xmit_raw_l3(integer sccp_conn_id, OCT1 dlci, octetstring l3_e
 		BSSAP.send(ts_BSSAP_DATA_req(sccp_conn_id, bssap));
 		}
 #endif
+#ifdef RAN_EMULATION_RANAP
+	case (RAN_PROTOCOL_RANAP) {
+		var RANAP_PDU ranap;
+		if (false /* SAPI */) {
+			var RANAP_IEs.SAPI sapi := sapi_0;
+			ranap := valueof(ts_RANAP_DirectTransferSAPI(l3_enc, sapi));
+		} else {
+			ranap := valueof(ts_RANAP_DirectTransfer(l3_enc));
+		}
+		RANAP.send(ts_RANAP_DATA_req(sccp_conn_id, ranap));
+		}
+#endif
 	}
 }
 
@@ -742,7 +1023,18 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 
 	if (isvalue(ops.sccp_addr_peer) and isvalue(ops.sccp_addr_local)) {
 		f_sleep(1.0);	/* HACK to wait for M3UA/ASP to be ACTIVE */
-		f_bssap_reset(ops.sccp_addr_peer, ops.sccp_addr_local);
+		select (g_ran_ops.protocol) {
+#ifdef RAN_EMULATION_BSSAP
+		case (RAN_PROTOCOL_BSSAP) {
+			f_bssap_reset(ops.sccp_addr_peer, ops.sccp_addr_local);
+			}
+#endif
+#ifdef RAN_EMULATION_RANAP
+		case (RAN_PROTOCOL_RANAP) {
+			f_ranap_reset(ops.sccp_addr_peer, ops.sccp_addr_local);
+			}
+#endif
+		}
 	}
 
 	while (true) {
@@ -756,6 +1048,7 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 
 		alt {
 		[g_ran_ops.protocol == RAN_PROTOCOL_BSSAP] as_main_bssap();
+		[g_ran_ops.protocol == RAN_PROTOCOL_RANAP] as_main_ranap();
 
 		[g_ran_ops.role_ms] CLIENT.receive(PDU_DTAP_MO:?) -> value dtap_mo sender vc_conn {
 			var integer idx := f_idx_by_comp(vc_conn);
@@ -822,6 +1115,7 @@ type port RAN_PROC_PT procedure {
 	inout RAN_register, RAN_register_imsi;
 } with { extension "internal" };
 
+#ifdef RAN_EMULATION_BSSAP
 /* CreateCallback that can be used as create_cb and will use the expectation table */
 function ExpectedCreateCallback(BSSAP_N_CONNECT_ind conn_ind, charstring id)
 runs on RAN_Emulation_CT return RAN_ConnHdlr {
@@ -854,6 +1148,42 @@ runs on RAN_Emulation_CT return RAN_ConnHdlr {
 	mtc.stop;
 	return ret;
 }
+#endif
+
+#ifdef RAN_EMULATION_RANAP
+/* CreateCallback that can be used as create_cb and will use the expectation table */
+function RanapExpectedCreateCallback(RANAP_N_CONNECT_ind conn_ind, charstring id)
+runs on RAN_Emulation_CT return RAN_ConnHdlr {
+	var RAN_ConnHdlr ret := null;
+	var template (omit) octetstring l3_info;
+	var integer i;
+
+	l3_info := f_ranap_extract_l3(conn_ind.userData);
+	if (istemplatekind(l3_info, "omit")) {
+		setverdict(fail, "N-CONNECT.ind without NAS payload");
+		mtc.stop;
+		return ret;
+	}
+
+	for (i := 0; i < sizeof(ExpectTable); i:= i+1) {
+		if (not ispresent(ExpectTable[i].l3_payload)) {
+			continue;
+		}
+		if (valueof(l3_info) == ExpectTable[i].l3_payload) {
+			ret := ExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			ExpectTable[i].l3_payload := omit;
+			ExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", l3_info, " handled at ", ret);
+			/* return the component reference */
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for incoming connection ", conn_ind);
+	mtc.stop;
+	return ret;
+}
+#endif
 
 private function f_create_expect(octetstring l3, RAN_ConnHdlr hdlr)
 runs on RAN_Emulation_CT {
