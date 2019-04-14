@@ -85,6 +85,11 @@ DIR=$BASEDIR/titan.ProtocolModules.SGsAP_13.2.0/src
 FILES="SGsAP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=../library/ranap
+FILES="RANAP_CommonDataTypes.asn RANAP_Constants.asn RANAP_Containers.asn RANAP_IEs.asn RANAP_PDU_Contents.asn RANAP_PDU_Descriptions.asn "
+FILES+="RANAP_Types.ttcn RANAP_Templates.ttcn RANAP_CodecPort.ttcn RANAP_EncDec.cc "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn MNCC_Types.ttcn MNCC_EncDec.cc MNCC_CodecPort.ttcn mncc.h MNCC_Emulation.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc GSUP_Types.ttcn GSUP_Emulation.ttcn "

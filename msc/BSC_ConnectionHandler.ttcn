@@ -10,6 +10,12 @@ import from BSSAP_Types all;
 import from RAN_Emulation all;
 import from BSSMAP_Templates all;
 
+import from RANAP_Constants all;
+import from RANAP_IEs all;
+import from RANAP_PDU_Contents all;
+import from RANAP_PDU_Descriptions all;
+import from RANAP_Templates all;
+
 import from GSUP_Types all;
 import from GSUP_Emulation all;
 
@@ -76,8 +82,28 @@ type record BSC_ConnHdlrPars {
 	boolean sgsap_enable,
 	boolean gsup_enable,
 	integer ran_idx,
-	boolean use_umts_aka
+	boolean use_umts_aka,
+	boolean ran_is_geran
 };
+
+private function imsi_hex2oct(hexstring imsi) return octetstring {
+	var hexstring tmp := ''H;
+	var octetstring ret;
+	var integer i;
+
+	/* swap nibbles and pad with F if insufficient input nibbles */
+	for (i := 0; i < lengthof(imsi); i := i+1) {
+		if (i+1 < lengthof(imsi)) {
+			tmp := tmp & imsi[i+1];
+		} else {
+			tmp := tmp & 'F'H;
+		}
+		tmp := tmp & imsi[i];
+		i := i+1;
+	}
+	ret := hex2oct(tmp);
+	return ret;
+}
 
 /* get a one-octet bitmaks of supported algorithms based on Classmark information */
 function f_alg_mask_from_cm(BSSMAP_IE_ClassmarkInformationType2 cm2) return OCT1 {
@@ -174,10 +200,31 @@ runs on RAN_Emulation_CT return template PDU_BSSAP {
 	return resp;
 }
 
+private function RncUnitdataCallback(RANAP_PDU ranap)
+runs on RAN_Emulation_CT return template RANAP_PDU {
+	var template RANAP_PDU resp := omit;
+
+	log("RANAP_RncUnitdataCallback");
+	/* answer all RESET with RESET ACK */
+	if (match(ranap, tr_RANAP_Reset)) {
+		log("RANAP_RncUnitdataCallback: Responding to RESET with RESET-ACK");
+		var CN_DomainIndicator dom;
+		dom := ranap.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator;
+		resp := ts_RANAP_ResetAck(dom);
+	}
+
+	/* FIXME: Handle paging, etc. */
+	return resp;
+}
+
+
 const RanOps BSC_RanOps := {
 	/* Create call-back for inbound connections from MSC (hand-over) */
 	create_cb := refers(RAN_Emulation.ExpectedCreateCallback),
 	unitdata_cb := refers(BscUnitdataCallback),
+	ranap_create_cb := refers(RAN_Emulation.RanapExpectedCreateCallback),
+	ranap_unitdata_cb := refers(RncUnitdataCallback),
+	ps_domain := false,
 	decode_dtap := true,
 	role_ms := true,
 	protocol := RAN_PROTOCOL_BSSAP,
@@ -206,6 +253,55 @@ runs on BSC_ConnHdlr {
 	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3);
 	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_peer, g_pars.sccp_addr_own,
 				     valueof(ts_BSSMAP_ComplL3(g_pars.cell_id, l3_enc))));
+	alt {
+	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND) {}
+	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+			setverdict(fail, "DISC.ind from SCCP");
+			mtc.stop;
+		}
+	}
+}
+
+/* generate Iu LAI from BSSAP CGI */
+private function f_IuLAI_from_BssmapCI(BSSMAP_IE_CellIdentifier ci) return LAI {
+	var LAI lai;
+	if (ischosen(ci.cellIdentification.cI_CGI)) {
+		lai.pLMNidentity := ci.cellIdentification.cI_CGI.mcc_mnc;
+		lai.lAC := ci.cellIdentification.cI_CGI.lac;
+	} else if (ischosen(ci.cellIdentification.cI_SAI)) {
+		lai.pLMNidentity := ci.cellIdentification.cI_SAI.mcc_mnc;
+		lai.lAC := ci.cellIdentification.cI_SAI.lac;
+	} else if (ischosen(ci.cellIdentification.ci_LAC_RNC_CI)) {
+		lai.pLMNidentity := ci.cellIdentification.ci_LAC_RNC_CI.mcc_mnc;
+		lai.lAC := ci.cellIdentification.ci_LAC_RNC_CI.lac;
+	} else {
+		mtc.stop;
+	}
+	lai.iE_Extensions := omit;
+	return lai;
+}
+
+/* like f_bssap_compl_l3() but for 3G */
+function f_ranap_initial_ue(PDU_ML3_MS_NW l3)
+runs on BSC_ConnHdlr {
+	log("Sending InitialUE: ", l3);
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3);
+	var RANAP_PDU ranap;
+	var LAI lai := f_IuLAI_from_BssmapCI(g_pars.cell_id);
+	var SAI sai := {
+		pLMNidentity := lai.pLMNidentity,
+		lAC := lai.lAC,
+		sAC := '0000'O, /* FIXME */
+		iE_Extensions := omit
+	};
+	var IuSignallingConnectionIdentifier sigc_id := int2bit(23, 24);
+	var GlobalRNC_ID grnc_id := {
+		pLMNidentity := lai.pLMNidentity,
+		rNC_ID := 2342 /* FIXME */
+	};
+
+	ranap := valueof(ts_RANAP_initialUE_CS(lai, sai, l3_enc, sigc_id, grnc_id));
+	BSSAP.send(ts_RANAP_Conn_Req(g_pars.sccp_addr_peer, g_pars.sccp_addr_own, ranap));
 	alt {
 	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND) {}
 	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
@@ -255,7 +351,11 @@ runs on BSC_ConnHdlr {
 	}
 
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
-	f_bssap_compl_l3(l3_info);
+	if (g_pars.ran_is_geran) {
+		f_bssap_compl_l3(l3_info);
+	} else {
+		f_ranap_initial_ue(l3_info);
+	}
 
 	f_mm_common();
 	if (g_pars.net.expect_ciph) {
@@ -329,21 +429,51 @@ function f_mm_auth() runs on BSC_ConnHdlr
 function f_mm_common() runs on BSC_ConnHdlr
 {
 	f_mm_auth();
-	if (g_pars.net.expect_ciph) {
-		var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2);
-		var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
-		alt {
-		[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) {
-			var OCT1 a5_chosen := f_best_alg_from_mask(a5_intersect);
-			var integer a5_nr := f_alg_from_mask(a5_chosen);
-			BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(a5_nr+1, 1)));
+	if (g_pars.ran_is_geran) {
+		if (g_pars.net.expect_ciph) {
+			var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2);
+			var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
+			alt {
+			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) {
+				var OCT1 a5_chosen := f_best_alg_from_mask(a5_intersect);
+				var integer a5_nr := f_alg_from_mask(a5_chosen);
+				BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(a5_nr+1, 1)));
+				}
+			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
+				setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
+				mtc.stop;
+				}
 			}
-		[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
-			setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
+			/* FIXME: Send the best available algorithm */
+		}
+	} else { /* UTRAN */
+		alt {
+		[g_pars.net.expect_ciph] BSSAP.receive(tr_RANAP_SecurityModeCmdEnc(uia_algs := ?,
+										   uia_key := oct2bit(g_pars.vec.ik),
+										   key_sts := ?,
+										   uea_algs := ?,
+										   uea_key := oct2bit(g_pars.vec.ck))) {
+			var IntegrityProtectionAlgorithm uia_chosen := 0; /*standard_UMTS_integrity_algorithm_UIA1*/
+			var EncryptionAlgorithm uea_chosen := 1; /*standard_UMTS_encryption_algorith_UEA1*/
+			BSSAP.send(ts_RANAP_SecurityModeCompleteEnc(uia_chosen, uea_chosen));
+			BSSAP.receive(tr_RANAP_CommonId(imsi_hex2oct(g_pars.imsi)));
+			}
+		[g_pars.net.expect_ciph] BSSAP.receive(tr_RANAP_SecurityModeCmdEnc(?,?,?,?,?)) {
+			setverdict(fail, "Invalid SecurityModeCommand (ciphering case)");
+			mtc.stop;
+			}
+		[not g_pars.net.expect_ciph] BSSAP.receive(tr_RANAP_SecurityModeCmd(uia_algs := ?,
+										    uia_key := oct2bit(g_pars.vec.ik),
+										    key_sts := ?)) {
+			var IntegrityProtectionAlgorithm uia_chosen := 0; /*standard_UMTS_integrity_algorithm_UIA1;*/
+			BSSAP.send(ts_RANAP_SecurityModeComplete(uia_chosen));
+			BSSAP.receive(tr_RANAP_CommonId(imsi_hex2oct(g_pars.imsi)));
+			}
+		[not g_pars.net.expect_ciph] BSSAP.receive(tr_RANAP_SecurityModeCmd(?,?,?)) {
+			setverdict(fail, "Invalid SecurityModeCommand (non-ciphering case)");
 			mtc.stop;
 			}
 		}
-		/* FIXME: Send the best available algorithm */
 	}
 }
 
@@ -362,10 +492,13 @@ runs on BSC_ConnHdlr {
 	f_create_gsup_expect(hex2str(g_pars.imsi));
 
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
-	f_bssap_compl_l3(l3_lu);
-
-	if (g_pars.send_early_cm) {
-		BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+	if (g_pars.ran_is_geran) {
+		f_bssap_compl_l3(l3_lu);
+		if (g_pars.send_early_cm) {
+			BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+		}
+	} else {
+		f_ranap_initial_ue(l3_lu);
 	}
 
 	f_mm_common();
@@ -544,27 +677,44 @@ runs on BSC_ConnHdlr {
 		MGCP.send(mgcp_resp);
 		}
 
-	var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
-		valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
 
-	interleave {
-	/* Second MGCP CRCX (this time for MSS/CN side) */
-	[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
-		var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-		/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
-		MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
+	if (g_pars.ran_is_geran) {
+		var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+			valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
+
+		interleave {
+		/* Second MGCP CRCX (this time for MSS/CN side) */
+		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
+			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
+			MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
+			}
+		/* expect the MSC to trigger a BSSMAP ASSIGNMENT */
+		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+			var BSSMAP_IE_SpeechCodec codec;
+
+			tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
+			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
+
+			BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+			}
 		}
+	} else {
+		var template TransportLayerAddress rab_tla := ? /* FIXME: encode the mgw_rtp_ip_bss/mgw_rtp_port_bss */
+		var template RAB_SetupOrModifyList rab_sml := tr_RAB_SML(rab_id := ?, tla := rab_tla, binding_id := ?);
 
-	/* expect the MSC to trigger a BSSMAP ASSIGNMENT */
-	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
-		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
-		var BSSMAP_IE_SpeechCodec codec;
-
-		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
-		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
-
-		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+		interleave {
+		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
+			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
+			MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
+			}
+		[] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
+			//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
+			}
 		}
 	}
 
@@ -575,7 +725,11 @@ runs on BSC_ConnHdlr {
 
 function f_expect_paging(boolean by_tmsi := true)
 runs on BSC_ConnHdlr {
-	BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	if (g_pars.ran_is_geran) {
+		BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi));
+	} else {
+		BSSAP.receive(tr_RANAP_Paging(cs_domain, imsi_hex2oct(g_pars.imsi), ?));
+	}
 }
 
 function f_mt_call_establish(inout CallParameters cpars)
@@ -649,27 +803,51 @@ runs on BSC_ConnHdlr {
 		}
 	}
 
-	var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
-		valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
-	interleave {
-	/* Second MGCP CRCX (this time for MSS/CN side) */
-	[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
-		var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+	if (g_pars.ran_is_geran) {
+		var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+			valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
 
-		/* Alerting */
-		MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
-		}
+		interleave {
+		/* Second MGCP CRCX (this time for MSS/CN side) */
+		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
+			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
 
-	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
+			/* Alerting */
+			MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
+			}
+
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
+			}
+		/* expect AoIP IP/Port to match what we returned in CRCX_ACK above */
+		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+			var BSSMAP_IE_SpeechCodec codec;
+			tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
+			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
+			BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+			}
 		}
-	/* expect AoIP IP/Port to match what we returned in CRCX_ACK above */
-	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
-		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
-		var BSSMAP_IE_SpeechCodec codec;
-		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
-		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
-		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+	} else {
+		var template TransportLayerAddress rab_tla := ?; /* FIXME: encode the mgw_rtp_ip_bss/mgw_rtp_port_bss */
+		var template RAB_SetupOrModifyList rab_sml := tr_RAB_SML(rab_id := ?, tla := rab_tla, binding_id := ?);
+
+		interleave {
+		/* Second MGCP CRCX (this time for MSS/CN side) */
+		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
+			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+
+			/* Alerting */
+			MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
+			}
+
+		[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
+			}
+
+		[] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
+			//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
+			}
 		}
 	}
 
@@ -688,12 +866,6 @@ runs on BSC_ConnHdlr {
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
 	var boolean respond_to_dlcx;
-	var template PDU_BSSAP t_clear := tr_BSSMAP_ClearCommand;
-
-	if (is_csfb) {
-		t_clear := tr_BSSMAP_ClearCommandCSFB;
-	}
-
 	MNCC.send(ts_MNCC_DISC_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
 
@@ -711,18 +883,43 @@ runs on BSC_ConnHdlr {
 
 	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
 
-	/* clearing of radio channel */
-	interleave {
-	[] BSSAP.receive(t_clear) {
-		BSSAP.send(ts_BSSMAP_ClearComplete);
-		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+		/* clearing of radio channel */
+	if (g_pars.ran_is_geran) {
+		var template PDU_BSSAP t_clear := tr_BSSMAP_ClearCommand;
+		if (is_csfb) {
+			t_clear := tr_BSSMAP_ClearCommandCSFB;
 		}
-	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
-		if (respond_to_dlcx) {
-			/* TODO: For one or all connections on EP? */
-			MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-			f_create_mgcp_delete_ep(cpars.mgcp_ep);
+
+		interleave {
+		[] BSSAP.receive(t_clear) {
+			BSSAP.send(ts_BSSMAP_ClearComplete);
+			BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+			}
+		[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+			if (respond_to_dlcx) {
+				/* TODO: For one or all connections on EP? */
+				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+				f_create_mgcp_delete_ep(cpars.mgcp_ep);
+			}
+			}
 		}
+	} else {
+		var template RANAP_PDU t_iurel := tr_RANAP_IuReleaseCommand(?);
+		if (is_csfb) {
+			/* FIXME! */
+		}
+		interleave {
+		[] BSSAP.receive(t_iurel) {
+			BSSAP.send(ts_RANAP_IuReleaseComplete);
+			BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+			}
+		[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+			if (respond_to_dlcx) {
+				/* TODO: For one or all connections on EP? */
+				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+				f_create_mgcp_delete_ep(cpars.mgcp_ep);
+			}
+			}
 		}
 	}
 
@@ -809,6 +1006,7 @@ runs on BSC_ConnHdlr {
 
 	setverdict(pass);
 }
+
 /* expect a clear command */
 altstep as_clear_cmd_compl_disc(float t := 5.0) runs on BSC_ConnHdlr {
 	var PDU_BSSAP bssap;
@@ -830,12 +1028,34 @@ altstep as_clear_cmd_compl_disc(float t := 5.0) runs on BSC_ConnHdlr {
 		}
 }
 
+/* expect a IuReleaseCommand; Confirm that; expect SCCP-level N-DISCONNET.ind */
+altstep as_iu_release_compl_disc(float t := 5.0) runs on BSC_ConnHdlr {
+	var RANAP_PDU ranap;
+	[] BSSAP.receive(tr_RANAP_IuReleaseCommand(?)) {
+		BSSAP.send(ts_RANAP_IuReleaseComplete);
+		alt {
+		[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+			setverdict(pass);
+			}
+		[] BSSAP.receive {
+			setverdict(fail, "Unexpected RANAP while waiting for SCCP Release ");
+			mtc.stop;
+			}
+		}
+		}
+	[] BSSAP.receive(RANAP_PDU:?) -> value ranap{
+		setverdict(fail, "Unexpected RANAP while waiting for IuReleaseCommand", ranap);
+		mtc.stop;
+		}
+}
+
 function f_expect_clear(float t := 5.0) runs on BSC_ConnHdlr {
 	timer T := t;
 
 	T.start;
 	alt {
-	[] as_clear_cmd_compl_disc(t) { }
+	[g_pars.ran_is_geran] as_clear_cmd_compl_disc(t) { }
+	[not g_pars.ran_is_geran] as_iu_release_compl_disc(t) { }
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for ClearCommand/Release");
 		mtc.stop;
