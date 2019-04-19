@@ -381,12 +381,60 @@ testcase TC_mo_success_rel_sip() runs on test_CT {
 	vc_conn.done;
 }
 
+/* SETUP followed by DISC results in lingering B-leg (OS#3518)*/
+private function f_TC_mo_setup_disc_late_rtp(charstring id) runs on ConnHdlr {
+	var CallPars cp := valueof(t_CallPars(true));
+	f_CallPars_compute(cp);
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	f_sleep(3.0);
+
+	var MNCC_number dst := valueof(ts_MNCC_number(cp.called, GSM48_TON_UNKNOWN));
+	var MNCC_number src := valueof(ts_MNCC_number(cp.calling, GSM48_TON_UNKNOWN));
+	var template SipAddr sip_addr_gsm := tr_SipAddr_from_val(cp.comp.sip_url_gsm);
+	var template SipAddr sip_addr_ext := tr_SipAddr_from_val(cp.comp.sip_url_ext);
+
+	f_create_sip_expect(cp.comp.sip_url_ext.addr.nameAddr.addrSpec);
+
+	/* MSC -> OSC: MSC sends SETUP.ind after CC SETUP was received from MS */
+	MNCC.send(ts_MNCC_SETUP_ind(cp.mncc_call_id, dst, src, "262420123456789"));
+
+	/* MSC -> OSC: Simulate a CC DISCONNET from the MT user *before* responding to the RTP_CREATE */
+	MNCC.send(ts_MNCC_DISC_ind(cp.mncc_call_id, ts_MNCC_cause(0)));
+
+	/* MSC <- OSC: Create GSM side RTP socket (too late) */
+	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id)) {
+		var MNCC_PDU mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
+		mncc.u.rtp.payload_msg_type := oct2int('0300'O);
+		MNCC.send(mncc);	/* FIXME: port/ip */
+		}
+
+	/* OSC -> SIP: We should never receive INVITE */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] SIP.receive(tr_SIP_INVITE(?, sip_addr_gsm, sip_addr_ext, ?, ?)) {
+		setverdict(fail, "Received unexpected INVITE");
+		}
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+testcase TC_mo_setup_disc_late_rtp() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+	pars := valueof(t_Pars);
+	vc_conn := f_start_handler(refers(f_TC_mo_setup_disc_late_rtp), pars);
+	vc_conn.done;
+}
 
 control {
 	execute( TC_mt_success_rel_gsm() );
 	execute( TC_mt_success_rel_sip() );
 	execute( TC_mo_success_rel_gsm() );
 	execute( TC_mo_success_rel_sip() );
+	execute( TC_mo_setup_disc_late_rtp() );
 }
 
 
