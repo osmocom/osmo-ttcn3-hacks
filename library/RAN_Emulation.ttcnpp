@@ -101,6 +101,17 @@ type record PDU_DTAP_MT {
 	PDU_ML3_NW_MS		dtap
 }
 
+type record PDU_DTAP_PS_MO {
+	OCT1			dlci optional,
+	boolean			skip_seq_patching optional,
+	PDU_L3_MS_SGSN          dtap
+}
+
+type record PDU_DTAP_PS_MT {
+	OCT1			dlci optional,
+	PDU_L3_SGSN_MS          dtap
+}
+
 template PDU_DTAP_MT ts_PDU_DTAP_MT(template PDU_ML3_NW_MS dtap, template OCT1 dlci := omit) := {
 	dlci := dlci,
 	dtap := dtap
@@ -118,6 +129,29 @@ template PDU_DTAP_MT tr_PDU_DTAP_MT(template PDU_ML3_NW_MS dtap, template OCT1 d
 }
 
 template PDU_DTAP_MO tr_PDU_DTAP_MO(template PDU_ML3_MS_NW dtap, template OCT1 dlci := *) := {
+	dlci := dlci,
+	skip_seq_patching := ?,
+	dtap := dtap
+}
+
+template (value) PDU_DTAP_PS_MT ts_PDU_DTAP_PS_MT(template (value) PDU_L3_SGSN_MS dtap, template (omit) OCT1 dlci := omit) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+template (value) PDU_DTAP_PS_MO ts_PDU_DTAP_PS_MO(template (value) PDU_L3_MS_SGSN dtap, template (value) OCT1 dlci := '00'O,
+						  boolean skip_seq_patching := false) := {
+	dlci := dlci,
+	skip_seq_patching := skip_seq_patching,
+	dtap := dtap
+}
+
+template PDU_DTAP_PS_MT tr_PDU_DTAP_PS_MT(template PDU_L3_SGSN_MS dtap, template OCT1 dlci := *) := {
+	dlci := dlci,
+	dtap := dtap
+}
+
+template PDU_DTAP_PS_MO tr_PDU_DTAP_PS_MO(template PDU_L3_MS_SGSN dtap, template OCT1 dlci := *) := {
 	dlci := dlci,
 	skip_seq_patching := ?,
 	dtap := dtap
@@ -142,6 +176,7 @@ type port RAN_Conn_PT message {
 #endif
 		/* direct DTAP messages from/to clients */
 		PDU_DTAP_MO, PDU_DTAP_MT,
+		PDU_DTAP_PS_MO, PDU_DTAP_PS_MT,
 		/* misc indications / requests between SCCP and client */
 		RAN_Conn_Prim;
 } with { extension "internal" };
@@ -562,24 +597,46 @@ runs on RAN_Emulation_CT {
 		var template (omit) OCT1 dlci := fake_dlci_from_sapi(sapi);
 		if (g_ran_ops.role_ms) {
 			/* we are the MS, so any message to us must be MT */
-			var PDU_DTAP_MT mt := {
-				dlci := omit,
-				dtap := dec_PDU_ML3_NW_MS(valueof(l3))
-			};
-			if (isvalue(dlci)) {
-				mt.dlci := valueof(dlci)
+			if (g_ran_ops.ps_domain) {
+				var PDU_DTAP_PS_MT mt := {
+					dlci := omit,
+					dtap := dec_PDU_L3_SGSN_MS(valueof(l3))
+				};
+				if (isvalue(dlci)) {
+					mt.dlci := valueof(dlci);
+				}
+				CLIENT.send(mt) to client;
+			} else {
+				var PDU_DTAP_MT mt := {
+					dlci := omit,
+					dtap := dec_PDU_ML3_NW_MS(valueof(l3))
+				};
+				if (isvalue(dlci)) {
+					mt.dlci := valueof(dlci)
+				}
+				CLIENT.send(mt) to client;
 			}
-			CLIENT.send(mt) to client;
 		} else {
 			/* we are the Network, so any message to us must be MO */
-			var PDU_DTAP_MO mo := {
-				dlci := omit,
-				dtap := dec_PDU_ML3_MS_NW(valueof(l3))
-			};
-			if (isvalue(dlci)) {
-				mo.dlci := valueof(dlci)
+			if (g_ran_ops.ps_domain) {
+				var PDU_DTAP_PS_MO mo := {
+					dlci := omit,
+					dtap := dec_PDU_L3_MS_SGSN(valueof(l3))
+				};
+				if (isvalue(dlci)) {
+					mo.dlci := valueof(dlci);
+				}
+				CLIENT.send(mo) to client;
+			} else {
+				var PDU_DTAP_MO mo := {
+					dlci := omit,
+					dtap := dec_PDU_ML3_MS_NW(valueof(l3))
+				};
+				if (isvalue(dlci)) {
+					mo.dlci := valueof(dlci)
+				}
+				CLIENT.send(mo) to client;
 			}
-			CLIENT.send(mo) to client;
 		}
 	}
 }
@@ -904,6 +961,8 @@ private altstep as_main_ranap() runs on RAN_Emulation_CT {
 		var RANAP_Conn_Req creq;
 		var RANAP_PDU ranap;
 		var RAN_ConnHdlr vc_conn;
+		var PDU_DTAP_PS_MO ps_mo;
+		var PDU_DTAP_PS_MT ps_mt;
 
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
 		[] RANAP.receive(RANAP_N_UNITDATA_ind:?) -> value rud_ind {
@@ -997,6 +1056,25 @@ private altstep as_main_ranap() runs on RAN_Emulation_CT {
 				log("patch: N(SD) for ConnIdx ", idx, " set to 1");
 			}
 			}
+
+		[g_ran_ops.role_ms] CLIENT.receive(PDU_DTAP_PS_MO:?) -> value ps_mo sender vc_conn {
+			var integer idx := f_idx_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_L3_MS_SGSN(ps_mo.dtap);
+			/* patch correct L3 send sequence number N(SD) into l3_enc */
+			if (ps_mo.skip_seq_patching == false) {
+				//f_ML3_patch_seq(ConnectionTable[idx], ps_mo.dtap, l3_enc);
+			}
+			f_xmit_raw_l3(ConnectionTable[idx].sccp_conn_id, ps_mo.dlci, l3_enc);
+			}
+
+		[not g_ran_ops.role_ms] CLIENT.receive(PDU_DTAP_PS_MT:?) -> value ps_mt sender vc_conn {
+			var integer idx := f_idx_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_L3_SGSN_MS(ps_mt.dtap);
+			f_xmit_raw_l3(ConnectionTable[idx].sccp_conn_id, ps_mt.dlci, l3_enc);
+			}
+
 
 #else
 		[false] CLIENT.receive {}
