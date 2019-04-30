@@ -24,7 +24,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -p -l -f $*
+ttcn3_makefilegen -p -l -U 5 -f $*
 
 TITAN_VERSION=$(ttcn3_makefilegen -v 2>&1 |grep "Product number" |cut --delimiter="/" -f 2-| sed -e "s/[A-Z ]//g")
 
@@ -60,5 +60,5 @@ if [ "x$USE_CCACHE" = "x1" ]; then
 	sed -i -e 's/^CXX = g++ $/CXX = env CCACHE_SLOPPINESS=time_macros ccache g++/' Makefile
 	# Append the -D option to compiler flags. This option disables timestamps
 	# inside comments in the generated C++ code which interfere with ccache.
-	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/&-D/' Makefile
+	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -D/' Makefile
 fi
