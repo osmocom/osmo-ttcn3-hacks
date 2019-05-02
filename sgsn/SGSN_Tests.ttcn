@@ -387,28 +387,40 @@ function f_send_l3_gmm_llc(template PDU_L3_MS_SGSN l3_mo, integer gb_index := 0)
 	f_send_llc(ts_LLC_UI(l3_enc, sapi, '0'B, n_u));
 }
 
-altstep as_mm_identity() runs on BSSGP_ConnHdlr {
+altstep as_mm_identity(integer gb_idx := 0) runs on BSSGP_ConnHdlr {
 	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
-	[] BSSGP[0].receive(tr_BD_L3_MT(tr_GMM_ID_REQ('001'B))) {
+	[] BSSGP[gb_idx].receive(tr_BD_L3_MT(tr_GMM_ID_REQ('001'B))) {
 		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
-		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi), gb_idx);
 		repeat;
 	}
-	[] BSSGP[0].receive(tr_BD_L3_MT(tr_GMM_ID_REQ('010'B))) {
+	[] BSSGP[gb_idx].receive(tr_BD_L3_MT(tr_GMM_ID_REQ('010'B))) {
 		mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
-		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi), gb_idx);
 		repeat;
 	}
+}
+
+/* receive a L3 (GMM/SM) message over whatever is the appropriate lower-layer bearer */
+function f_receive_l3(template PDU_L3_SGSN_MS rx_tpl := ?, integer gb_idx := 0)
+runs on BSSGP_ConnHdlr return PDU_L3_SGSN_MS {
+	var BssgpDecoded bd;
+	var PDU_L3_SGSN_MS l3_mt;
+	alt {
+	[] BSSGP[gb_idx].receive(tr_BD_L3_MT(rx_tpl)) -> value bd {
+		l3_mt := bd.l3_mt;
+		}
+	}
+	return l3_mt;
 }
 
 /* perform GMM authentication (if expected).
  * Note, for umts_aka_challenge to work, the revisionLevelIndicatior needs to
  * be 1 to mark R99 capability, in the GMM Attach Request, see f_gmm_attach(). */
-function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres := false) runs on BSSGP_ConnHdlr {
-	var BssgpDecoded bd;
+function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres := false, integer gb_idx := 0) runs on BSSGP_ConnHdlr {
 	var PDU_L3_MS_SGSN l3_mo;
 	var PDU_L3_SGSN_MS l3_mt;
-	var default di := activate(as_mm_identity());
+	var default di := activate(as_mm_identity(gb_idx));
 	if (g_pars.net.expect_auth) {
 		var GSUP_IE auth_tuple;
 		var template AuthenticationParameterAUTNTLV autn;
@@ -437,13 +449,13 @@ function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres
 								     g_pars.vec.kc));
 			log("GSUP sends only 2G auth tuple", auth_tuple);
 		}
+
 		GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
 		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
 
 		var template PDU_L3_SGSN_MS auth_ciph_req := tr_GMM_AUTH_REQ(g_pars.vec.rand);
 		auth_ciph_req.msgs.gprs_mm.authenticationAndCipheringRequest.authenticationParameterAUTN := autn;
-		BSSGP[0].receive(tr_BD_L3_MT(auth_ciph_req)) -> value bd;
-		l3_mt := bd.l3_mt;
+		l3_mt := f_receive_l3(auth_ciph_req, gb_idx);
 		var BIT4 ac_ref := l3_mt.msgs.gprs_mm.authenticationAndCipheringRequest.acReferenceNumber.valueField;
 		var template PDU_L3_MS_SGSN auth_ciph_resp := ts_GMM_AUTH_RESP_2G(ac_ref, g_pars.vec.sres);
 
@@ -465,7 +477,7 @@ function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres
 			l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
 						valueof(ts_MI_IMEISV_TLV(g_pars.imei & '0'H));
 		}
-		f_send_l3_gmm_llc(l3_mo);
+		f_send_l3_gmm_llc(l3_mo, gb_idx);
 	} else {
 		/* wait for identity procedure */
 		f_sleep(1.0);
@@ -559,10 +571,10 @@ private function f_gmm_gsup_lu_isd() runs on BSSGP_ConnHdlr {
 	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
 }
 
-private function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres) runs on BSSGP_ConnHdlr {
-	var BssgpDecoded bd;
+friend function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres, integer gb_idx := 0) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 	var template PDU_L3_MS_SGSN attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit);
+	var PDU_L3_SGSN_MS l3_mt;
 
 	/* indicate R99 capability of the MS to enable UMTS AKA in presence of
 	 * 3G auth vectors */
@@ -571,16 +583,16 @@ private function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres
 	 * revisionLevelIndicatior is at the wrong place! */
 	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.solSACapability := '0'B;
 
-	f_send_l3_gmm_llc(attach_req);
-	f_gmm_auth(umts_aka_challenge, force_gsm_sres);
+	f_send_l3_gmm_llc(attach_req, gb_idx);
+	f_gmm_auth(umts_aka_challenge, force_gsm_sres, gb_idx);
 	/* Expect SGSN to perform LU with HLR */
 	f_gmm_gsup_lu_isd();
 
-	BSSGP[0].receive(tr_BD_L3_MT(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?))) -> value bd {
-		f_process_attach_accept(bd.l3_mt.msgs.gprs_mm.attachAccept);
-	}
+	l3_mt := f_receive_l3(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?), gb_idx);
+	f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
+
 	/* FIXME: Extract P-TMSI, if any. Only send Complete if necessary */
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL, gb_idx);
 }
 
 private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
