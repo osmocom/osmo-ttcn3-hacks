@@ -133,6 +133,7 @@ type port RAN_Conn_PT message {
 		RAN_Conn_Prim;
 } with { extension "internal" };
 
+type uint2_t N_Sd_Array[4];
 
 /* represents a single BSSAP connection over SCCP */
 type record ConnectionData {
@@ -146,7 +147,7 @@ type record ConnectionData {
 	/* CIC that has been used for voice of this channel (BSC side) */
 	integer		cic optional,
 	/* array of N(SD) values for MO DTAP messages, indexed by discriminator */
-	uint2_t		n_sd[4]
+	N_Sd_Array	n_sd
 }
 
 type record ImsiMapping {
@@ -671,28 +672,51 @@ private function f_L3_is_rr(template octetstring l3) return boolean {
 	return false;
 }
 
-/* patch N(SD) into enc_l3, according to 24.007 11.2.3.2 */
-function f_ML3_patch_seq(inout ConnectionData cd, in PDU_ML3_MS_NW dtap, inout octetstring enc_l3) {
+function f_next_n_sd(inout N_Sd_Array n_sd, in integer n_sd_idx) return uint2_t {
 	var uint2_t seq_nr;
-	if (ischosen(dtap.msgs.cc) or ischosen(dtap.msgs.mm) or ischosen(dtap.msgs.ss)) {
-		seq_nr := cd.n_sd[0];
-		cd.n_sd[0] := (cd.n_sd[0] + 1) mod 4;
-	} else if (ischosen(dtap.msgs.gcc)) {
-		seq_nr := cd.n_sd[1];
-		cd.n_sd[1] := (cd.n_sd[1] + 1) mod 2;
-	} else if (ischosen(dtap.msgs.bcc)) {
-		seq_nr := cd.n_sd[2];
-		cd.n_sd[2] := (cd.n_sd[2] + 1) mod 2;
-	} else if (ischosen(dtap.msgs.loc)) {
-		seq_nr := cd.n_sd[3];
-		cd.n_sd[3] := (cd.n_sd[3] + 1) mod 2;
+	if (n_sd_idx == 0) {
+		seq_nr := n_sd[0];
+		n_sd[0] := (n_sd[0] + 1) mod 4;
+	} else if (n_sd_idx >= 1 and n_sd_idx <= 3) {
+		seq_nr := n_sd[n_sd_idx];
+		n_sd[n_sd_idx] := (n_sd[n_sd_idx] + 1) mod 2;
 	} else {
 		/* no sequence number to patch */
-		return;
+		seq_nr := 0;
 	}
+	return seq_nr;
+}
+
+/* patch N(SD) into enc_l3, according to 24.007 11.2.3.2 */
+function f_ML3_patch_seq_nr(in uint2_t seq_nr, inout octetstring enc_l3) {
 	log("patching N(SD)=", seq_nr, " into dtap ", enc_l3);
 	enc_l3[1] := (enc_l3[1] and4b '3f'O) or4b bit2oct(int2bit(seq_nr, 8) << 6);
 	log("patched enc_l3: ", enc_l3);
+}
+
+function f_ML3_n_sd_idx(in PDU_ML3_MS_NW dtap) return integer {
+	var uint2_t seq_nr;
+	if (ischosen(dtap.msgs.cc) or ischosen(dtap.msgs.mm) or ischosen(dtap.msgs.ss)) {
+		return 0;
+	} else if (ischosen(dtap.msgs.gcc)) {
+		return 1;
+	} else if (ischosen(dtap.msgs.bcc)) {
+		return 2;
+	} else if (ischosen(dtap.msgs.loc)) {
+		return 3;
+	}
+	/* no sequence number to patch */
+	return -1;
+}
+
+/* patch N(SD) into enc_l3, according to 24.007 11.2.3.2 */
+function f_ML3_patch_seq(inout ConnectionData cd, in PDU_ML3_MS_NW dtap, inout octetstring enc_l3) {
+	var integer n_sd_idx := f_ML3_n_sd_idx(dtap);
+	if (n_sd_idx < 0) {
+		return;
+	}
+	var uint2_t seq_nr := f_next_n_sd(cd.n_sd, n_sd_idx);
+	f_ML3_patch_seq_nr(seq_nr, enc_l3);
 }
 
 private altstep as_reset_ack() runs on RAN_Emulation_CT {
@@ -732,6 +756,8 @@ private altstep as_main_bssap() runs on RAN_Emulation_CT {
 		var BSSAP_Conn_Req creq;
 		var PDU_BSSAP bssap;
 		var RAN_ConnHdlr vc_conn;
+		var integer targetPointCode;
+		var N_Sd_Array last_n_sd;
 
 		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
 		[] BSSAP.receive(BSSAP_N_UNITDATA_ind:?) -> value ud_ind {
@@ -823,7 +849,18 @@ private altstep as_main_bssap() runs on RAN_Emulation_CT {
 				ConnectionTable[idx].n_sd[0] := 1;
 				log("patch: N(SD) for ConnIdx ", idx, " set to 1");
 			}
+			}
 
+		[] PROC.getcall(RAN_last_n_sd:{?,-}) -> param(vc_conn) {
+			var integer idx := f_idx_by_comp(vc_conn);
+			last_n_sd := ConnectionTable[idx].n_sd;
+			PROC.reply(RAN_last_n_sd:{vc_conn, last_n_sd}) to vc_conn;
+			}
+
+		[] PROC.getcall(RAN_continue_after_n_sd:{?,?}) -> param(last_n_sd, vc_conn) {
+			var integer idx := f_idx_by_comp(vc_conn);
+			ConnectionTable[idx].n_sd := last_n_sd;
+			PROC.reply(RAN_continue_after_n_sd:{last_n_sd, vc_conn}) to vc_conn;
 			}
 #else
 		[false] CLIENT.receive {}
@@ -1045,6 +1082,7 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 		var octetstring l3_info;
 		var hexstring imsi;
 		var OCT4 tmsi;
+		var integer targetPointCode;
 
 		alt {
 		[g_ran_ops.protocol == RAN_PROTOCOL_BSSAP] as_main_bssap();
@@ -1075,6 +1113,11 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 			PROC.reply(RAN_register:{l3_info, vc_hdlr}) to vc_hdlr;
 			}
 
+		[] PROC.getcall(RAN_register_handoverRequest:{?,?}) -> param(targetPointCode, vc_hdlr) {
+			f_create_expect(omit, vc_hdlr, targetPointCode);
+			PROC.reply(RAN_register_handoverRequest:{targetPointCode, vc_hdlr}) to vc_hdlr;
+			}
+
 		[] PROC.getcall(RAN_register_imsi:{?,?,?}) -> param(imsi, tmsi, vc_hdlr) {
 			f_create_imsi(imsi, tmsi, vc_hdlr);
 			PROC.reply(RAN_register_imsi:{imsi, tmsi, vc_hdlr}) to vc_hdlr;
@@ -1101,18 +1144,26 @@ private function f_mgcp_ep_extract_cic(charstring inp) return integer {
 type record ExpectData {
 	/* L3 payload based on which we can match it */
 	octetstring l3_payload optional,
+	integer handoverRequestPointCode optional,
 	/* component reference for this connection */
 	RAN_ConnHdlr vc_conn
 }
 
 /* procedure based port to register for incoming connections */
 signature RAN_register(in octetstring l3, in RAN_ConnHdlr hdlr);
+signature RAN_register_handoverRequest(in integer targetPointCode, in RAN_ConnHdlr hdlr);
 
 /* procedure based port to register for incoming IMSI/TMSI */
 signature RAN_register_imsi(in hexstring imsi, in OCT4 tmsi, in RAN_ConnHdlr hdlr);
 
+/* If DTAP happens across other channels (e.g. GSUP), provide manual advancing of the n_sd sequence number */
+signature RAN_last_n_sd(in RAN_ConnHdlr hdlr, out N_Sd_Array last_n_sd);
+
+/* Update conn's n_sd sequence nr after the connection was taken over from elsewhere */
+signature RAN_continue_after_n_sd(N_Sd_Array last_n_sd, in RAN_ConnHdlr hdlr);
+
 type port RAN_PROC_PT procedure {
-	inout RAN_register, RAN_register_imsi;
+	inout RAN_register, RAN_register_imsi, RAN_register_handoverRequest, RAN_last_n_sd, RAN_continue_after_n_sd;
 } with { extension "internal" };
 
 #ifdef RAN_EMULATION_BSSAP
@@ -1121,16 +1172,35 @@ function ExpectedCreateCallback(BSSAP_N_CONNECT_ind conn_ind, charstring id)
 runs on RAN_Emulation_CT return RAN_ConnHdlr {
 	var RAN_ConnHdlr ret := null;
 	var octetstring l3_info;
+	var boolean handoverRequest := false;
+	var integer handoverRequestPointCode;
 	var integer i;
 
-	if (not ischosen(conn_ind.userData.pdu.bssmap.completeLayer3Information)) {
-		setverdict(fail, "N-CONNECT.ind with L3 != COMPLETE L3");
+	if (ischosen(conn_ind.userData.pdu.bssmap.completeLayer3Information)) {
+		l3_info := conn_ind.userData.pdu.bssmap.completeLayer3Information.layer3Information.layer3info;
+		log("ExpectedCreateCallback completeLayer3Information");
+	} else if (ischosen(conn_ind.userData.pdu.bssmap.handoverRequest)) {
+		handoverRequest := true;
+		handoverRequestPointCode := bit2int(conn_ind.calledAddress.signPointCode);
+		log("ExpectedCreateCallback handoverRequest ", handoverRequestPointCode);
+	} else {
+		setverdict(fail, "N-CONNECT.ind with L3 != COMPLETE L3 nor a Handover Request");
 		mtc.stop;
 		return ret;
 	}
-	l3_info := conn_ind.userData.pdu.bssmap.completeLayer3Information.layer3Information.layer3info;
 
 	for (i := 0; i < sizeof(ExpectTable); i:= i+1) {
+		if (handoverRequest) {
+			log("ExpectTable[", i, "].handoverRequestPointCode = ", ExpectTable[i].handoverRequestPointCode,
+			    " ==? ", handoverRequestPointCode);
+			if (ExpectTable[i].handoverRequestPointCode == handoverRequestPointCode) {
+				ret := ExpectTable[i].vc_conn;
+				log("Found Expect[", i, "] for handoverRequest handled at ", ret);
+				return ret;
+			} else {
+				continue;
+			}
+		}
 		if (not ispresent(ExpectTable[i].l3_payload)) {
 			continue;
 		}
@@ -1185,14 +1255,26 @@ runs on RAN_Emulation_CT return RAN_ConnHdlr {
 }
 #endif
 
-private function f_create_expect(octetstring l3, RAN_ConnHdlr hdlr)
+private function f_create_expect(template octetstring l3, RAN_ConnHdlr hdlr,
+				 template integer handoverRequestPointCode := omit)
 runs on RAN_Emulation_CT {
 	var integer i;
+	log("f_create_expect(l3 := ", l3, ", handoverRequest := ", handoverRequestPointCode);
 	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
-		if (not ispresent(ExpectTable[i].l3_payload)) {
-			ExpectTable[i].l3_payload := l3;
+		if (not ispresent(ExpectTable[i].l3_payload)
+		    and not ispresent(ExpectTable[i].handoverRequestPointCode)) {
+			if (ispresent(l3)) {
+				ExpectTable[i].l3_payload := valueof(l3);
+			}
+			if (ispresent(handoverRequestPointCode)) {
+				ExpectTable[i].handoverRequestPointCode := valueof(handoverRequestPointCode);
+			}
 			ExpectTable[i].vc_conn := hdlr;
-			log("Created Expect[", i, "] for ", l3, " to be handled at ", hdlr);
+			if (ispresent(handoverRequestPointCode)) {
+				log("Created Expect[", i, "] for handoverRequest to be handled at ", hdlr);
+			} else {
+				log("Created Expect[", i, "] for ", l3, " to be handled at ", hdlr);
+			}
 			return;
 		}
 	}
@@ -1218,6 +1300,7 @@ private function f_expect_table_init()
 runs on RAN_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
 		ExpectTable[i].l3_payload := omit;
+		ExpectTable[i].handoverRequestPointCode := omit;
 	}
 }
 

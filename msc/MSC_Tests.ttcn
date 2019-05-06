@@ -468,31 +468,6 @@ modifies ts_BSSAP_BSSMAP := {
 	}
 }
 
-template PDU_BSSAP ts_BSSMAP_HandoReq(BssmapCause cause, BSSMAP_IE_CellIdentifierList cid_list)
-modifies ts_BSSAP_BSSMAP := {
-	pdu := {
-		bssmap := {
-			handoverRequired := {
-				messageType := '11'O,
-				cause := ts_BSSMAP_IE_Cause(cause),
-				responseRequest := omit,
-				cellIdentifierList := cid_list,
-				circuitPoolList := omit,
-				currentChannelType1 := omit,
-				speechVersion := omit,
-				queueingIndicator := omit,
-				oldToNewBSSInfo := omit,
-				sourceToTargetRNCTransparentInfo := omit,
-				sourceToTargetRNCTransparentInfoCDMA := omit,
-				gERANClassmark := omit,
-				talkerPriority := omit,
-				speechCodec := omit,
-				cSG_Identifier := omit
-			}
-		}
-	}
-}
-
 type function void_fn(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr;
 
 /* FIXME: move into BSC_ConnectionHandler? */
@@ -536,14 +511,14 @@ runs on MTC_CT return BSC_ConnHdlrPars {
 	return pars;
 }
 
-function f_start_handler_with_pars(void_fn fn, BSC_ConnHdlrPars pars) runs on MTC_CT return BSC_ConnHdlr {
+function f_start_handler_with_pars(void_fn fn, BSC_ConnHdlrPars pars, integer bssap_idx := 0) runs on MTC_CT return BSC_ConnHdlr {
 	var BSC_ConnHdlr vc_conn;
-	var charstring id := testcasename();
+	var charstring id := testcasename() & int2str(bssap_idx);
 
 	vc_conn := BSC_ConnHdlr.create(id);
 	/* BSSMAP part / A interface */
-	connect(vc_conn:BSSAP, g_bssap[pars.ran_idx].vc_RAN:CLIENT);
-	connect(vc_conn:BSSAP_PROC, g_bssap[pars.ran_idx].vc_RAN:PROC);
+	connect(vc_conn:BSSAP, g_bssap[pars.ran_idx + bssap_idx].vc_RAN:CLIENT);
+	connect(vc_conn:BSSAP_PROC, g_bssap[pars.ran_idx + bssap_idx].vc_RAN:PROC);
 	/* MNCC part */
 	connect(vc_conn:MNCC, vc_MNCC:MNCC_CLIENT);
 	connect(vc_conn:MNCC_PROC, vc_MNCC:MNCC_PROC);
@@ -4776,6 +4751,464 @@ testcase TC_sgsap_vlr_failure() runs on MTC_CT {
    *
  */
 
+private function f_tc_ho_inter_bsc_unknown_cell(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	cpars.bss_rtp_port := 1110;
+	cpars.mgcp_connection_id_bss := '22222'H;
+	cpars.mgcp_connection_id_mss := '33333'H;
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+	cpars.mo_call := true;
+
+	f_perform_lu();
+	f_mo_call_establish(cpars);
+
+	f_sleep(1.0);
+
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_BETTER_CELL;
+	var BssmapCause cause := enum2int(cause_val);
+
+	var template BSSMAP_FIELD_CellIdentificationList cil;
+	cil := { cIl_LAI := { ts_BSSMAP_CI_LAI('023'H, '42'H, 999) } };
+
+	BSSAP.send(ts_BSSMAP_HandoverRequired(cause, cil));
+	BSSAP.receive(tr_BSSMAP_HandoverRequiredReject);
+
+	f_call_hangup(cpars, true);
+}
+testcase TC_ho_inter_bsc_unknown_cell() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_tc_ho_inter_bsc_unknown_cell), 53);
+	vc_conn.done;
+}
+
+private altstep as_mgcp_ack_all_mdcx(CallParameters cpars) runs on BSC_ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+								hex2str(cpars.mgcp_call_id), "42",
+								cpars.mgw_rtp_port_mss,
+								{ int2str(cpars.rtp_payload_type) },
+								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+											cpars.rtp_sdp_format)),
+								  valueof(ts_SDP_ptime(20)) }));
+			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			repeat;
+		}
+}
+
+private function f_tc_ho_inter_bsc0(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	cpars.bss_rtp_port := 1110;
+	cpars.mgcp_connection_id_bss := '22222'H;
+	cpars.mgcp_connection_id_mss := '33333'H;
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+	cpars.mo_call := true;
+
+	f_init_handler(pars);
+
+	f_vty_transceive(MSCVTY, "configure terminal");
+	f_vty_transceive(MSCVTY, "msc");
+	f_vty_transceive(MSCVTY, "neighbor a cgi 262 42 23 42 ran-pc 0.24.1");
+	f_vty_transceive(MSCVTY, "neighbor a lac 5 ran-pc 0.24.2");
+	f_vty_transceive(MSCVTY, "exit");
+	f_vty_transceive(MSCVTY, "exit");
+
+	f_perform_lu();
+	f_mo_call_establish(cpars);
+
+	f_sleep(1.0);
+
+	var default ack_mdcx := activate(as_mgcp_ack_all_mdcx(cpars));
+
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_BETTER_CELL;
+	var BssmapCause cause := enum2int(cause_val);
+
+	var template BSSMAP_FIELD_CellIdentificationList cil;
+	cil := { cIl_LAI := { ts_BSSMAP_CI_LAI('023'H, '42'H, 5) } };
+
+	/* old BSS sends Handover Required */
+	BSSAP.send(ts_BSSMAP_HandoverRequired(cause, cil));
+
+	/* Now the action goes on in f_tc_ho_inter_bsc1() */
+
+	/* MSC forwards the RR Handover Command to old BSS */
+	var PDU_BSSAP ho_command;
+	BSSAP.receive(tr_BSSMAP_HandoverCommand) -> value ho_command;
+
+	log("GOT HandoverCommand", ho_command);
+
+	BSSAP.receive(tr_BSSMAP_HandoverSucceeded);
+
+	/* f_tc_ho_inter_bsc1() completes Handover, then expecting a Clear here. */
+	f_expect_clear();
+
+	log("FIRST inter-BSC Handover done");
+
+
+	/* ------------------------ */
+
+	/* Ok, that went well, now the other BSC is handovering back here --
+	 * from now on this here is the new BSS. */
+	f_create_bssmap_exp_handoverRequest(193);
+
+	var PDU_BSSAP ho_request;
+	BSSAP.receive(tr_BSSMAP_HandoverRequest) -> value ho_request;
+
+	/* new BSS composes a RR Handover Command */
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla := valueof(ts_BSSMAP_IE_AoIP_TLA4('01020304'O, 2342));
+	BSSAP.send(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
+							tla, ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+
+	/* Now f_tc_ho_inter_bsc1() expects HandoverCommand */
+
+	f_sleep(0.5);
+
+	/* Notify that the MS is now over here */
+
+	BSSAP.send(ts_BSSMAP_HandoverDetect);
+	f_sleep(0.1);
+	BSSAP.send(ts_BSSMAP_HandoverComplete);
+
+	f_sleep(3.0);
+
+	deactivate(ack_mdcx);
+
+	var default ccrel := activate(as_optional_cc_rel(cpars, true));
+
+	/* blatant cheating */
+	var N_Sd_Array last_n_sd := f_bssmap_last_n_sd();
+	last_n_sd[0] := 3;
+	f_bssmap_continue_after_n_sd(last_n_sd);
+
+	f_call_hangup(cpars, true);
+	f_sleep(1.0);
+	deactivate(ccrel);
+
+	setverdict(pass);
+}
+private function f_tc_ho_inter_bsc1(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	f_init_handler(pars);
+	f_create_bssmap_exp_handoverRequest(194);
+
+	var PDU_BSSAP ho_request;
+	BSSAP.receive(tr_BSSMAP_HandoverRequest) -> value ho_request;
+
+	/* new BSS composes a RR Handover Command */
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla := valueof(ts_BSSMAP_IE_AoIP_TLA4('01020304'O, 2342));
+	BSSAP.send(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
+							tla, ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+
+	/* Now f_tc_ho_inter_bsc0() expects HandoverCommand */
+
+	f_sleep(0.5);
+
+	/* Notify that the MS is now over here */
+
+	BSSAP.send(ts_BSSMAP_HandoverDetect);
+	f_sleep(0.1);
+	BSSAP.send(ts_BSSMAP_HandoverComplete);
+
+	f_sleep(3.0);
+
+	/* Now I'd like to f_call_hangup() but we don't know any cpars here. So
+	 * ... handover back to the first BSC :P */
+
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_BETTER_CELL;
+	var BssmapCause cause := enum2int(cause_val);
+
+	var template BSSMAP_FIELD_CellIdentificationList cil;
+	cil := { cIl_LAI := { ts_BSSMAP_CI_LAI('262'H, '42'H, 23) } };
+
+	/* old BSS sends Handover Required */
+	BSSAP.send(ts_BSSMAP_HandoverRequired(cause, cil));
+
+	/* Now the action goes on in f_tc_ho_inter_bsc0() */
+
+	/* MSC forwards the RR Handover Command to old BSS */
+	var PDU_BSSAP ho_command;
+	BSSAP.receive(tr_BSSMAP_HandoverCommand) -> value ho_command;
+
+	log("GOT HandoverCommand", ho_command);
+
+	BSSAP.receive(tr_BSSMAP_HandoverSucceeded);
+
+	/* f_tc_ho_inter_bsc1() completes Handover, then expecting a Clear here. */
+	f_expect_clear();
+	setverdict(pass);
+}
+testcase TC_ho_inter_bsc() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn0;
+	var BSC_ConnHdlr vc_conn1;
+	f_init(2);
+
+	var BSC_ConnHdlrPars pars0 := f_init_pars(53);
+	var BSC_ConnHdlrPars pars1 := f_init_pars(53);
+
+	vc_conn0 := f_start_handler_with_pars(refers(f_tc_ho_inter_bsc0), pars0, 0);
+	vc_conn1 := f_start_handler_with_pars(refers(f_tc_ho_inter_bsc1), pars1, 1);
+	vc_conn0.done;
+	vc_conn1.done;
+}
+
+function f_ML3_patch_seq_nr_MS_NW(in uint2_t seq_nr, inout octetstring enc_l3) {
+	log("MS_NW patching N(SD)=", seq_nr, " into dtap ", enc_l3);
+	enc_l3[2] := (enc_l3[2] and4b '3f'O) or4b bit2oct(int2bit(seq_nr, 8) << 6);
+	log("MS_NW patched enc_l3: ", enc_l3);
+}
+
+private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	cpars.bss_rtp_port := 1110;
+	cpars.mgcp_connection_id_bss := '22222'H;
+	cpars.mgcp_connection_id_mss := '33333'H;
+	cpars.mgcp_ep := "rtpbridge/1@mgw";
+	cpars.mo_call := true;
+	var hexstring ho_number := f_gen_msisdn(99999);
+
+	f_init_handler(pars);
+
+	f_create_mncc_expect(hex2str(ho_number));
+
+	f_vty_transceive(MSCVTY, "configure terminal");
+	f_vty_transceive(MSCVTY, "msc");
+	f_vty_transceive(MSCVTY, "neighbor a cgi 017 017 1 1 msc-ipa-name msc-017-017-1");
+	f_vty_transceive(MSCVTY, "exit");
+	f_vty_transceive(MSCVTY, "exit");
+
+	f_perform_lu();
+	f_mo_call_establish(cpars);
+
+	f_sleep(1.0);
+
+	var default ack_mdcx := activate(as_mgcp_ack_all_mdcx(cpars));
+
+	var myBSSMAP_Cause cause_val := GSM0808_CAUSE_BETTER_CELL;
+	var BssmapCause cause := enum2int(cause_val);
+
+	var template BSSMAP_FIELD_CellIdentificationList cil;
+	cil := { cIl_LAI := { ts_BSSMAP_CI_LAI('017'H, '017'H, 1) } };
+
+	/* old BSS sends Handover Required */
+	BSSAP.send(ts_BSSMAP_HandoverRequired(cause, cil));
+
+	/* The target cell 017-017 LAC 1 is configured to be a remote MSC of name "msc-017-017-1".
+	 * This MSC tries to reach the other MSC via GSUP. */
+
+	var octetstring remote_msc_name := '6D73632D3031372D3031372D3100'O; /* "msc-017-017-1\0" as octetstring */
+	var GSUP_PDU prep_ho_req;
+	GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_HANDOVER_REQUEST,
+				pars.imsi, destination_name := remote_msc_name)) -> value prep_ho_req;
+
+	var GSUP_IeValue source_name_ie;
+	f_gsup_find_ie(prep_ho_req, OSMO_GSUP_SOURCE_NAME_IE, source_name_ie);
+	var octetstring local_msc_name := source_name_ie.source_name;
+
+	/* Remote MSC has figured out its BSC and signals success */
+	var PDU_ML3_NW_MS rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	var PDU_BSSAP ho_req_ack := valueof(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
+					aoIPTransportLayer := omit,
+					speechCodec := ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+	GSUP.send(ts_GSUP_E_PrepareHandoverResult(
+				pars.imsi,
+				ho_number,
+				remote_msc_name, local_msc_name,
+				valueof(t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006, enc_PDU_BSSAP(ho_req_ack)))));
+
+	/* MSC forwards the RR Handover Command to old BSS */
+	BSSAP.receive(tr_BSSMAP_HandoverCommand);
+
+	/* The MS shows up at remote new BSS */
+
+	GSUP.send(ts_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PROCESS_ACCESS_SIGNALLING_REQUEST,
+				pars.imsi, remote_msc_name, local_msc_name,
+				valueof(t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006,
+						enc_PDU_BSSAP(valueof(ts_BSSMAP_HandoverDetect))))));
+	BSSAP.receive(tr_BSSMAP_HandoverSucceeded);
+	f_sleep(0.1);
+
+	/* Save the MS sequence counters for use on the other connection */
+	var N_Sd_Array last_n_sd := f_bssmap_last_n_sd();
+
+	GSUP.send(ts_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_SEND_END_SIGNAL_REQUEST,
+				pars.imsi, remote_msc_name, local_msc_name,
+				valueof(t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006,
+						enc_PDU_BSSAP(valueof(ts_BSSMAP_HandoverComplete))))));
+
+	/* The local BSS conn clears, all communication goes via remote MSC now */
+	f_expect_clear();
+
+	/**********************************/
+	/* Play through some signalling across the inter-MSC link.
+	 * This is a copy of f_tc_lu_and_mo_ussd_single_request() translated into GSUP AN-APDUs. */
+
+	if (false) {
+	var template OCTN facility_req := f_USSD_FACILITY_IE_INVOKE(
+		invoke_id := 5, /* Phone may not start from 0 or 1 */
+		op_code := SS_OP_CODE_PROCESS_USS_REQ,
+		ussd_string := "*#100#"
+	);
+
+	var template OCTN facility_rsp := f_USSD_FACILITY_IE_RETURN_RESULT(
+		invoke_id := 5, /* InvokeID shall be the same for both REQ and RSP */
+		op_code := SS_OP_CODE_PROCESS_USS_REQ,
+		ussd_string := "Your extension is " & hex2str(g_pars.msisdn) & "\r"
+	)
+
+	/* Compose a new SS/REGISTER message with request */
+	var template (value) PDU_ML3_MS_NW ussd_req := ts_ML3_MO_SS_REGISTER(
+		tid := 1, /* We just need a single transaction */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := valueof(facility_req)
+	);
+	var PDU_ML3_MS_NW ussd_req_v := valueof(ussd_req);
+
+	/* Compose SS/RELEASE_COMPLETE template with expected response */
+	var template PDU_ML3_NW_MS ussd_rsp := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 1, /* Response should arrive within the same transaction */
+		ti_flag := c_TIF_REPL, /* Sent to the side that originates the TI */
+		facility := valueof(facility_rsp)
+	);
+
+	/* Compose expected MSC -> HLR message */
+	var template GSUP_PDU gsup_req := tr_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := valueof(facility_req)
+	);
+
+	/* To be used for sending response with correct session ID */
+	var GSUP_PDU gsup_req_complete;
+
+	/* Request own number */
+	/* From remote MSC instead of BSSAP directly */
+	/* Patch the correct N_SD value into the message. */
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(ussd_req_v);
+	var RAN_Emulation.ConnectionData cd;
+	f_ML3_patch_seq_nr_MS_NW(f_next_n_sd(last_n_sd, f_ML3_n_sd_idx(ussd_req_v)), l3_enc);
+	GSUP.send(ts_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PROCESS_ACCESS_SIGNALLING_REQUEST,
+				pars.imsi, remote_msc_name, local_msc_name,
+				valueof(t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006,
+						enc_PDU_BSSAP(valueof(ts_BSSAP_DTAP(l3_enc)))
+						))
+				));
+
+	/* Expect GSUP message containing the SS payload */
+	gsup_req_complete := f_expect_gsup_msg(gsup_req);
+
+	/* Compose the response from HLR using received session ID */
+	var template GSUP_PDU gsup_rsp := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi,
+		sid := gsup_req_complete.ies[1].val.session_id,
+		state := OSMO_GSUP_SESSION_STATE_END,
+		ss := valueof(facility_rsp)
+	);
+
+	/* Finally, HLR terminates the session */
+	GSUP.send(gsup_rsp);
+
+	/* The USSD response goes out to remote MSC, on GSUP E instead of BSSAP */
+	var GSUP_PDU gsup_ussd_rsp;
+	GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_FORWARD_ACCESS_SIGNALLING_REQUEST,
+				pars.imsi, destination_name := remote_msc_name)) -> value gsup_ussd_rsp;
+
+	var GSUP_IeValue an_apdu;
+	if (not f_gsup_find_ie(gsup_ussd_rsp, OSMO_GSUP_AN_APDU_IE, an_apdu)) {
+		setverdict(fail, "No AN-APDU in received GSUP message. Expected USSD response in DTAP, got", gsup_ussd_rsp);
+		mtc.stop;
+	}
+	var PDU_BSSAP bssap_dtap_mt := dec_PDU_BSSAP(an_apdu.an_apdu.pdu);
+	var PDU_ML3_NW_MS dtap_mt := dec_PDU_ML3_NW_MS(bssap_dtap_mt.pdu.dtap);
+	log("Expecting", ussd_rsp);
+	log("Got", dtap_mt);
+        if (not match(dtap_mt, ussd_rsp)) {
+		setverdict(fail, "Unexpected GSUP message. Expected USSD response in DTAP, got", gsup_ussd_rsp);
+		mtc.stop;
+	}
+	}
+	/**********************************/
+
+
+	/* inter-MSC handover back to the first MSC */
+	f_create_bssmap_exp_handoverRequest(193);
+	cil := { cIl_CGI := { ts_BSSMAP_CI_CGI('262'H, '42'H, 23, 42) } };
+
+	/* old BSS sends Handover Required, via inter-MSC E link: like
+	 * BSSAP.send(ts_BSSMAP_HandoverRequired(cause, cil));
+	 * but via GSUP */
+	GSUP.send(ts_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_SUBSEQUENT_HANDOVER_REQUEST,
+				pars.imsi, remote_msc_name, local_msc_name,
+				valueof(t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006,
+						enc_PDU_BSSAP(valueof(ts_BSSMAP_HandoverRequired(cause, cil)))
+						))
+				));
+
+	/* MSC asks local BSS to prepare Handover to it */
+	BSSAP.receive(tr_BSSMAP_HandoverRequest);
+
+	/* Make sure the new BSSAP conn continues with the correct N_SD sequence numbers */
+	f_bssmap_continue_after_n_sd(last_n_sd);
+
+	/* new BSS composes a RR Handover Command */
+	rr_ho_cmd := valueof(ts_RR_HandoverCommand);
+	rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla := valueof(ts_BSSMAP_IE_AoIP_TLA4('01020304'O, 2342));
+	BSSAP.send(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
+							tla, ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+
+	/* HandoverCommand goes out via remote MSC-I */
+	var GSUP_PDU prep_subsq_ho_res;
+	GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_SUBSEQUENT_HANDOVER_RESULT,
+				pars.imsi, destination_name := remote_msc_name)) -> value prep_subsq_ho_res;
+
+	/* MS shows up at the local BSS */
+	BSSAP.send(ts_BSSMAP_HandoverDetect);
+	f_sleep(0.1);
+	BSSAP.send(ts_BSSMAP_HandoverComplete);
+
+	/* Handover Succeeded message */
+	GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_FORWARD_ACCESS_SIGNALLING_REQUEST,
+				pars.imsi, destination_name := remote_msc_name));
+
+	/* MS has handovered to here, Clear Command goes out via remote MSC-I -- in form of a GSUP Close. */
+	GSUP.receive(tr_GSUP_E_NO_PDU(OSMO_GSUP_MSGT_E_CLOSE,
+				pars.imsi, destination_name := remote_msc_name));
+
+	/* Handover ends successfully. Call goes on for a little longer and then we hang up. */
+
+	f_sleep(1.0);
+	deactivate(ack_mdcx);
+
+	/* FIXME: the inter-MSC call has put a number of MNCC messages in the queue, which above code should expect and
+	 * clear out. The f_call_hangup() expects an MNCC_REL_IND, so, for the time being, just clear the MNCC messages
+	 * before starting the call hangup. Instead of this, the individual messages should be tested for above. */
+	MNCC.clear;
+
+	var default ccrel := activate(as_optional_cc_rel(cpars, true));
+	f_call_hangup(cpars, true);
+	f_sleep(1.0);
+	deactivate(ccrel);
+
+	setverdict(pass);
+}
+testcase TC_ho_inter_msc_out() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init(1);
+
+	var BSC_ConnHdlrPars pars := f_init_pars(54);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ho_inter_msc_out), pars, 0);
+	vc_conn.done;
+}
+
+
 control {
 	execute( TC_cr_before_reset() );
 	execute( TC_lu_imsi_noauth_tmsi() );
@@ -4869,6 +5302,11 @@ control {
 	execute( TC_bssap_lu_sgsap_lu_and_mt_call() );
 	execute( TC_sgsap_lu_and_mt_call() );
 	execute( TC_sgsap_vlr_failure() );
+
+	execute( TC_ho_inter_bsc_unknown_cell() );
+	execute( TC_ho_inter_bsc() );
+
+	execute( TC_ho_inter_msc_out() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
