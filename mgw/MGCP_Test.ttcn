@@ -8,6 +8,10 @@ module MGCP_Test {
 	import from RTP_CodecPort all;
 	import from RTP_CodecPort_CtrlFunct all;
 	import from RTP_Emulation all;
+	import from OSMUX_Types all;
+	import from OSMUX_CodecPort all;
+	import from OSMUX_CodecPort_CtrlFunct all;
+	import from OSMUX_Emulation all;
 	import from IPL4asp_Types all;
 	import from General_Types all;
 	import from Native_Functions all;
@@ -31,6 +35,9 @@ module MGCP_Test {
 		var RTP_Emulation_CT vc_RTPEM[3];
 		port RTPEM_CTRL_PT RTPEM[3];
 
+		var OSMUX_Emulation_CT vc_OsmuxEM;
+		port OsmuxEM_CTRL_PT OsmuxEM;
+
 		port TELNETasp_PT MGWVTY;
 	};
 
@@ -50,12 +57,29 @@ module MGCP_Test {
 		PortNumber mp_remote_udp_port := 2427;
 		charstring mp_remote_ip := "127.0.0.1";
 		PortNumber mp_local_rtp_port_base := 10000;
+		PortNumber mp_local_osmux_port := 1985;
 	}
 
-	private function f_init_vty() runs on dummy_CT {
+	private function f_vty_enable_osmux(boolean osmux_on) runs on dummy_CT {
+		/* Turn on conversion mode */
+		f_vty_enter_config(MGWVTY);
+		f_vty_transceive(MGWVTY, "mgcp");
+		if (osmux_on) {
+			f_vty_transceive(MGWVTY, "osmux on");
+		} else {
+			f_vty_transceive(MGWVTY, "osmux off");
+		}
+		f_vty_transceive(MGWVTY, "exit");
+		f_vty_transceive(MGWVTY, "exit");
+
+	}
+
+	private function f_init_vty(boolean osmux_on) runs on dummy_CT {
 		map(self:MGWVTY, system:MGWVTY);
 		f_vty_set_prompts(MGWVTY);
 		f_vty_transceive(MGWVTY, "enable");
+
+		f_vty_enable_osmux(osmux_on);
 	}
 
 	private function f_rtpem_init(inout RTP_Emulation_CT comp_ref, integer i)
@@ -66,10 +90,17 @@ module MGCP_Test {
 		comp_ref.start(RTP_Emulation.f_main());
 	}
 
+	private function f_osmuxem_init(inout OSMUX_Emulation_CT comp_ref)
+	runs on dummy_CT {
+		comp_ref := OSMUX_Emulation_CT.create("OsmuxEM");
+		map(comp_ref:OSMUX, system:OSMUX);
+		comp_ref.start(OSMUX_Emulation.f_main());
+	}
+
 	/* initialization function, called by each test case at the
 	 * beginning, but 'initialized' variable ensures its body is
 	 * only executed once */
-	private function f_init(template MgcpEndpoint ep := omit) runs on dummy_CT {
+	private function f_init(template MgcpEndpoint ep := omit, boolean osmux_on := false) runs on dummy_CT {
 		var Result res;
 		var uint32_t ssrc;
 
@@ -93,6 +124,10 @@ module MGCP_Test {
 				f_rtpem_init(vc_RTPEM[i], i);
 				connect(vc_RTPEM[i]:CTRL, self:RTPEM[i]);
 			}
+			if (osmux_on) {
+				f_osmuxem_init(vc_OsmuxEM);
+				connect(vc_OsmuxEM:CTRL, self:OsmuxEM);
+			}
 		}
 
 		if (isvalue(ep)) {
@@ -100,7 +135,7 @@ module MGCP_Test {
 			f_dlcx_ignore(valueof(ep));
 		}
 
-		f_init_vty();
+		f_init_vty(osmux_on);
 	}
 
 	testcase TC_selftest() runs on dummy_CT {
@@ -272,6 +307,10 @@ module MGCP_Test {
 		charstring codec,
 		MgcpConnectionId mgcp_conn_id optional,
 		RtpemConfig rtp_cfg optional,
+		boolean osmux_cid_sent, /* whther non wildcarded CID was already sent to MGW */
+		MgcpOsmuxCID osmux_cid optional,
+		MgcpOsmuxCID osmux_cid_response optional,
+		OsmuxemConfig osmux_cfg optional,
 		charstring fmtp optional
 	}
 
@@ -333,6 +372,91 @@ module MGCP_Test {
 		f_rtpem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
 	}
 
+	/* Create an Osmux flow (bidirectional, or receive-only) */
+	function f_flow_create_osmux(OsmuxEM_CTRL_PT pt, MgcpEndpoint ep, MgcpCallId call_id, charstring mode, inout RtpFlowData flow,
+				boolean one_phase := true)
+	runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var SDP_attribute_list attributes;
+		var OsmuxTxHandle tx_hdl;
+		var OsmuxRxHandle rx_hdl;
+		var charstring cid_response;
+		var OsmuxCID cid_resp_parsed
+
+		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
+		if (isvalue(flow.fmtp)) {
+			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
+		}
+
+		/* bind local Osmux emulation socket */
+		f_osmuxem_bind(pt, flow.em.hostname, flow.em.portnr);
+
+		/* configure osmux-emulation */
+		if (ispresent(flow.osmux_cfg)) {
+			f_osmuxem_configure(pt, flow.osmux_cfg);
+		} else {
+			var OsmuxemConfig osmux_cfg := c_OsmuxemDefaultCfg;
+			f_osmuxem_configure(pt, osmux_cfg);
+			flow.osmux_cfg := osmux_cfg
+		}
+
+		if (one_phase) {
+			/* Connect flow to MGW using a CRCX that also contains an SDP
+			 * part that tells the MGW where we are listening for Osmux streams
+			 * that come from the MGW. We get a fully working connection in
+			 * one go. */
+			rx_hdl := c_OsmuxemDefaultRxHandle;
+			rx_hdl.cid := flow.osmux_cid;
+			f_osmuxem_register_rxhandle(pt, rx_hdl);
+			flow.osmux_cid_sent := true;
+			cmd := ts_CRCX_osmux(get_next_trans_id(), ep, mode, call_id, flow.osmux_cid);
+			cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
+					  flow.em.portnr, { int2str(flow.pt) }, attributes);
+  			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK_osmux);
+			flow.mgcp_conn_id := extract_conn_id(resp);
+			/* extract port number from response */
+			flow.mgw.portnr :=
+				resp.sdp.media_list[0].media_field.ports.port_number;
+		} else {
+			/* Create a half-open connection only. We do not tell the MGW
+			 * where it can send Osmux streams to us. This means this
+			 * connection will only be able to receive but can not send
+			 * data back to us. In order to turn the connection in a fully
+			 * bi-directional one, a separate MDCX is needed. */
+
+			cmd := ts_CRCX_osmux(get_next_trans_id(), ep, mode, call_id, flow.osmux_cid);
+			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK_osmux);
+
+			flow.mgcp_conn_id := extract_conn_id(resp);
+			/* extract MGW-side port number from response */
+			flow.mgw.portnr :=
+				resp.sdp.media_list[0].media_field.ports.port_number;
+		}
+
+		/* extract Osmux CID we got assigned by the MGW */
+		var MgcpMessage resp_msg := {
+			response := resp
+		}
+
+		if (f_mgcp_find_param(resp_msg, "X-OSMUX", cid_response) == false) {
+			setverdict(fail, "No Osmux CID in MGCP response", resp);
+			mtc.stop;
+		}
+
+		/* Make sure response is no wildcard */
+		flow.osmux_cid_response := f_mgcp_osmux_cid_decode(cid_response);
+		if (flow.osmux_cid_response == -1) {
+			setverdict(fail, "Osmux CID in MGCP response contains unexpected wildcard");
+			mtc.stop;
+		}
+		tx_hdl := valueof(t_TxHandleAMR590(flow.osmux_cid_response));
+		f_osmuxem_register_txhandle(pt, tx_hdl);
+
+		/* finally, connect the emulation-side RTP socket to the MGW */
+		f_osmuxem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
+	}
+
 	/* Modify an existing RTP flow */
 	function f_flow_modify(RTPEM_CTRL_PT pt, MgcpEndpoint ep, MgcpCallId call_id, charstring mode, inout RtpFlowData flow)
 	runs on dummy_CT {
@@ -372,6 +496,76 @@ module MGCP_Test {
 		f_rtpem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
 	}
 
+	/* Modify an existing Osmux flow */
+	function f_flow_modify_osmux(OsmuxEM_CTRL_PT pt, MgcpEndpoint ep, MgcpCallId call_id, charstring mode, inout RtpFlowData flow)
+	runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var SDP_attribute_list attributes;
+		var OsmuxRxHandle rx_hdl;
+		var charstring cid_response;
+		var OsmuxCID cid_resp_parsed
+
+		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
+		if (isvalue(flow.fmtp)) {
+			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
+		}
+
+		/* rebind local Osmux emulation socket to the new address */
+		f_osmuxem_bind(pt, flow.em.hostname, flow.em.portnr);
+
+		/* configure osmux-emulation */
+		if (ispresent(flow.osmux_cfg)) {
+			f_osmuxem_configure(pt, flow.osmux_cfg);
+		} else {
+			var OsmuxemConfig osmux_cfg := c_OsmuxemDefaultCfg;
+			f_osmuxem_configure(pt, osmux_cfg);
+		}
+
+		/* We didn't send a non-wildcarded Osmux CID yet. If caller wants to submit it, register handler */
+		if (flow.osmux_cid_sent == false and flow.osmux_cid != -1) {
+			rx_hdl := c_OsmuxemDefaultRxHandle;
+			rx_hdl.cid := flow.osmux_cid;
+			f_osmuxem_register_rxhandle(pt, rx_hdl);
+			flow.osmux_cid_sent := true;
+		}
+
+		/* connect MGW side Osmux socket to the emulation-side Osmux socket using SDP */
+		cmd := ts_MDCX_osmux(get_next_trans_id(), ep, mode, call_id, flow.mgcp_conn_id, flow.osmux_cid);
+		cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
+				  flow.em.portnr, { int2str(flow.pt) }, attributes);
+		resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
+
+		/* extract MGW-side port number from response. (usually this
+		 * will not change, but thats is up to the MGW) */
+		flow.mgw.portnr :=
+			resp.sdp.media_list[0].media_field.ports.port_number;
+
+		/* extract Osmux CID we got assigned by the MGW */
+		var MgcpMessage resp_msg := {
+			response := resp
+		}
+
+		if (f_mgcp_find_param(resp_msg, "X-OSMUX", cid_response) == false) {
+			setverdict(fail, "No Osmux CID in MGCP response", resp);
+			mtc.stop;
+		}
+
+		/* Make sure response is no wildcard */
+		cid_resp_parsed := f_mgcp_osmux_cid_decode(cid_response);
+		if (cid_resp_parsed == -1) {
+			setverdict(fail, "Osmux CID in MGCP response contains unexpected wildcard");
+			mtc.stop;
+		}
+		if (cid_resp_parsed != flow.osmux_cid_response) {
+			setverdict(fail, "Osmux CID in MGCP MDCX response changed from prev value");
+			mtc.stop;
+		}
+
+		/* reconnect the emulation-side Osmux socket to the MGW */
+		f_osmuxem_connect(pt, flow.mgw.hostname, flow.mgw.portnr);
+	}
+
 	/* Delete an existing RTP flow */
 	function f_flow_delete(RTPEM_CTRL_PT pt, template MgcpEndpoint ep := omit, template MgcpCallId call_id := omit)
 	runs on dummy_CT {
@@ -380,6 +574,22 @@ module MGCP_Test {
 
 		/* Switch off RTP flow */
 		f_rtpem_mode(pt, RTPEM_MODE_NONE);
+
+		/* Delete connection on MGW (if needed) */
+		if (isvalue(call_id) and isvalue(ep)) {
+			f_sleep(0.1);
+			f_dlcx_ok(valueof(ep), call_id);
+		}
+	}
+
+	/* Delete an existing Osmux flow */
+	function f_flow_delete_osmux(OsmuxEM_CTRL_PT pt, template MgcpEndpoint ep := omit, template MgcpCallId call_id := omit)
+	runs on dummy_CT {
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+
+		/* Switch off Osmux flow */
+		f_osmuxem_mode(pt, OSMUXEM_MODE_NONE);
 
 		/* Delete connection on MGW (if needed) */
 		if (isvalue(call_id) and isvalue(ep)) {
@@ -435,6 +645,42 @@ module MGCP_Test {
 			setverdict(fail, "SDP does not contain a port number");
 			mtc.stop;
 		}
+	}
+
+	function f_crcx_osmux(charstring ep_prefix, MgcpOsmuxCID osmux_cid, boolean run_init := true) runs on dummy_CT {
+		var MgcpEndpoint ep := ep_prefix & "2@" & c_mgw_domain;
+		var template MgcpCommand cmd;
+		var MgcpResponse resp;
+		var MgcpCallId call_id := '1234'H;
+		var charstring cid_response;
+
+		if (run_init) {
+			f_init(ep, true);
+		}
+
+		/* create the connection on the MGW */
+		cmd := ts_CRCX_osmux(get_next_trans_id(), ep, "recvonly", call_id, osmux_cid);
+		resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK_osmux);
+		extract_conn_id(resp);
+
+		/* extract Osmux CID we got assigned by the MGW */
+		var MgcpMessage resp_msg := {
+			response := resp
+		}
+
+		if (f_mgcp_find_param(resp_msg, "X-OSMUX", cid_response) == false) {
+			setverdict(fail, "No Osmux CID in MGCP response", resp);
+			mtc.stop;
+		}
+
+		/* Make sure response is no wildcard */
+		if (f_mgcp_osmux_cid_decode(cid_response) == -1) {
+			setverdict(fail, "Osmux CID in MGCP response contains unexpected wildcard");
+			mtc.stop;
+		}
+
+		/* clean-up */
+		f_dlcx_ok(ep, call_id);
 	}
 
 	/* test valid CRCX without SDP */
@@ -791,6 +1037,358 @@ module MGCP_Test {
 		setverdict(pass);
 	}
 
+	/* test valid CRCX without SDP */
+	testcase TC_crcx_osmux_wildcard() runs on dummy_CT {
+		f_crcx_osmux(c_mgw_ep_rtpbridge, -1);
+		setverdict(pass);
+	}
+
+	/* test valid CRCX without SDP */
+	testcase TC_crcx_osmux_fixed() runs on dummy_CT {
+		f_crcx_osmux(c_mgw_ep_rtpbridge, 2);
+		setverdict(pass);
+	}
+
+	/* test valid CRCX without SDP, twice, to make sure CID is freed fine during first step. */
+	testcase TC_crcx_osmux_fixed_twice() runs on dummy_CT {
+		f_crcx_osmux(c_mgw_ep_rtpbridge, 3, true);
+		f_crcx_osmux(c_mgw_ep_rtpbridge, 3, false);
+		setverdict(pass);
+	}
+
+	/* Create one half open connection in receive-only mode. The MGW must accept
+	 * the packets but must not send any. */
+	testcase TC_one_crcx_receive_only_osmux() runs on dummy_CT {
+		var RtpFlowData flow;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "1@" & c_mgw_domain;
+		var MgcpCallId call_id := '1225'H;
+		var OsmuxemStats stats;
+		var OsmuxTxHandle tx_hdl;
+
+		f_init(ep, true);
+		flow := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 112, "AMR/8000/1"));
+		flow.em.portnr := mp_local_osmux_port;
+		flow.osmux_cid := -1;
+		f_flow_create_osmux(OsmuxEM, ep, call_id, "recvonly", flow, false);
+
+		/* create a transmitter not yet known by MGW */
+		tx_hdl := valueof(t_TxHandleAMR590(2));
+		f_osmuxem_register_txhandle(OsmuxEM, tx_hdl);
+
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_TXONLY);
+		f_sleep(1.0);
+		f_flow_delete_osmux(OsmuxEM, ep, call_id);
+
+		stats := f_osmuxem_stats_get(OsmuxEM);
+
+		if (stats.num_pkts_tx < 40 / flow.osmux_cfg.batch_size) {
+			setverdict(fail);
+		}
+		if (stats.bytes_payload_tx < stats.num_pkts_tx * f_amrft_payload_len(tx_hdl.amr_ft) * flow.osmux_cfg.batch_size) {
+			setverdict(fail);
+		}
+
+		f_osmuxem_stats_err_check(stats);
+
+		setverdict(pass);
+	}
+
+	/* Create one connection in loopback mode, test if the Osmux packets are
+	 * actually reflected */
+	testcase TC_one_crcx_loopback_osmux() runs on dummy_CT {
+		var RtpFlowData flow;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "1@" & c_mgw_domain;
+		var MgcpCallId call_id := '1225'H;
+		var OsmuxemStats stats;
+		var OsmuxTxHandle tx_hdl;
+
+		f_init(ep, true);
+		flow := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 111, "GSM-HR-08/8000/1"));
+		flow.em.portnr := mp_local_osmux_port;
+		flow.osmux_cid := 2;
+		f_flow_create_osmux(OsmuxEM, ep, call_id, "loopback", flow);
+
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_BIDIR);
+		f_sleep(1.0);
+
+		/* Switch off both Tx, wait to receive delayed frames from MGW */
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_RXONLY);
+		f_sleep(0.1);
+		f_flow_delete_osmux(OsmuxEM, ep, call_id);
+
+		stats := f_osmuxem_stats_get(OsmuxEM);
+
+		if (stats.num_pkts_tx != stats.num_pkts_rx) {
+			setverdict(fail);
+		}
+		if (stats.bytes_payload_tx != stats.bytes_payload_rx) {
+			setverdict(fail);
+		}
+
+		f_osmuxem_stats_err_check(stats);
+
+		setverdict(pass);
+	}
+
+	/* Cross-compare two osmuxem-statistics. The transmission statistics on the a side
+	 * must match the reception statistics on the other side and vice versa. The
+	 * user may also supply a tolerance value (number of packets) when deviations
+	 * are acceptable */
+	function f_rtp_osmux_stats_compare(RtpemStats a, OsmuxemStats b, integer batch_size, integer tolerance := 0) return boolean {
+		var integer plen;
+
+		log("stats A: ", a);
+		log("stats B: ", b);
+		log("tolerance: ", tolerance, " packets");
+		log("batch_size: ", batch_size, " packets");
+
+		var integer tolerance_batch := tolerance + (batch_size - tolerance mod batch_size);
+
+		if (f_osmuxem_stats_compare_value(a.num_pkts_tx, b.num_pkts_rx * batch_size, tolerance_batch) == false) {
+			return false;
+		}
+
+		if (f_osmuxem_stats_compare_value(a.num_pkts_rx / batch_size, b.num_pkts_tx, tolerance_batch) == false) {
+			return false;
+		}
+
+		if(a.num_pkts_tx > 0) {
+			plen := a.bytes_payload_tx / a.num_pkts_tx;
+		} else {
+			plen := 0;
+		}
+
+		/* Each RTP pcket payload contains 2 extra bytes due to AMR ToC at start */
+		if (f_osmuxem_stats_compare_value(a.bytes_payload_tx, b.bytes_payload_rx + a.num_pkts_tx * 2, tolerance_batch * plen) == false) {
+			log("incorrect payload A->B: " , a.bytes_payload_tx, " vs ", b.bytes_payload_rx + a.num_pkts_rx * 2);
+			return false;
+		}
+
+		if (f_osmuxem_stats_compare_value(a.bytes_payload_rx, b.bytes_payload_tx + b.num_pkts_tx * 2 * batch_size, tolerance_batch * plen) == false) {
+			log("incorrect payload B->A: " ,  b.bytes_payload_tx + b.num_pkts_tx * 2 * batch_size, " vs ", a.bytes_payload_rx);
+			return false;
+		}
+
+		return true;
+	}
+
+	function f_TC_two_crcx_and_rtp_osmux(boolean bidir) runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats_rtp;
+		var OsmuxemStats stats_osmux;
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1226'H;
+		var integer tolerance := 0;
+
+		f_init(ep, true);
+
+		/* from us to MGW */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 112, "AMR/8000"));
+		flow[0].rtp_cfg := c_RtpemDefaultCfg
+		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
+		/* 0014 is the ToC (CMR=AMR4.75) in front of AMR Payload in RTP Payload */
+		flow[0].rtp_cfg.rx_fixed_payload := '0014'O & f_osmux_gen_expected_rx_rtp_payload(2 /* AMR_FT_2, 5.90 */, c_OsmuxemDefaultCfg.tx_fixed_payload);
+		flow[0].rtp_cfg.tx_fixed_payload := flow[0].rtp_cfg.rx_fixed_payload;
+		/* bind local RTP emulation sockets */
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+
+		/* from MGW back to us */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 110, "AMR/8000"));
+		flow[1].em.portnr := mp_local_osmux_port;
+		flow[1].osmux_cid := 2;
+		flow[1].osmux_cfg := c_OsmuxemDefaultCfg;
+		f_flow_create_osmux(OsmuxEM, ep, call_id, "sendrecv", flow[1]);
+
+		if (bidir) {
+				f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+				f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_BIDIR);
+
+				/* Note: When we test bidirectional we may
+				 * loose packets during switch off because
+				 * both ends are transmitting and we only
+				 * can switch them off one by one. */
+				tolerance := 3;
+		} else {
+				f_rtpem_mode(RTPEM[0], RTPEM_MODE_RXONLY);
+				f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_TXONLY);
+		}
+
+		f_sleep(1.0);
+
+		/* Switch off both Tx, wait to receive delayed frames from MGW */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_RXONLY);
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_RXONLY);
+		f_sleep(0.1);
+
+		f_flow_delete_osmux(OsmuxEM, ep, call_id);
+		f_flow_delete(RTPEM[1]);
+
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		if (not f_rtp_osmux_stats_compare(stats_rtp, stats_osmux, flow[1].osmux_cfg.batch_size,  tolerance)) {
+			setverdict(fail, "RTP and Osmux endpoint statistics don't match");
+			mtc.stop;
+		}
+
+		f_rtpem_stats_err_check(stats_rtp);
+		f_osmuxem_stats_err_check(stats_osmux);
+
+		setverdict(pass);
+	}
+
+	/* create one RTP and one OSmux emulations; create two connections on MGW EP, exchange some data */
+	testcase TC_two_crcx_and_rtp_osmux() runs on dummy_CT {
+		 f_TC_two_crcx_and_rtp_osmux(false);
+	}
+
+	/* create one RTP and one OSmux emulations; create two connections on MGW EP,
+	 * exchange some data in both directions */
+	testcase TC_two_crcx_and_rtp_osmux_bidir() runs on dummy_CT {
+		 f_TC_two_crcx_and_rtp_osmux(true);
+	}
+
+
+	function f_two_crcx_mdcx_and_rtp_osmux(boolean crcx_osmux_wildcard) runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats_rtp;
+		var OsmuxemStats stats_osmux;
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1227'H;
+		var integer num_pkts_tx[2];
+		var integer temp;
+
+		f_init(ep, true);
+
+		/* Create the first connection in receive only mode */
+		flow[0] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 112, "AMR/8000"));
+		flow[0].rtp_cfg := c_RtpemDefaultCfg
+		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
+		/* 0014 is the ToC (CMR=AMR4.75) in front of AMR Payload in RTP Payload */
+		flow[0].rtp_cfg.rx_fixed_payload := '0014'O & f_osmux_gen_expected_rx_rtp_payload(2 /* AMR_FT_2, 5.90 */, c_OsmuxemDefaultCfg.tx_fixed_payload);
+		flow[0].rtp_cfg.tx_fixed_payload := flow[0].rtp_cfg.rx_fixed_payload;
+		/* bind local RTP emulation sockets */
+		flow[0].em.portnr := 10000;
+		f_flow_create(RTPEM[0], ep, call_id, "recvonly", flow[0], false);
+
+
+		/* Create the second connection. This connection will be also
+		 * in receive only mode */
+		flow[1] := valueof(t_RtpFlow(mp_local_ip, mp_remote_ip, 110, "AMR/8000"));
+		flow[1].em.portnr := mp_local_osmux_port;
+		if (crcx_osmux_wildcard) {
+			flow[1].osmux_cid := -1;
+		} else {
+			flow[1].osmux_cid := 2;
+		}
+		flow[1].osmux_cfg := c_OsmuxemDefaultCfg;
+		f_flow_create_osmux(OsmuxEM, ep, call_id, "recvonly", flow[1], false);
+
+
+		/* The first leg starts transmitting */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
+		f_sleep(0.5);
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		if (stats_rtp.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from RTP MGW on recvonly connection");
+			mtc.stop;
+		}
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		if (stats_osmux.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from Osmux MGW on recvonly connection");
+			mtc.stop;
+		}
+
+		/* The second leg starts transmitting a little later */
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_TXONLY);
+		f_sleep(1.0);
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		if (stats_rtp.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from RTP MGW on recvonly connection");
+			mtc.stop;
+		}
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		if (stats_osmux.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from Osmux MGW on recvonly connection");
+			mtc.stop;
+		}
+
+		/* The first leg will now be switched into bidirectional
+		 * mode, but we do not expect any data comming back yet. */
+		f_flow_modify(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+		f_sleep(0.5);
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		if (stats_rtp.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from RTP MGW on recvonly connection");
+			mtc.stop;
+		}
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		if (stats_osmux.num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from Osmux MGW on recvonly connection");
+			mtc.stop;
+		}
+
+		/* When the second leg is switched into bidirectional mode
+		 * as well, then the MGW will connect the two together and
+		 * we should see RTP streams passing through from both ends. */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_BIDIR);
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		num_pkts_tx[0] := stats_rtp.num_pkts_tx
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		num_pkts_tx[1] := stats_osmux.num_pkts_tx
+
+		if (crcx_osmux_wildcard) {
+			/* For now we must set same CID as the MGW recvCID,
+			 * having sendCID!=recvCID is not yet supported. */
+			flow[1].osmux_cid := flow[1].osmux_cid_response;
+		}
+		f_flow_modify_osmux(OsmuxEM, ep, call_id, "sendrecv", flow[1]);
+		f_sleep(2.0);
+
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+
+		temp := stats_rtp.num_pkts_tx - num_pkts_tx[0] - stats_osmux.num_pkts_rx * flow[1].osmux_cfg.batch_size;
+		if (temp > 3 * flow[1].osmux_cfg.batch_size or temp < -3 * flow[1].osmux_cfg.batch_size) {
+			log("stats_rtp: ", stats_rtp);
+			log("stats_osmux: ", stats_osmux);
+			log("old_rtp_tx: ", num_pkts_tx[0]);
+			setverdict(fail, "number of packets not within normal parameters (" & int2str(temp) & ")");
+			mtc.stop;
+		}
+
+		temp := stats_osmux.num_pkts_tx - num_pkts_tx[1] - stats_rtp.num_pkts_rx / flow[1].osmux_cfg.batch_size;
+		if (temp > 3 or temp < -3) {
+			setverdict(fail, "number of packets not within normal parameters (" & int2str(temp) & ")");
+			mtc.stop;
+		}
+
+		f_rtpem_stats_err_check(stats_rtp);
+		f_osmuxem_stats_err_check(stats_osmux);
+
+		/* Tear down */
+		f_flow_delete(RTPEM[0]);
+		f_flow_delete_osmux(OsmuxEM, ep, call_id);
+		setverdict(pass);
+	}
+
+	/*  create one RTP and one OSmux emulations and pass data in both
+	    directions. Create CRCX with wildcard Osmux CID and set it later
+	    during MDCX. This is similar to how MSC sets up the call in AoIP. */
+	testcase TC_two_crcx_mdcx_and_rtp_osmux_wildcard() runs on dummy_CT {
+		f_two_crcx_mdcx_and_rtp_osmux(true);
+	}
+
+	/*  create one RTP and one OSmux emulations and pass data in both
+	    directions. Create CRCX with fixed Osmux CID and keep it during
+	    MDCX. This is similar to how BSC sets up the call in AoIP. */
+	testcase TC_two_crcx_mdcx_and_rtp_osmux_fixed() runs on dummy_CT {
+		f_two_crcx_mdcx_and_rtp_osmux(false);
+	}
+
 	function f_crcx_and_dlcx_ep_callid_connid(MgcpEndpoint ep, MgcpCallId call_id) runs on dummy_CT {
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
@@ -926,7 +1524,8 @@ module MGCP_Test {
 			portnr := omit
 		},
 		pt := pt,
-		codec := codec
+		codec := codec,
+		osmux_cid_sent := false
 	}
 
 	/* transmit RTP streams between two RTP Emulations back-to-back; expect no loss */
@@ -1481,6 +2080,16 @@ module MGCP_Test {
 		execute(TC_crcx_and_dlcx_ep_callid_inval());
 		execute(TC_crcx_and_dlcx_ep_callid_connid_inval());
 		execute(TC_crcx_and_dlcx_retrans());
+
+		execute(TC_crcx_osmux_wildcard());
+		execute(TC_crcx_osmux_fixed());
+		execute(TC_crcx_osmux_fixed_twice());
+		execute(TC_one_crcx_receive_only_osmux());
+		execute(TC_one_crcx_loopback_osmux());
+		execute(TC_two_crcx_and_rtp_osmux());
+		execute(TC_two_crcx_and_rtp_osmux_bidir());
+		execute(TC_two_crcx_mdcx_and_rtp_osmux_wildcard());
+		execute(TC_two_crcx_mdcx_and_rtp_osmux_fixed());
 
 		execute(TC_crcx_dlcx_30ep());
 

@@ -41,6 +41,7 @@ DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn
 MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="RTP_CodecPort.ttcn RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttcn IuUP_EncDec.cc "
+FILES+="OSMUX_CodecPort.ttcn OSMUX_Emulation.ttcn OSMUX_Types.ttcn OSMUX_CodecPort_CtrlFunct.ttcn OSMUX_CodecPort_CtrlFunctDef.cc "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
 gen_links $DIR $FILES
