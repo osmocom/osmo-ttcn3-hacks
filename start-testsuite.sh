@@ -28,7 +28,7 @@ SUITE=$1
 SUITE_DIR="$(dirname "$SUITE")"
 SUITE_NAME="$(basename "$SUITE")"
 CFG="$SUITE_NAME.cfg"
-if [ $# -gt 1 ]; then
+if [ $# -gt 1 ] && [ "$2" != "" ] ; then
 	CFG=$2
 fi
 
