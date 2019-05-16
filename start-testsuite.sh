@@ -42,5 +42,4 @@ if [ ! -x "$compare" ]; then
   exit 1
 fi
 
-set -e
 "$compare" "$expected" "$last_log" $OSMO_TTCN3_COMPARE_ARGS
