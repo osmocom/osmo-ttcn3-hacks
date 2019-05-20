@@ -33,7 +33,6 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.TestPorts.GPIO \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
 			titan.ProtocolModules.BSSGP_v13.0.0 \
-			titan.ProtocolModules.BSSMAP_v11.2.0 \
 			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
@@ -48,7 +47,8 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolEmulations.M3UA
 
-OSMOGIT_REPOS=		titan.ProtocolModules.MAP
+OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
+			titan.ProtocolModules.BSSMAP
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
@@ -60,7 +60,7 @@ titan.ProtocolEmulations.M3UA_commit=		R.2.A-2-g742cf02
 titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-2-g724c83f
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
-titan.ProtocolModules.BSSMAP_v11.2.0_commit=	R.2.A
+titan.ProtocolModules.BSSMAP_commit=		master
 titan.ProtocolModules.GRE_commit=		R.2.A
 titan.ProtocolModules.GTP_v13.5.0_commit=	R.2.A
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A

@@ -46,7 +46,7 @@ DIR=$BASEDIR/titan.ProtocolEmulations.SCCP/src
 FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.BSSMAP_v11.2.0/src
+DIR=$BASEDIR/titan.ProtocolModules.BSSMAP/src
 FILES="BSSAP_Types.ttcn"
 gen_links $DIR $FILES
 
