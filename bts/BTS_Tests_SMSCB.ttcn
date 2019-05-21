@@ -19,6 +19,7 @@ import from GSM_Types all;
 import from L1CTL_PortType all;
 import from L1CTL_Types all;
 import from LAPDm_Types all;
+import from IPA_Emulation all;
 
 import from RSL_Types all;
 
@@ -186,13 +187,10 @@ runs on test_CT {
 		RSL_CCHAN.send(ts_RSL_UD(rsl));
 	}
 }
-private function f_smscb_setup(inout CbchTestPars pars) runs on test_CT {
 
-	f_cbch_compute_exp_blocks(pars);
+private function f_vty_cbch_setup(boolean use_sdcch4 := true) runs on test_CT {
 
-	f_init_vty_bsc();
-	/* ensure that a CBCH is present in channel combination */
-	if (pars.use_sdcch4) {
+	if (use_sdcch4 == true) {
 		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 0"},
 					"phys_chan_config CCCH+SDCCH4+CBCH");
 		f_vty_config2(BSCVTY, {"network", "bts 0", "trx 0", "timeslot 6"},
@@ -205,6 +203,14 @@ private function f_smscb_setup(inout CbchTestPars pars) runs on test_CT {
 	}
 	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
 	f_sleep(2.0);
+}
+private function f_smscb_setup(inout CbchTestPars pars) runs on test_CT {
+
+	f_cbch_compute_exp_blocks(pars);
+
+	f_init_vty_bsc();
+	/* ensure that a CBCH is present in channel combination */
+	f_vty_cbch_setup(pars.use_sdcch4);
 	f_init(testcasename());
 
 	f_init_l1ctl();
@@ -687,6 +693,174 @@ testcase TC_sms_cb_cmd_sdcch4_default_then_null() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, pass);
 }
 
+/* Verify there are no CBCH load indications if no CBCH is present */
+testcase TC_cbch_load_idle_no_cbch() runs on test_CT {
+	var ASP_RSL_Unitdata rx_ud;
+	timer T := 10.0;
+
+	f_init(testcasename());
+	f_init_vty_bsc();
+
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_BASIC)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_EXTD)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive { repeat; }
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Verify the CBCH load indications of an idle cell (without CBCH load) */
+function f_TC_cbc_load_idle() runs on test_CT {
+	template integer tr_slot_count := (2 .. 15);
+	const integer min_load_ind := 4;
+	var integer basic_count := 0;
+	var integer extd_count := 0;
+	var ASP_RSL_Unitdata rx_ud;
+	timer T := 10.0;
+
+	f_init(testcasename());
+
+	RSL_CCHAN.clear;
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_BASIC(false, tr_slot_count))) {
+		basic_count := basic_count + 1;
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_EXTD(false, tr_slot_count))) -> value rx_ud {
+		extd_count := extd_count + 1;
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_BASIC)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_EXTD)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive { repeat; }
+	[] T.timeout {
+		if ((basic_count >= min_load_ind) and (extd_count >= min_load_ind)) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Insufficient number of CBCH LOAD IND: ",
+				   "BASIC=", basic_count, " EXTD=", extd_count);
+		}
+		}
+	}
+	f_smscb_cleanup();
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_cbc_sdcch4_load_idle() runs on test_CT {
+	f_init_vty_bsc();
+	f_vty_cbch_setup(use_sdcch4 := true);
+	f_TC_cbc_load_idle();
+}
+testcase TC_cbc_sdcch8_load_idle() runs on test_CT {
+	f_init_vty_bsc();
+	f_vty_cbch_setup(use_sdcch4 := false);
+	f_TC_cbc_load_idle();
+}
+
+/* Verify CBCH overload indications are sent when sending too many SMS CB CMD */
+function f_TC_cbc_load_overload(CbchTestPars pars) runs on test_CT {
+	template integer tr_slot_count_basic := (11 .. 13);
+	template integer tr_slot_count_extd := (2 .. 15);
+	const integer min_load_ind := 4;
+	var integer basic_count := 0;
+	var integer extd_count := 0;
+	var ASP_RSL_Unitdata rx_ud;
+	timer T_total := 10.0;
+	timer T_retransmit := 0.2;
+	timer T_initial_guard := 2.0;
+	var integer i;
+
+	f_init(testcasename());
+
+	/* send tons of SMSCB Command */
+	for (i := 0; i < 30; i := i+1) {
+		f_smscb_setup_rsl_chan(pars.basic);
+	}
+
+	/* keep sending SMSCB Commands for another two seconds */
+	T_initial_guard.start;
+	T_retransmit.start;
+	alt {
+	[] T_retransmit.timeout {
+		f_smscb_setup_rsl_chan(pars.basic);
+		T_retransmit.start;
+		repeat;
+		}
+	[] T_initial_guard.timeout { }
+	}
+	/* clear any pending messages (where load may not have peaked yet) */
+	RSL_CCHAN.clear;
+
+	/* keep sending SMSCB Commands while verifying LOAD INDICATIONS */
+	T_total.start;
+	T_retransmit.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_BASIC(true, tr_slot_count_basic))) {
+		basic_count := basic_count + 1;
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_EXTD(false, tr_slot_count_extd))) {
+		extd_count := extd_count + 1;
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_BASIC)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_CBCH_LOAD_IND_EXTD)) -> value rx_ud {
+		setverdict(fail, "Received unexpected CBCH LOAD IND: ", rx_ud);
+		}
+	[] RSL_CCHAN.receive { repeat; }
+	[] T_retransmit.timeout {
+		f_smscb_setup_rsl_chan(pars.basic);
+		T_retransmit.start;
+		repeat;
+		}
+	[] T_total.timeout {
+		if ((basic_count >= min_load_ind) and (extd_count >= min_load_ind)) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Insufficient number of CBCH LOAD IND: ",
+				   "BASIC=", basic_count, " EXTD=", extd_count);
+		}
+		}
+	}
+	f_smscb_cleanup();
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_cbc_sdcch4_load_overload() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		basic := valueof(t_CbchPC(msgs_1m_3b_norm)),
+		extended := omit
+	};
+
+	f_init_vty_bsc();
+	f_vty_cbch_setup(use_sdcch4 := true);
+	f_TC_cbc_load_overload(pars);
+}
+testcase TC_cbc_sdcch8_load_overload() runs on test_CT {
+	var CbchTestPars pars := {
+		use_sdcch4 := true,
+		basic := valueof(t_CbchPC(msgs_1m_3b_norm)),
+		extended := omit
+	};
+
+	f_init_vty_bsc();
+	f_vty_cbch_setup(use_sdcch4 := true);
+	f_TC_cbc_load_overload(pars);
+}
 
 
 /* SMSCB TODO:
@@ -696,6 +870,8 @@ testcase TC_sms_cb_cmd_sdcch4_default_then_null() runs on test_CT {
  */
 
 control {
+	execute( TC_cbch_load_idle_no_cbch() );
+
 	execute( TC_sms_cb_cmd_sdcch4_1block() );
 	execute( TC_sms_cb_cmd_sdcch4_2block() );
 	execute( TC_sms_cb_cmd_sdcch4_3block() );
@@ -705,6 +881,9 @@ control {
 	execute( TC_sms_cb_cmd_sdcch4_default_only() );
 	execute( TC_sms_cb_cmd_sdcch4_default_and_normal() );
 	execute( TC_sms_cb_cmd_sdcch4_default_then_null() );
+	execute( TC_cbc_sdcch4_load_idle() );
+	execute( TC_cbc_sdcch4_load_overload() );
+
 	if (false) { /* FIXME: SDCCH/8 support broken, needs trxcon + L1CTL work */
 	execute( TC_sms_cb_cmd_sdcch8_1block() );
 	execute( TC_sms_cb_cmd_sdcch8_2block() );
@@ -714,6 +893,8 @@ control {
 	execute( TC_sms_cb_cmd_sdcch8_schedule() );
 	execute( TC_sms_cb_cmd_sdcch8_default_only() );
 	execute( TC_sms_cb_cmd_sdcch8_default_and_normal() );
+	execute( TC_cbc_sdcch8_load_idle() );
+	execute( TC_cbc_sdcch8_load_overload() );
 	}
 }
 
