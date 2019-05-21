@@ -83,7 +83,8 @@ type record BSC_ConnHdlrPars {
 	boolean gsup_enable,
 	integer ran_idx,
 	boolean use_umts_aka,
-	boolean ran_is_geran
+	boolean ran_is_geran,
+	boolean use_osmux
 };
 
 /* get a one-octet bitmaks of supported algorithms based on Classmark information */
@@ -172,9 +173,9 @@ runs on RAN_Emulation_CT return template PDU_BSSAP {
 
 	log("BSSMAP_BscUnitdataCallback");
 	/* answer all RESET with RESET ACK */
-	if (match(bssap, tr_BSSMAP_Reset)){
+	if (match(bssap, tr_BSSMAP_Reset(g_ran_ops.use_osmux))){
 		log("BSSMAP_BscUnitdataCallback: Responding to RESET with RESET-ACK");
-		resp := ts_BSSMAP_ResetAck;
+		resp := ts_BSSMAP_ResetAck(g_ran_ops.use_osmux);
 	}
 
 	/* FIXME: Handle paging, etc. */
@@ -187,7 +188,7 @@ runs on RAN_Emulation_CT return template RANAP_PDU {
 
 	log("RANAP_RncUnitdataCallback");
 	/* answer all RESET with RESET ACK */
-	if (match(ranap, tr_RANAP_Reset)) {
+	if (match(ranap, tr_RANAP_Reset())) {
 		log("RANAP_RncUnitdataCallback: Responding to RESET with RESET-ACK");
 		var CN_DomainIndicator dom;
 		dom := ranap.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator;
@@ -593,7 +594,9 @@ type record CallParameters {
 	MgcpCallId mgcp_call_id optional,		/* MGCP Call ID; CallAgent allocated */
 	MgcpEndpoint mgcp_ep optional			/* MGCP Endpoint, CallAgent or MGW allocated */,
 	MgcpConnectionId mgcp_connection_id_bss,	/* MGCP Connection ID BSS Side */
-	MgcpConnectionId mgcp_connection_id_mss		/* MGCP Connection ID MSS Side */
+	MgcpConnectionId mgcp_connection_id_mss,	/* MGCP Connection ID MSS Side */
+
+	boolean use_osmux				/* MSC is expected to use Osmux for this call */
 }
 
 template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
@@ -618,7 +621,8 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	mgcp_call_id := omit,
 	mgcp_ep := omit,
 	mgcp_connection_id_bss := '0'H,//
-	mgcp_connection_id_mss := '0'H //
+	mgcp_connection_id_mss := '0'H,//
+	use_osmux := false
 };
 
 /* Allocate a call reference and send SETUP via MNCC to MSC */
@@ -643,6 +647,9 @@ function f_mt_call_complete(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
+	var template MgcpResponse mgcp_resp;
+	var MgcpOsmuxCID osmux_cid;
+	var PDU_BSSAP bssap;
 
 	f_ran_register_imsi(g_pars.imsi, g_pars.tmsi);
 
@@ -682,8 +689,19 @@ runs on BSC_ConnHdlr {
 							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 										cpars.rtp_sdp_format)),
 							  valueof(ts_SDP_ptime(20)) }));
-		var template MgcpResponse mgcp_resp;
-		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
+
+		if (cpars.use_osmux) {
+			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+			if (osmux_cid != -1) { /* we expect MSC to use wildcard here */
+				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
+				mtc.stop;
+			}
+			osmux_cid := 0;
+			mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+		} else {
+			mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
+		}
+
 		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
 		MGCP.send(mgcp_resp);
 		}
@@ -707,15 +725,30 @@ runs on BSC_ConnHdlr {
 			}
 
 		/* expect the MSC to trigger a BSSMAP ASSIGNMENT */
-		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap {
 			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
 			var BSSMAP_IE_SpeechCodec codec;
+			var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
 			log("f_mt_call_complete 6");
 
 			tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
 			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
 
-			BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+			if (cpars.use_osmux) {
+				if (not ispresent(bssap.pdu.bssmap.assignmentRequest.osmuxCID)) {
+					setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+					mtc.stop;
+				}
+				osmuxCID := valueof(ts_OsmuxCID(0));
+				if (cpars.use_osmux and not match(bssap.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
+					setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+					mtc.stop;
+				}
+				bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec, osmuxCID));
+			} else {
+				bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+			}
+			BSSAP.send(bssap);
 
 			BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT(cpars.transaction_id)));
 			}
@@ -737,8 +770,18 @@ runs on BSC_ConnHdlr {
 								{ int2str(cpars.rtp_payload_type) },
 								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 											cpars.rtp_sdp_format)),
-								  valueof(ts_SDP_ptime(20)) }));
-			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+											valueof(ts_SDP_ptime(20)) }));
+			if (cpars.use_osmux) {
+				osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+				if (osmux_cid != 0) { /* we expect MSC to use specific CID here */
+					setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != 0");
+					mtc.stop;
+				}
+				mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+			} else {
+				mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp);
+			}
+			MGCP.send(mgcp_resp);
 			}
 
 		/* MDCX setting up the CN side remote RTP address received from MNCC CONNECT */
@@ -807,7 +850,10 @@ runs on BSC_ConnHdlr {
 
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
+	var template MgcpResponse mgcp_resp;
 	var boolean respond_to_dlcx;
+	var PDU_BSSAP bssap;
+	var MgcpOsmuxCID osmux_cid;
 
 	if (cpars.emergency) {
 		f_establish_fully(EST_TYPE_EMERG_CALL);
@@ -847,6 +893,10 @@ runs on BSC_ConnHdlr {
 			cpars.mgcp_ep := mgcp_cmd.line.ep;
 		}
 
+		if (cpars.use_osmux) {
+			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+		}
+
 		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_bss, cpars.mgw_rtp_ip_bss,
 							hex2str(cpars.mgcp_call_id), "42",
 							cpars.mgw_rtp_port_bss,
@@ -855,8 +905,17 @@ runs on BSC_ConnHdlr {
 										cpars.rtp_sdp_format)),
 							  valueof(ts_SDP_ptime(20)) }));
 
-		var template MgcpResponse mgcp_resp;
-		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
+		if (cpars.use_osmux) {
+			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+			if (osmux_cid != -1) { /* we expect MSC to use wildcard here */
+				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
+				mtc.stop;
+			}
+			osmux_cid := 0;
+			mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+		} else {
+			mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
+		}
 		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
 		MGCP.send(mgcp_resp);
 		}
@@ -871,14 +930,30 @@ runs on BSC_ConnHdlr {
 		MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
 		}
 
-	//[g_pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
-	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) {
+	//[g_pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap {
+	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap {
 		log("f_mo_call_establish 4: rx Assignment Request");
 		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
 		var BSSMAP_IE_SpeechCodec codec;
+		var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
+
 		tla := valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.bss_rtp_ip), cpars.bss_rtp_port));
 		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
-		BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+		if (cpars.use_osmux) {
+			if (not ispresent(bssap.pdu.bssmap.assignmentRequest.osmuxCID)) {
+				setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+				mtc.stop;
+			}
+			osmuxCID := valueof(ts_OsmuxCID(0));
+			if (cpars.use_osmux and not match(bssap.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
+				setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+				mtc.stop;
+			}
+			bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec, osmuxCID));
+		} else {
+			bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+		}
+		BSSAP.send(bssap);
 		}
 	/*
 	[!g_pars.ran_is_geran] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
@@ -896,7 +971,18 @@ runs on BSC_ConnHdlr {
 							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 										cpars.rtp_sdp_format)),
 							  valueof(ts_SDP_ptime(20)) }));
-		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+
+		if (cpars.use_osmux) {
+			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+			if (osmux_cid != 0) { /* we expect MSC to use specific CID here */
+				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != 0");
+				mtc.stop;
+			}
+			mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+		} else {
+			mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp);
+		}
+		MGCP.send(mgcp_resp);
 		}
 
 	/* Second MGCP CRCX (this time for MSS/CN side) */
