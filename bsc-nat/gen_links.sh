@@ -20,6 +20,11 @@ DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+# for Osmocom_VTY
+DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
+FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
+gen_links $DIR $FILES
+
 # required by SCCP Emulation
 DIR=$BASEDIR/titan.TestPorts.MTP3asp/src
 FILES="MTP3asp_PortType.ttcn  MTP3asp_Types.ttcn"
@@ -47,7 +52,7 @@ FILES="RTP_EncDec.cc RTP_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp L3_Templates.ttcn BSSMAP_Templates.ttcn RAN_Emulation.ttcnpp MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn BSSAP_CodecPort.ttcn"
+FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp L3_Templates.ttcn BSSMAP_Templates.ttcn RAN_Emulation.ttcnpp MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc Osmocom_CTRL_Types.ttcn Osmocom_VTY_Functions.ttcn Osmocom_CTRL_Functions.ttcn BSSAP_CodecPort.ttcn"
 gen_links $DIR $FILES
 
 ignore_pp_results
