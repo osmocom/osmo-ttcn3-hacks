@@ -1269,6 +1269,132 @@ testcase TC_rach_count() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+private function f_vty_load_ind_thresh(integer period := 10, integer bts_nr := 0) runs on test_CT {
+	var charstring bts_str := "bts " & int2str(bts_nr);
+	f_vty_config2(BSCVTY, {"network", bts_str}, "ccch load-indication-threshold " & int2str(period));
+}
+
+/* empirical value: Number of RACH slots per reporting interval (1s) on combined CCCH */
+private template integer tr_rach_slots_per_interval := (90 .. 130);
+
+/* Expect 0 RACH load on an idle BTS that has just started up */
+testcase TC_rach_load_idle_thresh0() runs on test_CT {
+	var ASP_RSL_Unitdata rx_ud;
+
+	f_init_vty_bsc();
+	/* send load indications even at 0% load */
+	f_vty_load_ind_thresh(0);
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+	f_sleep(2.0);
+
+	f_init();
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RACH_LOAD_IND(tr_rach_slots_per_interval, 0, 0))) {
+		setverdict(pass);
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RACH_LOAD_IND(?, ?, ?))) -> value rx_ud {
+		setverdict(fail, "Unexpected RACH LOAD IND: ", rx_ud);
+		repeat;
+		}
+	[] RSL_CCHAN.receive {
+		repeat;
+		}
+	[] T.timeout { }
+	}
+
+	f_vty_load_ind_thresh(10);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Expect no RACH load indications on an idle BTS that has just started up (default threshold 10%) */
+testcase TC_rach_load_idle_below_thresh() runs on test_CT {
+	var ASP_RSL_Unitdata rx_ud;
+
+	f_init_vty_bsc();
+	f_init();
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RACH_LOAD_IND(?, ?, ?))) -> value rx_ud {
+		setverdict(fail, "Unexpected RACH LOAD IND: ", rx_ud);
+		repeat;
+		}
+	[] RSL_CCHAN.receive {
+		repeat;
+		}
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Expect 0 RACH load on an idle BTS that has just started up */
+testcase TC_rach_load_count() runs on test_CT {
+	var ASP_RSL_Unitdata rx_ud;
+	var integer load_access_count := 0;
+
+	f_init_vty_bsc();
+	/* send load indications even at 0% load */
+	f_vty_load_ind_thresh(0);
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+	f_sleep(2.0);
+	f_init();
+
+	f_init_l1ctl();
+	f_sleep(1.0);
+	f_l1_tune(L1CTL);
+
+	var GsmFrameNumber fn_last := 0;
+	for (var integer i := 0; i < 1000; i := i+1) {
+		var OCT1 ra := f_rnd_ra_cs();
+		var GsmFrameNumber fn := f_L1CTL_RACH(L1CTL, oct2int(ra));
+		if (fn == fn_last) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Two RACH in same FN?!?");
+		}
+		fn_last := fn;
+	}
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RACH_LOAD_IND(tr_rach_slots_per_interval, ?, ?)))
+										-> value rx_ud {
+		var RSL_IE_Body ie;
+		f_rsl_find_ie(rx_ud.rsl, RSL_IE_RACH_LOAD, ie);
+		load_access_count := load_access_count + ie.rach_load.access_count;
+		if (ie.rach_load.busy_count < ie.rach_load.access_count) {
+			setverdict(fail, "Access count cannot be < Busy count");
+		}
+		repeat;
+		}
+	[] RSL_CCHAN.receive(tr_RSL_UD(tr_RSL_RACH_LOAD_IND(?, ?, ?))) -> value rx_ud {
+		setverdict(fail, "Unexpected RACH LOAD IND: ", rx_ud);
+		repeat;
+		}
+	[] RSL_CCHAN.receive {
+		repeat;
+		}
+	[] T.timeout { }
+	}
+	if (load_access_count == 1000) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Load reports state ", load_access_count, " RACH, but we sent 1000");
+	}
+
+	f_vty_load_ind_thresh(10);
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+
+
 private function f_main_trxc_connect() runs on test_CT {
 	map(self:BTS_TRXC, system:BTS_TRXC);
 	var Result res;
@@ -4636,8 +4762,6 @@ testcase TC_chopped_ipa_payload() runs on test_CT {
 * handover detection
 * BS Power Control
 * Physical Context
-* CCCH Load Indication for RACH
-* SMS Broadcast Req / Cmd / CBCH LOad Ind
 * RF resource ind
 * error handling
 ** IE duplicated?
@@ -4664,6 +4788,9 @@ control {
 	execute( TC_rach_content() );
 	execute( TC_rach_count() );
 	execute( TC_rach_max_ta() );
+	execute( TC_rach_load_idle_thresh0() );
+	execute( TC_rach_load_idle_below_thresh() );
+	execute( TC_rach_load_count() );
 	execute( TC_meas_res_sign_tchf() );
 	execute( TC_meas_res_sign_tchh() );
 	execute( TC_meas_res_sign_sdcch4() );
