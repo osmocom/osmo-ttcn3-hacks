@@ -4,6 +4,12 @@
  * beyond what TITAN RAW coder can handle internally.
  *
  * (C) 2017 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 namespace RLCMAC__Types {

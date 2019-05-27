@@ -1,7 +1,13 @@
 
 /* Utility functions that I'm used to from C but for which I couldn't find TTCN-3 implementations
  *
- * (C) 2017 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2017 Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <sys/socket.h>
