@@ -300,16 +300,25 @@ module GGSN_Tests {
 		T_default.stop;
 	}
 
-	function f_pdp_ctx_del(PdpContext ctx, template BIT1 teardown_ind) runs on GT_CT {
+	function f_pdp_ctx_del(PdpContext ctx, template BIT1 teardown_ind, OCT1 expect_causevalue := '80'O) runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var default d;
+		var OCT4 expect_teid;
+
+		/* 3GPP TS 29.060 sec 7.3.6 specifies TEID used in response
+		   message with cause value "Non existent" shall be zero. */
+		if (expect_causevalue == 'C0'O) {
+			expect_teid := '00000000'O;
+		} else {
+			expect_teid := ctx.teic;
+		}
 
 		f_send_gtpc(ts_GTPC_DeletePDP(g_peer_c, g_c_seq_nr, ctx.teic_remote, ctx.nsapi, teardown_ind));
 		T_default.start;
 		d := activate(pingpong());
 		alt {
-			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, ctx.teic)) -> value ud {
-				if (ud.gtpc.gtpc_pdu.deletePDPContextResponse.cause.causevalue == '80'O) {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, expect_teid)) -> value ud {
+				if (ud.gtpc.gtpc_pdu.deletePDPContextResponse.cause.causevalue == expect_causevalue) {
 					setverdict(pass);
 				} else {
 					setverdict(fail);
@@ -1244,6 +1253,27 @@ module GGSN_Tests {
 		f_pdp_ctx_del(ctxA, '1'B);
 	}
 
+	/* Send a duplicate echo req. osmo-ggsn maintains a queue for sent
+	   responses (60 seconds): If same delete req is sent and duplicate is
+	   detected, saved duplicate response should be sent back. */
+	testcase TC_act_deact_retrans_duplicate() runs on GT_CT {
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		f_pdp_ctx_act(ctx);
+		f_pdp_ctx_del(ctx, '1'B);
+		/* leave some time in between to make sure retransmit response queue keeps packets for a while */
+		f_sleep(1.0);
+		/* g_c_seq_nr was increased during f_pdp_ctx_del(), we want a
+		   duplicate. If it was not a duplicate, osmo-ggsn would answer
+		   with a failure since that PDP ctx was already deleted. */
+		g_c_seq_nr := g_c_seq_nr - 1;
+		f_pdp_ctx_del(ctx, '1'B);
+
+		/* Now send a new pdp ctx del (increased seqnum). It should fail with cause "non-existent": */
+		var OCT1 cause_nonexistent := 'C0'O;
+		f_pdp_ctx_del(ctx, '1'B, cause_nonexistent);
+	}
+
 	control {
 		execute(TC_pdp4_act_deact());
 		execute(TC_pdp4_act_deact_ipcp());
@@ -1269,5 +1299,6 @@ module GGSN_Tests {
 		execute(TC_pdp46_clients_interact());
 
 		execute(TC_echo_req_resp());
+		execute(TC_act_deact_retrans_duplicate());
 	}
 }
