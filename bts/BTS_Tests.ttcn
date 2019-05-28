@@ -4876,6 +4876,71 @@ testcase TC_chan_act_a53() runs on test_CT {
 	f_testmatrix_each_chan(pars, refers(f_TC_chan_act_encr));
 }
 
+/* Test channel activation with A5/n right from the beginning and RSL MODE MODIFY
+ which should break the en/decryption on purpose by supplying a new key that is unknown to the MS*/
+function f_TC_rsl_modify_encr(charstring id) runs on ConnHdlr {
+	f_l1_tune(L1CTL);
+	f_est_dchan(true);
+
+	/* now we actually need to transmit some data both ways to check if the encryption works */
+	var L1ctlDlMessage dl;
+
+	var octetstring l3 := f_rnd_octstring(20);
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(0));
+
+	/* send UNITDATA_REQ from BTS to MS and expect it to arrive */
+	f_unitdata_mt(link_id, l3);
+
+	/* Send UI frame from MS and expect it to arrive as RLL UNITDATA IND on Abis */
+	f_unitdata_mo(link_id, l3);
+
+	var RSL_Message rsl;
+	rsl := valueof(ts_RSL_MODE_MODIFY_REQ(g_chan_nr, valueof(ts_RSL_ChanMode_SIGN(false))));
+
+	/* modify key to break proper encryption */
+	g_pars.encr.key :=  f_rnd_octstring(8);
+	var RSL_IE ei := valueof(t_RSL_IE(RSL_IE_ENCR_INFO, RSL_IE_Body:{encr_info := g_pars.encr}));
+	rsl.ies := rsl.ies & { ei };
+	RSL.send(rsl);
+
+	timer T0 := 1.0;
+	T0.start;
+	/* Expect RSL MODIFY ACK */
+	alt {
+	[] RSL.receive(tr_RSL_MODE_MODIFY_ACK(g_chan_nr)) {}
+	[] RSL.receive(tr_RSL_MODE_MODIFY_NACK(g_chan_nr, ?)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,"MODE MODIFY NACK");
+		}
+	[] T0.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for MODE MODIFY (N)ACK");
+		}
+	}
+
+	var octetstring l3msg := f_rnd_octstring(15);
+	timer T1 := 3.0;
+	/* Send UI frame from MS, do not expect it to arrive as RLL UNITDATA IND on Abis
+	due to broken encryption  */
+	f_tx_lapdm(ts_LAPDm_UI(link_id.sapi, cr_MO_CMD, l3msg), link_id);
+	T1.start;
+	alt {
+	[] RSL.receive(tr_RSL_UNITDATA_IND(g_chan_nr, link_id, l3msg)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "BTS shouldn't be able to decrypt after key change")
+		}
+	[] T1.timeout {
+		setverdict(pass);
+		}
+	}
+
+	/* release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_rsl_modify_encr() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	pars.encr := valueof(ts_RSL_IE_EncrInfo(RSL_ALG_ID_A5_1, f_rnd_octstring(8)));
+	f_testmatrix_each_chan(pars, refers(f_TC_rsl_modify_encr));
+}
 
 /* Test unencrypted channel activation followed by explicit ENCR CMD later */
 function f_TC_encr_cmd(charstring id) runs on ConnHdlr {
@@ -5244,6 +5309,7 @@ control {
 	execute( TC_rsl_ms_pwr_ctrl() );
 	execute( TC_rsl_chan_initial_ms_pwr() );
 	execute( TC_rsl_chan_initial_ta() );
+	execute( TC_rsl_modify_encr() );
 	execute( TC_conn_fail_crit() );
 	execute( TC_paging_imsi_80percent() );
 	execute( TC_paging_tmsi_80percent() );
