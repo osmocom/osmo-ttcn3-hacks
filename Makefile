@@ -1,4 +1,4 @@
-SUBDIRS=bsc bsc-nat bts ggsn_tests hlr lapdm mgw msc pcu sccp selftest sgsn sip sysinfo
+SUBDIRS=bsc bsc-nat bts ggsn_tests hlr mgw msc pcu sccp selftest sgsn sip sysinfo
 
 NPROC=$(shell nproc 2>/dev/null)
 ifeq ($(NPROC),)
