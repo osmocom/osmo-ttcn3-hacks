@@ -4,7 +4,9 @@ import from GSM_Types all;
 import from Osmocom_Types all;
 import from LAPDm_RAW_PT all;
 import from LAPDm_Types all;
+import from RSL_Types all;
 import from BTS_Tests all;
+import from Misc_Helpers all;
 
 /* test that use exclusively only LAPDm over L1CTL */
 type component lapdm_test_CT {
@@ -14,8 +16,6 @@ type component lapdm_test_CT {
 
 /* contrary to BTS_Tests.ttcn, we use LAPDm_PT here, a convenience wrapper
  * around L1CTL to perform encode/decode of abstract LAPDm frames */
-type component lapdm_bts_CT extends lapdm_test_CT, test_CT {
-}
 
 /*********************************************************************************
  * Test using only L1CTL/LAPDm
@@ -34,14 +34,30 @@ function f_lapdm_init() runs on lapdm_test_CT {
 	lapdm_component.start(LAPDmStart());
 }
 
+function f_lapdm_exit() runs on lapdm_test_CT {
+	lapdm_component.stop;
+	lapdm_component.done;
+	unmap(lapdm_component:L1CTL, system:L1CTL);
+}
+
 /* master function establishing a dedicated radio channel (takes care of RACH/IMM.ASS handling) */
 function f_establish_dcch() runs on lapdm_test_CT {
-	var BCCH_tune_req tune_req := { arfcn := { false, 871 }, combined_ccch := true };
+	var BCCH_tune_req tune_req := { arfcn := { false, mp_trx0_arfcn }, combined_ccch := true };
 	var DCCH_establish_req est_req := { ra := 23 };
 
 	LAPDM.send(tune_req);
 	LAPDM.send(est_req);
 	LAPDM.receive(DCCH_establish_res:?);
+}
+
+/* master function switching to a dedicated radio channel */
+function f_switch_dcch(Arfcn arfcn, RslChannelNr chan_nr, GsmTsc tsc) runs on lapdm_test_CT {
+	var BCCH_tune_req tune_req := { arfcn := arfcn, combined_ccch := true };
+	var DCCH_switch_req sw_req := { arfcn, chan_nr, tsc };
+
+	LAPDM.send(tune_req);
+	LAPDM.send(sw_req);
+	LAPDM.receive(DCCH_switch_res:?);
 }
 
 /* helper function releasing dedicated radio channel physically (no Um signaling!) */
@@ -252,6 +268,434 @@ testcase TC_foo() runs on lapdm_test_CT {
 	log("DEC: ", dec_LapdmFrameAB('0303012B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B'O));
 }
 
+/*********************************************************************************
+ * Test using both L1CTL/LAPDm and RSL
+ *********************************************************************************/
+
+private function fp_common_init() runs on ConnHdlr
+{
+	/* undo what f_start_handler is doing and pull LAPDm_CT into the loop */
+	unmap(self:L1CTL, system:L1CTL);
+	f_lapdm_init();
+	/* activate the channel on the BTS side */
+	f_rsl_chan_act(g_pars.chan_mode, false, {});
+	/* activate the channel on the MS side */
+	f_switch_dcch({false, mp_trx0_arfcn}, g_chan_nr, 7);
+}
+
+private function fp_common_fini() runs on ConnHdlr
+{
+	f_release_dcch();
+	f_rsl_chan_deact();
+	f_lapdm_exit();
+}
+
+/* Verify that the BTS is re-transmitting SABM messages after T200 timeout, inspired
+   by 3GPP TS 51.010-1 25.2.1.1.2.1 + 25.2.1.2.4 */
+private function f_TC_sabm_retransmit_bts(charstring id) runs on ConnHdlr {
+	const integer sapi := 3; /* BTS may not establish SAPI=0 outbound */
+	fp_common_init();
+
+	LAPDM.clear;
+	RSL.send(ts_RSL_EST_REQ(g_chan_nr, ts_RslLinkID_DCCH(sapi)));
+
+	timer T := 8.0;
+	var integer sabm_received := 0;
+	T.start;
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O))) {
+		sabm_received := sabm_received + 1;
+		repeat;
+		}
+	[] LAPDM.receive { repeat; }
+	[] T.timeout { }
+	}
+	if (sabm_received == 0) {
+		setverdict(fail, "No SABM observed at all!");
+	} else if (sabm_received != 6) {
+		setverdict(fail, "Incorrect number of SABM re-transmissions of observed: ",
+			   sabm_received);
+	} else {
+		setverdict(pass, "Received ", sabm_received, " SABM");
+	}
+
+	fp_common_fini();
+}
+testcase TC_sabm_retransmit_bts() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_sabm_retransmit_bts));
+}
+
+
+type record LapdmNamedFrame {
+	charstring name,
+	LapdmFrame lapdm
+};
+
+/* Test that the BTS will ignore receipt of frames other than a UA when
+ * received in response to the SABM frame, inspired from 3GPP TS 51.010-1
+ * Section 25.2.1.1.2.3 */
+private function f_TC_sabm_invalid_resp2(charstring id, LapdmNamedFrame err_frame) runs on ConnHdlr {
+	var integer sapi := err_frame.lapdm.ab.addr.sapi;
+	fp_common_init();
+
+	/* Establish Request via RSL; Expect SABM on LAPDm side */
+	LAPDM.clear;
+	RSL.send(ts_RSL_EST_REQ(g_chan_nr, ts_RslLinkID_DCCH(sapi)));
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O)));
+	[] LAPDM.receive { repeat; }
+	}
+
+	/* send erroneous response to SABM */
+	LAPDM.send(t_PH_DATA(0, false, err_frame.lapdm));
+
+	/* expect a SABM retransmission of the BTS */
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O))) {
+		setverdict(pass);
+		}
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) { repeat; }
+	[] LAPDM.receive(t_PH_DATA(0, false, ?)) {
+		setverdict(fail, "Received unexpected LAPDm frame instead of SABM after sending ",
+			   err_frame.name);
+		}
+	[] LAPDM.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SABM retransmission after sending ",
+			   err_frame.name);
+		}
+	}
+
+	fp_common_fini();
+}
+private function f_TC_sabm_invalid_resp(charstring id) runs on ConnHdlr {
+	const integer sapi := 3; /* BTS may not establish SAPI=0 outbound */
+	var LapdmNamedFrame err_frame[3] := {
+		{ "I", valueof(ts_LAPDm_I(sapi, c_r := cr_MO_CMD, p := true, nr := 0, ns := 0,
+					  l3 := '01020304'O)) },
+		{ "RR", valueof(ts_LAPDm_RR(sapi, c_r := cr_MO_CMD, p := true, nr := 0)) },
+		{ "REJ" , valueof(ts_LAPDm_REJ(sapi, c_r := cr_MO_CMD, p := true, nr := 0)) }
+	};
+	var integer i;
+
+	for (i := 0; i < lengthof(err_frame); i := i+1) {
+		f_TC_sabm_invalid_resp2(id, err_frame[i])
+	}
+}
+testcase TC_sabm_invalid_resp() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_sabm_invalid_resp));
+}
+
+/* Test that the BTS will not re-transmit SABM frames after receiving a DM response,
+ * inspired from 3GPP TS 51.010-1 Section 25.2.1.1.3 */
+private function f_TC_sabm_dm(charstring id) runs on ConnHdlr {
+	const integer sapi := 3; /* BTS may not establish SAPI=0 outbound */
+	fp_common_init();
+
+	/* Establish Request via RSL; Expect SABM on LAPDm side */
+	LAPDM.clear;
+	RSL.send(ts_RSL_EST_REQ(g_chan_nr, ts_RslLinkID_DCCH(sapi)));
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O)));
+	[] LAPDM.receive { repeat; }
+	}
+
+	/* send DM response to SABM */
+	RSL.clear;
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_DM(sapi, c_r:=cr_MO_RSP, f:=true)));
+	alt {
+	[] RSL.receive(tr_RSL_REL_IND(g_chan_nr, tr_RslLinkID_DCCH(sapi)));
+	[] RSL.receive { repeat; }
+	}
+
+	/* expect no SABM retransmission of the BTS */
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O))) {
+		setverdict(fail, "Received unexpected SABM retransmission");
+		}
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) { repeat; }
+	[] LAPDM.receive(t_PH_DATA(0, false, ?)) {
+		setverdict(fail, "Received unexpected LAPDm frame");
+		}
+	[] LAPDM.receive { repeat; }
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+
+	fp_common_fini();
+}
+testcase TC_sabm_dm() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_sabm_dm));
+}
+
+/* Test the full LAPDm establishment while simulating the loss of the initial SABM or UA
+ * frame, requiring the BTS to re-transmit one SABM and then following up all the way to
+ * dedicated mode; inspired by 3GPP TS 51.010-1 25.2.1.2.2  */
+private function f_TC_establish_ign_first_sabm(charstring id) runs on ConnHdlr {
+	const integer sapi := 3; /* BTS may not establish SAPI=0 outbound */
+	var integer num_sabm := 0;
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(sapi));
+	timer T := 3.0;
+
+	fp_common_init();
+
+	/* Establish Request via RSL */
+	LAPDM.clear;
+	RSL.send(ts_RSL_EST_REQ(g_chan_nr, link_id));
+	/* Expect two SABM (retransmit) */
+	T.start;
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_SABM(sapi, ?, ?, ''O))) {
+		num_sabm := num_sabm + 1;
+		if (num_sabm < 2) {
+			repeat;
+		}
+		}
+	[] LAPDM.receive { repeat; }
+	}
+
+	/* send UA response to SABM */
+	RSL.clear;
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_UA(sapi, c_r:=cr_MO_RSP, f:=true, l3:=''O)));
+	alt {
+	[] RSL.receive(tr_RSL_EST_CONF(g_chan_nr, link_id));
+	[] RSL.receive { repeat; }
+	}
+
+	/* Send I frame from BTS to MS */
+	var octetstring l3 := f_rnd_octstring(10);
+	RSL.send(ts_RSL_DATA_REQ(g_chan_nr, link_id, l3));
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=false,
+							nr:=0, ns:=0, l3:=l3)));
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) { repeat; }
+	[] LAPDM.receive(t_PH_DATA(0, true, ?)) { repeat; }
+	[] LAPDM.receive { setverdict(fail, "Unexpected LAPDm received"); }
+	}
+	/* Send RR frame in response */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_RR(sapi, c_r:=cr_MO_RSP, p:=false, nr:=1)));
+
+	/* expect idle UI Frame from BTS */
+	alt {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) {
+		setverdict(pass);
+		}
+	[] LAPDM.receive(t_PH_DATA(0, true, ?)) { repeat; }
+	[] LAPDM.receive { setverdict(fail, "Unexpected LAPDm received"); }
+	}
+
+	fp_common_fini();
+}
+testcase TC_establish_ign_first_sabm() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_establish_ign_first_sabm));
+}
+
+/* ignore all SACCH frames */
+private altstep as_lapdm_acch() runs on ConnHdlr {
+	[] LAPDM.receive(t_PH_DATA(0, true, ?)) { repeat; }
+}
+/* ignore all LAPDm idle frames (UI) */
+private altstep as_lapdm_idle() runs on ConnHdlr {
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) { repeat; }
+}
+/* ignore all measurement reports */
+private altstep as_rsl_meas_rep() runs on ConnHdlr {
+	[] RSL.receive(tr_RSL_MEAS_RES(g_chan_nr)) { repeat; }
+}
+/* fail if we receive an RSL ERROR IND */
+private altstep as_rsl_fail_err() runs on ConnHdlr {
+	var RSL_Message rx_rsl;
+	[] RSL.receive(tr_RSL_ERROR_IND(g_chan_nr, ?, ?)) {
+		setverdict(fail, "Received RSL ERROR IND ", rx_rsl);
+	}
+}
+/* all of the above */
+private altstep as_ignore_background() runs on ConnHdlr {
+	[] as_lapdm_acch();
+	[] as_lapdm_idle();
+	[] as_rsl_meas_rep();
+	[] as_rsl_fail_err();
+}
+
+/* Test the operation of Layer 2 sequence numbering.
+ * dedicated mode; inspired by 3GPP TS 51.010-1 25.2.2.1  */
+private function f_TC_iframe_seq_and_ack(charstring id) runs on ConnHdlr {
+	const integer sapi := 0;
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(sapi));
+	var octetstring l3 := f_rnd_octstring(18);
+	var default d;
+	timer T := 3.0;
+
+	fp_common_init();
+
+	/* some common altstep for meas res and other background noise */
+	d := activate(as_ignore_background());
+	RSL.clear;
+	LAPDM.clear;
+
+	/* MO Establish Request via LADPm: SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201.. */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3)));
+	RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3));
+	/* UA: SAPI = 0, R = 0, F = 1, M = 0, L = L of SABM. */
+	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UA(sapi, cr_MT_RSP, f:=true, l3:=l3)));
+
+	var integer last_ns_rx := 0;
+
+	for (var integer i := 0; i < 10; i := i+1) {
+		var octetstring l3_mo := f_rnd_octstring(12);
+		var octetstring l3_mt := f_rnd_octstring(12);
+		var LAPDm_ph_data pd;
+
+		log("Starting iteration ", i);
+		/* MT I frame */
+		RSL.send(ts_RSL_DATA_REQ(g_chan_nr, link_id, l3_mt));
+		alt {
+		/* SAPI = 0, R = 1, F = 0, M = 0, L = 0. */
+		[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_RR(sapi, c_r:=cr_MT_RSP, p:=false,
+								 nr:=i mod 8))) {
+			log("Ignoring RR in iteration ", i);
+			repeat;
+			}
+		/* SAPI = 0, C = 1, P = 0, M = 0, 0 ≤ L ≤ N201. */
+		[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=false,
+								nr:=i mod 8, ns:=i mod 8,
+								l3:=l3_mt))) -> value pd {
+			last_ns_rx := pd.lapdm.ab.ctrl.i.n_s;
+			}
+		}
+		/* respond with MO I-frame: SAPI = 0, C = 0, P = 0, M = 0, 0 <= L <= N201. */
+		LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_I(sapi, c_r:=cr_MO_CMD, p:=false,
+							  nr:=(last_ns_rx+1)mod 8,
+							  ns:=i mod 8, l3 := l3_mo)));
+		RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, l3_mo));
+	}
+	log("Completed iteration");
+
+	deactivate(d);
+	fp_common_fini();
+}
+testcase TC_iframe_seq_and_ack() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_iframe_seq_and_ack));
+}
+
+/* To test that the BTS is able to respond to I frames whilst in the timer recovery state.
+ * Inspired by 3GPP TS 51.010-1 25.2.2.2  */
+
+/*
+  1) The BTS is brought into the multiple frame established state
+  2) The MS sends an L3 Request asking for IMEI to the MS.
+  3) The BTS shall respond with a RR frame though this may be incorporated with
+     the L3 Response I frame.  The MS does not respond to the I frame.
+  4) The BTS shall wait for expiry of timer T200 and then repeat the I frame but
+     with the P bit set to 1.
+  5) The MS then sends a valid L3 Request I frame asking for IMEI which
+     does not acknowledge receipt of the I frame from the BTS.
+On the FACCH the BTS may send an RR frame acknowledging the I frame.
+  6) The BTS shall repeat the I frame, this frame will acknowledge receipt of
+     the second I frame from the MS.
+  7) The MS then acknowledges receipt of the MS I frame by sending a RR frame.
+  8) The BTS shall send the next I frame. The MS acknowledges this I frame.
+*/
+private function f_TC_iframe_timer_recovery(charstring id) runs on ConnHdlr {
+	const integer sapi := 0;
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(sapi));
+	var default d;
+	timer T := 3.0;
+
+	fp_common_init();
+
+	/* some common altstep for meas res and other background noise */
+	d := activate(as_ignore_background());
+	RSL.clear;
+	LAPDM.clear;
+
+	var octetstring l3_mo := f_rnd_octstring(12);
+	var octetstring l3_mt := f_rnd_octstring(12);
+
+	/*  1) The BTS is brought into the multiple frame established state */
+
+	/* MO Establish Request via LADPm: SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201.. */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3_mo)));
+	RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3_mo));
+	/* UA: SAPI = 0, R = 0, F = 1, M = 0, L = L of SABM. */
+	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UA(sapi, cr_MT_RSP, f:=true, l3:=l3_mo)));
+
+	/* 2) The MS sends an L3 Request to the BTS */
+	l3_mo := f_rnd_octstring(18);
+	/* SAPI = 0, C = 1, P = 0, M = 0, 0 ≤ L ≤ N201, N(S) = 0, N(R) = 0.  * */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_I(sapi, c_r:=cr_MO_CMD, p:=false,
+						  nr:=0, ns:=0, l3:=l3_mo)));
+	RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, l3_mo));
+	/* 3) The BTS shall respond with a RR frame though this may be incorporated with
+	   the L3 Response I frame.  The MS does not respond to the I frame. */
+	RSL.send(ts_RSL_DATA_REQ(g_chan_nr, link_id, l3_mt));
+	alt {
+	/* SAPI = 0, R = 1, F = 0, M = 0, L = 0, N(R) = 1. */
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_RR(sapi, c_r:=cr_MT_RSP, p:=false, nr:=1))) {
+		repeat;
+		}
+	/* SAPI = 0, C = 0, P = 0, M = 0, 0 ≤ L ≤ N201, N(R) = 1, N(S) = 0 */
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=false,
+							nr:=1, ns:=0, l3:=l3_mt)));
+	}
+
+	/* 4) The BTS shall wait for expiry of timer T200 and then repeat the I frame but
+	      with the P bit set to 1. */
+	/* SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201, N(R) = 1, N(S) = 0. * */
+	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=true,
+						     nr:=1, ns:=0, l3:=l3_mt)));
+
+	/* 5) The MS then sends a valid L3 Request I frame asking for IMEI which
+	      does not acknowledge receipt of the I frame from the BTS. */
+	/* SAPI = 0, C = 1, P = 0, M = 0, 0 ≤ L ≤ N201, N(S) = 1, N(R) = 0.  * */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_I(sapi, c_r:=cr_MO_CMD, p:=false,
+						  nr:=0, ns:=1, l3 := l3_mo)));
+	RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, l3_mo));
+	alt {
+	/* On the FACCH the BTS may send an RR frame acknowledging the I frame. */
+	/* SAPI = 0, R = 1, F = 0, M = 0, L = 0, N(R) = 2. */
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_RR(sapi, c_r:=cr_MT_RSP, p:=false, nr:=2))) {
+		repeat;
+		}
+	/* 6) The BTS shall repeat the I frame, this frame will acknowledge
+	      receipt of the second I frame from the MS. */
+	/* SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201, N(R) = 2, N(S) = 0. * */
+	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=true,
+						     nr:=2, ns:=0, l3:=l3_mt)));
+	}
+
+	/* 7) The MS then acknowledges receipt of the BTS I frame by sending a RR * frame. */
+	/* SAPI = 0, R = 0, F = 1, 0, M = 0, L = 0, N(R) = 1 */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_RR(sapi, c_r:=cr_MO_RSP, p:=true, nr:=1)));
+
+	/* 8) The BTS shall send the next I frame. The MS acknowledges this I frame. */
+	l3_mt := f_rnd_octstring(16);
+	RSL.send(ts_RSL_DATA_REQ(g_chan_nr, link_id, l3_mt));
+	/* SAPI = 0, C = 0, P = 0, M = 0, 0 ≤ L ≤ N201, N(R) = 2, N(S) = 1 */
+	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_I(sapi, c_r:=cr_MT_CMD, p:=false,
+						     nr:=2, ns:=1, l3:=l3_mt)));
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_RR(sapi, c_r:=cr_MO_RSP, p:=true, nr:=2)));
+
+	deactivate(d);
+	fp_common_fini();
+}
+testcase TC_iframe_timer_recovery() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_iframe_timer_recovery));
+}
+
+
+
 control {
 	execute(TC_foo());
 	execute(TC_sabm_ua_dcch_sapi0());
@@ -260,6 +704,12 @@ control {
 	execute(TC_sabm_ua_dcch_sapi4());
 	execute(TC_sabm_contention());
 	execute(TC_sabm_retransmit());
+	execute(TC_sabm_retransmit_bts());
+	execute(TC_sabm_invalid_resp());
+	execute(TC_sabm_dm());
+	execute(TC_establish_ign_first_sabm());
+	execute(TC_iframe_seq_and_ack());
+	execute(TC_iframe_timer_recovery());
 }
 
 }
