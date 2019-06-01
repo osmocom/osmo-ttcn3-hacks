@@ -694,6 +694,129 @@ testcase TC_iframe_timer_recovery() runs on test_CT {
 	f_testmatrix_each_chan(pars, refers(f_TC_iframe_timer_recovery));
 }
 
+type record LapdmDlConfig {
+	integer n201,
+	integer t200
+};
+
+type record LapdmDlState {
+	integer v_s,
+	integer v_a,
+	integer v_r
+};
+
+template (value) LapdmDlState t_init_LapdmDlState := {
+	v_s := 0,
+	v_a := 0,
+	v_r := 0
+}
+
+private function inc_mod8(inout integer v)
+{
+	v := (v + 1) mod 8;
+}
+
+private function f_lapdm_transceive_mo(inout LapdmDlState dls, RslLinkId link_id, octetstring l3)
+runs on ConnHdlr {
+	var LAPDm_ph_data pd;
+	var integer offset := 0;
+	var integer n201 := 20;
+	var boolean is_sacch := false;
+	if (link_id.c == SACCH) {
+		n201 := 18;
+		is_sacch := true;
+	}
+
+	while (offset < lengthof(l3)) {
+		var integer remain_len := lengthof(l3) - offset;
+		var integer seg_len := remain_len;
+		if (remain_len > n201) {
+			seg_len := n201;
+		}
+		var octetstring segment := substr(l3, offset, seg_len);
+		var boolean more;
+		if (offset + lengthof(segment) < lengthof(l3)) {
+			more := true;
+		} else {
+			more := false;
+		}
+		/* send the next segment */
+		LAPDM.send(t_PH_DATA(0, is_sacch,
+				     ts_LAPDm_I(link_id.sapi, c_r:=cr_MO_CMD, p:=false,
+						nr:=dls.v_a, ns:=dls.v_s, l3:=segment, m:=more)));
+		inc_mod8(dls.v_s);
+		offset := offset + lengthof(segment);
+
+		/* wait for it to be acknowledged */
+		alt {
+		[] LAPDM.receive(t_PH_DATA(0, is_sacch, tr_LAPDm_RR(link_id.sapi, c_r:=cr_MT_RSP,
+								    p:=false, nr:=(dls.v_s) mod 8)));
+		[] as_ignore_background();
+		[] LAPDM.receive(t_PH_DATA(0, is_sacch, ?)) -> value pd {
+			setverdict(fail, "received unexpected LAPDm ", pd);
+			repeat;
+			}
+		[] LAPDM.receive(t_PH_DATA(0, ?, ?)) { repeat; }
+		[offset < lengthof(l3)] RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, ?)) {
+			setverdict(fail, "received RSL DATA IND before message complete");
+			}
+		}
+	}
+
+	timer T := 1.0;
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, l3)) {
+		setverdict(pass);
+		}
+	[] RSL.receive(tr_RSL_DATA_IND(g_chan_nr, link_id, ?)) {
+		setverdict(fail, "Received RSL DATA IND with wrong payload");
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RSL DATA IND of de-segmented message");
+		}
+	}
+}
+
+/* Section 5.8.5 of TS 04.06 */
+const integer c_TS0406_MAX_L3_OCTETS := 251;
+
+private function f_TC_segm_concat(charstring id) runs on ConnHdlr {
+	const integer sapi := 0;
+	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(sapi));
+	var default d;
+	timer T := 3.0;
+
+	fp_common_init();
+
+	/* some common altstep for meas res and other background noise */
+	d := activate(as_ignore_background());
+	RSL.clear;
+	LAPDM.clear;
+
+	var octetstring l3_mo := f_rnd_octstring(5);
+
+	/*  1) The BTS is brought into the multiple frame established state */
+
+	/* MO Establish Request via LADPm: SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201.. */
+	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3_mo)));
+	RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3_mo));
+	/* UA: SAPI = 0, R = 0, F = 1, M = 0, L = L of SABM. */
+	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UA(sapi, cr_MT_RSP, f:=true, l3:=l3_mo)));
+
+	l3_mo := f_rnd_octstring(c_TS0406_MAX_L3_OCTETS);
+
+	deactivate(d);
+
+	var LapdmDlState dls := valueof(t_init_LapdmDlState);
+	f_lapdm_transceive_mo(dls, link_id, l3_mo);
+
+	fp_common_fini();
+}
+testcase TC_segm_concat() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_segm_concat));
+}
 
 
 control {
@@ -710,6 +833,7 @@ control {
 	execute(TC_establish_ign_first_sabm());
 	execute(TC_iframe_seq_and_ack());
 	execute(TC_iframe_timer_recovery());
+	execute(TC_segm_concat());
 }
 
 }
