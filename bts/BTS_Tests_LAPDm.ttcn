@@ -503,9 +503,13 @@ testcase TC_establish_ign_first_sabm() runs on test_CT {
 private altstep as_lapdm_acch() runs on ConnHdlr {
 	[] LAPDM.receive(t_PH_DATA(0, true, ?)) { repeat; }
 }
+/* ignore all DCCH frames */
+private altstep as_lapdm_dcch() runs on ConnHdlr {
+	[] LAPDM.receive(t_PH_DATA(0, false, ?)) { repeat; }
+}
 /* ignore all LAPDm idle frames (UI) */
 private altstep as_lapdm_idle() runs on ConnHdlr {
-	[] LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UI(0, ?, ''O))) { repeat; }
+	[] LAPDM.receive(t_PH_DATA(0, ?, tr_LAPDm_UI(?, ?, ''O))) { repeat; }
 }
 /* ignore all measurement reports */
 private altstep as_rsl_meas_rep() runs on ConnHdlr {
@@ -519,8 +523,9 @@ private altstep as_rsl_fail_err() runs on ConnHdlr {
 	}
 }
 /* all of the above */
-private altstep as_ignore_background() runs on ConnHdlr {
-	[] as_lapdm_acch();
+private altstep as_ignore_background(boolean want_dcch := true) runs on ConnHdlr {
+	[want_dcch] as_lapdm_acch();
+	[not want_dcch] as_lapdm_dcch();
 	[] as_lapdm_idle();
 	[] as_rsl_meas_rep();
 	[] as_rsl_fail_err();
@@ -751,7 +756,7 @@ runs on ConnHdlr {
 		alt {
 		[] LAPDM.receive(t_PH_DATA(0, is_sacch, tr_LAPDm_RR(link_id.sapi, c_r:=cr_MT_RSP,
 								    p:=false, nr:=(dls.v_s) mod 8)));
-		[] as_ignore_background();
+		[] as_ignore_background(not is_sacch);
 		[] LAPDM.receive(t_PH_DATA(0, is_sacch, ?)) -> value pd {
 			setverdict(fail, "received unexpected LAPDm ", pd);
 			repeat;
@@ -781,28 +786,38 @@ runs on ConnHdlr {
 /* Section 5.8.5 of TS 04.06 */
 const integer c_TS0406_MAX_L3_OCTETS := 251;
 
-private function f_TC_segm_concat(charstring id) runs on ConnHdlr {
-	const integer sapi := 0;
-	var RslLinkId link_id := valueof(ts_RslLinkID_DCCH(sapi));
+/* test segmentation and de-segmentation (concatenation) of a large message in uplink
+ * on specified SAPI/channel */
+private function f_TC_segm_concat(charstring id, RslLinkId link_id) runs on ConnHdlr {
+	var integer sapi := link_id.sapi;
+	var boolean is_sacch := false;
+	if (link_id.c == SACCH) {
+		is_sacch := true;
+	}
 	var default d;
 	timer T := 3.0;
 
 	fp_common_init();
 
 	/* some common altstep for meas res and other background noise */
-	d := activate(as_ignore_background());
+	d := activate(as_ignore_background(not is_sacch));
 	RSL.clear;
 	LAPDM.clear;
 
 	var octetstring l3_mo := f_rnd_octstring(5);
 
-	/*  1) The BTS is brought into the multiple frame established state */
-
 	/* MO Establish Request via LADPm: SAPI = 0, C = 0, P = 1, M = 0, 0 ≤ L ≤ N201.. */
-	LAPDM.send(t_PH_DATA(0, false, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3_mo)));
-	RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3_mo));
+	if (is_sacch) {
+		/* no payload permitted, as this is not contention resolution */
+		l3_mo := ''O;
+		LAPDM.send(t_PH_DATA(0, is_sacch, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3_mo)));
+		RSL.receive(tr_RSL_EST_IND_NOL3(g_chan_nr, link_id));
+	} else {
+		LAPDM.send(t_PH_DATA(0, is_sacch, ts_LAPDm_SABM(sapi, c_r:=cr_MO_CMD, p:=true, l3:=l3_mo)));
+		RSL.receive(tr_RSL_EST_IND(g_chan_nr, link_id, l3_mo));
+	}
 	/* UA: SAPI = 0, R = 0, F = 1, M = 0, L = L of SABM. */
-	LAPDM.receive(t_PH_DATA(0, false, tr_LAPDm_UA(sapi, cr_MT_RSP, f:=true, l3:=l3_mo)));
+	LAPDM.receive(t_PH_DATA(0, is_sacch, tr_LAPDm_UA(sapi, cr_MT_RSP, f:=true, l3:=l3_mo)));
 
 	l3_mo := f_rnd_octstring(c_TS0406_MAX_L3_OCTETS);
 
@@ -813,10 +828,23 @@ private function f_TC_segm_concat(charstring id) runs on ConnHdlr {
 
 	fp_common_fini();
 }
-testcase TC_segm_concat() runs on test_CT {
-	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
-	f_testmatrix_each_chan(pars, refers(f_TC_segm_concat));
+private function f_TC_segm_concat_dcch(charstring id) runs on ConnHdlr {
+	f_TC_segm_concat(id, valueof(ts_RslLinkID_DCCH(0)));
 }
+private function f_TC_segm_concat_sacch(charstring id) runs on ConnHdlr {
+	f_TC_segm_concat(id, link_id :=valueof(ts_RslLinkID_SACCH(0)));
+}
+/* test mobile-originated segmentation/de-segmentation on DCCH */
+testcase TC_segm_concat_dcch() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_segm_concat_dcch));
+}
+/* test mobile-originated segmentation/de-segmentation on SACCH */
+testcase TC_segm_concat_sacch() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_testmatrix_each_chan(pars, refers(f_TC_segm_concat_sacch));
+}
+
 
 
 control {
@@ -833,7 +861,8 @@ control {
 	execute(TC_establish_ign_first_sabm());
 	execute(TC_iframe_seq_and_ack());
 	execute(TC_iframe_timer_recovery());
-	execute(TC_segm_concat());
+	execute(TC_segm_concat_dcch());
+	execute(TC_segm_concat_sacch());
 }
 
 }
