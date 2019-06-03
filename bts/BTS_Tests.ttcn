@@ -193,7 +193,8 @@ type record ConnHdlrPars {
 	float t_guard,
 	ConnL1Pars l1_pars,
 	TestSpecUnion spec optional,
-	RSL_IE_EncryptionInfo encr optional
+	RSL_IE_EncryptionInfo encr optional,
+	BtsBand bts0_band optional
 }
 
 /* Test-specific parameters */
@@ -594,7 +595,8 @@ friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 		ms_actual_ta := mp_ms_actual_ta_exp
 	},
 	spec := omit,
-	encr := omit
+	encr := omit,
+	bts0_band := omit
 }
 
 /***********************************************************************
@@ -1888,6 +1890,352 @@ function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
 	}
 	f_rsl_chan_deact();
 	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+}
+
+/* target level -100, first rssi -90, ms power 7, expected increase to 7+6 within 6 seconds,
+second rssi -110, ms power 7+6, expected decrease to 7 within 6 seconds,
+These power levels are valid for all bands and require no special handling */
+function f_TC_rsl_ms_pwr_dyn_ass_updown(charstring id) runs on ConnHdlr {
+	var uint5_t pwr_var := 7;
+	var L1ctlDlMessage l1_dl;
+
+	f_trxc_fake_rssi(rxlev2dbm(10));
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	var RSL_IE_List addl_ies;
+	var template (value)  RSL_IE_MS_Power_Parameters pp := (ts_RSL_IE_MS_Power_Parameters(''O));
+
+	addl_ies := {
+		valueof(t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{ms_power := ts_RSL_IE_MS_Power(pwr_var)})),
+		valueof(t_RSL_IE(RSL_IE_MS_POWER_PARAM, RSL_IE_Body:{ms_power_params := pp}))
+	};
+
+	/* establish with power parameters */
+	f_est_dchan(more_ies := addl_ies);
+
+	/* set a high value to ensure L1 power control level increases */
+	f_trxc_fake_rssi(rxlev2dbm(20));
+
+	timer T2 := 6.0;
+	T2.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl {
+		if( not(oct2int(l1_dl.payload.data_ind.payload[0]) > (pwr_var+6))){
+			repeat;
+			}
+		T2.stop;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T2.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Power Level in L1 header has not increased sufficiently");
+		}
+	}
+
+	/* set a low value to ensure L1 power control level decreases */
+	f_trxc_fake_rssi(rxlev2dbm(0));
+
+	timer T4 := 6.0;
+	T4.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl {
+		if( not(oct2int(l1_dl.payload.data_ind.payload[0]) <= (pwr_var))){
+			repeat;
+			}
+		T4.stop;
+		setverdict(pass, "Power level in L1 decreased/increased as expected");
+		}
+	[] L1CTL.receive { repeat; }
+	[] T4.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Power Level in L1 header has not decreased sufficiently");
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+
+}
+
+/* check that we do not exceed the max power */
+function f_TC_rsl_ms_pwr_dyn_max(charstring id) runs on ConnHdlr {
+	var uint5_t pwr_var := 7;
+	var L1ctlDlMessage l1_dl;
+
+	/* set a low value to ensure power increases */
+	f_trxc_fake_rssi(rxlev2dbm(10));
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	var RSL_IE_List addl_ies;
+	var template (value)  RSL_IE_MS_Power_Parameters pp := (ts_RSL_IE_MS_Power_Parameters(''O));
+
+	addl_ies := {
+		valueof(t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{ms_power := ts_RSL_IE_MS_Power(pwr_var)})),
+		valueof(t_RSL_IE(RSL_IE_MS_POWER_PARAM, RSL_IE_Body:{ms_power_params := pp}))
+	};
+
+	/* establish with power parameters */
+	f_est_dchan(more_ies := addl_ies);
+
+	timer T1 := 10.0;
+	T1.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl { repeat; }
+	[] L1CTL.receive { repeat; }
+	[] T1.timeout {
+		if( oct2int(l1_dl.payload.data_ind.payload[0]) != pwr_var){
+			setverdict(fail, "Power level in L1 header should not have changed");
+		}
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+
+}
+
+/* see if we reach the band max power */
+function f_TC_rsl_ms_pwr_dyn_up(charstring id) runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	var uint5_t pwr_var := 15;
+	var uint5_t pwr_max_var := f_get_max_power_from_band();
+
+	/* set a low value to ensure power increases */
+	f_trxc_fake_rssi(rxlev2dbm(10));
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	var template (value) RSL_IE_MS_Power ms_power := ts_RSL_IE_MS_Power(pwr_var);
+	var template (value) RSL_IE pwr := t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{ms_power := ms_power});
+
+	/* establish with fixed power level */
+	f_est_dchan(more_ies :={valueof(pwr)});
+
+	/* check our initial power level */
+	f_wait_for_l1_power_level(pwr_var);
+
+	/* update power param to enable power loop
+	48.058 The maximum power to be used is indicated in the BS and MS Power elements respectively. */
+	RSL.send(ts_RSL_MS_PWR_CTRL_with_pp(g_chan_nr, pwr_max_var));
+
+	/* wait, then check that our power level was reduced */
+	timer T1 := 10.0;
+	T1.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl { repeat; }
+	[] L1CTL.receive { repeat; }
+	[] T1.timeout {
+		var int8_t rcv := oct2int(l1_dl.payload.data_ind.payload[0]);
+		if( f_power_level_is_highest_dbm(rcv) ){
+			setverdict(pass, "Power level in L1 header reduced as expected");
+		} else {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Power Level in L1 header did not reach the expected value, e:",pwr_max_var," r:",rcv));
+		}
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+
+}
+
+/* see if we reach the band min power */
+function f_TC_rsl_ms_pwr_dyn_down(charstring id) runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+
+	/* set a high value to ensure power decreases */
+	f_trxc_fake_rssi(rxlev2dbm(50));
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	var uint5_t pwr_var := 5;
+	var uint5_t pwr_target_val := 15;
+
+	var template (value) RSL_IE_MS_Power ms_power := ts_RSL_IE_MS_Power(pwr_var);
+	var template (value) RSL_IE pwr := t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{ms_power := ms_power});
+
+	/* establish with fixed power level */
+	f_est_dchan(more_ies :={valueof(pwr)});
+
+	/* check our initial power level */
+	f_wait_for_l1_power_level(pwr_var);
+
+	/* update power param to enable power loop
+	 as per spec the supplied ms power IE should set the max allowed power...*/
+	RSL.send(ts_RSL_MS_PWR_CTRL_with_pp(g_chan_nr, pwr_var));
+
+	/* wait, then check that our power level was increased */
+	timer T1 := 10.0;
+	T1.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl { repeat; }
+	[] L1CTL.receive { repeat; }
+	[] T1.timeout {
+		if( f_power_level_is_lowest_dbm(oct2int(l1_dl.payload.data_ind.payload[0])) ){
+			setverdict(pass, "Power level in L1 header increased to lowest power value");
+		} else {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Power level in L1 header NOT increased to lowest power value");
+		}
+		}
+	}
+
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+
+}
+
+function f_wait_for_l1_power_level(integer level) runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	timer T0 := 10.0;
+	T0.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_SACCH(?))) -> value l1_dl {
+		if (not (l1_dl.payload.data_ind.payload[0] == int2oct(level, 1))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Power level in L1 header != signaled (RSL) power level.");
+		}
+		}
+	[] L1CTL.receive { repeat; }
+	[] T0.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout waiting for initial power level");
+		}
+	}
+	T0.stop;
+}
+
+private function f_power_level_is_lowest_dbm(integer level) runs on ConnHdlr return boolean  {
+	var IntegerRecord min_dbm_level;
+	var IntegerRecord max_dbm_level;
+	var IntegerRecord x := f_power_from_band(g_pars.bts0_band, min_dbm_level, max_dbm_level);
+
+	for (var integer i := 0; i < sizeof(min_dbm_level); i := i+1) {
+		if (min_dbm_level[i] == level) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_power_level_is_highest_dbm(integer level) runs on ConnHdlr return boolean {
+	var IntegerRecord min_dbm_level;
+	var IntegerRecord max_dbm_level;
+	var IntegerRecord x := f_power_from_band(g_pars.bts0_band, min_dbm_level, max_dbm_level);
+
+	for (var integer i := 0; i < sizeof(max_dbm_level); i := i+1) {
+		if (max_dbm_level[i] == level) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_get_max_power_from_band() runs on ConnHdlr return integer {
+	var IntegerRecord min_dbm_level;
+	var IntegerRecord max_dbm_level;
+	var IntegerRecord x := f_power_from_band(g_pars.bts0_band, min_dbm_level, max_dbm_level);
+	return max_dbm_level[0];
+}
+
+type charstring BtsBand ("GSM450","GSM480","GSM750","GSM810","GSM850","GSM900","DCS1800","PCS1900");
+template charstring BtsBand_allGSM:= pattern "GSM???";
+private function f_power_from_band(in BtsBand band, out IntegerRecord min_dbm_level, out IntegerRecord max_dbm_level) return IntegerRecord {
+	// 45.005 4.1.1
+	var IntegerRecord gsm_power :={31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19,
+	 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
+	 2, 1, 0};
+	var IntegerRecord dcs_power :={28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15,
+	 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 31, 30, 29};
+	var IntegerRecord pcs_power :={15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 31, 30};
+	var IntegerRecord rv;
+
+	select(band){
+	case (BtsBand_allGSM){
+		rv := gsm_power;
+		min_dbm_level := {31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19} ;
+		max_dbm_level := {2, 1, 0};
+	}
+	case("DCS1800"){
+		rv := dcs_power;
+		min_dbm_level := {28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15};
+		max_dbm_level := {0, 29}; // let's cheat here, assume MS_TXPWR_MAX_CCH might be being broadcast, so maybe no 29,30,31
+	}
+	case("PCS1900"){
+		rv := pcs_power;
+		min_dbm_level := {15};
+		max_dbm_level := {30};
+	}
+	}
+
+	return rv;
+}
+
+private function f_vty_get_bts0_band() runs on test_CT return BtsBand {
+	return f_vty_transceive_match_regex(BTSVTY, "show bts 0", "BTS 0 is of \w+ type in band (\w+),*", 0);
+}
+
+testcase TC_rsl_ms_pwr_dyn_ass_updown() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	f_vty_config(BTSVTY, "phy 0", "osmotrx ms-power-loop -100");
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
+		pars.bts0_band := f_vty_get_bts0_band();
+		vc_conn := f_start_handler(refers(f_TC_rsl_ms_pwr_dyn_ass_updown), pars, trxc_comp := true);
+		vc_conn.done;
+	}
+	f_vty_config(BTSVTY, "phy 0", "no osmotrx ms-power-loop");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+testcase TC_rsl_ms_pwr_dyn_up() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	f_vty_config(BTSVTY, "phy 0", "osmotrx ms-power-loop -10");
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
+		pars.bts0_band := f_vty_get_bts0_band();
+		vc_conn := f_start_handler(refers(f_TC_rsl_ms_pwr_dyn_up), pars, trxc_comp := true);
+		vc_conn.done;
+	}
+	f_vty_config(BTSVTY, "phy 0", "no osmotrx ms-power-loop");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+testcase TC_rsl_ms_pwr_dyn_max() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	f_vty_config(BTSVTY, "phy 0", "osmotrx ms-power-loop -10");
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
+		pars.bts0_band := f_vty_get_bts0_band();
+		vc_conn := f_start_handler(refers(f_TC_rsl_ms_pwr_dyn_max), pars, trxc_comp := true);
+		vc_conn.done;
+	}
+	f_vty_config(BTSVTY, "phy 0", "no osmotrx ms-power-loop");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+testcase TC_rsl_ms_pwr_dyn_down() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	f_vty_config(BTSVTY, "phy 0", "osmotrx ms-power-loop -100");
+	for (var integer tn := 1; tn <= 1; tn := tn+1) {
+		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
+		pars.bts0_band := f_vty_get_bts0_band();
+		vc_conn := f_start_handler(refers(f_TC_rsl_ms_pwr_dyn_down), pars, trxc_comp := true);
+		vc_conn.done;
+	}
+	f_vty_config(BTSVTY, "phy 0", "no osmotrx ms-power-loop");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
 testcase TC_meas_res_sign_tchf() runs on test_CT {
@@ -5550,6 +5898,10 @@ control {
 	execute( TC_meas_res_sign_sdcch8() );
 	execute( TC_meas_res_sign_tchh_toa256() );
 	execute( TC_rsl_ms_pwr_ctrl() );
+	execute( TC_rsl_ms_pwr_dyn_up() );
+	execute( TC_rsl_ms_pwr_dyn_down() );
+	execute( TC_rsl_ms_pwr_dyn_ass_updown() );
+	execute( TC_rsl_ms_pwr_dyn_max() );
 	execute( TC_rsl_chan_initial_ms_pwr() );
 	execute( TC_rsl_chan_initial_ta() );
 	execute( TC_rsl_modify_encr() );
