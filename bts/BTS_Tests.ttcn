@@ -117,7 +117,7 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* L1CTL port (for classic tests) */
 	port L1CTL_PT L1CTL;
 
-	/* TRXC port (for classic tests) */
+	/* Optional TRXC connection to FakeTRX (BTS side) */
 	port TRXC_CODEC_PT BTS_TRXC;
 	var integer g_bts_trxc_conn_id;
 
@@ -160,6 +160,7 @@ type component test_CT extends CTRL_Adapter_CT {
 type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 	port L1CTL_PT L1CTL;
 
+	/* Optional TRXC connection to FakeTRX (BTS side) */
 	port TRXC_CODEC_PT BTS_TRXC;
 	var integer g_bts_trxc_conn_id;
 
@@ -333,6 +334,20 @@ private function f_init_pcu(PCUIF_CODEC_PT pt, charstring id,
 	}
 }
 
+private function f_init_trxc(TRXC_CODEC_PT pt, charstring id,
+			     out integer trxc_conn_id) {
+	var Result res;
+
+	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(pt, mp_bts_trxc_ip, mp_bts_trxc_port,
+						       "", -1, -1, { udp := {} }, {});
+	if (not ispresent(res.connId)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Could not connect to the control (TRXC) interface " &
+					"of FakeTRX, check your configuration");
+	}
+	trxc_conn_id := res.connId;
+}
+
 /* global init function */
 function f_init() runs on test_CT {
 	var charstring id := testcasename();
@@ -398,8 +413,12 @@ function f_init() runs on test_CT {
 
 	if (mp_bts_trxc_port != -1) {
 		var TrxcMessage ret;
+
+		/* Init TRXC interface to FakeTRX */
+		map(self:BTS_TRXC, system:BTS_TRXC);
+		f_init_trxc(BTS_TRXC, id, g_bts_trxc_conn_id);
+
 		/* start with a default moderate timing offset equalling TA=2 */
-		f_main_trxc_connect();
 		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, valueof(ts_TRXC_FAKE_TIMING(2*256)));
 	}
 
@@ -417,7 +436,9 @@ function f_init_l1ctl() runs on test_CT {
 type function void_fn(charstring id) runs on ConnHdlr;
 
 /* create a new test component */
-function f_start_handler(void_fn fn, ConnHdlrPars pars, boolean pcu_comp := false)
+function f_start_handler(void_fn fn, ConnHdlrPars pars,
+			 boolean pcu_comp := false,
+			 boolean trxc_comp := false)
 runs on test_CT return ConnHdlr {
 	var charstring id := testcasename();
 	var ConnHdlr vc_conn;
@@ -426,12 +447,17 @@ runs on test_CT return ConnHdlr {
 	/* connect to RSL Emulation main component */
 	connect(vc_conn:RSL, vc_RSL:CLIENT_PT);
 	connect(vc_conn:RSL_PROC, vc_RSL:RSL_PROC);
+
+	/* The ConnHdlr component may want to talk to some ports directly,
+	 * so we disconnect it from the test_CT and connect it to the component.
+	 * This obviously only works for one component, i.e. no concurrency. */
 	if (pcu_comp) {
-		/* the ConnHdlr component wants to talk directly to the PCU, so disconnect
-		 * it from the test_CT and connect it to the component.  This obviously only
-		 * works for one component, i.e. no concurrency */
 		unmap(self:PCU, system:PCU);
 		map(vc_conn:PCU, system:PCU);
+	}
+	if (trxc_comp) {
+		unmap(self:BTS_TRXC, system:BTS_TRXC);
+		map(vc_conn:BTS_TRXC, system:BTS_TRXC);
 	}
 
 	vc_conn.start(f_handler_init(fn, id, pars));
@@ -459,19 +485,6 @@ friend function f_l1_tune(L1CTL_PT L1CTL, L1ctlCcchMode ccch_mode := CCCH_MODE_C
 	f_L1CTL_FBSB(L1CTL, { false, mp_trx0_arfcn }, ccch_mode, mp_rxlev_exp);
 }
 
-private function f_trxc_connect() runs on ConnHdlr {
-	map(self:BTS_TRXC, system:BTS_TRXC);
-	var Result res;
-	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(BTS_TRXC, mp_bts_trxc_ip, mp_bts_trxc_port,
-							"", -1, -1, {udp:={}}, {});
-	if (not ispresent(res.connId)) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					"Could not connect to the control (TRXC) interface " &
-					"of FakeTRX, check your configuration");
-	}
-	g_bts_trxc_conn_id := res.connId;
-}
-
 private function f_trxc_fake_rssi(TRXC_RSSI rssi) runs on ConnHdlr {
 	var TrxcMessage ret;
 	ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, valueof(ts_TRXC_FAKE_RSSI(rssi)));
@@ -492,7 +505,7 @@ runs on ConnHdlr {
 	f_connect_reset(L1CTL);
 
 	if (mp_bts_trxc_port != -1) {
-		f_trxc_connect();
+		f_init_trxc(BTS_TRXC, id, g_bts_trxc_conn_id);
 	}
 
 	g_Tguard.start(pars.t_guard);
@@ -1430,21 +1443,6 @@ testcase TC_rach_load_count() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
-
-
-private function f_main_trxc_connect() runs on test_CT {
-	map(self:BTS_TRXC, system:BTS_TRXC);
-	var Result res;
-	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(BTS_TRXC, mp_bts_trxc_ip, mp_bts_trxc_port,
-							"", -1, -1, {udp:={}}, {});
-	if (not ispresent(res.connId)) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					"Could not connect to the control (TRXC) interface " &
-					"of FakeTRX, check your configuration");
-	}
-	g_bts_trxc_conn_id := res.connId;
-}
-
 private function f_rach_toffs(int16_t toffs256, boolean expect_pass) runs on test_CT {
 	var TrxcMessage ret;
 	/* tell fake_trx to use a given timing offset for all bursts */
@@ -1897,7 +1895,8 @@ testcase TC_meas_res_sign_tchf() runs on test_CT {
 	f_init();
 	for (var integer tn := 1; tn <= 4; tn := tn+1) {
 		pars := valueof(t_Pars(t_RslChanNr_Bm(tn), ts_RSL_ChanMode_SIGN));
-		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars);
+		vc_conn := f_start_handler(refers(f_TC_meas_res_periodic), pars,
+					   pcu_comp := false, trxc_comp := true);
 		vc_conn.done;
 	}
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
@@ -2064,7 +2063,8 @@ testcase TC_rsl_chan_initial_ta() runs on test_CT {
 	var ConnHdlrPars pars;
 	f_init();
 	pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
-	vc_conn := f_start_handler(refers(f_tc_rsl_chan_initial_ta), pars);
+	vc_conn := f_start_handler(refers(f_tc_rsl_chan_initial_ta), pars,
+				   pcu_comp := false, trxc_comp := true);
 	vc_conn.done;
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
