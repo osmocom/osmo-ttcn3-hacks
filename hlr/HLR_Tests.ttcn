@@ -356,6 +356,21 @@ function f_vty_subscr_show(TELNETasp_PT VTY, HlrSubscriber sub, template charstr
 	f_vty_transceive_match(VTY, prefix & "show", exp, invert);
 }
 
+/***********************************************************************
+ * VTY Configuration
+ ***********************************************************************/
+
+function f_vty_config_store_imei(TELNETasp_PT VTY, boolean enable) {
+	f_vty_transceive(VTY, "configure terminal");
+	f_vty_transceive(VTY, "hlr");
+	if (enable) {
+		f_vty_transceive(VTY, "store-imei");
+	} else {
+		f_vty_transceive(VTY, "no store-imei");
+	}
+	f_vty_transceive(VTY, "exit");
+	f_vty_transceive(VTY, "exit");
+}
 
 /***********************************************************************
  * Helper functions for ConnHdlr
@@ -565,6 +580,48 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 
 	return ret;
 }
+
+function f_perform_CHECK_IMEI(hexstring imsi, hexstring imei,
+			      template (omit) integer exp_err_cause := omit,
+			      template (omit) GSUP_IMEIResult result := omit)
+runs on HLR_ConnHdlr return GSUP_PDU {
+	var GSUP_PDU ret;
+	timer T := 3.0;
+	var boolean exp_fail := false;
+	if (not istemplatekind(exp_err_cause, "omit")) {
+		exp_fail := true;
+	}
+
+	GSUP.send(valueof(ts_GSUP_CHECK_IMEI_REQ(imsi, imei)));
+	T.start;
+	alt {
+	[exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_ERR(imsi, exp_err_cause)) -> value ret {
+		setverdict(pass);
+		}
+	[exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_ERR(imsi, ?)) -> value ret {
+		setverdict(fail, "Unexpected CHECK IMEI ERROR Cause");
+		}
+	[exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_RES(imsi, ?)) -> value ret {
+		setverdict(fail, "Unexpected CHECK IMEI RES instead of ERR");
+		}
+	[not exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_ERR(imsi, ?)) -> value ret {
+		setverdict(fail, "Unexpected CHECK IMEI ERROR");
+		}
+	[not exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_RES(imsi, result)) -> value ret {
+		setverdict(pass);
+		}
+	[not exp_fail] GSUP.receive(tr_GSUP_CHECK_IMEI_RES(imsi, ?)) -> value ret {
+		setverdict(fail, "Unexpected CHECK IMEI RES");
+		}
+	[] GSUP.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for CHECK IMEI response");
+		mtc.stop;
+		}
+	}
+	return ret;
+}
+
 
 
 
@@ -1082,6 +1139,81 @@ testcase TC_mo_sss_reject() runs on test_CT {
    * timeout cases
  */
 
+
+/* Test Check IMEI */
+private function f_TC_gsup_check_imei() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+
+	/* store-imei disabled */
+	f_vty_config_store_imei(VTY, false);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '12345678901234'H,
+				    result := OSMO_GSUP_IMEI_RESULT_ACK);
+	f_vty_subscr_show(VTY, g_pars.sub, pattern "*IMEI: *12345678901234*", invert := true);
+
+	/* store-imei enabled */
+	f_vty_config_store_imei(VTY, true);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '12345678901234'H,
+				    result := OSMO_GSUP_IMEI_RESULT_ACK);
+	f_vty_subscr_show(VTY, g_pars.sub, pattern "*IMEI: *12345678901234*");
+}
+testcase TC_gsup_check_imei() runs on test_CT {
+	var HlrSubscriberList sl;
+	var GSUP_PDU res;
+
+	f_init(false);
+	sl := f_gen_subs();
+	f_start_handler_per_sub(refers(f_TC_gsup_check_imei), sl);
+
+	setverdict(pass);
+}
+
+/* Test Check IMEI with invalid IMEI length */
+private function f_TC_gsup_check_imei_invalid_len() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+
+	/* IMEI too long */
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '111456789012345F'H, 96 /* Invalid Mandatory Information */);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '2224567890123456'H, 96 /* Invalid Mandatory Information */);
+
+	/* IMEI too short */
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '3334567890123F'H, 96 /* Invalid Mandatory Information */);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '444456789012'H, 96 /* Invalid Mandatory Information */);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, ''H, 96 /* Invalid Mandatory Information */);
+}
+testcase TC_gsup_check_imei_invalid_len() runs on test_CT {
+	var HlrSubscriberList sl;
+	var GSUP_PDU res;
+
+	f_init(false);
+	sl := f_gen_subs();
+	f_start_handler_per_sub(refers(f_TC_gsup_check_imei_invalid_len), sl);
+
+	setverdict(pass);
+}
+
+/* Test Check IMEI with unknown IMSI */
+private function f_TC_gsup_check_imei_unknown_imsi() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+
+	f_vty_config_store_imei(VTY, false);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '22245678901234'H, 96 /* Invalid Mandatory Information */);
+
+	/* Check again with store-imei set (different code path) */
+	f_vty_config_store_imei(VTY, true);
+	res := f_perform_CHECK_IMEI(g_pars.sub.imsi, '22245678901234'H, 96 /* Invalid Mandatory Information */);
+
+	setverdict(pass);
+}
+testcase TC_gsup_check_imei_unknown_imsi() runs on test_CT {
+	var hexstring imsi := f_rnd_imsi('26242'H);
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(imsi));
+	var HLR_ConnHdlr vc_conn;
+
+	f_init(false);
+	vc_conn := f_start_handler(refers(f_TC_gsup_check_imei_unknown_imsi), pars);
+	vc_conn.done;
+}
+
 /* TODO:
   * UL with ISD error
   * UL with ISD timeout
@@ -1115,6 +1247,10 @@ control {
 	execute( TC_mo_ussd_euse() );
 	execute( TC_mo_ussd_euse_continue() );
 	execute( TC_mo_ussd_euse_defaultroute() );
+
+	execute( TC_gsup_check_imei() );
+	execute( TC_gsup_check_imei_invalid_len() );
+	execute( TC_gsup_check_imei_unknown_imsi() );
 
 	/* "Structured" Supplementary Services */
 	execute( TC_mo_sss_reject() );
