@@ -3608,6 +3608,91 @@ testcase TC_proc_ss_paging_fail() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* MT (network-originated) USSD followed by immediate abort */
+friend function f_tc_proc_ss_abort(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var octetstring facility := f_rnd_octstring(23);
+	var OCT4 sid := '20000555'O;
+	timer TP := 2.0;
+
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+
+	f_ran_register_imsi(g_pars.imsi, 'FFFFFFFF'O);
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	/* PROC_SS_REQ initiates a mobile-originated SS/USSD session */
+	var template (value) GSUP_PDU gsup_req := ts_GSUP_PROC_SS_REQ(
+		imsi := g_pars.imsi, sid := sid,
+		state := OSMO_GSUP_SESSION_STATE_BEGIN,
+		ss := facility
+	);
+
+	/* On the MS side, we expect GSM 04.80 REGISTER message */
+	var template PDU_ML3_NW_MS dtap_reg := tr_ML3_MT_SS_REGISTER(
+		tid := 0, /* Most likely, it should be 0 */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		facility := facility
+	);
+
+	/* PROC_SS_ERR with SESSION_STATE_END terminates the SS/USSD session */
+	var template (value) GSUP_PDU gsup_abort := ts_GSUP_PROC_SS_ERR(
+		imsi := g_pars.imsi, sid := sid,
+		state := OSMO_GSUP_SESSION_STATE_END,
+		cause := 0 /* FIXME: introduce an enumerated type! */
+	);
+
+	/* On the MS side, we expect GSM 04.80 REGISTER message */
+	var template PDU_ML3_NW_MS dtap_rel := tr_ML3_MT_SS_RELEASE_COMPLETE(
+		tid := 0, /* Most likely, it should be 0 */
+		ti_flag := c_TIF_ORIG, /* Sent from the side that originates the TI */
+		cause := *, /* FIXME: expect some specific cause value */
+		facility := omit
+	);
+
+	/* Initiate a MT USSD with random payload */
+	GSUP.send(gsup_req);
+
+	/* Expect Paging Request */
+	TP.start;
+	alt {
+	[pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_Paging(g_pars.imsi)) {
+		setverdict(pass);
+		}
+	[not pars.ran_is_geran] BSSAP.receive(tr_RANAP_Paging(cs_domain, imsi_hex2oct(g_pars.imsi))) {
+		setverdict(pass);
+		}
+	/* We don't expect anything else */
+	[] as_unexp_gsup_or_bssap_msg();
+	[] TP.timeout {
+		setverdict(fail, "Timeout waiting for Paging Request");
+		}
+	}
+
+	/* Send Paging Response and establish connection */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+	/* Expect MT REGISTER message with random facility */
+	f_expect_mt_dtap_msg(dtap_reg);
+
+	/* HLR/EUSE decides to abort the session even
+	 * before getting any response from the MS */
+	 /* Initiate a MT USSD with random payload */
+	GSUP.send(gsup_abort);
+
+	/* Expect RELEASE COMPLETE on ths MS side */
+	f_expect_mt_dtap_msg(dtap_rel);
+
+	f_expect_clear();
+}
+testcase TC_proc_ss_abort() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_tc_proc_ss_abort), 102);
+	vc_conn.done;
+}
+
 
 /* A5/1 only permitted on network side; attempt an invalid CIPHER MODE COMPLETE with A5/3 which MSC should reject. */
 private function f_tc_cipher_complete_with_invalid_cipher(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
@@ -5459,6 +5544,7 @@ control {
 	execute( TC_mt_ussd_for_unknown_subscr() );
 	execute( TC_proc_ss_for_unknown_session() );
 	execute( TC_proc_ss_paging_fail() );
+	execute( TC_proc_ss_abort() );
 
 	execute( TC_cipher_complete_with_invalid_cipher() );
 	execute( TC_cipher_complete_1_without_cipher() );
