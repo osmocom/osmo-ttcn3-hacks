@@ -15,6 +15,7 @@ import from Misc_Helpers all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from GSM_Types all;
+import from IPA_Emulation all;
 import from SCCPasp_Types all;
 import from BSSAP_Types all;
 import from RAN_Emulation all;
@@ -23,6 +24,7 @@ import from BSSMAP_Templates all;
 import from IPL4asp_Types all;
 import from Native_Functions all;
 
+import from MGCP_CodecPort all;
 import from MGCP_Types all;
 import from MGCP_Templates all;
 import from MGCP_Emulation all;
@@ -330,13 +332,35 @@ function f_rx_mdcx(MgcpCommand mgcp_cmd)
 	return ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
 }
 
+function tr_MGCP_RecvFrom_any(template MgcpMessage msg)
+runs on MSC_ConnHdlr return template MGCP_RecvFrom {
+	var template MGCP_RecvFrom mrf := {
+		connId := ?,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
 /* altstep for handling of MGCP media related commands. Activated by as_Media() to test
  * MGW level media handling */
+
 altstep as_Media_mgw(boolean norepeat := false) runs on MSC_ConnHdlr {
 	var MgcpCommand mgcp_cmd;
 	var template MgcpResponse mgcp_resp;
+	var MGCP_RecvFrom mrf;
+	var template MgcpMessage msg_crcx := {
+		command := tr_CRCX
+	}
+	var template MgcpMessage msg_mdcx := {
+		command := tr_MDCX
+	}
+	var template MgcpMessage msg_resp;
 
-	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+	[g_pars.aoip] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
 		mgcp_resp := f_rx_crcx(mgcp_cmd);
 		MGCP.send(mgcp_resp);
 		if(norepeat == false) {
@@ -344,9 +368,31 @@ altstep as_Media_mgw(boolean norepeat := false) runs on MSC_ConnHdlr {
 		}
 	}
 
-	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+	[not g_pars.aoip] MGCP_MULTI.receive(tr_MGCP_RecvFrom_any(msg_crcx)) -> value mrf {
+		mgcp_resp := f_rx_crcx(mrf.msg.command);
+		msg_resp := {
+			response := mgcp_resp
+		}
+		MGCP_MULTI.send(t_MGCP_SendToMrf(mrf, msg_resp));
+		if(norepeat == false) {
+			repeat;
+		}
+	}
+
+	[g_pars.aoip] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
 		mgcp_resp := f_rx_mdcx(mgcp_cmd);
 		MGCP.send(mgcp_resp);
+		if(norepeat == false) {
+			repeat;
+		}
+	}
+
+	[not g_pars.aoip] MGCP_MULTI.receive(tr_MGCP_RecvFrom_any(msg_mdcx)) -> value mrf {
+		mgcp_resp := f_rx_mdcx(mrf.msg.command);
+		msg_resp := {
+			response := mgcp_resp
+		}
+		MGCP_MULTI.send(t_MGCP_SendToMrf(mrf, msg_resp));
 		if(norepeat == false) {
 			repeat;
 		}
@@ -371,11 +417,17 @@ type component MSC_ConnHdlr extends RAN_ConnHdlr, RSL_DchanHdlr, MGCP_ConnHdlr {
 	port RAN_PROC_PT RAN;
 	port TELNETasp_PT BSCVTY;
 
+	/* Proxy MGCP-over-IPA and MGCP-over-UDP */
+	port IPA_MGCP_PT MGCP_MSC_CLIENT;
+	var integer g_trans_id := 0;
+
 	var MediaState g_media;
 	var TestHdlrParams g_pars;
 
 	var charstring host_bts := "127.0.0.2";
 	var charstring host_mgw := "127.0.0.3";
+	var charstring host_msc := "127.0.0.4";
+
 	var boolean g_vty_initialized := false;
 }
 
@@ -388,6 +440,12 @@ function f_MscConnHdlr_init(integer i, HostName bts, HostName mgw, BSSMAP_FIELD_
 		f_vty_transceive(BSCVTY, "enable");
 		g_vty_initialized := true;
 	}
+}
+
+private function get_next_trans_id() runs on MSC_ConnHdlr return MgcpTransId {
+	var MgcpTransId tid := int2str(g_trans_id);
+	g_trans_id := g_trans_id + 1;
+	return tid;
 }
 
 /* Callback function from general RAN_Emulation whenever a connectionless
@@ -862,6 +920,31 @@ function f_ass_patch_lcls(inout template (omit) PDU_BSSAP ass_tpl,
 	}
 }
 
+/* Send a MGCP request through MGCP-over-IPA from MSC side and receive a (matching!) response */
+function mgcp_transceive_mgw(template MgcpCommand cmd, template MgcpResponse resp := ?) runs on MSC_ConnHdlr {
+	template MgcpResponse resp_any := ?
+	var MgcpResponse resp_val;
+	resp.line.trans_id := cmd.line.trans_id;
+	timer T := 5.0;
+
+	BSSAP.send(cmd);
+	T.start;
+	alt {
+		[] as_Media_mgw();
+		[] BSSAP.receive(resp) -> value resp_val { }
+		[] BSSAP.receive(resp_any) {
+			setverdict(fail, "Response didn't match template");
+			mtc.stop;
+			}
+		[] BSSAP.receive { repeat; }
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for response to ", cmd);
+			mtc.stop;
+			}
+	}
+	T.stop;
+}
+
 /* Helper function to check if the activity on the MGCP matches what we
  * expected */
 function f_check_mgcp_expectations() runs on MSC_ConnHdlr {
@@ -975,17 +1058,10 @@ runs on MSC_ConnHdlr {
 		g_media.mgcp_conn[1].mdcx_seen_exp := 0;
 	} else if (st.voice_call) {
 		/* For voice calls we expect the following MGCP activity */
-		if (g_pars.aoip == false) {
-			g_media.mgcp_conn[0].crcx_seen_exp := 1;
-			g_media.mgcp_conn[0].mdcx_seen_exp := 1;
-			g_media.mgcp_conn[1].crcx_seen_exp := 0;
-			g_media.mgcp_conn[1].mdcx_seen_exp := 0;
-		} else {
-			g_media.mgcp_conn[0].crcx_seen_exp := 1;
-			g_media.mgcp_conn[0].mdcx_seen_exp := 1;
-			g_media.mgcp_conn[1].crcx_seen_exp := 1;
-			g_media.mgcp_conn[1].mdcx_seen_exp := 0;
-		}
+		g_media.mgcp_conn[0].crcx_seen_exp := 1;
+		g_media.mgcp_conn[0].mdcx_seen_exp := 1;
+		g_media.mgcp_conn[1].crcx_seen_exp := 1;
+		g_media.mgcp_conn[1].mdcx_seen_exp := 0;
 	}
 
 	f_create_mgcp_expect(mgcpcrit);
@@ -1042,6 +1118,29 @@ runs on MSC_ConnHdlr {
 			g_media.mgcp_conn[1].mdcx_seen_exp := g_media.mgcp_conn[1].mdcx_seen_exp + 1;
 
 		}
+	}
+
+	if (not exp_fail and st.voice_call and not g_pars.aoip) {
+		/* With SCCPLite, connect to BSC-located MGW using a CRCX + SDP.
+		   It is sent in MGCP over IPA in the BSC<->MSC (BSC-NAT)
+		   connection. BSC will forward it to its MGW. */
+		var template MgcpCommand cmd;
+		var template MgcpResponse resp;
+		var integer cic := f_bssmap_ie_cic_2_int(ass_cmd.pdu.bssmap.assignmentRequest.circuitIdentityCode);
+		var MgcpEndpoint ep := int2str(cic) & "@mgw"; /* 1: matches value configured in BSC_Tests.ttcn pass in AssignReq */
+		var MgcpCallId call_id := '51234'H;
+		var SDP_attribute_list attributes := { valueof(ts_SDP_ptime(20)) };
+		if (g_pars.use_osmux) {
+			cmd := ts_CRCX_osmux(get_next_trans_id(), ep, "sendrecv", call_id, cic);
+			resp := tr_CRCX_ACK_osmux;
+		} else {
+			cmd := ts_CRCX(get_next_trans_id(), ep, "sendrecv", call_id);
+			resp := tr_CRCX_ACK;
+		}
+		cmd.sdp := ts_SDP(host_msc, host_mgw, "23", "42",
+			     14000, { int2str(g_media.mgcp_conn[1].rtp_pt) },
+			     { valueof(ts_SDP_ptime(20)) });
+		mgcp_transceive_mgw(cmd, resp);
 	}
 
 	f_check_mgcp_expectations();
