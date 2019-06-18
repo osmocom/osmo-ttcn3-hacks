@@ -37,14 +37,22 @@ import from Osmocom_Types all;
 import from IPL4asp_Types all;
 
 type component MGCP_ConnHdlr {
+	/* Simple send/recv without caring about peer addr+port. Used with multi_conn_mode=false. */
 	port MGCP_Conn_PT MGCP;
-	/* procedure based port to register for incoming connections */
+	/* Handle multiple connections concurrently. Used with multi_conn_mode=true. */
+	port MGCP_Conn_Multi_PT MGCP_MULTI;
+	/* procedure based port to register for incoming connections. */
 	port MGCPEM_PROC_PT MGCP_PROC;
 }
 
 /* port between individual per-connection components and this dispatcher */
 type port MGCP_Conn_PT message {
 	inout MgcpCommand, MgcpResponse;
+} with { extension "internal" };
+
+/* port between individual per-connection components and this dispatcher */
+type port MGCP_Conn_Multi_PT message {
+	inout MGCP_RecvFrom, MGCP_SendTo;
 } with { extension "internal" };
 
 /* represents a single MGCP Endpoint */
@@ -63,6 +71,8 @@ type component MGCP_Emulation_CT {
 	 * MGCP_Emulation_CT.main needs to figure out what messages
 	 * to send where with CLIENT.send() to vc_conn */
 	port MGCP_Conn_PT MGCP_CLIENT;
+	/* This one is used with multi_conn_mode=true and allows differentiating UDP sockets */
+	port MGCP_Conn_Multi_PT MGCP_CLIENT_MULTI;
 	/* currently tracked connections */
 	var EndpointData MgcpEndpointTable[16];
 	var MgcpTransIds MgcpPendingTrans := {};
@@ -73,6 +83,8 @@ type component MGCP_Emulation_CT {
 
 	var charstring g_mgcp_id;
 	var integer g_mgcp_conn_id := -1;
+
+	var MGCP_conn_parameters g_pars;
 }
 
 type function MGCPCreateCallback(MgcpCommand cmd, charstring id)
@@ -90,7 +102,8 @@ type record MGCP_conn_parameters {
 	HostName callagent_ip,
 	PortNumber callagent_udp_port,
 	HostName mgw_ip,
-	PortNumber mgw_udp_port
+	PortNumber mgw_udp_port,
+	boolean multi_conn_mode
 }
 
 function tr_MGCP_RecvFrom_R(template MgcpMessage msg)
@@ -224,14 +237,23 @@ runs on MGCP_Emulation_CT {
 	}
 }
 
+private function f_forward_to_client(MGCP_RecvFrom mrf, MGCP_ConnHdlr vc_conn) runs on MGCP_Emulation_CT {
+	if (g_pars.multi_conn_mode) {
+		MGCP_CLIENT_MULTI.send(mrf) to vc_conn;
+	} else {
+		MGCP_CLIENT.send(mrf.msg.command) to vc_conn;
+	}
+}
+
 function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_Emulation_CT {
 	var Result res;
+	g_pars := p;
 	g_mgcp_id := id;
 	f_ep_table_init();
 	f_expect_table_init();
 
 	map(self:MGCP, system:MGCP_CODEC_PT);
-	if (p.callagent_udp_port == -1) {
+	if (p.multi_conn_mode or p.callagent_udp_port == -1) {
 		res := MGCP_CodecPort_CtrlFunct.f_IPL4_listen(MGCP, p.mgw_ip, p.mgw_udp_port, { udp:={} });
 	} else {
 		res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.callagent_ip, p.callagent_udp_port, p.mgw_ip, p.mgw_udp_port, -1, { udp:={} });
@@ -246,6 +268,7 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 		var MGCP_ConnHdlr vc_conn;
 		var ExpectCriteria crit;
 		var MGCP_RecvFrom mrf;
+		var MGCP_SendTo mst;
 		var MgcpMessage msg;
 		var MgcpCommand cmd;
 		var MgcpResponse resp;
@@ -253,7 +276,7 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 
 		alt {
 		/* MGCP from client */
-		[] MGCP_CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
+		[not p.multi_conn_mode] MGCP_CLIENT.receive(MgcpResponse:?) -> value resp sender vc_conn {
 			msg := {
 				response := resp
 			};
@@ -265,9 +288,23 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 			/* TODO: check which ConnectionID client has allocated + store in table? */
 			MGCP.send(t_MGCP_Send(g_mgcp_conn_id, msg));
 			}
+
+		/* MGCP from client in Multi Conn mode */
+		[p.multi_conn_mode] MGCP_CLIENT_MULTI.receive(MGCP_SendTo:?) -> value mst sender vc_conn {
+			/* If this is the resposne to a pending CRCX, extract Endpoint and store in table */
+			if (f_trans_id_was_pending(mst.msg.response.line.trans_id)) {
+				f_ep_table_add(vc_conn, f_mgcp_ep(mst.msg));
+			}
+			/* Pass message through */
+			/* TODO: check which ConnectionID client has allocated + store in table? */
+			MGCP.send(mst);
+			}
 		[] MGCP.receive(tr_MGCP_RecvFrom_R(?)) -> value mrf {
-			if (p.callagent_udp_port == -1) {
-				/* we aren't yet connected to the remote side port, let's fix this */
+			if (not p.multi_conn_mode and p.callagent_udp_port == -1) {
+				/* we aren't yet connected to the remote side
+				   port, let's fix this. This way upper layers
+				   can use Send/Recv without caring about UDP
+				   src/dst addr + port */
 				p.callagent_udp_port := mrf.remPort;
 				res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, p.callagent_ip, p.callagent_udp_port, p.mgw_ip, p.mgw_udp_port, g_mgcp_conn_id, { udp:={} });
 				if (not ispresent(res.connId)) {
@@ -279,7 +316,7 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 				cmd := mrf.msg.command;
 				if (f_ep_known(cmd.line.ep)) {
 					vc_conn := f_comp_by_ep(cmd.line.ep);
-					MGCP_CLIENT.send(cmd) to vc_conn;
+					f_forward_to_client(mrf, vc_conn);
 				} else {
 					if (cmd.line.verb == "CRCX") {
 						vc_conn := ops.create_cb.apply(cmd, id);
@@ -290,12 +327,12 @@ function main(MGCPOps ops, MGCP_conn_parameters p, charstring id) runs on MGCP_E
 							/* add this transaction to list of pending transactions */
 							MgcpPendingTrans := MgcpPendingTrans & {cmd.line.trans_id};
 						}
-						MGCP_CLIENT.send(cmd) to vc_conn;
+						f_forward_to_client(mrf, vc_conn);
 					} else {
 						/* connectionless MGCP, i.e. messages without ConnectionId */
 						var template MgcpMessage r := ops.unitdata_cb.apply(mrf.msg);
 						if (isvalue(r)) {
-							MGCP.send(t_MGCP_Send(g_mgcp_conn_id, r));
+							MGCP.send(t_MGCP_SendToMrf(mrf, r));
 						}
 					}
 				}
