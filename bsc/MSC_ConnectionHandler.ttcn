@@ -270,69 +270,83 @@ altstep as_Media_ipacc() runs on MSC_ConnHdlr {
 
 }
 
+function f_rx_crcx(MgcpCommand mgcp_cmd)
+	 runs on MSC_ConnHdlr return template MgcpResponse {
+	var MgcpOsmuxCID osmux_cid;
+	var SDP_Message sdp;
+	var integer cid := f_get_free_mgcp_conn();
+	if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard)) {
+		if (cid != 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "MGCP wildcard EP only works in first CRCX");
+		}
+		/* we keep the endpoint name allocated during MediaState_init */
+	} else {
+		/* Call Agent allocated endpoint, trust/use it always */
+		g_media.mgcp_ep := mgcp_cmd.line.ep;
+	}
+	if (isvalue(mgcp_cmd.sdp)) {
+		sdp := mgcp_cmd.sdp;
+		g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
+		g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
+	}
+	var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
+	sdp := valueof(ts_SDP(mgcp_conn.mgw.host, mgcp_conn.mgw.host, "foo", "21",
+				mgcp_conn.mgw.port_nr, { int2str(mgcp_conn.rtp_pt) },
+			{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
+						mgcp_conn.mime_type & "/" &
+						int2str(mgcp_conn.sample_rate))),
+			valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
+	var template MgcpResponse mgcp_resp;
+	if (g_pars.use_osmux and f_MgcpCmd_contains_par(mgcp_cmd, "X-OSMUX")) {
+		osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+		mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, osmux_cid, sdp);
+	} else {
+		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
+	}
+	f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(g_media.mgcp_ep));
+	g_media.mgcp_conn[cid].crcx_seen := g_media.mgcp_conn[cid].crcx_seen + 1;
+	return mgcp_resp;
+}
+
+function f_rx_mdcx(MgcpCommand mgcp_cmd)
+	runs on MSC_ConnHdlr return template MgcpResponse {
+	var SDP_Message sdp;
+	var integer cid := f_get_mgcp_conn(f_MgcpCmd_extract_conn_id(mgcp_cmd));
+	if (isvalue(mgcp_cmd.sdp)) {
+		sdp := mgcp_cmd.sdp;
+		g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
+		g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "MDCX has no [recognizable] SDP");
+	}
+	var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
+	sdp := valueof(ts_SDP(mgcp_conn.peer.host, mgcp_conn.peer.host, "foo", "21",
+				mgcp_conn.peer.port_nr, { int2str(mgcp_conn.rtp_pt) },
+			{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
+						mgcp_conn.mime_type & "/" &
+						int2str(mgcp_conn.sample_rate))),
+			valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
+	g_media.mgcp_conn[cid].mdcx_seen := g_media.mgcp_conn[cid].mdcx_seen + 1;
+	return ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
+}
+
 /* altstep for handling of MGCP media related commands. Activated by as_Media() to test
  * MGW level media handling */
 altstep as_Media_mgw(boolean norepeat := false) runs on MSC_ConnHdlr {
 	var MgcpCommand mgcp_cmd;
-	var MgcpOsmuxCID osmux_cid;
+	var template MgcpResponse mgcp_resp;
 
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
-		var SDP_Message sdp;
-		var integer cid := f_get_free_mgcp_conn();
-		if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard)) {
-			if (cid != 0) {
-				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "MGCP wildcard EP only works in first CRCX");
-			}
-			/* we keep the endpoint name allocated during MediaState_init */
-		} else {
-			/* Call Agent allocated endpoint, trust/use it always */
-			g_media.mgcp_ep := mgcp_cmd.line.ep;
-		}
-		if (isvalue(mgcp_cmd.sdp)) {
-			sdp := mgcp_cmd.sdp;
-			g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
-			g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
-		}
-		var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
-		sdp := valueof(ts_SDP(mgcp_conn.mgw.host, mgcp_conn.mgw.host, "foo", "21",
-					mgcp_conn.mgw.port_nr, { int2str(mgcp_conn.rtp_pt) },
-				{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
-							mgcp_conn.mime_type & "/" &
-							int2str(mgcp_conn.sample_rate))),
-				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
-		var template MgcpResponse mgcp_resp;
-		if (g_pars.use_osmux and f_MgcpCmd_contains_par(mgcp_cmd, "X-OSMUX")) {
-			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
-			mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, osmux_cid, sdp);
-		} else {
-			mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
-		}
-		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(g_media.mgcp_ep));
+		mgcp_resp := f_rx_crcx(mgcp_cmd);
 		MGCP.send(mgcp_resp);
-		g_media.mgcp_conn[cid].crcx_seen := g_media.mgcp_conn[cid].crcx_seen + 1;
 		if(norepeat == false) {
 			repeat;
 		}
-		}
+	}
+
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
-		var SDP_Message sdp;
-		var integer cid := f_get_mgcp_conn(f_MgcpCmd_extract_conn_id(mgcp_cmd));
-		if (isvalue(mgcp_cmd.sdp)) {
-			sdp := mgcp_cmd.sdp;
-			g_media.mgcp_conn[cid].peer.host := sdp.connection.conn_addr.addr;
-			g_media.mgcp_conn[cid].peer.port_nr := sdp.media_list[0].media_field.ports.port_number;
-		} else {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "MDCX has no [recognizable] SDP");
-		}
-		var MgcpConnState mgcp_conn := g_media.mgcp_conn[cid];
-		sdp := valueof(ts_SDP(mgcp_conn.peer.host, mgcp_conn.peer.host, "foo", "21",
-					mgcp_conn.peer.port_nr, { int2str(mgcp_conn.rtp_pt) },
-				{valueof(ts_SDP_rtpmap(mgcp_conn.rtp_pt,
-							mgcp_conn.mime_type & "/" &
-							int2str(mgcp_conn.sample_rate))),
-				valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
-		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp));
-		g_media.mgcp_conn[cid].mdcx_seen := g_media.mgcp_conn[cid].mdcx_seen + 1;
+		mgcp_resp := f_rx_mdcx(mgcp_cmd);
+		MGCP.send(mgcp_resp);
 		if(norepeat == false) {
 			repeat;
 		}
