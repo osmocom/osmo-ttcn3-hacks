@@ -1,0 +1,118 @@
+/* MME (Mobility Management Engine) test suite in TTCN-3
+ * (C) 2019 Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module MME_Tests {
+
+import from SGsAP_Types all;
+import from SGsAP_Templates all;
+import from SGsAP_Emulation all;
+
+import from L3_Templates all;
+import from DNS_Helpers all;
+
+friend module MME_Tests_SGsAP;
+
+type component MTC_CT {
+	var SGsAP_Emulation_CT vc_SGsAP;
+	port SGsAP_PT SGsAP_UNIT;
+	port SGsAPEM_PROC_PT SGsAP_PROC;
+}
+
+type component ConnHdlr extends SGsAP_ConnHdlr {
+	var ConnHdlrPars g_pars;
+	timer g_Tguard := 30.0;
+}
+
+type record ConnHdlrPars {
+	hexstring imsi
+}
+
+modulepar {
+	charstring mp_sgs_local_ip := "127.0.0.1";
+	integer mp_sgs_local_port := 29118;
+	charstring mp_vlr_name := "vlr.example.net";
+	charstring mp_mme_name := "mmec01.mmegi0001.mme.epc.mnc070.mcc901.3gppnetwork.org";
+}
+
+/* send incoming unit data messages (like reset) to global SGsAP_UNIT port */
+friend function ForwardUnitdataCallback(PDU_SGsAP msg)
+runs on SGsAP_Emulation_CT return template PDU_SGsAP {
+	SGsAP_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_sgsap(charstring id) runs on MTC_CT {
+	id := id & "-SGsAP";
+	var SGsAPOps ops := {
+		create_cb := refers(SGsAP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(ForwardUnitdataCallback)
+	}
+	var SGsAP_conn_parameters pars := {
+		remote_ip := "",
+		remote_sctp_port := -1,
+		local_ip := mp_sgs_local_ip,
+		local_sctp_port := mp_sgs_local_port
+	}
+
+	vc_SGsAP := SGsAP_Emulation_CT.create(id);
+	map(vc_SGsAP:SGsAP, system:SGsAP_CODEC_PT);
+	connect(vc_SGsAP:SGsAP_PROC, self:SGsAP_PROC);
+	connect(vc_SGsAP:SGsAP_UNIT, self:SGsAP_UNIT);
+	vc_SGsAP.start(SGsAP_Emulation.main(ops, pars, id));
+}
+
+/* generate parameters for a connection handler */
+friend function f_init_pars(integer imsi_suffix)
+runs on MTC_CT return ConnHdlrPars {
+	var ConnHdlrPars pars := {
+		imsi := f_gen_imsi(imsi_suffix)
+	};
+	return pars;
+}
+
+type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+
+/* start a connection handler with given parameters */
+friend function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer s1ap_idx := 0)
+runs on MTC_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename() & int2str(s1ap_idx);
+
+	vc_conn := ConnHdlr.create(id);
+	/* SGsAP part */
+	connect(vc_conn:SGsAP, vc_SGsAP:SGsAP_CLIENT);
+	connect(vc_conn:SGsAP_PROC, vc_SGsAP:SGsAP_PROC);
+
+	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
+	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
+	vc_conn.start(derefers(fn)(pars));
+	return vc_conn;
+}
+
+/* altstep for the global guard timer */
+private altstep as_Tguard()runs on ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		mtc.stop;
+	}
+}
+
+friend function f_init_handler(ConnHdlrPars pars, float t_guard := 30.0) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+	/* start guard timre and activate it as default */
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+	/* Route all SGsAP mesages for our IMSIto us */
+	f_create_sgsap_expect(pars.imsi);
+}
+
+
+}
