@@ -105,6 +105,9 @@ type component RTP_Emulation_CT {
 	var uint32_t g_rx_last_ts;
 
 	var IuUP_Entity g_iuup_ent; // := valueof(t_IuUP_Entity(1));
+
+	var boolean g_conn_refuse_expect := false;
+	var boolean g_conn_refuse_received := false;
 }
 
 type enumerated RtpemMode {
@@ -175,9 +178,12 @@ signature RTPEM_connect(in HostName remote_host, in PortNumber remote_port);
 signature RTPEM_mode(in RtpemMode mode);
 signature RTPEM_configure(in RtpemConfig cfg);
 signature RTPEM_stats_get(out RtpemStats stats, in boolean rtcp);
+signature RTPEM_conn_refuse_expect(in boolean expect);
+signature RTPEM_conn_refuse_received(out boolean received);
 
 type port RTPEM_CTRL_PT procedure {
-	inout RTPEM_bind, RTPEM_connect, RTPEM_mode, RTPEM_configure, RTPEM_stats_get;
+	inout RTPEM_bind, RTPEM_connect, RTPEM_mode, RTPEM_configure, RTPEM_stats_get, RTPEM_conn_refuse_expect,
+	      RTPEM_conn_refuse_received;
 } with { extension "internal" };
 
 function f_rtpem_bind(RTPEM_CTRL_PT pt, in HostName local_host, inout PortNumber local_port) {
@@ -299,6 +305,21 @@ function f_rtpem_stats_err_check(RtpemStats s) {
 	}
 }
 
+function f_rtpem_conn_refuse_expect(RTPEM_CTRL_PT pt) {
+	pt.call(RTPEM_conn_refuse_expect:{true}) {
+		[] pt.getreply(RTPEM_conn_refuse_expect:{true}) {};
+	}
+}
+
+function f_rtpem_conn_refuse_verify(RTPEM_CTRL_PT pt) {
+	pt.call(RTPEM_conn_refuse_received:{?}) {
+		[] pt.getreply(RTPEM_conn_refuse_received:{true}) {};
+		[] pt.getreply(RTPEM_conn_refuse_received:{false}) {
+			setverdict(fail, "Expected to receive connection refused");
+		};
+	}
+}
+
 template PDU_RTP ts_RTP(BIT32_BO_LAST ssrc, INT7b pt, LIN2_BO_LAST seq, uint32_t ts,
 			octetstring payload, BIT1 marker := '0'B) := {
 	version := 2,
@@ -347,6 +368,11 @@ function f_main() runs on RTP_Emulation_CT
 	var template RTP_RecvFrom tr_rtcp := tr;
 	tr_rtp.msg := { rtp := ? };
 	tr_rtcp.msg := { rtcp := ? };
+
+	var template ASP_Event tr_conn_refuse := {result := { errorCode := ERROR_SOCKET,
+							      connId := ?,
+							      os_error_code := 111,
+							      os_error_text := ? /* "Connection refused" */}};
 
 	g_iuup_ent := valueof(t_IuUP_Entity(g_cfg.iuup_tx_init));
 
@@ -448,7 +474,12 @@ function f_main() runs on RTP_Emulation_CT
 				CTRL.reply(RTPEM_stats_get:{g_stats_rtp, is_rtcp});
 			}
 		}
-
+		[] CTRL.getcall(RTPEM_conn_refuse_expect:{?}) -> param(g_conn_refuse_expect) {
+			CTRL.reply(RTPEM_conn_refuse_expect:{g_conn_refuse_expect});
+		}
+		[] CTRL.getcall(RTPEM_conn_refuse_received:{?}) {
+			CTRL.reply(RTPEM_conn_refuse_received:{g_conn_refuse_received});
+		}
 
 
 		/* simply ignore any RTTP/RTP if receiver not enabled */
@@ -489,6 +520,16 @@ function f_main() runs on RTP_Emulation_CT
 			g_stats_rtp.num_pkts_tx := g_stats_rtp.num_pkts_tx+1;
 			g_stats_rtp.bytes_payload_tx := g_stats_rtp.bytes_payload_tx +
 								lengthof(g_cfg.tx_fixed_payload);
+		}
+
+		/* connection refused */
+		[g_conn_refuse_expect] RTP.receive(tr_conn_refuse) {
+			log("Connection refused (expected)");
+			g_conn_refuse_received := true;
+		}
+		[not g_conn_refuse_expect] RTP.receive(tr_conn_refuse) {
+			setverdict(fail, "Connection refused (unexpected)");
+			mtc.stop;
 		}
 
 		/* fail on any unexpected messages */
