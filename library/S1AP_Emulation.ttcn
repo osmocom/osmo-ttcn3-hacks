@@ -1,0 +1,681 @@
+module S1AP_Emulation {
+
+/* S1AP Emulation, runs on top of S1AP_CodecPort.  It multiplexes/demultiplexes
+ * the individual IMSIs/subscribers, so there can be separate TTCN-3 components handling
+ * each of them.
+ *
+ * The S1AP_Emulation.main() function processes S1AP primitives from the S1AP
+ * socket via the S1AP_CodecPort, and dispatches them to the per-IMSI components.
+ *
+ * For each new IMSI, the S1apOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that IMSI
+ * is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound IMSI, it can
+ * do so by registering an "expect" with the expected IMSI.
+ *
+ * Inbound non-UE related S1AP messages (such as RESET, SETUP, OVERLOAD) are dispatched to
+ * the S1apOps.unitdata_cb() callback, which is registered with an argument to the
+ * main() function below.
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from S1AP_CodecPort all;
+import from S1AP_CodecPort_CtrlFunct all;
+import from S1AP_Types all;
+import from S1AP_Constants all;
+import from S1AP_PDU_Contents all;
+import from S1AP_PDU_Descriptions all;
+import from S1AP_IEs all;
+import from S1AP_Templates all;
+
+import from NAS_EPS_Types all;
+import from NAS_Templates all;
+
+import from LTE_CryptoFunctions all;
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from DNS_Helpers all;
+
+
+type component S1AP_ConnHdlr {
+	port S1AP_Conn_PT S1AP;
+	/* procedure based port to register for incoming connections */
+	port S1APEM_PROC_PT S1AP_PROC;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port S1AP_Conn_PT message {
+	inout S1AP_PDU, PDU_NAS_EPS, S1APEM_Config;
+} with { extension "internal" };
+
+type record NAS_Keys {
+	octetstring k_nas_int,
+	octetstring k_nas_enc
+};
+type union S1APEM_Config {
+	NAS_Keys set_nas_keys
+};
+
+type enumerated S1APEM_EventUpDown {
+	S1APEM_EVENT_DOWN,
+	S1APEM_EVENT_UP
+}
+
+/* an event indicating us whether or not a connection is physically up or down,
+ * and whether we have received an ID_ACK */
+type union S1APEM_Event {
+	S1APEM_EventUpDown	up_down
+}
+
+/* global test port e.g. for non-imsi/conn specific messages */
+type port S1AP_PT message {
+	inout S1AP_PDU, S1APEM_Event;
+} with { extension "internal" };
+
+
+/* represents a single S1AP Association */
+type record AssociationData {
+	S1AP_ConnHdlr	comp_ref,			/* component handling this UE connection */
+	uint24_t	enb_ue_s1ap_id optional,	/* eNB side S1AP ID */
+	uint32_t	mme_ue_s1ap_id optional,	/* MME side S1AP ID */
+	EUTRAN_CGI	cgi optional,
+	TAI		tai optional,
+	NAS_UE_State	nus
+
+	//hexstring	imsi optional
+};
+
+type component S1AP_Emulation_CT {
+	/* Port facing to the UDP SUT */
+	port S1AP_CODEC_PT S1AP;
+	/* All S1AP_ConnHdlr S1AP ports connect here
+	 * S1AP_Emulation_CT.main needs to figure out what messages
+	 * to send where with CLIENT.send() to vc_conn */
+	port S1AP_Conn_PT S1AP_CLIENT;
+	/* currently tracked connections */
+	var AssociationData S1apAssociationTable[16];
+	/* pending expected CRCX */
+	var ExpectData S1apExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port S1APEM_PROC_PT S1AP_PROC;
+	/* test port for unit data messages */
+	port S1AP_PT S1AP_UNIT;
+
+	var S1AP_conn_parameters g_pars;
+	var charstring g_s1ap_id;
+	var integer g_s1ap_conn_id := -1;
+}
+
+type function S1APCreateCallback(S1AP_PDU msg, template (omit) MME_UE_S1AP_ID mme_id,
+				 template (omit) ENB_UE_S1AP_ID enb_id, charstring id)
+runs on S1AP_Emulation_CT return S1AP_ConnHdlr;
+
+type function S1APUnitdataCallback(S1AP_PDU msg)
+runs on S1AP_Emulation_CT return template S1AP_PDU;
+
+type record S1APOps {
+	S1APCreateCallback create_cb,
+	S1APUnitdataCallback unitdata_cb
+}
+
+type record S1AP_conn_parameters {
+	HostName remote_ip,
+	PortNumber remote_sctp_port,
+	HostName local_ip,
+	PortNumber local_sctp_port,
+	NAS_Role role
+}
+
+function tr_S1AP_RecvFrom_R(template S1AP_PDU msg)
+runs on S1AP_Emulation_CT return template S1AP_RecvFrom {
+	var template S1AP_RecvFrom mrf := {
+		connId := g_s1ap_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+private function f_s1ap_ids_known(template (omit) MME_UE_S1AP_ID mme_id,
+				  template (omit) ENB_UE_S1AP_ID enb_id)
+runs on S1AP_Emulation_CT return boolean {
+	var integer i;
+	log("f_s1ap_ids_known(",mme_id,", ",enb_id,")");
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		log("tbl[",i,"]: mme=", S1apAssociationTable[i].mme_ue_s1ap_id,
+		    ", enb=", S1apAssociationTable[i].enb_ue_s1ap_id);
+		/* skip empty records */
+		if (S1apAssociationTable[i].mme_ue_s1ap_id == omit and
+		    S1apAssociationTable[i].enb_ue_s1ap_id == omit) {
+			log("skipping empty ", i);
+			continue;
+		}
+		if (S1apAssociationTable[i].mme_ue_s1ap_id == omit) {
+			log("entry ", i, " has no MME ID yet (enb=", S1apAssociationTable[i].enb_ue_s1ap_id);
+			/* Table doesn't yet know the MME side ID, let's look-up only
+			 * based on the eNB side ID */
+			if (match(S1apAssociationTable[i].enb_ue_s1ap_id, enb_id)) {
+				/* update table with MME side ID */
+				S1apAssociationTable[i].mme_ue_s1ap_id := valueof(mme_id);
+				return true;
+			}
+		} else if (match(S1apAssociationTable[i].enb_ue_s1ap_id, enb_id) and
+			match(S1apAssociationTable[i].mme_ue_s1ap_id, mme_id)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(S1AP_ConnHdlr client)
+runs on S1AP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		if (S1apAssociationTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_assoc_id_by_s1ap_ids(template (omit) MME_UE_S1AP_ID mme_id,
+				    template (omit) ENB_UE_S1AP_ID enb_id)
+runs on S1AP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		if (match(S1apAssociationTable[i].enb_ue_s1ap_id, enb_id)) {
+			if (istemplatekind(mme_id, "omit")) {
+				return i;
+			} else {
+				if (match(S1apAssociationTable[i].mme_ue_s1ap_id, mme_id)) {
+					return i;
+				}
+			}
+		}
+	}
+	setverdict(fail, "S1AP Association Table not found by ENB-ID=", enb_id, " MME-ID=", mme_id);
+	mtc.stop;
+}
+
+private function f_assoc_id_by_comp(S1AP_ConnHdlr client)
+runs on S1AP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		if (S1apAssociationTable[i].comp_ref == client) {
+			return i;
+		}
+	}
+	setverdict(fail, "S1AP Association Table not found by component ", client);
+	mtc.stop;
+}
+
+private function f_assoc_by_comp(S1AP_ConnHdlr client)
+runs on S1AP_Emulation_CT return AssociationData {
+	var integer i := f_assoc_id_by_comp(client);
+	return S1apAssociationTable[i];
+}
+
+private function f_s1ap_id_table_add(S1AP_ConnHdlr comp_ref,
+				     template (omit) MME_UE_S1AP_ID mme_id, ENB_UE_S1AP_ID enb_id)
+runs on S1AP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		if (not isvalue(S1apAssociationTable[i].enb_ue_s1ap_id)) {
+			S1apAssociationTable[i].enb_ue_s1ap_id := enb_id;
+			if (istemplatekind(mme_id, "omit")) {
+				S1apAssociationTable[i].mme_ue_s1ap_id := omit;
+			} else {
+				S1apAssociationTable[i].mme_ue_s1ap_id := valueof(mme_id);
+			}
+			S1apAssociationTable[i].comp_ref := comp_ref;
+			return i;
+		}
+	}
+	testcase.stop("S1AP Association Table full!");
+	return -1;
+}
+
+private function f_s1ap_id_table_del(S1AP_ConnHdlr comp_ref, ENB_UE_S1AP_ID enb_id)
+runs on S1AP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		if (S1apAssociationTable[i].comp_ref == comp_ref and
+		    S1apAssociationTable[i].mme_ue_s1ap_id == enb_id) {
+			S1apAssociationTable[i].enb_ue_s1ap_id := omit;
+			S1apAssociationTable[i].mme_ue_s1ap_id := omit;
+			S1apAssociationTable[i].comp_ref := null;
+			return;
+		}
+	}
+	setverdict(fail, "S1AP Association Table: Couldn't find to-be-deleted entry!");
+	mtc.stop;
+}
+
+
+private function f_s1ap_id_table_init()
+runs on S1AP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(S1apAssociationTable); i := i+1) {
+		S1apAssociationTable[i].mme_ue_s1ap_id := omit;
+		S1apAssociationTable[i].enb_ue_s1ap_id := omit;
+		S1apAssociationTable[i].cgi := omit;
+		S1apAssociationTable[i].tai := omit;
+		S1apAssociationTable[i].nus := valueof(t_NAS_UE_State(g_pars.role));
+	}
+}
+
+private template (value) SctpTuple ts_SCTP(template (omit) integer ppid := 18) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+private function f_s1ap_xceive(template (value) S1AP_PDU tx,
+				template S1AP_PDU rx_t := ?)
+runs on S1AP_Emulation_CT  return S1AP_PDU {
+	timer T := 10.0;
+	var S1AP_RecvFrom mrf;
+
+	S1AP.send(t_S1AP_Send(g_s1ap_conn_id, tx));
+	alt {
+	[] S1AP.receive(tr_S1AP_RecvFrom_R(rx_t)) -> value mrf { }
+	[] S1AP.receive(tr_SctpAssocChange) { repeat; }
+	[] S1AP.receive(tr_SctpPeerAddrChange)  { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", rx_t);
+		mtc.stop;
+		}
+	}
+	return mrf.msg;
+}
+
+/*
+private function f_nas_try_decaps(PDU_NAS_EPS nas) return PDU_NAS_EPS
+{
+	var PDU_NAS_EPS_SecurityProtectedNASMessage secp_nas;
+	if (not match(nas, tr_NAS_EMM_SecurityProtected)) {
+		return nas;
+	}
+	secp_nas := nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_SecurityProtectedNASMessage;
+	select (secp_nas.securityHeaderType) {
+	case ('0011'B) {
+		var octetstring knas_int := '530ce32318f26264eab26bc116870b86'O;
+		var octetstring data_with_seq := int2oct(secp_nas.sequenceNumber, 1) & secp_nas.nAS_Message;
+		var OCT4 exp_mac := f_snow_3g_f9(knas_int, secp_nas.sequenceNumber, 0,
+						 is_downlink:=true, data:=data_with_seq);
+		if (exp_mac != secp_nas.messageAuthenticationCode) {
+			setverdict(fail, "Received NAS MAC ", secp_nas.messageAuthenticationCode,
+				   " doesn't match expected MAC ", exp_mac, ": ", nas);
+			mtc.stop;
+		}
+		return dec_PDU_NAS_EPS(secp_nas.nAS_Message);
+		}
+	case else  {
+		setverdict(fail, "Implement SecHdrType for ", secp_nas);
+		mtc.stop;
+		}
+	}
+}
+*/
+
+function main(S1APOps ops, S1AP_conn_parameters p, charstring id) runs on S1AP_Emulation_CT {
+	var Result res;
+	g_pars := p;
+	g_s1ap_id := id;
+	f_s1ap_id_table_init();
+	f_expect_table_init();
+
+	map(self:S1AP, system:S1AP_CODEC_PT);
+	if (p.remote_sctp_port == -1) {
+		res := S1AP_CodecPort_CtrlFunct.f_IPL4_listen(S1AP, p.local_ip, p.local_sctp_port, { sctp := valueof(ts_SCTP) });
+	} else {
+		res := S1AP_CodecPort_CtrlFunct.f_IPL4_connect(S1AP, p.remote_ip, p.remote_sctp_port,
+								p.local_ip, p.local_sctp_port, -1, { sctp := valueof(ts_SCTP) });
+	}
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect S1AP socket, check your configuration");
+		mtc.stop;
+	}
+	g_s1ap_conn_id := res.connId;
+
+	/* notify user about SCTP establishment */
+	if (p.remote_sctp_port != -1) {
+		S1AP_UNIT.send(S1APEM_Event:{up_down:=S1APEM_EVENT_UP})
+	}
+
+	while (true) {
+		var S1AP_ConnHdlr vc_conn;
+		var PDU_NAS_EPS nas;
+		var hexstring imsi;
+		var S1AP_RecvFrom mrf;
+		var S1AP_PDU msg;
+		var S1APEM_Config s1cfg;
+		var charstring vlr_name, mme_name;
+		var integer ai;
+
+		alt {
+		/* Configuration primitive from client */
+		[] S1AP_CLIENT.receive(S1APEM_Config:{set_nas_keys:=?}) -> value s1cfg sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			S1apAssociationTable[assoc_id].nus.k_nas_int := s1cfg.set_nas_keys.k_nas_int;
+			S1apAssociationTable[assoc_id].nus.k_nas_enc := s1cfg.set_nas_keys.k_nas_enc;
+			}
+		/* S1AP from client: InitialUE */
+		[] S1AP_CLIENT.receive(tr_S1AP_InitialUE) -> value msg sender vc_conn {
+			/* create a table entry about this connection */
+			ai := f_s1ap_id_table_add(vc_conn, omit, valueof(f_S1AP_get_ENB_UE_S1AP_ID(msg)));
+			/* Store CGI + TAI so we can use it for generating UlNasTransport from NAS */
+			S1apAssociationTable[ai].tai := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[2].value_.TAI;
+			S1apAssociationTable[ai].cgi := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[3].value_.EUTRAN_CGI;
+			/* Pass message through */
+			S1AP.send(t_S1AP_Send(g_s1ap_conn_id, msg));
+			}
+		/* NAS from client: Wrap in S1AP Uplink NAS Transport */
+		[] S1AP_CLIENT.receive(PDU_NAS_EPS:?) -> value nas sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			var AssociationData ad := S1apAssociationTable[assoc_id];
+			nas := f_nas_encaps(S1apAssociationTable[assoc_id].nus, nas, new_ctx := false);
+			var octetstring nas_enc := enc_PDU_NAS_EPS(nas);
+			S1AP.send(t_S1AP_Send(g_s1ap_conn_id,
+					      ts_S1AP_UlNasTransport(ad.mme_ue_s1ap_id,
+								     ad.enb_ue_s1ap_id,
+								     nas_enc, ad.cgi, ad.tai)));
+			}
+		/* S1AP from client: pass on transparently */
+		[] S1AP_CLIENT.receive(S1AP_PDU:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			/* FIXME: validate S1AP_IDs ? */
+			S1AP.send(t_S1AP_Send(g_s1ap_conn_id, msg));
+			}
+
+		/* non-UE related S1AP: pass through unmodified/unverified */
+		[] S1AP_UNIT.receive(S1AP_PDU:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			S1AP.send(t_S1AP_Send(g_s1ap_conn_id, msg));
+			}
+
+		/* S1AP received from peer (MME) */
+		[] S1AP.receive(tr_S1AP_RecvFrom_R(?)) -> value mrf {
+			if (match(mrf.msg, tr_S1AP_nonUErelated)) {
+				/* non-UE-related S1AP message */
+				var template S1AP_PDU resp := ops.unitdata_cb.apply(mrf.msg);
+				if (isvalue(resp)) {
+					S1AP.send(t_S1AP_Send(g_s1ap_conn_id, valueof(resp)));
+				}
+			} else if (match(mrf.msg, tr_S1AP_UeContextReleaseCmd)) {
+				/* TODO: special handling, as it contains multiple eNB or MME IDs */
+				setverdict(fail, "implement UeContextReleaseCmd handling");
+				mtc.stop;
+			} else {
+				/* Ue-related S1AP message */
+				/* obtain MME + ENB UE S1AP ID */
+				var template (omit) MME_UE_S1AP_ID mme_ue_id := f_S1AP_get_MME_UE_S1AP_ID(mrf.msg);
+				var template (omit) ENB_UE_S1AP_ID enb_ue_id := f_S1AP_get_ENB_UE_S1AP_ID(mrf.msg);
+				/* check if those IDs are known in our table */
+				if (f_s1ap_ids_known(mme_ue_id, enb_ue_id)) {
+					/* if yes, dispatch to the ConnHdlr for this Ue-Connection */
+					var template (omit) octetstring nas_enc;
+					var integer assoc_id  := f_assoc_id_by_s1ap_ids(mme_ue_id, enb_ue_id);
+					vc_conn := S1apAssociationTable[assoc_id].comp_ref;
+					nas_enc := f_S1AP_get_NAS_PDU(mrf.msg);
+					if (isvalue(nas_enc)) {
+						nas := dec_PDU_NAS_EPS(valueof(nas_enc));
+						if (match(nas, tr_NAS_EMM_SecurityProtected)) {
+							nas := f_nas_try_decaps(S1apAssociationTable[assoc_id].nus, nas);
+						}
+						/* send decoded NAS */
+						S1AP_CLIENT.send(nas) to vc_conn;
+					} else {
+						/* send raw S1AP */
+						S1AP_CLIENT.send(mrf.msg) to vc_conn;
+					}
+				} else {
+					/* if not, call create_cb so it can create new ConnHdlr */
+					vc_conn := ops.create_cb.apply(mrf.msg, mme_ue_id, enb_ue_id, id);
+					f_s1ap_id_table_add(vc_conn, mme_ue_id, valueof(enb_ue_id));
+					S1AP_CLIENT.send(mrf.msg) to vc_conn;
+				}
+			}
+			}
+		[] S1AP.receive(tr_SctpAssocChange) { }
+		[] S1AP.receive(tr_SctpPeerAddrChange)  { }
+		[] S1AP_PROC.getcall(S1APEM_register:{?,?}) -> param(imsi, vc_conn) {
+			f_create_expect(imsi, vc_conn);
+			S1AP_PROC.reply(S1APEM_register:{imsi, vc_conn}) to vc_conn;
+			}
+		}
+
+	}
+}
+
+/* "Expect" Handling */
+
+type record ExpectData {
+	hexstring imsi optional,
+	S1AP_ConnHdlr vc_conn
+}
+
+signature S1APEM_register(in hexstring imsi, in S1AP_ConnHdlr hdlr);
+
+type port S1APEM_PROC_PT procedure {
+	inout S1APEM_register;
+} with { extension "internal" };
+
+/* Function that can be used as create_cb and will usse the expect table */
+function ExpectedCreateCallback(S1AP_PDU msg, hexstring imsi, charstring id)
+runs on S1AP_Emulation_CT return S1AP_ConnHdlr {
+	var S1AP_ConnHdlr ret := null;
+	var integer i;
+
+	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
+		if (not ispresent(S1apExpectTable[i].imsi)) {
+			continue;
+		}
+		if (imsi == S1apExpectTable[i].imsi) {
+			ret := S1apExpectTable[i].vc_conn;
+			/* Release this entry */
+			S1apExpectTable[i].imsi := omit;
+			S1apExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", msg, " handled at ", ret);
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for ", msg);
+	mtc.stop;
+}
+
+private function f_create_expect(hexstring imsi, S1AP_ConnHdlr hdlr)
+runs on S1AP_Emulation_CT {
+	var integer i;
+
+	/* Check an entry like this is not already presnt */
+	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
+		if (imsi == S1apExpectTable[i].imsi) {
+			setverdict(fail, "IMSI already present", imsi);
+			mtc.stop;
+		}
+	}
+	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
+		if (not ispresent(S1apExpectTable[i].imsi)) {
+			S1apExpectTable[i].imsi := imsi;
+			S1apExpectTable[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for ", imsi, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	testcase.stop("No space left in S1apExpectTable")
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_s1ap_expect(hexstring imsi) runs on S1AP_ConnHdlr {
+	S1AP_PROC.call(S1APEM_register:{imsi, self}) {
+		[] S1AP_PROC.getreply(S1APEM_register:{?,?}) {};
+	}
+}
+
+
+private function f_expect_table_init()
+runs on S1AP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(S1apExpectTable); i := i + 1) {
+		S1apExpectTable[i].imsi := omit;
+	}
+}
+
+function DummyUnitdataCallback(S1AP_PDU msg)
+runs on S1AP_Emulation_CT return template S1AP_PDU {
+	log("Ignoring S1AP ", msg);
+	return omit;
+}
+
+
+function f_S1AP_get_ENB_UE_S1AP_ID(S1AP_PDU s1ap) return template (omit) ENB_UE_S1AP_ID
+{
+	if (ischosen(s1ap.initiatingMessage)) {
+		var InitiatingMessage im := s1ap.initiatingMessage;
+		select (s1ap) {
+		case (tr_S1AP_InitialUE) {
+			return im.value_.InitialUEMessage.protocolIEs[0].value_.ENB_UE_S1AP_ID;
+			}
+		case (tr_S1AP_DlNasTransport) {
+			return im.value_.DownlinkNASTransport.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UlNasTransport) {
+			return im.value_.UplinkNASTransport.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		case (tr_S1AP_IntialCtxSetupReq) {
+			return im.value_.initialContextSetupRequest.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UeContextReleaseReq) {
+			return im.value_.UEContextReleaseRequest.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		/* UeContextReleaseCmd needs special handling; it can contain any number of MME/UE IDs */
+		case (tr_S1AP_ConnEstInd) {
+			return im.value_.ConnectionEstablishmentIndication.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	} else if (ischosen(s1ap.successfulOutcome)) {
+		var SuccessfulOutcome so := s1ap.successfulOutcome;
+		select (s1ap) {
+		case (tr_S1AP_InitialCtxSetupResp) {
+			return so.value_.initialContextSetupResponse.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UeContextReleaseCompl) {
+			return so.value_.UEContextReleaseComplete.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	} else if (ischosen(s1ap.unsuccessfulOutcome)) {
+		var UnsuccessfulOutcome uo := s1ap.unsuccessfulOutcome;
+		select (s1ap) {
+		case (tr_S1AP_InitialCtxSetupFail) {
+			return uo.value_.initialContextSetupFailure.protocolIEs[1].value_.ENB_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	}
+	return omit;
+}
+
+function f_S1AP_get_MME_UE_S1AP_ID(S1AP_PDU s1ap) return template (omit) MME_UE_S1AP_ID
+{
+	if (ischosen(s1ap.initiatingMessage)) {
+		var InitiatingMessage im := s1ap.initiatingMessage;
+		select (s1ap) {
+		case (tr_S1AP_DlNasTransport) {
+			return im.value_.DownlinkNASTransport.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UlNasTransport) {
+			return im.value_.UplinkNASTransport.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		case (tr_S1AP_IntialCtxSetupReq) {
+			return im.value_.initialContextSetupRequest.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UeContextReleaseReq) {
+			return im.value_.UEContextReleaseRequest.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		/* UeContextReleaseCmd needs special handling; it can contain any number of MME/UE IDs */
+		case (tr_S1AP_ConnEstInd) {
+			return im.value_.ConnectionEstablishmentIndication.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	} else if (ischosen(s1ap.successfulOutcome)) {
+		var SuccessfulOutcome so := s1ap.successfulOutcome;
+		select (s1ap) {
+		case (tr_S1AP_InitialCtxSetupResp) {
+			return so.value_.initialContextSetupResponse.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		case (tr_S1AP_UeContextReleaseCompl) {
+			return so.value_.UEContextReleaseComplete.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	} else if (ischosen(s1ap.unsuccessfulOutcome)) {
+		var UnsuccessfulOutcome uo := s1ap.unsuccessfulOutcome;
+		select (s1ap) {
+		case (tr_S1AP_InitialCtxSetupFail) {
+			return uo.value_.initialContextSetupFailure.protocolIEs[0].value_.MME_UE_S1AP_ID;
+			}
+		/* TODO */
+		}
+	}
+	return omit;
+}
+
+function f_S1AP_get_NAS_PDU(S1AP_PDU s1ap) return template (omit) NAS_PDU
+{
+	var integer i;
+
+	if (ischosen(s1ap.initiatingMessage)) {
+		var InitiatingMessage im := s1ap.initiatingMessage;
+		select (s1ap) {
+		case (tr_S1AP_DlNasTransport) {
+			var DownlinkNASTransport msg := im.value_.DownlinkNASTransport;
+			for (i := 0; i < lengthof(msg.protocolIEs); i := i+1) {
+				if (msg.protocolIEs[i].id == id_NAS_PDU) {
+					return msg.protocolIEs[i].value_.NAS_PDU;
+				}
+			}
+			}
+		case (tr_S1AP_UlNasTransport) {
+			var UplinkNASTransport msg := im.value_.UplinkNASTransport;
+			for (i := 0; i < lengthof(msg.protocolIEs); i := i+1) {
+				if (msg.protocolIEs[i].id == id_NAS_PDU) {
+					return msg.protocolIEs[i].value_.NAS_PDU;
+				}
+			}
+			}
+		}
+	}
+	return omit;
+}
+
+
+
+}
