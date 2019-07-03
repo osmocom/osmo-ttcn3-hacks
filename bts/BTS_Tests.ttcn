@@ -422,6 +422,8 @@ function f_init() runs on test_CT {
 		/* Start with a default moderate timing offset equalling TA=2, and RSSI=-60 */
 		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, valueof(ts_TRXC_FAKE_TIMING(2*256)));
 		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, valueof(ts_TRXC_FAKE_RSSI(-60)));
+		/* FIXME: OsmoBTS may have different AB / NB threshold (see MIN_QUAL_NORM, MIN_QUAL_RACH) */
+		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, valueof(ts_TRXC_FAKE_CI(0)));
 	}
 
 	/* Wait some extra time to make sure the BTS emits a stable carrier.
@@ -4315,6 +4317,80 @@ testcase TC_pcu_ext_rach_content() runs on test_CT {
 	setverdict(pass);
 }
 
+private function f_TC_pcu_data_ind_lqual_cb(int16_t lqual_cb_exp, int16_t thresh)
+runs on test_CT {
+	var template PCUIF_send_data sdt;
+	var PCUIF_send_data sd;
+	var int16_t lqual_cb;
+	timer T := 1.0;
+
+	/* PCUIF_DATA.ind is encapsulated into a supplementary record */
+	sdt := t_SD_PCUIF_MSGT(g_pcu_conn_id, PCU_IF_MSG_DATA_IND);
+
+	/* Send a random PDTCH frame over Um */
+	L1CTL.send(ts_L1CTL_TRAFFIC_REQ(ts_RslChanNr_PDCH(7), ts_RslLinkID_DCCH(0),
+					'0000'O & f_rnd_octstring(21)));
+
+	T.start;
+	alt {
+	/* If expected link quality is above the threshold */
+	[lqual_cb_exp >= thresh] PCU.receive(sdt) -> value sd {
+		lqual_cb := sd.data.u.data_ind.lqual_cb;
+		log("Rx PCUIF_DATA.ind (lqual_cb=", lqual_cb, ")");
+
+		/* Make sure the actual link quality matches the expected value */
+		if (not match(lqual_cb, lqual_cb_exp)) {
+			setverdict(fail, log2str("Link quality ", lqual_cb, " does not match ",
+						 "expected value ", lqual_cb_exp));
+		} else {
+			setverdict(pass);
+		}
+		}
+	/* If expected link quality is below the threshold */
+	[lqual_cb_exp < thresh] PCU.receive(sdt) -> value sd {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx unexpected PCUIF_DATA.ind: ", sd.data));
+		}
+	/* Ignore PCUIF_RTS.req and PCUIF_TIME.ind */
+	[] PCU.receive { repeat; }
+	[lqual_cb_exp < thresh] T.timeout {
+		log("Rx nothing, as expected");
+		setverdict(pass);
+		}
+	[lqual_cb_exp >= thresh] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Timeout waiting for PCUIF_DATA.ind");
+		}
+	}
+}
+
+/* Verify C/I (Carrier-to-Interference ratio) processing of PDTCH frames */
+testcase TC_pcu_data_ind_lqual_cb() runs on test_CT {
+	f_init_pcu_test();
+	PCU.clear;
+
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	/* Activate a PDCH channel on TS7 */
+	f_TC_pcu_act_req(0, 0, 7, true);
+
+	/* Tune trxcon to that PDCH channel on TS7 */
+	f_L1CTL_DM_EST_REQ(L1CTL, { false, mp_trx0_arfcn },
+			   valueof(ts_RslChanNr_PDCH(7)), 7);
+
+	/* C/I in centiBels, test range: -256 .. +1280, step 128 */
+	for (var int16_t i := -256; i <= 1280; i := i + 128) {
+		var TrxcMessage ret;
+
+		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id,
+					 valueof(ts_TRXC_FAKE_CI(i)));
+
+		/* FIXME: OsmoBTS may have different threshold (see MIN_QUAL_NORM) */
+		f_TC_pcu_data_ind_lqual_cb(i, thresh := 0);
+	}
+}
+
 /* Send PAGING via RSL, expect it to shw up on PCU socket */
 testcase TC_pcu_paging_from_rsl() runs on test_CT {
 	f_init_pcu_test();
@@ -6163,6 +6239,7 @@ control {
 		execute( TC_pcu_data_req_imm_ass_pch() );
 		execute( TC_pcu_rach_content() );
 		execute( TC_pcu_ext_rach_content() );
+		execute( TC_pcu_data_ind_lqual_cb() );
 		execute( TC_pcu_paging_from_rsl() );
 		execute( TC_pcu_time_ind() );
 		execute( TC_pcu_rts_req() );
