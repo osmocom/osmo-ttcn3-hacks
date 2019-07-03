@@ -335,6 +335,7 @@ function f_init(integer num_bsc := 1, boolean sgsap := false, boolean gsup := tr
 	/* set some defaults */
 	f_vty_config(MSCVTY, "network", "authentication optional");
 	f_vty_config(MSCVTY, "msc", "assign-tmsi");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 0");
 	f_vty_config(MSCVTY, "network", "encryption a5 0");
 	if (mp_enable_osmux_test) {
 		if (osmux) {
@@ -367,7 +368,11 @@ runs on MTC_CT return BSC_ConnHdlrPars {
 		kc_support := '0A'O,	/* A5/1 and A5/3 enabled */
 		expect_tmsi := true,
 		expect_auth := false,
-		expect_ciph := false
+		expect_ciph := false,
+		expect_imei := false,
+		expect_imei_early := false,
+		check_imei_result := OSMO_GSUP_IMEI_RESULT_ACK,
+		check_imei_error := false
 	};
 	var BSC_ConnHdlrPars pars := {
 		sccp_addr_own := g_bssap[ran_idx].sccp_addr_own,
@@ -5531,6 +5536,287 @@ testcase TC_ho_inter_msc_out() runs on MTC_CT {
 	vc_conn.done;
 }
 
+private function f_tc_lu_imsi_auth_tmsi_check_imei(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_auth := true;
+	pars.net.expect_imei := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth3g_tmsi_check_imei(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_auth := true;
+	pars.use_umts_aka := true;
+	pars.net.expect_imei := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_auth3g_tmsi_check_imei() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth3g_tmsi_check_imei), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_noauth_tmsi_check_imei(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_imei := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_noauth_tmsi_check_imei() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_tmsi_check_imei), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_noauth_notmsi_check_imei(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_tmsi := false;
+	pars.net.expect_imei := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_noauth_notmsi_check_imei() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "no assign-tmsi");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_notmsi_check_imei), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth_tmsi_check_imei_nack(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_lu;
+	var PDU_DTAP_MT dtap_mt;
+
+	pars.net.expect_auth := true;
+	pars.net.expect_imei := true;
+	pars.net.check_imei_result := OSMO_GSUP_IMEI_RESULT_NACK;
+	f_init_handler(pars);
+
+	/* Cannot use f_perform_lu() as we expect a reject */
+	l3_lu := f_build_lu_imsi(g_pars.imsi)
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+
+	f_mm_common();
+	f_msc_lu_hlr();
+	f_mm_imei();
+
+	/* Expect reject. As of writing, sometimes it passes, sometimes we get a broken pipe (race condition)! */
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(?)) -> value dtap_mt {
+		setverdict(fail, "Expected LU reject BSSAP message, got: ", dtap_mt);
+		mtc.stop;
+		}
+	}
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei_nack() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei_nack), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth_tmsi_check_imei_err(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_lu;
+	var PDU_DTAP_MT dtap_mt;
+
+	pars.net.expect_auth := true;
+	pars.net.expect_imei := true;
+	pars.net.check_imei_error := true;
+	f_init_handler(pars);
+
+	/* Cannot use f_perform_lu() as we expect a reject */
+	l3_lu := f_build_lu_imsi(g_pars.imsi)
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+
+	f_mm_common();
+	f_msc_lu_hlr();
+	f_mm_imei();
+
+	/* Expect reject. As of writing, sometimes it passes, sometimes we get a broken pipe (race condition)! */
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(?)) -> value dtap_mt {
+		setverdict(fail, "Expected LU reject BSSAP message, got: ", dtap_mt);
+		mtc.stop;
+		}
+	}
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei_err() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd 1");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei_err), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth_tmsi_check_imei_early(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_auth := true;
+	pars.net.expect_imei_early := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei_early() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei_early), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth3g_tmsi_check_imei_early(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_auth := true;
+	pars.use_umts_aka := true;
+	pars.net.expect_imei_early := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_auth3g_tmsi_check_imei_early() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth3g_tmsi_check_imei_early), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_noauth_tmsi_check_imei_early(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_imei_early := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_noauth_tmsi_check_imei_early() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_tmsi_check_imei_early), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_noauth_notmsi_check_imei_early(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	pars.net.expect_tmsi := false;
+	pars.net.expect_imei_early := true;
+	f_init_handler(pars);
+	f_perform_lu();
+}
+testcase TC_lu_imsi_noauth_notmsi_check_imei_early() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "msc", "no assign-tmsi");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_noauth_notmsi_check_imei_early), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth_tmsi_check_imei_early_nack(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_lu;
+	var PDU_DTAP_MT dtap_mt;
+
+	pars.net.expect_auth := true;
+	pars.net.expect_imei_early := true;
+	pars.net.check_imei_result := OSMO_GSUP_IMEI_RESULT_NACK;
+	f_init_handler(pars);
+
+	/* Cannot use f_perform_lu() as we expect a reject */
+	l3_lu := f_build_lu_imsi(g_pars.imsi)
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+
+	f_mm_imei_early();
+
+	/* Expect reject */
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(?)) -> value dtap_mt {
+		setverdict(fail, "Expected LU reject BSSAP message, got: ", dtap_mt);
+		mtc.stop;
+		}
+	}
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei_early_nack() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei_early_nack), 5);
+	vc_conn.done;
+}
+
+private function f_tc_lu_imsi_auth_tmsi_check_imei_early_err(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var PDU_ML3_MS_NW l3_lu;
+	var PDU_DTAP_MT dtap_mt;
+
+	pars.net.expect_auth := true;
+	pars.net.expect_imei_early := true;
+	pars.net.check_imei_error := true;
+	f_init_handler(pars);
+
+	/* Cannot use f_perform_lu() as we expect a reject */
+	l3_lu := f_build_lu_imsi(g_pars.imsi)
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+	f_bssap_compl_l3(l3_lu);
+	BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3));
+
+	f_mm_imei_early();
+
+	/* Expect reject */
+	alt {
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(?)) -> value dtap_mt {
+		setverdict(fail, "Expected LU reject BSSAP message, got: ", dtap_mt);
+		mtc.stop;
+		}
+	}
+}
+testcase TC_lu_imsi_auth_tmsi_check_imei_early_err() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	f_vty_config(MSCVTY, "network", "authentication required");
+	f_vty_config(MSCVTY, "msc", "check-imei-rqd early");
+
+	vc_conn := f_start_handler(refers(f_tc_lu_imsi_auth_tmsi_check_imei_early_err), 5);
+	vc_conn.done;
+}
 
 control {
 	execute( TC_cr_before_reset() );
@@ -5640,6 +5926,19 @@ control {
 	execute( TC_ho_inter_bsc() );
 
 	execute( TC_ho_inter_msc_out() );
+
+	execute( TC_lu_imsi_auth_tmsi_check_imei() );
+	execute( TC_lu_imsi_auth3g_tmsi_check_imei() );
+	execute( TC_lu_imsi_noauth_tmsi_check_imei() );
+	execute( TC_lu_imsi_noauth_notmsi_check_imei() );
+	execute( TC_lu_imsi_auth_tmsi_check_imei_nack() );
+	execute( TC_lu_imsi_auth_tmsi_check_imei_err() );
+	execute( TC_lu_imsi_auth_tmsi_check_imei_early() );
+	execute( TC_lu_imsi_auth3g_tmsi_check_imei_early() );
+	execute( TC_lu_imsi_noauth_tmsi_check_imei_early() );
+	execute( TC_lu_imsi_noauth_notmsi_check_imei_early() );
+	execute( TC_lu_imsi_auth_tmsi_check_imei_early_nack() );
+	execute( TC_lu_imsi_auth_tmsi_check_imei_early_err() );
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_lu_imsi_auth_tmsi_encr_3_1_log_msc_debug() );
