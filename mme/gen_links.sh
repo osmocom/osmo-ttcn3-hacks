@@ -31,6 +31,10 @@ DIR=$BASEDIR/titan.ProtocolModules.SGsAP_13.2.0/src
 FILES="SGsAP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.NAS_EPS_15.2.0.1/src
+FILES="NAS_EPS_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library/s1ap
 FILES="S1AP_CommonDataTypes.asn S1AP_Constants.asn S1AP_Containers.asn S1AP_IEs.asn S1AP_PDU_Contents.asn
 S1AP_PDU_Descriptions.asn "
@@ -42,6 +46,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Na
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="L3_Templates.ttcn "
 FILES+="S1AP_CodecPort.ttcn "
+FILES+="NAS_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

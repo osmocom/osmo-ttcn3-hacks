@@ -51,6 +51,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
+			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
 			titan.ProtocolEmulations.SCCP
