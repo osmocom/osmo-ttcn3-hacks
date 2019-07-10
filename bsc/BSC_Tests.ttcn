@@ -1719,6 +1719,10 @@ private function f_connect_handler(inout MSC_ConnHdlr vc_conn) runs on test_CT {
 		connect(vc_conn:RSL1, bts[1].rsl.vc_RSL:CLIENT_PT);
 		connect(vc_conn:RSL1_PROC, bts[1].rsl.vc_RSL:RSL_PROC);
 	}
+	if (isvalue(bts[2])) {
+		connect(vc_conn:RSL2, bts[2].rsl.vc_RSL:CLIENT_PT);
+		connect(vc_conn:RSL2_PROC, bts[2].rsl.vc_RSL:RSL_PROC);
+	}
 	connect(vc_conn:BSSAP, g_bssap.vc_RAN:CLIENT);
 	connect(vc_conn:MGCP, vc_MGCP:MGCP_CLIENT);
 	connect(vc_conn:MGCP_MULTI, vc_MGCP:MGCP_CLIENT_MULTI);
@@ -2837,6 +2841,11 @@ runs on MSC_ConnHdlr {
 	f_vty_transceive(BSCVTY, cmd & suffix);
 }
 
+/* Even though the VTY command to trigger handover takes a new BTS number as argument, behind the scenes osmo-bsc always
+ * translates that to a target ARFCN+BSIC first. See bsc_vty.c trigger_ho_or_as(), which puts the selected BTS' neighbor
+ * ident key (ARFCN + BSIC) in the struct passed on to handover_request(). handover_start() then resolves that to a
+ * viable actual neighbor cell. So from the internal osmo-bsc perspective, we always request handover to an ARFCN + BSIC
+ * pair, not really to a specific BTS number. */
 private function f_vty_handover(integer bts_nr, integer trx_nr, RslChannelNr chan_nr,
 				integer new_bts_nr)
 runs on MSC_ConnHdlr {
@@ -3587,6 +3596,353 @@ testcase TC_ho_in_fail_no_detect2() runs on test_CT {
 	vc_conn.done;
 }
 
+type record of charstring Commands;
+
+private function f_bts_0_cfg(Commands cmds := {}) runs on MSC_ConnHdlr
+{
+	f_vty_enter_cfg_bts(BSCVTY, 0);
+	for (var integer i := 0; i < sizeof(cmds); i := i+1) {
+		f_vty_transceive(BSCVTY, cmds[i]);
+	}
+	f_vty_transceive(BSCVTY, "end");
+}
+
+private function f_probe_for_handover(charstring log_label,
+				      charstring log_descr,
+				      charstring handover_vty_cmd,
+				      boolean expect_handover,
+				      boolean is_inter_bsc_handover := false)
+runs on MSC_ConnHdlr
+{
+	var RSL_Message rsl;
+
+	var charstring log_msg := " (expecting handover)"
+	if (not expect_handover) {
+		log_msg := " (expecting NO handover)";
+	}
+	log("f_probe_for_handover starting: " & log_label & ": " & log_descr & log_msg);
+	f_vty_transceive(BSCVTY, handover_vty_cmd);
+
+	/* We're going to thwart any and all handover attempts, just be ready to handle (and ignore) handover target
+	 * lchans to be established on bts 1 or bts 2. */
+	f_rslem_suspend(RSL1_PROC);
+	f_rslem_suspend(RSL2_PROC);
+
+	timer T := 2.0;
+	T.start;
+
+	alt {
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		log("Rx L3 from net: ", l3);
+		if (ischosen(l3.msgs.rrm.handoverCommand)) {
+			var RslChannelNr new_chan_nr;
+			var GsmArfcn arfcn;
+			f_ChDesc2RslChanNr(l3.msgs.rrm.handoverCommand.channelDescription2,
+					   new_chan_nr, arfcn);
+			log("Handover to new chan ", new_chan_nr, " on ARFCN ", arfcn);
+			log(l3.msgs.rrm.handoverCommand);
+
+			/* Need to register for new lchan on new BTS -- it's either bts 1 or bts 2.  It doesn't really
+			 * matter on which BTS it really is, we're not going to follow through an entire handover
+			 * anyway. */
+			f_rslem_register(0, new_chan_nr, RSL1_PROC);
+			f_rslem_resume(RSL1_PROC);
+			f_rslem_register(0, new_chan_nr, RSL2_PROC);
+			f_rslem_resume(RSL2_PROC);
+
+			if (expect_handover and not is_inter_bsc_handover) {
+				setverdict(pass);
+				log("f_probe_for_handover(" & log_label & "): Got RSL Handover Command as expected.");
+			} else {
+				setverdict(fail, "f_probe_for_handover(" & log_label & "): Expected none, but got RSL Handover Command. "
+						 & log_label & ": " & log_descr);
+			}
+
+			log("f_probe_for_handover(" & log_label & "): Ending the test: Handover Failure stops the procedure.");
+			/* osmo-bsc has triggered Handover. That's all we need to know for this test, reply with
+			 * Handover Failure. */
+			f_rsl_send_l3(ts_RRM_HandoverFailure('00'O));
+
+			/* target BTS is told to release lchan again; don't care which BTS nor what messages. */
+			f_sleep(0.5);
+			RSL1.clear;
+			RSL2.clear;
+			log("f_probe_for_handover(" & log_label & "): done (got RSL Handover Command)");
+			break;
+		} else {
+			repeat;
+		}
+		}
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequired) {
+			if (expect_handover and is_inter_bsc_handover) {
+				setverdict(pass);
+				log("f_probe_for_handover(" & log_label & "): Got BSSMAP Handover Required as expected.");
+			} else {
+				setverdict(fail, "f_probe_for_handover(" & log_label & "): Expected none, but got BSSMAP Handover Required. "
+						 & log_label & ": " & log_descr);
+			}
+
+			log("f_probe_for_handover(" & log_label & "): done (got BSSMAP Handover Required)");
+
+			/* Note: f_tc_ho_neighbor_config_start() sets T7, the timeout for BSSMAP Handover Required, to
+			 * 1 second. There is no legal way to quickly abort a handover after a BSSMAP Handover Required,
+			 * setting a short timeout and waiting is the only way. */
+			log("f_probe_for_handover(" & log_label & "): waiting for inter-BSC HO to time out...");
+			f_sleep(1.5);
+			log("f_probe_for_handover(" & log_label & "): ...done");
+
+			break;
+		}
+	[] T.timeout {
+		if (expect_handover) {
+			setverdict(fail, "f_probe_for_handover(" & log_label & "): Expected Handover, but got none. "
+					 & log_label & ": " & log_descr);
+		} else {
+			setverdict(pass);
+			log("f_probe_for_handover(" & log_label & "): Got no Handover, as expected.");
+		}
+		log("f_probe_for_handover(" & log_label & "): done (got no Handover)");
+		break;
+		}
+	}
+
+	f_rslem_resume(RSL1_PROC);
+	f_rslem_resume(RSL2_PROC);
+	f_sleep(3.0);
+	RSL.clear;
+
+	log("f_probe_for_handover(" & log_label & "): done clearing");
+}
+
+/* Test the effect of various neighbor configuration scenarios:
+ *
+ * To avoid complexity, block off any actual handover operation, and always remain on the lchan at bts 0.
+ * Reconfigure the neighbors for bts 0, trigger a Handover, and probe whether osmo-bsc does or doesn't start HO.
+ */
+private function f_tc_ho_neighbor_config_start() runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	const OCT8 kc := '0001020304050607'O;
+
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	/* Establish lchan at bts 0 */
+	f_establish_fully(ass_cmd, exp_compl);
+
+	/* Shorten the inter-BSC Handover timeout, to not wait so long for inter-BSC Handovers */
+	f_vty_enter_cfg_network(BSCVTY);
+	f_vty_transceive(BSCVTY, "timer T7 1");
+	f_vty_transceive(BSCVTY, "end");
+}
+
+private function f_tc_ho_neighbor_config_1(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 1. No 'neighbor' config");
+	f_bts_0_cfg({"no neighbors"});
+	f_probe_for_handover("1.a", "HO to bts 1 works, implicitly listed as neighbor (legacy behavior when none are configured)",
+			"handover any to arfcn 871 bsic 11",
+			true);
+
+	f_probe_for_handover("1.b", "HO to unknown cell does not start",
+			"handover any to arfcn 13 bsic 39",
+			false);
+
+	f_probe_for_handover("1.c", "HO to 871-12 is ambiguous = error",
+			"handover any to arfcn 871 bsic 12",
+			false);
+
+	f_probe_for_handover("1.d", "HO to 871-11 still works (verify that this test properly cleans up)",
+			"handover any to arfcn 871 bsic 11",
+			true);
+}
+private function f_tc_ho_neighbor_config_2(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 2. explicit local neighbor: 'neighbor bts 1'");
+	f_bts_0_cfg({"neighbor bts 1"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("2.a", "HO to bts 1 works, explicitly listed as neighbor",
+			"handover any to arfcn 871 bsic 11",
+			true);
+
+	f_probe_for_handover("2.b", "HO to bts 2 doesn't work, not listed as neighbor",
+			"handover any to arfcn 871 bsic 12",
+			false);
+}
+private function f_tc_ho_neighbor_config_3(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 3. explicit local neighbor: 'neighbor bts 2'");
+	f_bts_0_cfg({"no neighbors", "neighbor bts 2"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("3.a", "HO to bts 1 doesn't work, not listed as neighbor",
+			"handover any to arfcn 871 bsic 11",
+			false);
+	f_probe_for_handover("3.b", "HO to bts 2 works, explicitly listed as neighbor; no ambiguity because bts 3 is not listed as neighbor",
+			"handover any to arfcn 871 bsic 12",
+			true);
+}
+private function f_tc_ho_neighbor_config_4(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 4. explicit remote neighbor: 'neighbor lac 99 arfcn 123 bsic 45'");
+	f_bts_0_cfg({"no neighbors", "neighbor lac 99 arfcn 123 bsic 45"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("4.a", "HO to bts 1 doesn't work, not listed as neighbor",
+			"handover any to arfcn 871 bsic 11",
+			false);
+	f_probe_for_handover("4.b", "HO to bts 2 doesn't work, not listed as neighbor",
+			"handover any to arfcn 871 bsic 12",
+			false);
+	f_probe_for_handover("4.c", "HO to 123-45 triggers inter-BSC HO",
+			"handover any to arfcn 123 bsic 45",
+			true, true);
+}
+private function f_tc_ho_neighbor_config_5(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 5. explicit remote neighbor re-using ARFCN+BSIC: 'neighbor lac 99 arfcn 871 bsic 12'");
+	f_bts_0_cfg({"no neighbors", "neighbor lac 99 arfcn 871 bsic 12"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("5.a", "HO to 871-12 triggers inter-BSC HO (ignoring local cells with same ARFCN+BSIC)",
+			"handover any to arfcn 871 bsic 12",
+			true, true);
+}
+private function f_tc_ho_neighbor_config_6(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 6. config error: explicit local and remote neighbors with ambiguous ARFCN+BSIC:"
+	    & " 'neighbor bts 2; neighbor lac 99 arfcn 871 bsic 12'");
+	f_bts_0_cfg({"no neighbors", "neighbor bts 2", "neighbor lac 99 arfcn 871 bsic 12"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("6.a", "HO to 871-12 is ambiguous = error",
+			"handover any to arfcn 871 bsic 12",
+			false);
+}
+private function f_tc_ho_neighbor_config_7(charstring id) runs on MSC_ConnHdlr {
+	f_tc_ho_neighbor_config_start();
+
+	/*
+	 * bts 0 ARFCN 871 BSIC 10
+	 * bts 1 ARFCN 871 BSIC 11
+	 * bts 2 ARFCN 871 BSIC 12
+	 * bts 3 ARFCN 871 BSIC 12  serves as ambiguity for bts 2, re-using the ARFCN+BSIC
+	 */
+
+	log("f_tc_ho_neighbor_config: 7. explicit local and remote neighbors:"
+	    & " 'neighbor bts 2; neighbor lac 99 arfcn 123 bsic 45'");
+	f_bts_0_cfg({"no neighbors", "neighbor bts 2", "neighbor lac 99 arfcn 123 bsic 45"});
+	f_sleep(0.5);
+
+	f_probe_for_handover("7.a", "HO to 871-12 does HO to bts 2",
+			"handover any to arfcn 871 bsic 12",
+			true);
+	f_probe_for_handover("7.b", "HO to 123-45 triggers inter-BSC HO",
+			"handover any to arfcn 123 bsic 45",
+			true, true);
+}
+
+testcase TC_ho_neighbor_config_1() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_1));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_2() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_2));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_3() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_3));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_4() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_4));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_5() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_5));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_6() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_6));
+	vc_conn.done;
+}
+testcase TC_ho_neighbor_config_7() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(3, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_neighbor_config_7));
+	vc_conn.done;
+}
+
 /* OS#3041: Open and close N connections in a normal fashion, and expect no
  * BSSMAP Reset just because of that. */
 testcase TC_bssap_rlsd_does_not_cause_bssmap_reset() runs on test_CT {
@@ -4139,6 +4495,14 @@ control {
 	execute( TC_ho_in_fail_msc_clears_after_ho_detect() );
 	execute( TC_ho_in_fail_no_detect() );
 	execute( TC_ho_in_fail_no_detect2() );
+
+	execute( TC_ho_neighbor_config_1() );
+	execute( TC_ho_neighbor_config_2() );
+	execute( TC_ho_neighbor_config_3() );
+	execute( TC_ho_neighbor_config_4() );
+	execute( TC_ho_neighbor_config_5() );
+	execute( TC_ho_neighbor_config_6() );
+	execute( TC_ho_neighbor_config_7() );
 
 	execute( TC_bssap_rlsd_does_not_cause_bssmap_reset() );
 	execute( TC_bssmap_clear_does_not_cause_bssmap_reset() );
