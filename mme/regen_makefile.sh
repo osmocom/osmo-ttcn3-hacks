@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn *.asn *.c IPL4asp_PT.cc  IPL4asp_discovery.cc  Native_FunctionDefs.cc SGsAP_CodecPort_CtrlFunctDef.cc  TCCConversion.cc  TCCEncoding.cc  TCCInterface.cc  TELNETasp_PT.cc S1AP_EncDec.cc LTE_CryptoFunctionDefs.cc "
+FILES="*.ttcn *.asn *.c IPL4asp_PT.cc  IPL4asp_discovery.cc  Native_FunctionDefs.cc SGsAP_CodecPort_CtrlFunctDef.cc  S1AP_CodecPort_CtrlFunctDef.cc  TCCConversion.cc  TCCEncoding.cc  TCCInterface.cc  TELNETasp_PT.cc S1AP_EncDec.cc LTE_CryptoFunctionDefs.cc "
 
 export CPPFLAGS_TTCN3=""
 

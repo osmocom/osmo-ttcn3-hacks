@@ -38,14 +38,14 @@ gen_links $DIR $FILES
 DIR=../library/s1ap
 FILES="S1AP_CommonDataTypes.asn S1AP_Constants.asn S1AP_Containers.asn S1AP_IEs.asn S1AP_PDU_Contents.asn
 S1AP_PDU_Descriptions.asn "
-FILES+="S1AP_EncDec.cc  S1AP_Types.ttcn "
+FILES+="S1AP_EncDec.cc  S1AP_Types.ttcn  S1AP_Templates.ttcn "
 gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="L3_Templates.ttcn "
-FILES+="S1AP_CodecPort.ttcn "
+FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Emulation.ttcn "
 FILES+="NAS_Templates.ttcn "
 gen_links $DIR $FILES
 
