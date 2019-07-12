@@ -1,7 +1,7 @@
 #ifndef __SNOW_3G__
 #define __SNOW_3G__
 
-#include "ogs-core.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {

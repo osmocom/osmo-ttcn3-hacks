@@ -381,7 +381,7 @@ void snow_3g_f8(u8 *key, u32 count, u32 bearer, u32 dir, u8 *data, u32 length)
 	int n = ( length + 31 ) / 32;
 	int i=0;
 	int lastbits = (8-(length%8)) % 8;
-	u32 *KS;
+	u32 KS[n];
 	
 	/*Initialisation*/
 	/* Load the confidentiality key for SNOW 3G initialization as in section
@@ -399,7 +399,6 @@ void snow_3g_f8(u8 *key, u32 count, u32 bearer, u32 dir, u8 *data, u32 length)
 	
 	/* Run SNOW 3G algorithm to generate sequence of key stream bits KS*/
 	snow_3g_initialize(K,IV);
-	KS = (u32 *)ogs_malloc(4*n);
 	snow_3g_generate_key_stream(n,(u32*)KS);
 	
 	/* Exclusive-OR the input data with keystream to generate the output bit
@@ -411,8 +410,6 @@ void snow_3g_f8(u8 *key, u32 count, u32 bearer, u32 dir, u8 *data, u32 length)
 		data[4*i+2] ^= (u8) (KS[i] >> 8) & 0xff;
 		data[4*i+3] ^= (u8) (KS[i] ) & 0xff;
 	}
-	
-	ogs_free(KS);
 	
 	/* zero last bits of data in case its length is not byte-aligned 
 	   this is an addition to the C reference code, which did not handle it */
