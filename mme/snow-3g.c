@@ -78,7 +78,7 @@ static const u8 SQ[256] = {
 * See section 3.1.1 for details.
 */
 
-u8 MULx(u8 V, u8 c)
+static u8 MULx(u8 V, u8 c)
 {
 	if ( V & 0x80 )
 		return ( (V << 1) ^ c);
@@ -94,7 +94,7 @@ u8 MULx(u8 V, u8 c)
 * See section 3.1.2 for details.
 */
 
-u8 MULxPOW(u8 V, u8 i, u8 c)
+static u8 MULxPOW(u8 V, u8 i, u8 c)
 {
 	if ( i == 0)
 		return V;
@@ -108,7 +108,7 @@ u8 MULxPOW(u8 V, u8 i, u8 c)
 * See section 3.4.2 for details.
 */
 
-u32 MULalpha(u8 c)
+static u32 MULalpha(u8 c)
 {
 	return ( ( ((u32)MULxPOW(c, 23, 0xa9)) << 24 ) |
 		( ((u32)MULxPOW(c, 245, 0xa9)) << 16 ) |
@@ -122,7 +122,7 @@ u32 MULalpha(u8 c)
 * See section 3.4.3 for details.
 */
 
-u32 DIValpha(u8 c)
+static u32 DIValpha(u8 c)
 {
 	return ( ( ((u32)MULxPOW(c, 16, 0xa9)) << 24 ) |
 		( ((u32)MULxPOW(c, 39, 0xa9)) << 16 ) |
@@ -136,7 +136,7 @@ u32 DIValpha(u8 c)
 * See section 3.3.1.
 */
 
-u32 S1(u32 w)
+static u32 S1(u32 w)
 {
 	u8 r0=0, r1=0, r2=0, r3=0;
 	u8 srw0 = SR[ (u8)((w >> 24) & 0xff) ];
@@ -174,7 +174,7 @@ u32 S1(u32 w)
 * See section 3.3.2.
 */
 
-u32 S2(u32 w)
+static u32 S2(u32 w)
 {
 	u8 r0=0, r1=0, r2=0, r3=0;
 	u8 sqw0 = SQ[ (u8)((w >> 24) & 0xff) ];
@@ -211,7 +211,7 @@ u32 S2(u32 w)
 * See section 3.4.4.
 */
 
-void ClockLFSRInitializationMode(u32 F)
+static void ClockLFSRInitializationMode(u32 F)
 {
 	u32 v = ( ( (LFSR_S0 << 8) & 0xffffff00 ) ^
 		( MULalpha( (u8)((LFSR_S0>>24) & 0xff) ) ) ^
@@ -243,7 +243,7 @@ void ClockLFSRInitializationMode(u32 F)
 * See section 3.4.5.
 */
 
-void ClockLFSRKeyStreamMode()
+static void ClockLFSRKeyStreamMode()
 {
 	u32 v = ( ( (LFSR_S0 << 8) & 0xffffff00 ) ^
 		( MULalpha( (u8)((LFSR_S0>>24) & 0xff) ) ) ^
@@ -275,7 +275,7 @@ void ClockLFSRKeyStreamMode()
 * See Section 3.4.6.
 */
 
-u32 ClockFSM()
+static u32 ClockFSM()
 {
 	u32 F = ( ( LFSR_S15 + FSM_R1 ) & 0xffffffff ) ^ FSM_R2 ;
 	u32 r = ( FSM_R2 + ( FSM_R3 ^ LFSR_S5 ) ) & 0xffffffff ;
@@ -433,7 +433,7 @@ void snow_3g_f8(u8 *key, u32 count, u32 bearer, u32 dir, u8 *data, u32 length)
  * function.
  * See section 4.3.2 for details.
  */
-u64 MUL64x(u64 V, u64 c)
+static u64 MUL64x(u64 V, u64 c)
 {
 	if ( V & 0x8000000000000000 )
 		return (V << 1) ^ c;
@@ -449,7 +449,7 @@ u64 MUL64x(u64 V, u64 c)
  * A 64-bit memory is allocated which is to be freed by the calling function.
  * See section 4.3.3 for details.
  */
-u64 MUL64xPOW(u64 V, u8 i, u64 c)
+static u64 MUL64xPOW(u64 V, u8 i, u64 c)
 {
 	if ( i == 0)
 		return V; 
@@ -466,7 +466,7 @@ u64 MUL64xPOW(u64 V, u8 i, u64 c)
  * function.
  * See section 4.3.4 for details.
  */
-u64 MUL64(u64 V, u64 P, u64 c)
+static u64 MUL64(u64 V, u64 P, u64 c)
 {
 	u64 result = 0;
 	int i = 0;
@@ -484,7 +484,7 @@ u64 MUL64(u64 V, u64 P, u64 c)
  * Output : an 8 bit mask.
  * Prepares an 8 bit mask with required number of 1 bits on the MSB side.
  */
-u8 mask8bit(int n)
+static u8 mask8bit(int n)
 {
 	return 0xFF ^ ((1<<(8-n)) - 1);
 }
