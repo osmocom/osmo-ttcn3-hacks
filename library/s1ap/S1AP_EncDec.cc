@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 
 #include <string.h>
 #include <stdarg.h>
@@ -13,6 +15,7 @@ TTCN_Module S1AP__EncDec("S1AP_EncDec", __DATE__, __TIME__);
 
 OCTETSTRING enc__S1AP__PDU(const S1AP__PDU__Descriptions::S1AP__PDU &pdu)
 {
+	static unsigned long count = 0;
 	uint8_t *aper_buf;
 	int aper_buf_len;
 	TTCN_Buffer TTCN_buf;
@@ -25,6 +28,18 @@ OCTETSTRING enc__S1AP__PDU(const S1AP__PDU__Descriptions::S1AP__PDU &pdu)
 	aper_buf_len = fftranscode_ber2aper(FFTRANSC_T_S1AP, &aper_buf, TTCN_buf.get_data(), TTCN_buf.get_len());
 	if (aper_buf_len < 0) {
 		TTCN_error("fftranscode failed.");
+	}
+
+	/* Observed srsEPC segfaults with:
+	 *  idx=1 && mask=0x1d
+	 *  idx=5 && mask=any */
+	if (count++ % 2 == 0) {
+		int idx = rand() % aper_buf_len;
+		uint8_t mask = (uint8_t) rand();
+
+		/* TUWAT! Mangle a random byte. */
+		printf("=== TUWAT: mangling octet %d with mask 0x%02x\n", idx, mask);
+		aper_buf[idx] ^= mask;
 	}
 
 	/* make octetstring from output buffer */
@@ -61,4 +76,10 @@ S1AP__PDU__Descriptions::S1AP__PDU dec__S1AP__PDU(const OCTETSTRING &stream)
 	return ret_dcc;
 }
 
+}
+
+static __attribute__((constructor)) void on_dso_load(void)
+{
+	/* Use a static seed for reproduceable results */
+	srand(10000);
 }
