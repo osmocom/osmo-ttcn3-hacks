@@ -1,0 +1,427 @@
+module DIAMETER_Emulation {
+
+/* DIAMETER Emulation, runs on top of DIAMETER_CodecPort.  It multiplexes/demultiplexes
+ * the individual IMSIs/subscribers, so there can be separate TTCN-3 components handling
+ * each of them.
+ *
+ * The DIAMETER_Emulation.main() function processes DIAMETER primitives from the DIAMETER
+ * socket via the DIAMETER_CodecPort, and dispatches them to the per-IMSI components.
+ *
+ * For each new IMSI, the DiameterOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that IMSI
+ * is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound IMSI, it can
+ * do so by registering an "expect" with the expected IMSI.
+ *
+ * Inbound DIAMETER messages without IMSI (such as RESET-IND/ACK) are dispatched to
+ * the DiameterOps.unitdata_cb() callback, which is registered with an argument to the
+ * main() function below.
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from DIAMETER_CodecPort all;
+import from DIAMETER_CodecPort_CtrlFunct all;
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from DNS_Helpers all;
+import from MobileL3_Types all;
+
+type hexstring IMSI;
+
+type component DIAMETER_ConnHdlr {
+	port DIAMETER_Conn_PT DIAMETER;
+	/* procedure based port to register for incoming connections */
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port DIAMETER_Conn_PT message {
+	inout PDU_DIAMETER, PDU_ML3_MS_NW, PDU_ML3_NW_MS;
+} with { extension "internal" };
+
+/* global test port e.g. for non-imsi/conn specific messages */
+type port DIAMETER_PT message {
+	inout PDU_DIAMETER;
+} with { extension "internal" };
+
+
+/* represents a single DIAMETER Association */
+type record AssociationData {
+	DIAMETER_ConnHdlr	comp_ref,
+	hexstring	imsi optional
+};
+
+type component DIAMETER_Emulation_CT {
+	/* Port facing to the UDP SUT */
+	port DIAMETER_CODEC_PT DIAMETER;
+	/* All DIAMETER_ConnHdlr DIAMETER ports connect here
+	 * DIAMETER_Emulation_CT.main needs to figure out what messages
+	 * to send where with CLIENT.send() to vc_conn */
+	port DIAMETER_Conn_PT DIAMETER_CLIENT;
+	/* currently tracked connections */
+	var AssociationData SgsapAssociationTable[16];
+	/* pending expected CRCX */
+	var ExpectData DiameterExpectTable[8];
+	/* procedure based port to register for incoming connections */
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
+	/* test port for unit data messages */
+	port DIAMETER_PT DIAMETER_UNIT;
+
+	var charstring g_diameter_id;
+	var integer g_diameter_conn_id := -1;
+}
+
+type function DIAMETERCreateCallback(PDU_DIAMETER msg, hexstring imsi, charstring id)
+runs on DIAMETER_Emulation_CT return DIAMETER_ConnHdlr;
+
+type function DIAMETERUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER;
+
+type record DIAMETEROps {
+	DIAMETERCreateCallback create_cb,
+	DIAMETERUnitdataCallback unitdata_cb
+}
+
+type record DIAMETER_conn_parameters {
+	HostName remote_ip,
+	PortNumber remote_sctp_port,
+	HostName local_ip,
+	PortNumber local_sctp_port
+}
+
+function tr_DIAMETER_RecvFrom_R(template PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template DIAMETER_RecvFrom {
+	var template DIAMETER_RecvFrom mrf := {
+		connId := g_diameter_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+private function f_imsi_known(hexstring imsi)
+runs on DIAMETER_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (SgsapAssociationTable[i].imsi == imsi) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(DIAMETER_ConnHdlr client)
+runs on DIAMETER_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (SgsapAssociationTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_imsi(hexstring imsi)
+runs on DIAMETER_Emulation_CT return DIAMETER_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (SgsapAssociationTable[i].imsi == imsi) {
+			return SgsapAssociationTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "DIAMETER Association Table not found by IMSI", imsi);
+	mtc.stop;
+}
+
+private function f_imsi_by_comp(DIAMETER_ConnHdlr client)
+runs on DIAMETER_Emulation_CT return hexstring {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (SgsapAssociationTable[i].comp_ref == client) {
+			return SgsapAssociationTable[i].imsi;
+		}
+	}
+	setverdict(fail, "DIAMETER Association Table not found by component ", client);
+	mtc.stop;
+}
+
+private function f_imsi_table_add(DIAMETER_ConnHdlr comp_ref, hexstring imsi)
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (not isvalue(SgsapAssociationTable[i].imsi)) {
+			SgsapAssociationTable[i].imsi := imsi;
+			SgsapAssociationTable[i].comp_ref := comp_ref;
+			return;
+		}
+	}
+	testcase.stop("DIAMETER Association Table full!");
+}
+
+private function f_imsi_table_del(DIAMETER_ConnHdlr comp_ref, hexstring imsi)
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		if (SgsapAssociationTable[i].comp_ref == comp_ref and
+		    SgsapAssociationTable[i].imsi == imsi) {
+			SgsapAssociationTable[i].imsi := omit;
+			SgsapAssociationTable[i].comp_ref := null;
+			return;
+		}
+	}
+	setverdict(fail, "DIAMETER Association Table: Couldn't find to-be-deleted entry!");
+	mtc.stop;
+}
+
+
+private function f_imsi_table_init()
+runs on DIAMETER_Emulation_CT {
+	for (var integer i := 0; i < sizeof(SgsapAssociationTable); i := i+1) {
+		SgsapAssociationTable[i].comp_ref := null;
+		SgsapAssociationTable[i].imsi := omit;
+	}
+}
+
+function f_DIAMETER_get_avp(PDU_DIAMETER pdu, template (present) AVP_Code avp_code)
+return template (omit) AVP
+{
+	var integer i;
+
+	for (i := 0; i < lengthof(pdu.avps); i := i+1) {
+		if (not ispresent(pdu.avps[i].avp)) {
+			continue;
+		}
+		var AVP_Header hdr := pdu.avps[i].avp.avp_header;
+		if (match(hdr.avp_code, avp_code)) {
+			return pdu.avps[i].avp;
+		}
+	}
+	return omit;
+}
+
+function f_DIAMETER_get_imsi(PDU_DIAMETER pdu) return template (omit) IMSI
+{
+	var template (omit) AVP imsi_avp;
+
+	imsi_avp := f_DIAMETER_get_avp(pdu, c_AVP_Code_BASE_NONE_User_Name);
+	if (istemplatekind(imsi_avp, "omit")) {
+		return omit;
+	} else {
+		var octetstring imsi_oct := valueof(imsi_avp.avp_data.avp_BASE_NONE_User_Name);
+		return str2hex(oct2char(imsi_oct));
+	}
+}
+
+private template (value) SctpTuple ts_SCTP(template (omit) integer ppid := omit) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+private function f_diameter_xceive(template (value) PDU_DIAMETER tx,
+				   template PDU_DIAMETER rx_t := ?)
+runs on DIAMETER_Emulation_CT return PDU_DIAMETER {
+	timer T := 10.0;
+	var DIAMETER_RecvFrom mrf;
+
+	DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, tx));
+	alt {
+	[] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(rx_t)) -> value mrf { }
+	[] DIAMETER.receive(tr_SctpAssocChange) { repeat; }
+	[] DIAMETER.receive(tr_SctpPeerAddrChange)  { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", rx_t);
+		mtc.stop;
+		}
+	}
+	return mrf.msg;
+}
+
+function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs on DIAMETER_Emulation_CT {
+	var Result res;
+	g_diameter_id := id;
+	f_imsi_table_init();
+	f_expect_table_init();
+
+	map(self:DIAMETER, system:DIAMETER_CODEC_PT);
+	if (p.remote_sctp_port == -1) {
+		res := DIAMETER_CodecPort_CtrlFunct.f_IPL4_listen(DIAMETER, p.local_ip, p.local_sctp_port, { sctp := valueof(ts_SCTP) });
+	} else {
+		res := DIAMETER_CodecPort_CtrlFunct.f_IPL4_connect(DIAMETER, p.remote_ip, p.remote_sctp_port,
+								p.local_ip, p.local_sctp_port, -1, { sctp := valueof(ts_SCTP) });
+	}
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect DIAMETER socket, check your configuration");
+		mtc.stop;
+	}
+	g_diameter_conn_id := res.connId;
+
+	while (true) {
+		var DIAMETER_ConnHdlr vc_conn;
+		var PDU_ML3_MS_NW l3_mo;
+		var PDU_ML3_NW_MS l3_mt;
+		var template IMSI imsi_t;
+		var hexstring imsi;
+		var DIAMETER_RecvFrom mrf;
+		var PDU_DIAMETER msg;
+		var charstring vlr_name, mme_name;
+		var PortEvent port_evt;
+
+		alt {
+		[] DIAMETER.receive(PortEvent:{connOpened := ?}) -> value port_evt {
+			g_diameter_conn_id := port_evt.connOpened.connId;
+			}
+		[] DIAMETER.receive(PortEvent:?) { }
+		/* DIAMETER from client */
+		[] DIAMETER_CLIENT.receive(PDU_DIAMETER:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			/* TODO: check which ConnectionID client has allocated + store in table? */
+			DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, msg));
+			}
+
+		/* handle CER/CEA handshake */
+		[] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(tr_DIAMETER_R(cmd_code := Capabilities_Exchange))) -> value mrf {
+			var template (value) PDU_DIAMETER resp;
+			resp := ts_DIA_CEA(mrf.msg.hop_by_hop_id, mrf.msg.end_to_end_id);
+			DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, resp));
+			}
+
+		/* DIAMETER from remote peer */
+		[] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(?)) -> value mrf {
+			imsi_t := f_DIAMETER_get_imsi(mrf.msg);
+			if (isvalue(imsi_t)) {
+				imsi := valueof(imsi_t);
+				if (f_imsi_known(imsi)) {
+					vc_conn := f_comp_by_imsi(imsi);
+					DIAMETER_CLIENT.send(mrf.msg) to vc_conn;
+				} else {
+					vc_conn := ops.create_cb.apply(mrf.msg, imsi, id);
+					f_imsi_table_add(vc_conn, imsi);
+					DIAMETER_CLIENT.send(mrf.msg) to vc_conn;
+				}
+			} else {
+				/* message contained no IMSI; is not IMSI-oriented */
+				var template PDU_DIAMETER resp := ops.unitdata_cb.apply(mrf.msg);
+				if (isvalue(resp)) {
+					DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, valueof(resp)));
+				}
+			}
+			}
+		[] DIAMETER.receive(tr_SctpAssocChange) { }
+		[] DIAMETER.receive(tr_SctpPeerAddrChange)  { }
+		[] DIAMETER_PROC.getcall(DIAMETEREM_register:{?,?}) -> param(imsi, vc_conn) {
+			f_create_expect(imsi, vc_conn);
+			DIAMETER_PROC.reply(DIAMETEREM_register:{imsi, vc_conn}) to vc_conn;
+			}
+
+		}
+
+	}
+}
+
+/* "Expect" Handling */
+
+type record ExpectData {
+	hexstring imsi optional,
+	DIAMETER_ConnHdlr vc_conn
+}
+
+signature DIAMETEREM_register(in hexstring imsi, in DIAMETER_ConnHdlr hdlr);
+
+type port DIAMETEREM_PROC_PT procedure {
+	inout DIAMETEREM_register;
+} with { extension "internal" };
+
+/* Function that can be used as create_cb and will usse the expect table */
+function ExpectedCreateCallback(PDU_DIAMETER msg, hexstring imsi, charstring id)
+runs on DIAMETER_Emulation_CT return DIAMETER_ConnHdlr {
+	var DIAMETER_ConnHdlr ret := null;
+	var integer i;
+
+	for (i := 0; i < sizeof(DiameterExpectTable); i := i+1) {
+		if (not ispresent(DiameterExpectTable[i].imsi)) {
+			continue;
+		}
+		if (imsi == DiameterExpectTable[i].imsi) {
+			ret := DiameterExpectTable[i].vc_conn;
+			/* Release this entry */
+			DiameterExpectTable[i].imsi := omit;
+			DiameterExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", msg, " handled at ", ret);
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for ", msg);
+	mtc.stop;
+}
+
+private function f_create_expect(hexstring imsi, DIAMETER_ConnHdlr hdlr)
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+
+	/* Check an entry like this is not already presnt */
+	for (i := 0; i < sizeof(DiameterExpectTable); i := i+1) {
+		if (imsi == DiameterExpectTable[i].imsi) {
+			setverdict(fail, "IMSI already present", imsi);
+			mtc.stop;
+		}
+	}
+	for (i := 0; i < sizeof(DiameterExpectTable); i := i+1) {
+		if (not ispresent(DiameterExpectTable[i].imsi)) {
+			DiameterExpectTable[i].imsi := imsi;
+			DiameterExpectTable[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for ", imsi, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	testcase.stop("No space left in DiameterExpectTable")
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_diameter_expect(hexstring imsi) runs on DIAMETER_ConnHdlr {
+	DIAMETER_PROC.call(DIAMETEREM_register:{imsi, self}) {
+		[] DIAMETER_PROC.getreply(DIAMETEREM_register:{?,?}) {};
+	}
+}
+
+private function f_expect_table_init()
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(DiameterExpectTable); i := i + 1) {
+		DiameterExpectTable[i].imsi := omit;
+	}
+}
+
+function DummyUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	log("Ignoring DIAMETER ", msg);
+	return omit;
+}
+
+
+}
