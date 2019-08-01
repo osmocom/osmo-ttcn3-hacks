@@ -29,6 +29,10 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSMAP/src
 FILES="BSSAP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=../library/sabp
+FILES="SABP_CommonDataTypes.asn SABP_Constants.asn SABP_Containers.asn SABP_IEs.asn SABP_PDU_Contents.asn SABP_PDU_Descriptions.asn SABP_Types.ttcn SABP_EncDec.cc SABP_Templates.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="CBSP_Types.ttcn CBSP_Templates.ttcn "
