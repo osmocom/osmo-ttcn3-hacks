@@ -1,0 +1,505 @@
+module BSC_Tests_CBSP {
+
+/* CBSP Integration Tests for OsmoBSC
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoBSC while emulating the CBC (Cell Broadcast Centre)
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from IPL4asp_Types all;
+import from BSSAP_Types all;
+import from BSSMAP_Templates all;
+
+import from BSC_Tests all;
+
+import from IPA_Emulation all;
+import from IPA_CodecPort all;
+import from IPA_Types all;
+
+import from RSL_Types all;
+import from RSL_Emulation all;
+
+import from CBSP_Types all;
+import from CBSP_Templates all;
+import from CBSP_Adapter all;
+import from CBSP_CodecPort all;
+
+modulepar {
+	charstring mp_cbc_ip := "0.0.0.0";
+	integer mp_cbc_port := 48049;
+	integer mp_bsc_cbsp_port := 48050;
+
+	/* BTS 0: 262-42-1-0 with CBCH
+	 * BTS 1: 262-42-1-1 with CBCH
+	 * BTS 2: 262-42-2-1 with CBCH
+	 * BTS 3: 262-42-2-3 without CBCH */
+	GsmCgiAbstract mp_cgi_bts0 := { '262'H, '42'H, 1, 0 };
+	GsmCgiAbstract mp_cgi_bts1 := { '262'H, '42'H, 1, 1 };
+	GsmCgiAbstract mp_cgi_bts2 := { '262'H, '42'H, 2, 1 };
+	GsmCgiAbstract mp_cgi_bts3 := { '262'H, '42'H, 2, 3 };
+}
+
+private type record GsmCgiAbstract {
+	GsmMcc mcc,
+	GsmMnc mnc,
+	GsmLac lac,
+	GsmCellId ci
+};
+private template (value) BSSMAP_FIELD_CellIdentification_CGI bssmap_cgi(GsmCgiAbstract cgi) :=
+	ts_BSSMAP_CI_CGI(cgi.mcc, cgi.mnc, cgi.lac, cgi.ci);
+private template (value) BSSMAP_FIELD_CellIdentification_LAC_CI bssmap_lac_ci(GsmCgiAbstract cgi) :=
+	ts_BSSMAP_CI_LAC_CI(cgi.lac, cgi.ci);
+private template (value) BSSMAP_FIELD_CellIdentification_LAI bssmap_lai(GsmCgiAbstract cgi) :=
+	ts_BSSMAP_CI_LAI(cgi.mcc, cgi.mnc, cgi.lac);
+private template (value) OCT2 bssmap_lac(GsmCgiAbstract cgi) := ts_BSSMAP_CI_LAC(cgi.lac);
+private template (value) OCT2 bssmap_ci(GsmCgiAbstract cgi) := ts_BSSMAP_CI_CI(cgi.ci);
+
+type component cbsp_test_CT extends test_CT, CBSP_Adapter_CT {
+}
+
+private altstep as_IgnRSL(template RSL_Message tr) runs on cbsp_test_CT {
+[] IPA_RSL[0].receive(tr_RSL_UD(tr)) { repeat; }
+[] IPA_RSL[1].receive(tr_RSL_UD(tr)) { repeat; }
+[] IPA_RSL[2].receive(tr_RSL_UD(tr)) { repeat; }
+}
+
+private altstep as_FailRSL() runs on cbsp_test_CT {
+var template RSL_Message tr := (tr_RSL_SMSCB_CMD);
+var ASP_RSL_Unitdata rx;
+[] IPA_RSL[0].receive(tr_RSL_UD(tr)) -> value rx {
+	setverdict(fail, "Received unexpected RSL ", rx);
+	mtc.stop;
+	}
+[] IPA_RSL[1].receive(tr_RSL_UD(tr)) -> value rx {
+	setverdict(fail, "Received unexpected RSL ", rx);
+	mtc.stop;
+	}
+[] IPA_RSL[2].receive(tr_RSL_UD(tr)) -> value rx {
+	setverdict(fail, "Received unexpected RSL ", rx);
+	mtc.stop;
+	}
+}
+
+private function f_init() runs on cbsp_test_CT {
+	BSC_Tests.f_init();
+	activate(as_IgnRSL((tr_RSL_BCCH_INFO, tr_RSL_SACCH_FILL,
+			    tr_RSL_NO_BCCH_INFO, tr_RSL_NO_SACCH_FILL,
+			    tr_RSL_MsgTypeD(?))));
+	activate(as_FailRSL());
+}
+private function f_cbsp_init_client() runs on cbsp_test_CT {
+	f_init();
+	CBSP_Adapter.f_connect(mp_bsc_ip, mp_bsc_cbsp_port, "", -1);
+	f_cbsp_init_tail();
+}
+
+private function f_cbsp_init_server() runs on cbsp_test_CT {
+	var ASP_Event asp_evt;
+	timer T := 10.0;
+
+	f_init();
+	CBSP_Adapter.f_bind(mp_cbc_ip, mp_cbc_port);
+
+	T.start;
+	alt {
+	[] CBSP[0].receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
+		g_cbsp_conn_id[0] := asp_evt.connOpened.connId;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for incoming connection to CBSP Port");
+		}
+	}
+	f_cbsp_init_tail();
+}
+private function f_cbsp_init_tail() runs on cbsp_test_CT {
+	interleave {
+	[] CBSP[0].receive(tr_CBSP_Recv(?, tr_CBSP_RESTART(?, CBSP_BC_MSGT_CBS, CBSP_RI_DATA_LOST)));
+	/* should we also expect a restart for emergency related messages? */
+	//[] CBSP[0].receive(tr_CBSP_Recv(?, tr_CBSP_RESTART(?, CBSP_BC_MSGT_EMERG, CBSP_RI_DATA_LOST)));
+	}
+}
+
+function f_gen_page() return CBSP_IE {
+	var integer len := f_rnd_int(82);
+	var octetstring payload := f_rnd_octstring(len);
+	return valueof(ts_CbspMsgContent(payload, len));
+}
+
+function f_cbsp_reset_bss(integer idx) runs on CBSP_Adapter_CT {
+	var template (value) CBSP_PDU tx;
+	timer T := 3.0;
+	tx := ts_CBSP_RESET(cell_list := ts_BSSMAP_CIL_BSS);
+	CBSP[idx].clear;
+	CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
+	T.start;
+	alt {
+	[] CBSP[idx].receive(tr_CBSP_Recv(?, tr_CBSP_RESET_COMPL(cell_list := ts_BSSMAP_CIL_BSS)));
+	[] CBSP[idx].receive {
+		setverdict(fail, "received unexpected CBSP");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "timeout waiting for RESET COMPLETE");
+		mtc.stop;
+		}
+	}
+}
+
+/* send a WRITE CBS to the BSC; expect either COMPLETE or FAILURE in response*/
+function f_cbsp_write(uint16_t msg_id, uint16_t ser_no,
+		      template (value) BSSMAP_FIELD_CellIdentificationList cell_list := ts_BSSMAP_CIL_BSS,
+		      template (value) CBSP_Category category := CBSP_CATEG_NORMAL,
+		      uint16_t rep_period := 10, uint16_t num_bcast_req := 1,
+		      uint8_t dcs := 0, uint8_t channel_ind := 0, CBSP_IEs content,
+		      template BSSMAP_FIELD_CellIdentificationList success_list := ?,
+		      template CBSP_FailureListItems fail_list := omit) runs on cbsp_test_CT {
+	var template (value) CBSP_PDU tx;
+	var template CBSP_PDU rx;
+	var CBSP_IEs pages := {f_gen_page()};
+
+	tx := ts_CBSP_WRITE_CBS(msg_id, ser_no, cell_list, channel_ind, category,
+				rep_period, num_bcast_req, dcs, content);
+	CBSP[0].send(ts_CBSP_Send(g_cbsp_conn_id[0], tx));
+	if (istemplatekind(fail_list, "omit")) {
+		rx := tr_CBSP_WRITE_CBS_COMPL(msg_id, ser_no, success_list, channel_ind);
+	} else {
+		rx := tr_CBSP_WRITE_CBS_FAIL(msg_id, ser_no, fail_list, *, success_list, channel_ind);
+	}
+	alt {
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], rx)) {
+		setverdict(pass);
+		}
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], ?)) {
+		setverdict(fail, "Received unexpected CBSP");
+		}
+	}
+}
+
+/* send a REPLACE CBS to the BSC; expect either COMPLETE or FAILURE in response*/
+function f_cbsp_replace(uint16_t msg_id, uint16_t new_ser_no, uint16_t old_ser_no,
+		      template (value) BSSMAP_FIELD_CellIdentificationList cell_list := ts_BSSMAP_CIL_BSS,
+		      template (value) CBSP_Category category := CBSP_CATEG_NORMAL,
+		      uint16_t rep_period := 10, uint16_t num_bcast_req := 1,
+		      uint8_t dcs := 0, uint8_t channel_ind := 0, CBSP_IEs content,
+		      template BSSMAP_FIELD_CellIdentificationList success_list := ?,
+		      template CBSP_FailureListItems fail_list := omit) runs on cbsp_test_CT {
+	var template (value) CBSP_PDU tx;
+	var template CBSP_PDU rx;
+	var CBSP_IEs pages := {f_gen_page()};
+
+	tx := ts_CBSP_REPLACE_CBS(msg_id, new_ser_no, old_ser_no, cell_list, channel_ind, category,
+				rep_period, num_bcast_req, dcs, content);
+	CBSP[0].send(ts_CBSP_Send(g_cbsp_conn_id[0], tx));
+	if (istemplatekind(fail_list, "omit")) {
+		rx := tr_CBSP_REPLACE_CBS_COMPL(msg_id, new_ser_no, old_ser_no, ?, success_list,
+						channel_ind);
+	} else {
+		rx := tr_CBSP_REPLACE_CBS_FAIL(msg_id, new_ser_no, old_ser_no, fail_list, *, success_list,
+					       channel_ind);
+	}
+	alt {
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], rx)) {
+		setverdict(pass);
+		}
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], ?)) {
+		setverdict(fail, "Received unexpected CBSP");
+		}
+	}
+}
+/* send a KILL CBS to the BSC; expect either COMPLETE or FAILURE in response*/
+function f_cbsp_kill(uint16_t msg_id, uint16_t ser_no, template (omit) uint8_t channel_ind := 0,
+		     template (value) BSSMAP_FIELD_CellIdentificationList cell_list := ts_BSSMAP_CIL_BSS,
+		     template BSSMAP_FIELD_CellIdentificationList success_list := ?,
+		     template CBSP_FailureListItems fail_list := omit) runs on cbsp_test_CT
+{
+	var template (value) CBSP_PDU tx;
+	var template CBSP_PDU rx;
+
+	tx := ts_CBSP_KILL(msg_id, ser_no, cell_list, channel_ind);
+	CBSP[0].send(ts_CBSP_Send(g_cbsp_conn_id[0], tx));
+	if (istemplatekind(fail_list, "omit")) {
+		rx := tr_CBSP_KILL_COMPL(msg_id, ser_no, compl_list:=*, cell_list:=success_list,
+					 channel_ind:=channel_ind);
+	} else {
+		rx := tr_CBSP_KILL_FAIL(msg_id, ser_no, fail_list, compl_list:=*, cell_list:=success_list,
+					channel_ind:=channel_ind);
+	}
+	alt {
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], rx)) {
+		setverdict(pass);
+		}
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], ?)) {
+		setverdict(fail, "Received unexpected CBSP");
+		}
+	}
+}
+
+private template (present) ASP_RSL_Unitdata tr_RSL_UD(template (present) RSL_Message rsl) := {
+	streamId := ?,
+	rsl := rsl
+}
+
+template (present) RSL_IE_CbCommandType
+tr_RslCbCmdType(template (present) uint2_t lblock := ?, template (present) RSL_CbCommand cmd := ?) := {
+	command := cmd,
+	default_bcast_null := ?,
+	spare := ?,
+	last_block := lblock
+}
+
+/* build a RSL_Message receive template from a CBSP page */
+private function f_page2rsl(CBSP_IE page, uint16_t msg_id, uint16_t ser_no, boolean ext_cbch := false)
+return template (present) RSL_Message
+{
+	var template RSL_Message tr;
+	var integer lblock := page.body.msg_content.user_len / 22;
+	var octetstring payload;
+	if (page.body.msg_content.user_len mod 22 > 0) {
+		lblock := lblock + 1;
+	}
+	payload := int2oct(ser_no, 2) & int2oct(msg_id, 2) & '0011'O & page.body.msg_content.val;
+	tr := tr_RSL_SMSCB_CMD(tr_RslCbCmdType(lblock), f_pad_oct(payload, 88, '00'O));
+	if (ext_cbch) {
+		tr.ies[3] := tr_RSL_IE(RSL_IE_Body:{smscb_chan_ind := 1});
+		tr.ies[4] := *;
+	}
+	return tr;
+}
+
+/***********************************************************************
+ * Test Cases
+ ***********************************************************************/
+
+/* Test if BSC (server) accepts connections from CBC (client) */
+testcase TC_cbsp_bsc_server() runs on cbsp_test_CT {
+	f_cbsp_init_client();
+	setverdict(pass);
+}
+
+/* Test if BSC (client) is connecting to CBC (server) */
+testcase TC_cbsp_bsc_client() runs on cbsp_test_CT {
+	f_cbsp_init_server();
+	setverdict(pass);
+}
+
+/* Test if a BSS-global RESET is executed successfully */
+testcase TC_cbsp_reset_bss() runs on cbsp_test_CT {
+	f_cbsp_init_server();
+
+	f_cbsp_reset_bss(0);
+	setverdict(pass);
+}
+
+testcase TC_cbsp_write() runs on cbsp_test_CT {
+	var template (value) CBSP_PDU tx;
+	var CBSP_IEs pages := {f_gen_page()};
+	f_cbsp_init_server();
+
+	tx := ts_CBSP_WRITE_CBS(msg_id:=23,  new_ser_nr:=42, cell_list:=ts_BSSMAP_CIL_BSS,
+				channel_ind:=0, category:=CBSP_CATEG_NORMAL,
+				rep_period:=10, num_bcast_req:=1, dcs := 0,
+				content:=pages);
+
+	CBSP[0].send(ts_CBSP_Send(g_cbsp_conn_id[0], tx));
+	f_sleep(10.0);
+}
+
+/* Write to entire BSS; three cells succeed; one fails (no CBCH) */
+testcase TC_cbsp_write_bss() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_BSS;
+	f_cbsp_init_server();
+	f_cbsp_write(1, 1001, cell_list, content:=pages,
+		     success_list:=tr_BSSMAP_CIL_CGI({?,?,?}), fail_list:={?});
+
+	var template RSL_Message tr := f_page2rsl(pages[0], 1, 1001);
+	interleave {
+	[] IPA_RSL[0].receive(tr_RSL_UD(tr)) {}
+	[] IPA_RSL[1].receive(tr_RSL_UD(tr)) {}
+	[] IPA_RSL[2].receive(tr_RSL_UD(tr)) {}
+	}
+}
+
+/* Write to single BTS supporting CBCH: success */
+testcase TC_cbsp_write_bts_cgi() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(2, 1002, cell_list, content:=pages,
+		     success_list:=cell_list, fail_list:=omit);
+	var template RSL_Message tr := f_page2rsl(pages[0], 1, 1001);
+	IPA_RSL[0].receive(tr_RSL_UD(tr));
+	f_sleep(5.0);
+}
+
+/* Write to single BTS not supporting CBCH: failure */
+testcase TC_cbsp_write_bts_no_cbch() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts3)});
+	f_cbsp_init_server();
+	f_cbsp_write(3, 1003, cell_list, content:=pages,
+		     success_list:=omit, fail_list:={?});
+	f_sleep(5.0);
+}
+
+/* Write to single non-existant BTS */
+testcase TC_cbsp_write_unknown_bts() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_CGI({ts_BSSMAP_CI_CGI(mp_cgi_bts0.mcc, mp_cgi_bts1.mnc, 22222, 33333)});
+	f_cbsp_init_server();
+	f_cbsp_write(4, 1004, cell_list, content:=pages,
+		     success_list:=omit, fail_list:={?});
+	f_sleep(5.0);
+}
+
+/* Write to single BTS using LAC+CI */
+testcase TC_cbsp_write_lac_ci() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(5, 1005, cell_list, content:=pages,
+		     success_list:=?, fail_list:=omit);
+	IPA_RSL[0].receive(tr_RSL_UD(f_page2rsl(pages[0], 5, 1005)));
+	f_sleep(5.0);
+}
+
+/* Write to single BTS using CI */
+testcase TC_cbsp_write_ci() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_CI({bssmap_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(6, 1006, cell_list, content:=pages,
+		     success_list:=?, fail_list:=omit);
+	IPA_RSL[0].receive(tr_RSL_UD(f_page2rsl(pages[0], 6, 1006)));
+	f_sleep(5.0);
+}
+
+/* Write to single BTS using LAI */
+testcase TC_cbsp_write_lai() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAI({bssmap_lai(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(7, 1007, cell_list, content:=pages,
+		     success_list:=?, fail_list:=omit);
+	IPA_RSL[0].receive(tr_RSL_UD(f_page2rsl(pages[0], 7, 1007)));
+	f_sleep(5.0);
+}
+
+/* Write to two BTS using LAC */
+testcase TC_cbsp_write_lac() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC({bssmap_lac(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(8, 1008, cell_list, content:=pages,
+		     success_list:=?, fail_list:=omit);
+	var template RSL_Message tr := f_page2rsl(pages[0], 8, 1008);
+	interleave {
+	[] IPA_RSL[0].receive(tr_RSL_UD(tr));
+	[] IPA_RSL[1].receive(tr_RSL_UD(tr));
+	}
+	f_sleep(5.0);
+}
+
+/* Write a message, then replace it */
+testcase TC_cbsp_write_then_replace() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(9, 1009, cell_list, num_bcast_req:=10, content:=pages,
+		     success_list:=?, fail_list:=omit);
+	f_cbsp_replace(9, 2009, 1009, cell_list, content:=pages,
+		       success_list:=?, fail_list:=omit);
+}
+
+/* Replace a message that doesn't exist: failure */
+testcase TC_cbsp_replace_nonexist() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_replace(10, 2010, 1010, cell_list, content:=pages,
+		       success_list:=omit, fail_list:=?);
+}
+
+/* Write more messages than can be scheduled */
+testcase TC_cbsp_write_too_many() runs on cbsp_test_CT {
+	/* repeating three pages at an interval of 1 is impossible */
+	var CBSP_IEs pages := {f_gen_page(), f_gen_page(), f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(11, 1011, cell_list, rep_period:=1, content:=pages,
+		     success_list:=omit, fail_list:=?);
+}
+
+/* Kill message that doesn't exist: failure */
+testcase TC_cbsp_kill_nonexist() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_kill(12, 1012, 0, cell_list, success_list:=omit, fail_list:=?);
+}
+/* Write a message, then kill it */
+testcase TC_cbsp_write_then_kill() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(13, 1013, cell_list, content:=pages, success_list:=?, fail_list:=omit);
+	f_cbsp_kill(13, 1013, 0, cell_list, success_list:=?, fail_list:=omit);
+}
+
+/* Write a message, then reset all messages */
+testcase TC_cbsp_write_then_reset() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
+	f_cbsp_init_server();
+	f_cbsp_write(14, 1014, cell_list, content:=pages, success_list:=?, fail_list:=omit);
+	f_cbsp_reset_bss(0);
+}
+
+control {
+	execute( TC_cbsp_bsc_server() );
+	execute( TC_cbsp_bsc_client() );
+	execute( TC_cbsp_reset_bss() );
+
+	/* test various different types of Cell Identities */
+	execute( TC_cbsp_write_bss() );
+	execute( TC_cbsp_write_bts_cgi() );
+	execute( TC_cbsp_write_bts_no_cbch() );
+	execute( TC_cbsp_write_unknown_bts() );
+	execute( TC_cbsp_write_lac_ci() );
+	execute( TC_cbsp_write_ci() );
+	execute( TC_cbsp_write_lai() );
+	execute( TC_cbsp_write_lac() );
+
+	execute( TC_cbsp_write_then_replace() );
+	execute( TC_cbsp_replace_nonexist() );
+	execute( TC_cbsp_write_too_many() );
+	execute( TC_cbsp_kill_nonexist() );
+	execute( TC_cbsp_write_then_kill() );
+	execute( TC_cbsp_write_then_reset() );
+}
+
+
+}
