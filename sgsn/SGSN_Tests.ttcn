@@ -169,6 +169,8 @@ type record BSSGP_ConnHdlrPars {
 	OCT4 tlli_old optional,
 	RoutingAreaIdentificationV ra optional,
 	BssgpCellIds bssgp_cell_id,
+	/* Tracks the RNC state. If true next L3 message will be sent with InitiualUe */
+	boolean rnc_send_initial_ue,
 	AuthVector vec optional,
 	SGSN_ConnHdlrNetworkPars net,
 	float t_guard,
@@ -390,6 +392,7 @@ runs on test_CT return BSSGP_ConnHdlr {
 		tlli_old := omit,
 		ra := omit,
 		bssgp_cell_id := { gb[0].cfg.cell_id, gb[1].cfg.cell_id, gb[2].cfg.cell_id },
+		rnc_send_initial_ue := true,
 		vec := omit,
 		net := net_pars,
 		t_guard := t_guard,
@@ -469,28 +472,92 @@ testcase TC_wait_ns_up() runs on test_CT {
 	f_cleanup();
 }
 
+friend function is_gb(integer gb_idx) return boolean {
+	return gb_idx < NUM_GB;
+}
+friend function is_iu(integer gb_idx) return boolean {
+	return gb_idx >= NUM_GB;
+}
+
 function f_send_llc(template (value) PDU_LLC llc_pdu, integer gb_index := 0) runs on BSSGP_ConnHdlr {
 	var octetstring llc_enc := enc_PDU_LLC(valueof(llc_pdu));
 	BSSGP[gb_index].send(ts_BSSGP_UL_UD(g_pars.tlli, g_pars.bssgp_cell_id[gb_index], llc_enc));
 }
 
-function f_send_l3_gmm_llc(template PDU_L3_MS_SGSN l3_mo, integer gb_index := 0) runs on BSSGP_ConnHdlr {
+private function f_send_l3_gmm_llc(template (value) PDU_L3_MS_SGSN l3_mo, integer gb_index := 0) runs on BSSGP_ConnHdlr {
 	var octetstring l3_enc := enc_PDU_L3_MS_SGSN(valueof(l3_mo));
 	var BIT4 sapi := f_llc_sapi_by_l3_mo(valueof(l3_mo));
 	var integer n_u := f_llc_get_n_u_tx(llc[bit2int(sapi)]);
 	f_send_llc(ts_LLC_UI(l3_enc, sapi, '0'B, n_u), gb_index);
 }
 
+/* trigger sending of a RANAP InitialUE and wait for SCCP connection confirmation */
+function f_send_l3_initial_ue(template (value) PDU_L3_MS_SGSN l3_mo) runs on BSSGP_ConnHdlr {
+	log("Sending InitialUE: ", l3_mo);
+	var octetstring l3_enc := enc_PDU_L3_MS_SGSN(valueof(l3_mo));
+	var RANAP_PDU ranap;
+	var LAI lai := {
+		pLMNidentity := '62F224'O,
+		lAC := '1234'O,
+		iE_Extensions := omit
+	};
+	var SAI sai := {
+		pLMNidentity := lai.pLMNidentity,
+		lAC := lai.lAC,
+		sAC := '0000'O, /* FIXME */
+		iE_Extensions := omit
+	};
+	var IuSignallingConnectionIdentifier sigc_id := int2bit(23, 24); /* FIXME */
+	var GlobalRNC_ID grnc_id := {
+		pLMNidentity := lai.pLMNidentity,
+		rNC_ID := 2342 /* FIXME */
+	};
+
+	ranap := valueof(ts_RANAP_initialUE_CS(lai, sai, l3_enc, sigc_id, grnc_id));
+	BSSAP.send(ts_RANAP_Conn_Req(g_pars.sccp_addr_peer, g_pars.sccp_addr_local, ranap));
+	alt {
+	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND) {}
+	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
+		setverdict(fail, "DISC.ind from SCCP");
+		mtc.stop;
+		}
+	}
+}
+
+/* send a L3 (GMM/SM) message over whatever is the appropriate lower-layer bearer */
+function f_send_l3(template (value) PDU_L3_MS_SGSN l3_mo, integer gb_index := 0) runs on BSSGP_ConnHdlr {
+	if (is_iu(gb_index)) {
+		if (g_pars.rnc_send_initial_ue) {
+			g_pars.rnc_send_initial_ue := false;
+			f_send_l3_initial_ue(l3_mo);
+		} else {
+			BSSAP.send(ts_PDU_DTAP_PS_MO(l3_mo));
+		}
+	} else {
+		f_send_l3_gmm_llc(l3_mo, gb_index);
+	}
+}
+
 altstep as_mm_identity(integer gb_idx := 0) runs on BSSGP_ConnHdlr {
 	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
-	[] BSSGP[gb_idx].receive(tr_GMM_ID_REQ('001'B)) {
+	[is_gb(gb_idx)] BSSGP[gb_idx].receive(tr_GMM_ID_REQ('001'B)) {
 		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
-		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi), gb_idx);
+		f_send_l3(ts_GMM_ID_RESP(mi), gb_idx);
 		repeat;
 	}
-	[] BSSGP[gb_idx].receive(tr_GMM_ID_REQ('010'B)) {
+	[is_iu(gb_idx)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_ID_REQ('001'B))) {
+		mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+		f_send_l3(ts_GMM_ID_RESP(mi), gb_idx);
+		repeat;
+	}
+	[is_gb(gb_idx)] BSSGP[gb_idx].receive(tr_GMM_ID_REQ('010'B)) {
 		mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
-		f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi), gb_idx);
+		f_send_l3(ts_GMM_ID_RESP(mi), gb_idx);
+		repeat;
+	}
+	[is_iu(gb_idx)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_ID_REQ('010'B))) {
+		mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
+		f_send_l3(ts_GMM_ID_RESP(mi), gb_idx);
 		repeat;
 	}
 }
@@ -498,9 +565,13 @@ altstep as_mm_identity(integer gb_idx := 0) runs on BSSGP_ConnHdlr {
 /* receive a L3 (GMM/SM) message over whatever is the appropriate lower-layer bearer */
 function f_receive_l3(template PDU_L3_SGSN_MS rx_tpl := ?, integer gb_idx := 0)
 runs on BSSGP_ConnHdlr return PDU_L3_SGSN_MS {
+	var PDU_DTAP_PS_MT mt;
 	var PDU_L3_SGSN_MS l3_mt;
 	alt {
-	[] BSSGP[gb_idx].receive(rx_tpl) -> value l3_mt { }
+	[is_gb(gb_idx)] BSSGP[gb_idx].receive(rx_tpl) -> value l3_mt { }
+	[is_iu(gb_idx)] BSSAP.receive(tr_PDU_DTAP_PS_MT(rx_tpl)) -> value mt {
+		l3_mt := mt.dtap;
+		}
 	}
 	return l3_mt;
 }
@@ -568,7 +639,16 @@ function f_gmm_auth (boolean umts_aka_challenge := false, boolean force_gsm_sres
 			l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
 						valueof(ts_MI_IMEISV_TLV(g_pars.imei & '0'H));
 		}
-		f_send_l3_gmm_llc(l3_mo, gb_idx);
+		f_send_l3(l3_mo, gb_idx);
+
+		/* Security Mode Command + Complete on Iu case */
+		if (is_iu(gb_idx)) {
+			BSSAP.receive(tr_RANAP_SecurityModeCmd(uia_algs := ?, uia_key := oct2bit(g_pars.vec.ik),
+								key_sts := ?)) {
+				var IntegrityProtectionAlgorithm uia_chosen := 0; /* 0 = standard_UMTS_integrity_algorithm_UIA1 */
+				BSSAP.send(ts_RANAP_SecurityModeComplete(uia_chosen));
+			}
+		}
 	} else {
 		/* wait for identity procedure */
 		f_sleep(1.0);
@@ -674,7 +754,7 @@ friend function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres,
 	 * revisionLevelIndicatior is at the wrong place! */
 	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.solSACapability := '0'B;
 
-	f_send_l3_gmm_llc(attach_req, gb_idx);
+	f_send_l3(attach_req, gb_idx);
 	f_gmm_auth(umts_aka_challenge, force_gsm_sres, gb_idx);
 	/* Expect SGSN to perform LU with HLR */
 	f_gmm_gsup_lu_isd();
@@ -683,7 +763,12 @@ friend function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres,
 	f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
 
 	/* FIXME: Extract P-TMSI, if any. Only send Complete if necessary */
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL, gb_idx);
+	f_send_l3(ts_GMM_ATTACH_COMPL, gb_idx);
+
+	/* IuPS case: Expect Iu Release */
+	if (is_iu(gb_idx)) {
+		as_iu_release_compl_disc();
+	}
 }
 
 private function f_TC_attach(charstring id) runs on BSSGP_ConnHdlr {
@@ -739,7 +824,7 @@ testcase TC_attach_umts_aka_gsm_sres() runs on test_CT {
 private function f_TC_attach_auth_id_timeout(charstring id) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	alt {
 	[] BSSGP[0].receive(tr_GMM_ID_REQ(?)) {
 		/* don't send ID Response */
@@ -766,7 +851,7 @@ testcase TC_attach_auth_id_timeout() runs on test_CT {
 private function f_TC_attach_auth_sai_timeout(charstring id) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	alt {
 	[] as_mm_identity();
 	[] GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi)); { }
@@ -787,7 +872,7 @@ testcase TC_attach_auth_sai_timeout() runs on test_CT {
 private function f_TC_attach_auth_sai_reject(charstring id) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	alt {
 	[] as_mm_identity();
 	[] GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi)); {
@@ -810,7 +895,7 @@ private function f_TC_attach_gsup_lu_timeout(charstring id) runs on BSSGP_ConnHd
 	var PDU_L3_SGSN_MS l3_mt;
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	f_gmm_auth();
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
@@ -840,7 +925,7 @@ private function f_TC_attach_gsup_lu_reject(charstring id) runs on BSSGP_ConnHdl
 	var PDU_L3_SGSN_MS l3_mt;
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	f_gmm_auth();
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi)) {
@@ -872,7 +957,7 @@ private function f_TC_attach_combined(charstring id) runs on BSSGP_ConnHdlr {
 	var PDU_L3_SGSN_MS l3_mt;
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, true, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, true, false, omit, omit));
 	f_gmm_auth();
 	/* Expect MSC to perform LU with HLR */
 	f_gmm_gsup_lu_isd();
@@ -880,7 +965,7 @@ private function f_TC_attach_combined(charstring id) runs on BSSGP_ConnHdlr {
 	BSSGP[0].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) -> value l3_mt {
 		f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
 	}
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+	f_send_l3(ts_GMM_ATTACH_COMPL);
 	setverdict(pass);
 }
 testcase TC_attach_combined() runs on test_CT {
@@ -899,12 +984,12 @@ private function f_TC_attach_accept_all(charstring id) runs on BSSGP_ConnHdlr {
 
 	g_pars.net.expect_auth := false;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	f_gmm_auth();
 	BSSGP[0].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) -> value l3_mt {
 		f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
 	}
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+	f_send_l3(ts_GMM_ATTACH_COMPL);
 	setverdict(pass);
 }
 testcase TC_attach_accept_all() runs on test_CT {
@@ -927,7 +1012,7 @@ private function f_TC_attach_closed_foreign(charstring id) runs on BSSGP_ConnHdl
 
 	g_pars.net.expect_auth := false;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	alt {
 	[] as_mm_identity();
 	[] BSSGP[0].receive(tr_GMM_ATTACH_REJECT('07'O)) {
@@ -960,7 +1045,7 @@ testcase TC_attach_closed() runs on test_CT {
 private function f_TC_rau_unknown(charstring id) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
 
-	f_send_l3_gmm_llc(ts_GMM_RAU_REQ(f_mi_get_lv(), GPRS_UPD_T_RA, old_ra, false, omit, omit));
+	f_send_l3(ts_GMM_RAU_REQ(f_mi_get_lv(), GPRS_UPD_T_RA, old_ra, false, omit, omit));
 	alt {
 	[] BSSGP[0].receive(tr_GMM_RAU_REJECT('0a'O)) {
 		setverdict(pass);
@@ -998,7 +1083,7 @@ testcase TC_attach_rau() runs on test_CT {
 function f_detach_mo(BIT3 detach_type, boolean power_off, boolean expect_purge, integer bssgp_index := 0) runs on BSSGP_ConnHdlr {
 	var PDU_L3_SGSN_MS l3_mt;
 	timer T := 5.0;
-	f_send_l3_gmm_llc(ts_GMM_DET_REQ_MO(detach_type, power_off), bssgp_index);
+	f_send_l3(ts_GMM_DET_REQ_MO(detach_type, power_off), bssgp_index);
 	if (expect_purge) {
 		GSUP.receive(tr_GSUP_PURGE_MS_REQ(g_pars.imsi, OSMO_GSUP_CN_DOMAIN_PS));
 		GSUP.send(ts_GSUP_PURGE_MS_RES(g_pars.imsi));
@@ -1138,7 +1223,7 @@ runs on BSSGP_ConnHdlr {
 		recovery := ts_Recovery(apars.ggsn_restart_ctr);
 	}
 
-	f_send_l3_gmm_llc(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
+	f_send_l3(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco), gb_idx);
 	GTP.receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
 		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
@@ -1178,7 +1263,7 @@ runs on BSSGP_ConnHdlr {
 	var boolean exp_rej := ispresent(apars.exp_rej_cause);
 	var Gtp1cUnitdata g_ud;
 
-	f_send_l3_gmm_llc(ts_SM_DEACT_PDP_REQ_MO(apars.tid, cause, false, omit), gb_idx);
+	f_send_l3(ts_SM_DEACT_PDP_REQ_MO(apars.tid, cause, false, omit), gb_idx);
 	GTP.receive(tr_GTPC_MsgType(?, deletePDPContextRequest, apars.ggsn_tei_c)) -> value g_ud {
 		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
 		BSSGP[gb_idx].clear;
@@ -1210,7 +1295,7 @@ runs on BSSGP_ConnHdlr {
 
 	alt {
 	[] BSSGP[gb_idx].receive(tr_SM_DEACT_PDP_REQ_MT(apars.tid, ?, true)) {
-		f_send_l3_gmm_llc(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid), gb_idx);
+		f_send_l3(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid), gb_idx);
 		}
 	[not error_ind] GTP.receive(tr_GTPC_MsgType(?, deletePDPContextResponse, apars.ggsn_tei_c)) {
 		repeat;
@@ -1397,7 +1482,7 @@ testcase TC_attach_pdp_act() runs on test_CT {
 /* PDP Context activation for not-attached subscriber; expect fail */
 private function f_TC_pdp_act_unattached(charstring id) runs on BSSGP_ConnHdlr {
 	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
-	f_send_l3_gmm_llc(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
+	f_send_l3(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco));
 	alt {
 	/* We might want toalso actually expect a PDPC CTX ACT REJ? */
@@ -1662,7 +1747,7 @@ private function f_TC_attach_restart_ctr_echo(charstring id) runs on BSSGP_ConnH
 	var OCT1 cause_network_failure := int2oct(38, 1)
 	alt {
 	[] BSSGP[0].receive(tr_SM_DEACT_PDP_REQ_MT(apars.tid, cause_network_failure, true)) {
-		f_send_l3_gmm_llc(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
+		f_send_l3(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
 		setverdict(pass);
 		}
 	[] as_xid(apars);
@@ -1745,7 +1830,7 @@ private function f_TC_attach_pdp_act_deact_mt_t3395_expire(charstring id) runs o
 
 	GTP.receive(tr_GTPC_MsgType(?, deletePDPContextResponse, apars.ggsn_tei_c)) {}
 
-	f_send_l3_gmm_llc(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
+	f_send_l3(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
 	setverdict(pass);
 }
 testcase TC_attach_pdp_act_deact_mt_t3395_expire() runs on test_CT {
@@ -1950,7 +2035,7 @@ private function f_TC_hlr_location_cancel_request_withdraw(charstring id) runs o
 
 	/* MS: receive a Detach Request */
 	BSSGP[0].receive(tr_GMM_DET_REQ_MT(c_GMM_DTT_MT_IMSI_DETACH, ?, ?));
-	f_send_l3_gmm_llc(ts_GMM_DET_ACCEPT_MO);
+	f_send_l3(ts_GMM_DET_ACCEPT_MO);
 
 	setverdict(pass);
 }
@@ -2045,7 +2130,7 @@ private function f_TC_attach_no_imei_response(charstring id) runs on BSSGP_ConnH
 	var integer count_req := 0;
 	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
 
 	alt {
 		[] BSSGP[0].receive(tr_GMM_ATTACH_REJECT(?)) {
@@ -2053,7 +2138,7 @@ private function f_TC_attach_no_imei_response(charstring id) runs on BSSGP_ConnH
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('001'B)) {
 			mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
-			f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+			f_send_l3(ts_GMM_ID_RESP(mi));
 			repeat;
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('010'B)) {
@@ -2094,7 +2179,7 @@ private function f_TC_attach_no_imsi_response(charstring id) runs on BSSGP_ConnH
 	/* set p_tmsi to use it in Attach Req via f_mi_get_lv() */
 	g_pars.p_tmsi := 'c0000035'O;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
 
 	alt {
 		[] BSSGP[0].receive(tr_GMM_ATTACH_REJECT(?)) {
@@ -2107,7 +2192,7 @@ private function f_TC_attach_no_imsi_response(charstring id) runs on BSSGP_ConnH
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('010'B)) {
 			mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
-			f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+			f_send_l3(ts_GMM_ID_RESP(mi));
 			repeat;
 		}
 	}
@@ -2170,7 +2255,7 @@ private function f_TC_attach_closed_imsi_added(charstring id) runs on BSSGP_Conn
 	/* there is no auth */
 	g_pars.net.expect_auth := false;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit));
 	f_gmm_auth();
 	alt {
 		[] BSSGP[0].receive(tr_GMM_ATTACH_REJECT(?)) {
@@ -2179,7 +2264,7 @@ private function f_TC_attach_closed_imsi_added(charstring id) runs on BSSGP_Conn
 		}
 		[] BSSGP[0].receive(tr_GMM_ATTACH_ACCEPT(*, *, *)) -> value l3_mt {
 			f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
-			f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+			f_send_l3(ts_GMM_ATTACH_COMPL);
 			setverdict(pass);
 		}
 	}
@@ -2224,7 +2309,7 @@ testcase TC_attach_closed_add_vty() runs on test_CT {
 private function f_TC_attach_check_complete_resend(charstring id) runs on BSSGP_ConnHdlr {
 	var integer count_req := 0;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
 	f_gmm_auth();
 
 	timer T := 10.0;
@@ -2265,11 +2350,11 @@ private function f_routing_area_update(RoutingAreaIdentificationV ra, integer bs
 	var PDU_L3_SGSN_MS l3_mt;
 
 	/* then send RAU */
-	f_send_l3_gmm_llc(ts_GMM_RAU_REQ(f_mi_get_lv(), GPRS_UPD_T_RA, g_pars.ra, false, omit, omit), bssgp);
+	f_send_l3(ts_GMM_RAU_REQ(f_mi_get_lv(), GPRS_UPD_T_RA, g_pars.ra, false, omit, omit), bssgp);
 	alt {
 	[] BSSGP[bssgp].receive(tr_GMM_RAU_ACCEPT) -> value l3_mt {
 		f_process_rau_accept(l3_mt.msgs.gprs_mm.routingAreaUpdateAccept, bssgp);
-		f_send_l3_gmm_llc(ts_GMM_RAU_COMPL, bssgp);
+		f_send_l3(ts_GMM_RAU_COMPL, bssgp);
 		setverdict(pass);
 		}
 	[] BSSGP[bssgp].receive(tr_GMM_RAU_REJECT) {
@@ -2347,7 +2432,7 @@ private function f_TC_attach_gmm_attach_req_while_gmm_attach(charstring id) runs
 	var RoutingAreaIdentificationV rand_rai := f_random_RAI();
 	var PDU_L3_SGSN_MS l3_mt;
 
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), rand_rai, true, false, omit, omit));
+	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), rand_rai, true, false, omit, omit));
 
 	alt {
 		[] BSSGP[0].receive(tr_GMM_ATTACH_REJECT(?)) {
@@ -2356,16 +2441,16 @@ private function f_TC_attach_gmm_attach_req_while_gmm_attach(charstring id) runs
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('001'B)) {
 			mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
-			f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+			f_send_l3(ts_GMM_ID_RESP(mi));
 			repeat;
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('010'B)) {
 			/* send out a second GMM_Attach Request.
 			 * If the SGSN follows the rules, this 2nd ATTACH REQ should be ignored, because
 			 * of the same content */
-			f_send_l3_gmm_llc(ts_GMM_ATTACH_REQ(f_mi_get_lv(), rand_rai, true, false, omit, omit));
+			f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), rand_rai, true, false, omit, omit));
 			mi := valueof(ts_MI_IMEI_LV(g_pars.imei));
-			f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+			f_send_l3(ts_GMM_ID_RESP(mi));
 		}
 	}
 	f_sleep(1.0);
@@ -2374,7 +2459,7 @@ private function f_TC_attach_gmm_attach_req_while_gmm_attach(charstring id) runs
 	alt {
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('001'B)) {
 			mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
-			f_send_l3_gmm_llc(ts_GMM_ID_RESP(mi));
+			f_send_l3(ts_GMM_ID_RESP(mi));
 			repeat;
 		}
 		[] BSSGP[0].receive(tr_GMM_ID_REQ('010'B)) {
@@ -2387,7 +2472,7 @@ private function f_TC_attach_gmm_attach_req_while_gmm_attach(charstring id) runs
 		}
 		[] BSSGP[0].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) -> value l3_mt {
 			f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
-			f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+			f_send_l3(ts_GMM_ATTACH_COMPL);
 			setverdict(pass);
 			/* FIXME: Extract P-TMSI, if any. Only send Complete if necessary */
 		}
@@ -2426,7 +2511,7 @@ private function f_TC_attach_usim_resync(charstring id) runs on BSSGP_ConnHdlr {
 	/* The thing is, if the solSACapability is 'omit', then the
 	 * revisionLevelIndicatior is at the wrong place! */
 	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.solSACapability := '0'B;
-	f_send_l3_gmm_llc(attach_req);
+	f_send_l3(attach_req);
 
 	/* do the auth */
 	var PDU_L3_MS_SGSN l3_mo;
@@ -2458,7 +2543,7 @@ private function f_TC_attach_usim_resync(charstring id) runs on BSSGP_ConnHdlr {
 	BSSGP[0].receive(auth_ciph_req) -> value l3_mt;
 
 	/* send the gmm auth failure with resync IE */
-	f_send_l3_gmm_llc(ts_GMM_AUTH_FAIL_UMTS_AKA_RESYNC(g_pars.vec.auts));
+	f_send_l3(ts_GMM_AUTH_FAIL_UMTS_AKA_RESYNC(g_pars.vec.auts));
 
 	/* wait for the GSUP resync request */
 	GSUP.receive(tr_GSUP_SAI_REQ_UMTS_AKA_RESYNC(
@@ -2505,7 +2590,7 @@ private function f_TC_attach_usim_resync(charstring id) runs on BSSGP_ConnHdlr {
 		l3_mo.msgs.gprs_mm.authenticationAndCipheringResponse.imeisv :=
 					valueof(ts_MI_IMEISV_TLV(g_pars.imei & '0'H));
 	}
-	f_send_l3_gmm_llc(l3_mo);
+	f_send_l3(l3_mo);
 	deactivate(di);
 
 	/* Expect SGSN to perform LU with HLR */
@@ -2514,7 +2599,7 @@ private function f_TC_attach_usim_resync(charstring id) runs on BSSGP_ConnHdlr {
 	BSSGP[0].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) -> value l3_mt {
 		f_process_attach_accept(l3_mt.msgs.gprs_mm.attachAccept);
 	}
-	f_send_l3_gmm_llc(ts_GMM_ATTACH_COMPL);
+	f_send_l3(ts_GMM_ATTACH_COMPL);
 	setverdict(pass);
 }
 
@@ -2680,7 +2765,6 @@ testcase TC_attach_pdp_act_gmm_detach() runs on test_CT {
 	vc_conn.done;
 	f_cleanup();
 }
-
 
 control {
 	execute( TC_attach() );
