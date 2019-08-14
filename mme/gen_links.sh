@@ -55,6 +55,7 @@ FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn
 FILES+="L3_Templates.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Emulation.ttcn "
 FILES+="NAS_Templates.ttcn GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
+FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

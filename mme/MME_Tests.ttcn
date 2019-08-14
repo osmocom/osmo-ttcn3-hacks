@@ -21,6 +21,10 @@ import from S1AP_IEs all;
 import from NAS_EPS_Types all;
 import from NAS_Templates all;
 
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_Emulation all;
+
 import from SGsAP_Types all;
 import from SGsAP_Templates all;
 import from SGsAP_Emulation all;
@@ -58,6 +62,11 @@ type component MTC_CT {
 	port S1AP_PT S1AP_UNIT[NUM_ENB];
 	port S1APEM_PROC_PT S1AP_PROC[NUM_ENB];
 
+	/* S6a/S6d interface of emulated HSS */
+	var DIAMETER_Emulation_CT vc_DIAMETER;
+	port DIAMETER_PT DIAMETER_UNIT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
+
 	/* SGs interface of emulated MSC/VLR */
 	var SGsAP_Emulation_CT vc_SGsAP;
 	port SGsAP_PT SGsAP_UNIT;
@@ -66,7 +75,7 @@ type component MTC_CT {
 	var UeParams g_ue_pars[NUM_UE];
 }
 
-type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr {
+type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr {
 	var ConnHdlrPars g_pars;
 	timer g_Tguard := 30.0;
 }
@@ -86,6 +95,10 @@ modulepar {
 	integer mp_mme_s1ap_port := 36412;
 	charstring mp_s1_local_ip := "127.0.0.1";
 	integer mp_s1_local_port := 50000;
+
+	/* S6 interface */
+	charstring mp_s6_local_ip := "127.0.0.4";
+	integer mp_s6_local_port := 3868;
 
 	/* SGs interface */
 	charstring mp_sgs_local_ip := "127.0.0.1";
@@ -191,6 +204,30 @@ friend function f_init_s1ap(charstring id, integer imsi_suffix) runs on MTC_CT {
 	}
 }
 
+friend function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_diameter(charstring id) runs on MTC_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback)
+	};
+	var DIAMETER_conn_parameters pars := {
+		remote_ip := mp_mme_ip,
+		remote_sctp_port := -1,
+		local_ip := mp_s6_local_ip,
+		local_sctp_port := mp_s6_local_port
+	};
+	vc_DIAMETER := DIAMETER_Emulation_CT.create(id);
+	map(vc_DIAMETER:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_DIAMETER:DIAMETER_UNIT, self:DIAMETER_UNIT);
+	connect(vc_DIAMETER:DIAMETER_PROC, self:DIAMETER_PROC);
+	vc_DIAMETER.start(DIAMETER_Emulation.main(ops, pars, id));
+}
+
 friend template (value) TAI ts_enb_S1AP_TAI(EnbParams enb) := {
 	pLMNidentity := enb.global_enb_id.pLMNidentity,
 	tAC := enb.supported_tas[0].tAC,
@@ -232,6 +269,10 @@ runs on MTC_CT return ConnHdlr {
 		connect(vc_conn:SGsAP, vc_SGsAP:SGsAP_CLIENT);
 		connect(vc_conn:SGsAP_PROC, vc_SGsAP:SGsAP_PROC);
 	}
+	if (isbound(vc_DIAMETER)) {
+		connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
+		connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+	}
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
@@ -253,6 +294,9 @@ friend function f_init_handler(ConnHdlrPars pars, float t_guard := 30.0) runs on
 	/* start guard timre and activate it as default */
 	g_Tguard.start(t_guard);
 	activate(as_Tguard());
+	if (DIAMETER_PROC.checkstate("Connected")) {
+		f_diameter_expect(g_pars.ue_pars.imsi);
+	}
 	if (SGsAP_PROC.checkstate("Connected")) {
 		/* Route all SGsAP mesages for our IMSIto us */
 		f_create_sgsap_expect(pars.ue_pars.imsi);
@@ -414,9 +458,64 @@ private altstep as_s1ap_handle_sec_mode() runs on ConnHdlr {
 		}
 }
 
+/* Exepect AuthInfoReq (AIR) from HSS; respond with AuthInforAnswer (AIA) */
+private altstep as_DIA_AuthInfo() runs on ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_AIR(g_pars.ue_pars.imsi)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var octetstring vplmn_id;
+		var hexstring imsi;
+		var template (value) AVP_list auth_info_content;
+
+		/* retrieve input data */
+		imsi := valueof(f_DIAMETER_get_imsi(rx_dia));
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_AAA_3GPP_Visited_PLMN_Id);
+		vplmn_id := valueof(avp.avp_data.avp_AAA_3GPP_Visited_PLMN_Id);
+
+		/* compute tuple */
+		auth_info_content := { ts_AVP_EutranVec(1, '20080c3818183b522614162c07601d0d'O, '6a91970e838fd079'O, 'f11b89a2a8be00001f9c526f3d75d44c'O, '95AFAD9A0D29AFAA079A9451DF7161D7EE4CBF2AF9387F766D058BB6B44B905D'O) };
+
+		DIAMETER.send(ts_DIA_AIA(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id,
+					 sess_id, auth_info_content));
+	}
+}
+
+/* Expect UpdateLocationReq (ULR); respond with UpdateLocationAnswer (ULA) */
+private altstep as_DIA_UpdLoc() runs on ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_ULR(g_pars.ue_pars.imsi)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var hexstring imsi;
+		var template (value) AVP_list sub_data;
+
+		/* retrieve input data */
+		imsi := valueof(f_DIAMETER_get_imsi(rx_dia));
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+		sub_data := {
+			ts_AVP_3GPP_SubscriberStatus(SERVICE_GRANTED),
+			ts_AVP_3GPP_SubscrRauTauTmr(30),
+			ts_AVP_3GPP_AMBR(1000, 2000),
+			ts_AVP_3GPP_ApnConfigProfile({
+				ts_AVP_3GPP_ContextId(1),
+				ts_AVP_3GPP_AllApnConfigsIncl,
+				ts_AVP_3GPP_ApnConfig(1, IPv4, "*")
+			})
+			};
+
+		DIAMETER.send(ts_DIA_ULA(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id, sess_id, sub_data));
+	}
+}
+
 private function f_TC_attach(ConnHdlrPars pars) runs on ConnHdlr {
+
 	f_init_handler(pars);
-	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI('001010000000001'H);
+	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI(pars.ue_pars.imsi);
 	var template (value) PDU_NAS_EPS nas_esm, nas_emm;
 /*
 	nas_esm := ts_NAS_ActDefEpsBearCtxReq(bearer_id := '0000'B, proc_tid := int2bit(1,8),
@@ -435,14 +534,24 @@ private function f_TC_attach(ConnHdlrPars pars) runs on ConnHdlr {
 				p_rrcCause := mo_Signalling);
 	S1AP.send(tx);
 
+	as_DIA_AuthInfo();
 	as_s1ap_handle_auth();
-	as_s1ap_handle_sec_mode();
+	alt {
+	[] as_DIA_UpdLoc() {
+		as_s1ap_handle_sec_mode();
+		}
+	[] as_s1ap_handle_sec_mode() {
+		as_DIA_UpdLoc();
+		}
+	}
 
 	f_sleep(10.0);
 }
 testcase TC_s1ap_attach() runs on MTC_CT {
 	var charstring id := testcasename();
 
+	f_init_diameter(id);
+	f_sleep(10.0);
 	f_init_s1ap(id, 4);
 	f_s1ap_setup(0);
 
@@ -456,6 +565,7 @@ control {
 	execute( TC_s1ap_setup_wrong_plmn() );
 	execute( TC_s1ap_setup_wrong_tac() );
 	execute( TC_s1ap_setup() );
+	execute( TC_s1ap_attach() );
 }
 
 
