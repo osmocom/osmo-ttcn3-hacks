@@ -43,6 +43,10 @@ DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPC_EncDec.cc   GTPC_Types.ttcn  GTPU_EncDec.cc   GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
+FILES="DIAMETER_EncDec.cc"
+gen_links $DIR $FILES
+
 DIR=../library/s1ap
 FILES="S1AP_CommonDataTypes.asn S1AP_Constants.asn S1AP_Containers.asn S1AP_IEs.asn S1AP_PDU_Contents.asn
 S1AP_PDU_Descriptions.asn "

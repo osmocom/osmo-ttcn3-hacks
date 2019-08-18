@@ -28,6 +28,7 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.TCP \
 			titan.ProtocolModules.UDP \
 			titan.ProtocolModules.RTP \
+			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
 			titan.TestPorts.Common_Components.Socket-API \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
@@ -91,6 +92,7 @@ titan.ProtocolModules.M3UA_commit=		R.2.A
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
 titan.ProtocolModules.RTP_commit=		R.5.A
+titan.ProtocolModules.DIAMETER_ProtocolModule_Generator_commit=	ffd939595a08da1b8c8176aaa1f8578bfe02a912
 titan.ProtocolModules.ROSE_commit=		R.1.C
 titan.ProtocolModules.SCTP_commit=		R.2.A
 titan.ProtocolModules.SGsAP_13.2.0_commit=	520dc48dd41ee15c9fd77e71d2ea7a05c58770b9
