@@ -90,6 +90,7 @@ titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
 titan.ProtocolModules.M2PA_commit=		R.2.A
 titan.ProtocolModules.M3UA_commit=		R.2.A
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
+titan.ProtocolModules.NAS_EPS_15.2.0.1_commit=	2ba853c7d197f7f39d97b76fca4726a7143fb4ad
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
 titan.ProtocolModules.RTP_commit=		R.5.A
 titan.ProtocolModules.DIAMETER_ProtocolModule_Generator_commit=	ffd939595a08da1b8c8176aaa1f8578bfe02a912
