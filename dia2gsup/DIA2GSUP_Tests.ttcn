@@ -1,0 +1,197 @@
+module DIA2GSUP_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from L3_Common all;
+
+import from IPA_Emulation all;
+import from GSUP_Emulation all;
+import from GSUP_Types all;
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_Emulation all;
+
+type component MTC_CT {
+	var DIAMETER_Emulation_CT vc_DIAMETER;
+	port DIAMETER_PT DIAMETER_UNIT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
+
+	var GSUP_Emulation_CT vc_GSUP;
+	var IPA_Emulation_CT vc_GSUP_IPA;
+	port IPA_CTRL_PT GSUP_IPA_EVENT;
+
+};
+
+type component D2G_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr {
+	var D2G_ConnHdlrPars g_pars;
+	timer g_Tguard := 30.0;
+};
+
+type record D2G_ConnHdlrPars {
+	hexstring imsi,
+	AuthVector vec optional
+};
+
+private function f_init_pars(integer imsi_suffix)
+runs on MTC_CT return D2G_ConnHdlrPars {
+	var D2G_ConnHdlrPars pars := {
+		imsi := f_gen_imsi(imsi_suffix),
+		vec := f_gen_auth_vec_3g()
+	};
+	return pars;
+}
+
+
+modulepar {
+	/* our emulated GSUP HLR */
+	charstring mp_hlr_ip := "127.0.0.1";
+	integer mp_hlr_port := 4222;
+
+	/* our emulated MME */
+	charstring mp_s6_local_ip := "127.0.0.100";
+	integer mp_s6_local_port := 3868;
+
+	/* IUT behaving as HSS */
+	charstring mp_hss_ip := "127.0.0.4";
+	integer mp_hss_port := 3868;
+}
+
+private altstep as_Tguard() runs on D2G_ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		mtc.stop;
+	}
+}
+
+private function f_init_gsup(charstring id) runs on MTC_CT {
+	id := id & "-GSUP";
+	var GsupOps ops := {
+		create_cb := refers(GSUP_Emulation.ExpectedCreateCallback)
+	};
+
+	vc_GSUP_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	vc_GSUP := GSUP_Emulation_CT.create(id);
+
+	map(vc_GSUP_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_GSUP:GSUP, vc_GSUP_IPA:IPA_GSUP_PORT);
+	/* we use this hack to get events like ASP_IPA_EVENT_UP */
+	connect(vc_GSUP_IPA:IPA_CTRL_PORT, self:GSUP_IPA_EVENT);
+
+	vc_GSUP.start(GSUP_Emulation.main(ops, id));
+	vc_GSUP_IPA.start(IPA_Emulation.main_server(mp_hlr_ip, mp_hlr_port));
+
+	/* wait for incoming connection to GSUP port before proceeding */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] GSUP_IPA_EVENT.receive(t_ASP_IPA_EVT_UD(ASP_IPA_EVENT_UP)) { }
+	[] T.timeout {
+		setverdict(fail, "No connection to GSUP Port");
+		mtc.stop;
+		}
+	}
+}
+
+private function f_init_handler(D2G_ConnHdlrPars pars, float t_guard := 20.0) runs on D2G_ConnHdlr {
+	g_pars := pars;
+	activate(as_Tguard());
+	g_Tguard.start(t_guard);
+}
+
+private type function void_fn(charstring id, D2G_ConnHdlrPars pars) runs on D2G_ConnHdlr;
+
+private function f_start_handler_with_pars(void_fn fn, D2G_ConnHdlrPars pars)
+runs on MTC_CT return D2G_ConnHdlr {
+	var D2G_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := D2G_ConnHdlr.create(id);
+
+	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
+	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
+	connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+
+	vc_conn.start(derefers(fn)(id, pars));
+	return vc_conn;
+}
+
+private function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+private function f_init_diameter(charstring id) runs on MTC_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback)
+	};
+	var DIAMETER_conn_parameters pars := {
+		remote_ip := mp_hss_ip,
+		remote_sctp_port := mp_hss_port,
+		local_ip := mp_s6_local_ip,
+		local_sctp_port := mp_s6_local_port
+	};
+	vc_DIAMETER := DIAMETER_Emulation_CT.create(id);
+	map(vc_DIAMETER:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_DIAMETER:DIAMETER_UNIT, self:DIAMETER_UNIT);
+	connect(vc_DIAMETER:DIAMETER_PROC, self:DIAMETER_PROC);
+	vc_DIAMETER.start(DIAMETER_Emulation.main(ops, pars, id));
+}
+
+private function f_init() runs on MTC_CT {
+	f_init_gsup(testcasename());
+	f_init_diameter(testcasename());
+}
+
+
+private function f_DIA_AI() runs on D2G_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var UINT32 hbh_id := f_rnd_octstring(4);
+	var UINT32 ete_id := f_rnd_octstring(4);
+	var octetstring sess_id := char2oct("foobar");
+	var OCT3 vplmn := '00F110'O;
+
+	/* Send AIR to translator; expect it to show up on GSUP side */
+	DIAMETER.send(ts_DIA_AIR(hbh_id, ete_id, sess_id, g_pars.imsi, vplmn));
+	GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi));
+
+	/* Send a positive response back to the translator; expect AIA */
+	var GSUP_IE auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+								   g_pars.vec.sres,
+								   g_pars.vec.kc,
+								   g_pars.vec.ik,
+								   g_pars.vec.ck,
+								   g_pars.vec.autn,
+								   g_pars.vec.res));
+	GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+
+	alt {
+	[] DIAMETER.receive(tr_DIA_AIA) {
+		setverdict(pass);
+		}
+	}
+}
+
+private function f_TC_authinfo_normal(charstring id, D2G_ConnHdlrPars pars) runs on D2G_ConnHdlr {
+	f_init_handler(pars);
+	f_DIA_AI();
+}
+
+testcase TC_authinfo_normal() runs on MTC_CT {
+	var D2G_ConnHdlrPars pars := f_init_pars(1);
+	var D2G_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(10.0);
+	vc_conn := f_start_handler_with_pars(refers(f_TC_authinfo_normal), pars);
+	vc_conn.done;
+}
+
+
+control {
+}
+
+}
