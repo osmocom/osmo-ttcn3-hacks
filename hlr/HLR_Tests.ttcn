@@ -293,6 +293,30 @@ function f_gen_subs() runs on test_CT return HlrSubscriberList {
 
 	return sl;
 }
+function f_gen_3G_subs() runs on test_CT return HlrSubscriberList {
+	var HlrSubscriber sub;
+	var HlrSubscriberList sl := {};
+
+	sub := valueof(t_Sub3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9), "milenage", false));
+	sl := sl & { sub };
+
+	sub := valueof(t_Sub3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9), "milenage", true));
+	sl := sl & { sub };
+
+	sub := valueof(t_Sub2G3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9),
+				 "comp128v1", "milenage", false));
+	sl := sl & { sub };
+
+	sub := valueof(t_Sub2G3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9),
+				 "comp128v2", "milenage", false));
+	sl := sl & { sub };
+
+	sub := valueof(t_Sub2G3G(f_rnd_imsi('26242'H), '49161'H & f_rnd_hexstring(7, 9),
+				 "comp128v3", "milenage", false));
+	sl := sl & { sub };
+
+	return sl;
+}
 
 function f_vty_transceive_match(TELNETasp_PT pt, charstring cmd, template charstring exp_ret) {
 	var charstring ret := f_vty_transceive_ret(pt, cmd);
@@ -370,7 +394,8 @@ function f_vty_subscr_show_nomatch(TELNETasp_PT VTY, HlrSubscriber sub, template
  ***********************************************************************/
 
 /* perform SendAuthInfo for given imsi, return the GSUP response/error */
-function f_perform_SAI(hexstring imsi, template (omit) integer exp_err_cause := omit)
+function f_perform_SAI(hexstring imsi, template (omit) integer exp_err_cause := omit,
+		       boolean is_eps := false)
 runs on HLR_ConnHdlr return GSUP_PDU {
 	var GSUP_PDU ret;
 	timer T := 3.0;
@@ -379,7 +404,11 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 		exp_fail := true;
 	}
 
-	GSUP.send(valueof(ts_GSUP_SAI_REQ(imsi)));
+	if (is_eps) {
+		GSUP.send(ts_GSUP_SAI_REQ_EPS(imsi));
+	} else {
+		GSUP.send(valueof(ts_GSUP_SAI_REQ(imsi)));
+	}
 	T.start;
 	alt {
 	[exp_fail] GSUP.receive(tr_GSUP_SAI_ERR(imsi, exp_err_cause)) -> value ret {
@@ -682,6 +711,7 @@ function f_start_handler_per_sub(void_fn fn, HlrSubscriberList sl) runs on test_
 private function f_TC_gsup_sai() runs on HLR_ConnHdlr {
 	var GSUP_PDU res;
 	res := f_perform_SAI(g_pars.sub.imsi);
+	f_ensure_amf_separation_bit(res, '0'B);
 	/* TODO: match if tuple[s] matches expectation */
 	setverdict(pass);
 }
@@ -696,6 +726,48 @@ testcase TC_gsup_sai() runs on test_CT {
 
 	setverdict(pass);
 }
+
+private function f_ensure_amf_separation_bit(GSUP_PDU res, BIT1 sep_bit)
+{
+	for (var integer i := 0; i < lengthof(res.ies); i := i+1) {
+		var GSUP_IE tuple := res.ies[i];
+		if (tuple.tag != OSMO_GSUP_AUTH_TUPLE_IE) {
+			continue;
+		}
+		var GSUP_IeValue autn;
+		if (f_gsup_find_nested_ie(tuple.val.auth_tuple, OSMO_GSUP_AUTN_IE, autn) == false) {
+			setverdict(fail, "Couldn't find AUTN IE in tuple ", i);
+			mtc.stop;
+		}
+		var bitstring amf := oct2bit(substr(autn.autn, 6, 2));
+		if (amf[0] != sep_bit) {
+			setverdict(fail, "AMF bit 0 (separation bit) must be ", sep_bit,"  but was not");
+			mtc.stop;
+		}
+	}
+}
+
+/* test SAI for a number of different subscriber cases (algo, 2g/3g, ...) */
+private function f_TC_gsup_sai_eps() runs on HLR_ConnHdlr {
+	var GSUP_PDU res;
+	res := f_perform_SAI(g_pars.sub.imsi, is_eps := true);
+	f_ensure_amf_separation_bit(res, '1'B);
+
+	/* TODO: match if tuple[s] matches expectation */
+	setverdict(pass);
+}
+testcase TC_gsup_sai_eps() runs on test_CT {
+	var HlrSubscriberList sl;
+	var GSUP_PDU res;
+
+	f_init(false);
+
+	sl := f_gen_3G_subs();
+	f_start_handler_per_sub(refers(f_TC_gsup_sai_eps), sl);
+
+	setverdict(pass);
+}
+
 
 /* test UL for unknown IMSI */
 private function f_TC_ul_unknown_imsi() runs on HLR_ConnHdlr {
@@ -1397,6 +1469,7 @@ testcase TC_subscr_create_on_demand_sai() runs on test_CT {
 control {
 	execute( TC_gsup_sai_err_invalid_imsi() );
 	execute( TC_gsup_sai() );
+	execute( TC_gsup_sai_eps() );
 	execute( TC_gsup_ul_unknown_imsi() );
 	execute( TC_gsup_sai_err_unknown_imsi() );
 	execute( TC_gsup_ul() );
