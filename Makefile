@@ -19,6 +19,7 @@ SUBDIRS= \
 	bts \
 	cbc \
 	ccid \
+	dia2gsup \
 	fr \
 	fr-net \
 	gbproxy \
