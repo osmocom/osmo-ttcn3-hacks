@@ -64,6 +64,13 @@ module GGSN_Tests {
 		 * The tests expect to be able to send ping packets between any two simulated MS within the same
 		 * address range. This requires IP forwarding to be enabled on the corresponding tun interfaces.
 		 */
+
+		/*
+		 * Whether ggsn supports "(no) echo-interval" VTY command
+		 * (osmo-ggsn.git Id2c84165dc59dff495106758146a701ca488834f).
+		 * This option can be dropped after osmo-ggsn release > 1.4.0 exists.
+		 */
+		boolean m_ggsn_supports_echo_interval := true;
 	}
 
 	type set PdpContext {
@@ -107,6 +114,7 @@ module GGSN_Tests {
 
 		port TELNETasp_PT GGSNVTY;
 		var boolean use_gtpu_txseq := false;
+		var boolean g_use_echo := false;
 	}
 
 	private function f_init_vty() runs on GT_CT {
@@ -159,6 +167,17 @@ module GGSN_Tests {
 			return true;
 	}
 
+	private function f_vty_enable_echo_interval(boolean enable) runs on GT_CT {
+		f_vty_enter_config(GGSNVTY);
+		f_vty_transceive(GGSNVTY, "ggsn ggsn0");
+		if (enable) {
+			f_vty_transceive(GGSNVTY, "echo-interval 5");
+		} else {
+			f_vty_transceive(GGSNVTY, "no echo-interval");
+		}
+		f_vty_transceive(GGSNVTY, "end");
+	}
+
 	function f_init() runs on GT_CT {
 		if (g_initialized == true) {
 			return;
@@ -184,20 +203,22 @@ module GGSN_Tests {
 
 		f_init_vty();
 		f_vty_set_gpdu_txseq(use_gtpu_txseq);
+		if (m_ggsn_supports_echo_interval) {
+			f_vty_enable_echo_interval(g_use_echo);
+		}
 	}
 
 	/* Altstep implementing responses to any incoming echo requests */
 	altstep pingpong() runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var Gtp1uUnitdata udu;
-		[] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+		[g_use_echo] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
 			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
-			GTPC.send(ts_GTPC_PONG(ud.peer, seq, '00'O));
+			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
 			repeat;
 		};
-		[] GTPU.receive(tr_GTPU_PING(?)) -> value udu {
-			var uint16_t seq := oct2int(udu.gtpu.opt_part.sequenceNumber);
-			GTPU.send(ts_GTPU_PONG(udu.peer, seq, '00'O));
+		[not g_use_echo] GTPC.receive(tr_GTPC_PING(?)) {
+			setverdict(fail, "GTP Echo Req rceived but not enabled in VTY");
 		};
 		[] T_default.timeout { setverdict(fail); };
 	}
@@ -297,6 +318,35 @@ module GGSN_Tests {
 						log("EUA received on createPDPContextResponse cause=" & oct2str(cpr.cause.causevalue));
 						setverdict(fail);
 					}
+					setverdict(pass);
+				} else {
+					setverdict(fail);
+				}
+			}
+		}
+		deactivate(d);
+		T_default.stop;
+	}
+
+	function f_pdp_ctx_exp_del_req(PdpContext ctx, template (omit) OCT1 expect_cause := omit, boolean expect_teardown := false) runs on GT_CT {
+		var Gtp1cUnitdata ud;
+		var default d;
+
+		T_default.start;
+		d := activate(pingpong());
+		alt {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextRequest, ctx.teic)) -> value ud {
+				if (istemplatekind(expect_cause, "omit") and not ispresent(ud.gtpc.gtpc_pdu.deletePDPContextRequest.cause.causevalue)) {
+					setverdict(pass);
+				} else if (not istemplatekind(expect_cause, "omit") and
+					   ispresent(ud.gtpc.gtpc_pdu.deletePDPContextRequest.cause.causevalue) and
+					   ud.gtpc.gtpc_pdu.deletePDPContextRequest.cause.causevalue == valueof(expect_cause)) {
+					setverdict(pass);
+				} else {
+					setverdict(fail);
+				}
+
+				if (expect_teardown == ispresent(ud.gtpc.gtpc_pdu.deletePDPContextRequest.tearDownIndicator)) {
 					setverdict(pass);
 				} else {
 					setverdict(fail);
@@ -1330,6 +1380,32 @@ module GGSN_Tests {
 		f_pdp_ctx_del(ctx, '1'B, cause_nonexistent);
 	}
 
+	/* Activate PDP context + trigger Recovery procedure through EchoResp */
+	testcase TC_pdp_act_restart_ctr_echo() runs on GT_CT {
+		var Gtp1cUnitdata ud;
+		g_use_echo := true;
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		f_pdp_ctx_act(ctx);
+
+		/* Wait to receive echo request and send initial Restart counter */
+		GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
+			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
+		};
+
+		/* Wait to receive second echo request and send incremented Restart
+		   counter. This will fake a restarted SGSN, and pdp ctx allocated
+		   should be released by GGSN */
+		g_restart_ctr := int2oct(oct2int(g_restart_ctr) + 1, 1);
+		GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
+			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
+		};
+		f_pdp_ctx_exp_del_req(ctx, omit, true);
+		setverdict(pass);
+	}
+
 	control {
 		execute(TC_pdp4_act_deact());
 		execute(TC_pdp4_act_deact_ipcp());
@@ -1358,5 +1434,9 @@ module GGSN_Tests {
 
 		execute(TC_echo_req_resp());
 		execute(TC_act_deact_retrans_duplicate());
+
+		if (m_ggsn_supports_echo_interval) {
+			execute(TC_pdp_act_restart_ctr_echo());
+		}
 	}
 }
