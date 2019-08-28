@@ -61,6 +61,7 @@ modulepar {
 	charstring mp_hlr_ip := "127.0.0.1";
 	integer mp_hlr_port := 4222;
 	charstring mp_ggsn_ip := "127.0.0.2";
+	integer mp_echo_interval := 5; /* in seconds. Only used in test enabling g_use_echo  */
 
 	NSConfigurations mp_nsconfig := {
 		{
@@ -259,7 +260,7 @@ private function f_init_vty() runs on test_CT {
 
 private function f_vty_enable_echo_interval(boolean enable) runs on test_CT {
 	if (enable) {
-		f_vty_config(SGSNVTY, "sgsn", "ggsn 0 echo-interval 5");
+		f_vty_config(SGSNVTY, "sgsn", "ggsn 0 echo-interval " & int2str(mp_echo_interval));
 	} else {
 		f_vty_config(SGSNVTY, "sgsn", "ggsn 0 no echo-interval");
 	}
@@ -1539,6 +1540,65 @@ testcase TC_attach_second_attempt() runs on test_CT {
 	vc_conn.done;
 }
 
+private function f_TC_attach_echo_timeout(charstring id) runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+	var integer seq_nr;
+
+	/* first perform regular attach */
+	f_TC_attach(id);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars);
+
+	/* Wait to receive first echo request and send initial Restart counter */
+	GTP.receive(tr_GTPC_MsgType(?, echoRequest, ?)) -> value g_ud {
+		BSSGP[0].clear;
+		seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP.send(ts_GTPC_PONG(g_ud.peer, seq_nr, apars.ggsn_restart_ctr));
+		f_sleep(int2float(mp_echo_interval)); /* wait until around next echo is expected */
+	}
+
+	/* At some point next echo request not answered will timeout and SGSN
+	   should drop the pdp ctx. Around T3 (3secs) * 6 (+ extra, a lot due to OS#4178): */
+	timer T := 3.0 * 6.0 + 16.0;
+	T.start;
+	alt {
+		[] BSSGP[0].receive(tr_SM_DEACT_PDP_REQ_MT(apars.tid, ?, true)) {
+			f_send_l3_gmm_llc(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid));
+			setverdict(pass);
+		}
+		[] GTP.receive(tr_GTPC_MsgType(?, deletePDPContextRequest, apars.ggsn_tei_c)) -> value g_ud {
+			/* SGSN currently doesn't send this message because it expects GGSN to be non-reachable anyway */
+			seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+			log("Received deletePDPContextRequest seq_nr=" & int2str(seq_nr));
+			GTP.send(ts_GTPC_DeletePdpResp(g_ud.peer, seq_nr, apars.sgsn_tei_c, '7F'O));
+			repeat;
+		}
+		[] GTP.receive(tr_GTPC_MsgType(?, echoRequest, ?)) -> value g_ud {
+			seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+			log("Received EchoRequest seq_nr=" & int2str(seq_nr));
+			repeat;
+		}
+		[] T.timeout {
+			setverdict(fail, "BSSGP DeactPdpReq not received");
+			mtc.stop;
+		}
+		[] as_xid(apars);
+	}
+	T.stop
+
+	setverdict(pass);
+}
+/* ATTACH + trigger Recovery procedure through CreatePdpResp */
+testcase TC_attach_echo_timeout() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	g_use_echo := true;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_echo_timeout), testcasename(), g_gb, 67, 50.0);
+	vc_conn.done;
+	g_use_echo := false;
+}
+
 private function f_TC_attach_restart_ctr_echo(charstring id) runs on BSSGP_ConnHdlr {
 	var Gtp1cUnitdata g_ud;
 	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
@@ -2597,6 +2657,7 @@ control {
 	execute( TC_attach_pdp_act_user_deact_mt() );
 	execute( TC_attach_pdp_act_deact_dup() );
 	execute( TC_attach_second_attempt() );
+	execute( TC_attach_echo_timeout() );
 	execute( TC_attach_restart_ctr_echo() );
 	execute( TC_attach_restart_ctr_create() );
 	execute( TC_attach_pdp_act_deact_mt_t3395_expire() );
