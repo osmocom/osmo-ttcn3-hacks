@@ -22,6 +22,7 @@ import from L1CTL_PortType all;
 import from L1CTL_Types all;
 import from LAPDm_Types all;
 import from IPA_Emulation all;
+import from GSM_RR_Types all;
 
 import from RSL_Types all;
 
@@ -875,6 +876,177 @@ testcase TC_cbc_sdcch8_load_overload() runs on test_CT {
 }
 
 
+private template GsmRrMessage tr_PagingType1 := {
+	header := t_RrHeader(PAGING_REQUEST_TYPE_1, ?),
+	payload :=?
+};
+
+private template GsmRrMessage tr_PagingType1_empty := {
+	header := t_RrHeader(PAGING_REQUEST_TYPE_1, 5),
+	payload := {
+		pag_req_1 := {
+			chan_needed := {
+				second := CHAN_NEED_ANY,
+				first := CHAN_NEED_ANY
+			},
+			page_mode := PAGE_MODE_NORMAL,
+			mi1 := {
+				len := 1,
+				mi := {
+					unused := {
+						pad := '1111'B,
+						odd := false,
+						mi_type := MI_TYPE_NONE
+					}
+				}
+			},
+			mi2 := omit,
+			rest_octets := ?
+		}
+	}
+};
+
+/* we expect four blocks of 14 bytes, let's fill them with content easily distinguishable */
+const octetstring c_etws_seg0 := '000102030405060708090a0b0c0d'O;
+const octetstring c_etws_seg1 := '101112131415161718191a1b1c1d'O;
+const octetstring c_etws_seg2 := '202122232425262728292a2b2c2d'O;
+const octetstring c_etws_seg3 := '303132333435363738393a3b3c3d'O;
+const octetstring c_etws := c_etws_seg0 & c_etws_seg1 & c_etws_seg2 & c_etws_seg3;
+
+/* Ensure only Paging Type 1 with segmented ETWS Primary Notification are sent after RSL_OSMO_ETWS_CMD */
+testcase TC_etws_p1ro() runs on test_CT {
+	var template RslChannelNr t_chan_nr := ts_RslChanNr_PCH_AGCH(0);
+	/* decoding the actual entire P1 rest octets by manually generated code is
+	 * too much effort; instead simply do a binary compare to this constant */
+	const bitstring c_P1RO_hdr := '00101011101'B;
+	var integer seg_received[4] := { 0, 0, 0, 0 };
+	var L1ctlDlMessage dl;
+	timer T := 10.0;
+
+	f_init();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL, ccch_mode := CCCH_MODE_COMBINED_CBCH);
+
+	RSL_CCHAN.send(ts_RSL_UD(ts_RSL_OSMO_ETWS_CMD(c_etws)));
+	/* wait for a bit until old non-ETWS Paging messages are gone */
+	f_sleep(1.0);
+	L1CTL.clear;
+	T.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_chan_nr)) -> value dl {
+		var GsmRrMessage l3 := dec_GsmRrMessage(dl.payload.data_ind.payload);
+		select (l3) {
+		case (tr_PagingType1_empty) {
+			var octetstring p1ro := l3.payload.pag_req_1.rest_octets;
+			var bitstring midamble := oct2bit(substr(p1ro, 0, 3));
+			var octetstring segment := substr(p1ro, 3, lengthof(p1ro)-3);
+			var BIT1 not_first := substr(midamble, 11, 1);
+			var integer seg_nr := bit2int(substr(midamble, 12, 4));
+			var boolean err := false;
+			if (substr(midamble, 0, 11) != c_P1RO_hdr) {
+				setverdict(fail, "Received unexpected P1 RO header ", midamble);
+			}
+			if (not_first == '1'B) {
+				select (seg_nr) {
+				case (2) {
+					if (segment != c_etws_seg1) {
+						err := true
+					} else {
+						seg_received[1] := seg_received[1] + 1;
+					}}
+				case (3) {
+					if (segment != c_etws_seg2) {
+						err := true
+					} else {
+						seg_received[2] := seg_received[2] + 1;
+					}}
+				case (4) {
+					if (segment != c_etws_seg3) {
+						err := true
+					} else {
+						seg_received[3] := seg_received[3] + 1;
+					}}
+				case else { setverdict(fail, "Unknown segment Nr ", seg_nr); }
+				}
+				if (err) {
+					setverdict(fail, "Unexpected segment ", seg_nr, ": ", segment);
+				}
+			} else {
+				if (seg_nr != 4) {
+					setverdict(fail, "Invalid number of segments ", seg_nr);
+					err := true;
+				}
+				if (segment != c_etws_seg0) {
+					setverdict(fail, "Invalid first segment ", segment);
+					err := true;
+				}
+				if (not err) {
+					seg_received[0] := seg_received[0] + 1;
+				}
+			}
+			}
+		case (tr_PagingType1) {
+			setverdict(fail, "Received unexpected PAGING TYPE 1: ", l3);
+			}
+		}
+		repeat;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+	log("Quantity of received ETWS PN segments: ", seg_received);
+	var integer i;
+	for (i := 0; i < 4; i := i+1) {
+		if (seg_received[i] < 15) {
+			setverdict(fail, "Segment ", i, " not received often enough");
+		}
+	}
+}
+
+/* Ensure only Paging Type 1 without ETWS Primary Notification are sent after disabling them */
+testcase TC_etws_p1ro_end() runs on test_CT {
+	var template RslChannelNr t_chan_nr := ts_RslChanNr_PCH_AGCH(0);
+	/* we expect four blocks of 14 bytes, let's fill them with content easily
+	 * distinguishable */
+	/* decoding the actual entire P1 rest octets by manually generated code is
+	 * too much effort; instead simply do a binary compare to this constant */
+	const bitstring c_P1RO_hdr := '00101011101'B;
+	var L1ctlDlMessage dl;
+	timer T := 10.0;
+
+	f_init();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL, ccch_mode := CCCH_MODE_COMBINED_CBCH);
+
+	RSL_CCHAN.send(ts_RSL_UD(ts_RSL_OSMO_ETWS_CMD(c_etws)));
+	/* wait for a bit until old non-ETWS Paging messages are gone */
+	f_sleep(3.0);
+	/* disable the ETWS PN again */
+	RSL_CCHAN.send(ts_RSL_UD(ts_RSL_OSMO_ETWS_CMD(''O)));
+	f_sleep(2.0);
+	T.start;
+	L1CTL.clear;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_chan_nr)) -> value dl {
+		var GsmRrMessage l3 := dec_GsmRrMessage(dl.payload.data_ind.payload);
+		select (l3) {
+		case (tr_PagingType1_empty) { repeat; }
+		case (tr_PagingType1) {
+			setverdict(fail, "Received non-empty PT1 after disabling ETWS PN: ", l3);
+			}
+		}
+		repeat;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+
 /* SMSCB TODO:
    * multiple SMS BC CMD at the same time: Ensure all of them are sent exactly once
    * extended CBCH vs. normal CBCH
@@ -908,6 +1080,9 @@ control {
 	execute( TC_cbc_sdcch8_load_idle() );
 	execute( TC_cbc_sdcch8_load_overload() );
 	}
+
+	execute( TC_etws_p1ro() );
+	execute( TC_etws_p1ro_end() );
 }
 
 
