@@ -25,6 +25,10 @@ import from IPA_Emulation all;
 import from IPA_CodecPort all;
 import from IPA_Types all;
 
+import from MobileL3_Types all;
+import from MobileL3_RRM_Types all;
+import from L3_Templates all;
+
 import from RSL_Types all;
 import from RSL_Emulation all;
 
@@ -150,6 +154,35 @@ function f_cbsp_reset_bss(integer idx) runs on CBSP_Adapter_CT {
 	[] T.timeout {
 		setverdict(fail, "timeout waiting for RESET COMPLETE");
 		mtc.stop;
+		}
+	}
+}
+
+/* send a WRITE CBS to the BSC; expect either COMPLETE or FAILURE in response*/
+function f_cbsp_write_emerg(uint16_t msg_id, uint16_t ser_no,
+			template (value) BSSMAP_FIELD_CellIdentificationList cell_list := ts_BSSMAP_CIL_BSS,
+			template (value) uint8_t emerg_ind := 1,
+			template (value) uint16_t warn_type := oct2int('0780'O),
+			template (value) uint16_t warn_per := 5,
+			template BSSMAP_FIELD_CellIdentificationList success_list := ?,
+			template CBSP_FailureListItems fail_list := omit) runs on cbsp_test_CT {
+	var template (value) CBSP_PDU tx;
+	var template CBSP_PDU rx;
+	var CBSP_IEs pages := {f_gen_page()};
+
+	tx := ts_CBSP_WRITE_EMERG(msg_id, ser_no, cell_list, emerg_ind, warn_type, warn_per);
+	CBSP[0].send(ts_CBSP_Send(g_cbsp_conn_id[0], tx));
+	if (istemplatekind(fail_list, "omit")) {
+		rx := tr_CBSP_WRITE_CBS_COMPL(msg_id, ser_no, success_list, omit);
+	} else {
+		rx := tr_CBSP_WRITE_CBS_FAIL(msg_id, ser_no, fail_list, *, success_list, omit);
+	}
+	alt {
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], rx)) {
+		setverdict(pass);
+		}
+	[] CBSP[0].receive(tr_CBSP_Recv(g_cbsp_conn_id[0], ?)) {
+		setverdict(fail, "Received unexpected CBSP");
 		}
 	}
 }
@@ -478,6 +511,57 @@ testcase TC_cbsp_write_then_reset() runs on cbsp_test_CT {
 	f_cbsp_reset_bss(0);
 }
 
+private const octetstring c_ETWS_sec_default :=
+	'00000000000000000000000000000000000000000000000000'O &
+	'00000000000000000000000000000000000000000000000000'O;
+function f_gen_etws_pn(uint16_t ser_nr, uint16_t msg_id, OCT2 msg_type := '0780'O,
+			octetstring sec_inf := c_ETWS_sec_default) return octetstring {
+	return int2oct(ser_nr, 2) & int2oct(msg_id, 2) & msg_type & sec_inf;
+}
+
+/* Write ETWS PN to single BTS; verify it arrives on DCHAN */
+testcase TC_cbsp_emerg_write_bts_cgi_dchan() runs on cbsp_test_CT {
+	var CBSP_IEs pages := {f_gen_page()};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	var ASP_RSL_Unitdata rx_rsl_ud;
+
+	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
+	f_cbsp_init_server();
+
+	/* first establish a dedicated channel */
+	var DchanTuple dt := f_est_dchan('23'O, 23, '00010203040506'O);
+
+	/* then send ETWS PN */
+	f_cbsp_write_emerg(15, 1015, cell_list);
+	var template (present) octetstring tr_apdu := f_gen_etws_pn(1015, 15);
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(IPAC_PROTO_RSL_TRX0, tr_RSL_DATA_REQ(dt.rsl_chan_nr, ?, ?))) -> value rx_rsl_ud {
+		var RSL_IE_Body l3_ie;
+		if (f_rsl_find_ie(rx_rsl_ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
+			setverdict(fail, "RSL DATA REQ without L3?");
+			mtc.stop;
+		}
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(l3_ie.l3_info.payload);
+		var template (present) APDU_Flags_V tr_flags := {
+			lastSeg := '0'B,
+			firstSeg := '0'B,
+			cR := '0'B,
+			spare := '0'B
+		};
+		if (match(l3, tr_RR_APP_INFO('0001'B, tr_apdu, tr_flags))) {
+			setverdict(pass);
+			}
+		}
+	[] IPA_RSL[0].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Waiting for APP INFO");
+		}
+	}
+}
+
+
 control {
 	execute( TC_cbsp_bsc_server() );
 	execute( TC_cbsp_bsc_client() );
@@ -499,6 +583,8 @@ control {
 	execute( TC_cbsp_kill_nonexist() );
 	execute( TC_cbsp_write_then_kill() );
 	execute( TC_cbsp_write_then_reset() );
+
+	execute( TC_cbsp_emerg_write_bts_cgi_dchan() );
 }
 
 
