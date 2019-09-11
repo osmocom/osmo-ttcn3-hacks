@@ -7,6 +7,7 @@ module PCU_Tests_RAW {
    those NS and BSSGP implementations on the BSS (PCU) side. */
 
 /* (C) 2018-2019 Harald Welte <laforge@gnumonks.org>
+ * (C) 2019 Vadim Yanitskiy <axilirator@gmail.com>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -519,6 +520,82 @@ runs on RAW_PCU_Test_CT {
 	BTS.receive(tr_RAW_PCU_EV(BTS_EV_SI13_NEGO));
 }
 
+/* FIXME: properly encode RA (see TS 24.060, table 11.2.5.2) */
+private function f_establish_tbf(out GsmRrMessage rr_imm_ass, uint8_t bts_nr := 0,
+				 uint16_t ra := oct2int('3A'O), uint8_t is_11bit := 0,
+				 PCUIF_BurstType burst_type := BURST_TYPE_0,
+				 TimingAdvance ta := 0)
+runs on RAW_PCU_Test_CT return boolean {
+	var PCUIF_Message pcu_msg;
+	var GsmRrMessage rr_msg;
+	var uint32_t fn;
+	timer T;
+
+	/* FIXME: ask the BTS component to give us the current TDMA fn */
+	fn := 1337 + ta;
+
+	/* Send RACH.ind */
+	log("Sending RACH.ind on fn=", fn, " with RA=", ra, ", TA=", ta);
+	BTS.send(ts_PCUIF_RACH_IND(bts_nr := bts_nr,
+				   ra := ra, is_11bit := is_11bit,
+				   burst_type := burst_type,
+				   fn := fn, arfcn := 871,
+				   qta := ta * 4));
+
+	/* Expect Immediate (TBF) Assignment on TS0/AGCH */
+	T.start(2.0);
+	alt {
+	[] BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := bts_nr, trx_nr := ?, ts_nr := 0,
+					 sapi := PCU_IF_SAPI_AGCH, data := ?))
+					-> value pcu_msg {
+		rr_imm_ass := dec_GsmRrMessage(pcu_msg.u.data_req.data);
+		log("Rx Immediate Assignment: ", rr_imm_ass);
+
+		/* Make sure this assignment is for us
+		 * TODO: Uplink or Downlink TBF? */
+		if (match(rr_imm_ass, tr_IMM_TBF_ASS(?, ra, fn))) {
+			setverdict(pass);
+			return true;
+		}
+
+		/* Not for us? Wait for more. */
+		repeat;
+		}
+	[] BTS.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Immediate Assignment");
+		}
+	}
+
+	return false;
+}
+
+/* Test of correct Timing Advance at the time of TBF establishment
+ * (derived from timing offset of the Access Burst). */
+testcase TC_ta_rach_imm_ass() runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_msg;
+	var boolean ok;
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* We cannot send too many TBF requests in a short time because
+	 * at some point the PCU will fail to allocate a new TBF. */
+	for (var TimingAdvance ta := 0; ta < 64; ta := ta + 16) {
+		/* Establish an Uplink TBF (send RACH.ind with current TA) */
+		ok := f_establish_tbf(rr_msg, bts_nr := 0, ta := ta);
+		if (not ok) {
+			setverdict(fail, "Failed to establish an Uplink TBF");
+			mtc.stop;
+		}
+
+		/* Make sure Timing Advance IE matches out expectations */
+		if (match(rr_msg, tr_IMM_TBF_ASS(dl := false, ta := ta))) {
+			setverdict(pass);
+		}
+	}
+}
+
 
 control {
 	execute( TC_ns_reset() );
@@ -531,6 +608,7 @@ control {
 	execute( TC_ns_so_block() );
 
 	execute( TC_pcuif_suspend() );
+	execute( TC_ta_rach_imm_ass() );
 }
 
 
