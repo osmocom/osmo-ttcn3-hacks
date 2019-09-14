@@ -21,6 +21,9 @@ import from Osmocom_Types all;
 import from GSM_Types all;
 import from GSM_RR_Types all;
 
+import from RLCMAC_CSN1_Types all;
+import from RLCMAC_Types all;
+
 import from NS_Types all;
 import from BSSGP_Types all;
 import from Osmocom_Gb_Types all;
@@ -596,6 +599,103 @@ testcase TC_ta_rach_imm_ass() runs on RAW_PCU_Test_CT {
 	}
 }
 
+/* Default link quality adaptation (Coding Scheme) ranges:
+/* CS1: ... 6 dB, CS2: 5 .. 8 dB, CS3: 7 .. 13 db, CS4: 12 ... dB */
+private template integer CS1_lqual_dB_range := (-infinity .. 6);
+private template integer CS2_lqual_dB_range := (5 .. 8);
+private template integer CS3_lqual_dB_range := (7 .. 13);
+private template integer CS4_lqual_dB_range := (12 .. infinity);
+
+testcase TC_cs_lqual_ul_tbf() runs on RAW_PCU_Test_CT {
+	var PacketUlAssign ul_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var PCUIF_Message pcu_msg;
+	var GsmRrMessage rr_msg;
+	var octetstring data;
+	var boolean ok;
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_msg);
+	if (not ok) {
+		setverdict(fail, "Failed to establish an Uplink TBF");
+		mtc.stop;
+	}
+
+	/* Make sure we received an UL TBF Assignment */
+	/* TODO: check if we got single or dynamic assignment */
+	if (match(rr_msg, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(?)))) {
+		ul_tbf_ass := rr_msg.payload.imm_ass.rest_octets.hh.pa.uldl.ass.ul;
+		log("Rx Uplink TBF assignment: ", ul_tbf_ass);
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Failed to match UL TBF Assignment");
+		mtc.stop;
+	}
+
+	var template (value) RlcmacUlBlock ul_data := t_RLCMAC_UL_DATA(
+		tfi := ul_tbf_ass.dynamic.tfi_assignment,
+		cv := 15, /* 15 UL blocks to be sent (to be overridden in loop) */
+		bsn := 0, /* TODO: what should be here? */
+		blocks := { /* To be generated in loop */ });
+
+	/* HACK: patch missing TLLI; otherwise OsmoPCU rejects DATA.req */
+	ul_data.data.tlli := '00000001'O;
+
+	/* 16 UL blocks (0 .. 32 dB, step = 2 dB) */
+	for (var integer i := 0; i < 16; i := i + 1) {
+		/* Prepare a new UL block (CV, random payload) */
+		ul_data.data.mac_hdr.countdown := (15 - i);
+		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(f_rnd_octstring(10))) };
+
+		/* Encode the payload of DATA.ind */
+		data := enc_RlcmacUlBlock(valueof(ul_data));
+		data := f_pad_oct(data, 23, '00'O); /* CS-1 */
+
+		/* Link quality in dB and our CS1-4 expectations */
+		var integer lqual := i * 2;
+
+		/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+		log("Sending DATA.ind with link quality (dB): ", lqual);
+		BTS.send(ts_PCUIF_DATA_IND(bts_nr := 0, trx_nr := 0, ts_nr := 7, block_nr := 0,
+					   sapi := PCU_IF_SAPI_PDTCH, data := data,
+					   fn := 0, arfcn := 871, lqual_cb := lqual * 10));
+		BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PDTCH_BLOCK_SENT));
+
+		/* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
+		BTS.send(ts_PCUIF_RTS_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := 871, block_nr := 0));
+		BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+					      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
+		dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
+		if (not match(dl_block, tr_RLCMAC_ACK_NACK(ul_tfi := ?, tlli := ?))) {
+			setverdict(fail, "Failed to match Packet Uplink ACK / NACK");
+			mtc.stop;
+		}
+
+		log("Rx Packet Uplink ACK / NACK with Channel Coding Command: ",
+		    dl_block.ctrl.payload.u.ul_ack_nack.gprs.ch_coding_cmd);
+
+		/* Match the received Channel Coding Command */
+		var template ChCodingCommand ch_coding;
+		select (lqual) {
+		case (CS1_lqual_dB_range) { ch_coding := CH_CODING_CS1; }
+		case (CS2_lqual_dB_range) { ch_coding := CH_CODING_CS2; }
+		case (CS3_lqual_dB_range) { ch_coding := CH_CODING_CS3; }
+		case (CS4_lqual_dB_range) { ch_coding := CH_CODING_CS4; }
+		}
+
+		if (not match(dl_block.ctrl.payload.u.ul_ack_nack.gprs.ch_coding_cmd, ch_coding)) {
+			setverdict(fail, "Channel Coding does not match our expectations: ", ch_coding);
+		} else {
+			setverdict(pass);
+		}
+	}
+}
+
 
 control {
 	execute( TC_ns_reset() );
@@ -609,6 +709,7 @@ control {
 
 	execute( TC_pcuif_suspend() );
 	execute( TC_ta_rach_imm_ass() );
+	execute( TC_cs_lqual_ul_tbf() );
 }
 
 
