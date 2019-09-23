@@ -1,0 +1,165 @@
+module SABP_Adapter {
+
+/* SABP Adapter layer, sitting on top of SABP_CodecPort.
+ * test suites can 'inherit' in order to have a SABP connection to the IUT which they're testing
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from Osmocom_Types all;
+import from General_Types all;
+import from SABP_Types all;
+import from SABP_PDU_Descriptions all;
+import from SABP_Templates all;
+import from SABP_CodecPort all;
+import from SABP_CodecPort_CtrlFunct all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+//import from Socket_API_Definitions all;
+
+const integer SABP_HDR_LEN := 3;
+
+const integer NUM_SABP := 3;
+
+type component SABP_Adapter_CT {
+	/* down-facing port to SABP Codec port */
+	port SABP_CODEC_PT SABP[NUM_SABP];
+	var IPL4asp_Types.ConnectionId g_sabp_conn_id[NUM_SABP] := { -1, -1, -1 };
+}
+
+/*! parse a single APER length determinant. Return -1 if input insufficient or -2 if invalid */
+private function f_aper_len_det(in octetstring stream, out integer len_len) return integer {
+	if (lengthof(stream) < 1) {
+		return -1;
+	}
+
+	select (stream[0] and4b 'C0'O) {
+	case ('00'O) {
+		/* total length is encoded in this octet */
+		len_len := 1;
+		return oct2int(stream[0]);
+		}
+	case ('80'O) {
+		/* total length (up to 16k) encoded in two octets */
+		if (lengthof(stream) < 2) {
+			return -1;
+		}
+		len_len := 2;
+		return (oct2int(stream[0] and4b '3F'O) * 256) + oct2int(stream[1]);
+		}
+	case ('C0'O) {
+		/* total length not known, encoded in chunks; first chunk length now known */
+		len_len := 1;
+		return oct2int(stream[0] and4b '3F'O) * 16384;
+		}
+	case else {
+		return -2;
+		}
+
+	}
+}
+
+/* The callback function has to return the length of the message if completely received. It has to return
+ * "-1" if the length cannot be determined. If the message is incomplete, but the length can be
+ * determined, then the function should return the length. In this case the callback function will not be
+ * called again for the given message - possibly increasing the performance. Alternatively the function may
+ * always return "-1" when the message is incomplete.
+ * If the callback function detects that the it will be impossible to determine the length of the message,
+ * even receiving more octets, should return "-2". In this case the connection will be closed and the
+ * length calculation error will be reported. */
+private function f_APER_getMsgLen(in octetstring stream, inout ro_integer args) return integer {
+	var integer stream_len := lengthof(stream);
+	var integer hdr_len := args[0];
+	var octetstring stream_nohdr;
+	var integer len, len_len;
+
+	if (stream_len < hdr_len + 1) {
+		return -1;
+	}
+	stream_nohdr := substr(stream, hdr_len, stream_len-hdr_len);
+
+	len := f_aper_len_det(stream_nohdr, len_len);
+	if (len < 0) {
+		/* error: return to caller */
+		return len;
+	}
+	if (len < 16384) {
+		/* full length is known: return to caller */
+		return hdr_len + len_len + len;
+	} else {
+		/* 'cursor' to next length indicator */
+		var integer cur := hdr_len + len_len + len;
+		/* iterate the whole chain of chunks */
+		while (true) {
+			if (stream_len < cur + 1) {
+				return -1;
+			}
+			len := f_aper_len_det(substr(stream, cur, stream_len-cur), len_len);
+			if (len < 0) {
+				/* error: return to caller */
+				return len;
+			}
+			if (len < 16384) {
+				/* final chunk: segment with less than 16384 bytes */
+				return cur + len_len + len;
+			} else {
+				/* point to next chunk */
+				cur := cur + len_len + len;
+			}
+		}
+	}
+	/* not reached */
+	return -2;
+}
+
+private function f_set_tcp_segmentation(integer idx) runs on SABP_Adapter_CT {
+	/* Set function for dissecting the binary stream into packets */
+	var f_IPL4_getMsgLen vl_f := refers(f_APER_getMsgLen);
+	/* Offset: 1, size of length: 3, delta: 4, multiplier: 1, big-endian */
+	SABP_CodecPort_CtrlFunct.f_IPL4_setGetMsgLen(SABP[idx], g_sabp_conn_id[idx], vl_f, {SABP_HDR_LEN});
+}
+
+function f_connect(charstring remote_host, IPL4asp_Types.PortNumber remote_port,
+		   charstring local_host, IPL4asp_Types.PortNumber local_port, integer idx := 0)
+runs on SABP_Adapter_CT {
+	var IPL4asp_Types.Result res;
+	map(self:SABP[idx], system:SABP);
+	res := SABP_CodecPort_CtrlFunct.f_IPL4_connect(SABP[idx], remote_host, remote_port,
+							local_host, local_port, 0, { tcp :={} });
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect to SABP port, check your configuration");
+		mtc.stop;
+	}
+	g_sabp_conn_id[idx] := res.connId;
+
+	f_set_tcp_segmentation(idx);
+}
+
+/* Function to use to bind to a local port as IPA server, accepting remote clients */
+function f_bind(charstring local_host, IPL4asp_Types.PortNumber local_port, integer idx := 0)
+runs on SABP_Adapter_CT {
+	var IPL4asp_Types.Result res;
+	map(self:SABP[idx], system:SABP);
+	res := SABP_CodecPort_CtrlFunct.f_IPL4_listen(SABP[idx], local_host, local_port, { tcp:={} });
+	g_sabp_conn_id[idx] := res.connId;
+
+	f_set_tcp_segmentation(idx);
+}
+
+function f_sabp_send(template (value) SABP_PDU pdu, integer idx := 0) runs on SABP_Adapter_CT {
+	SABP[idx].send(ts_SABP_Send(g_sabp_conn_id[idx], pdu));
+}
+
+function f_sabp_exp(template SABP_PDU exp, integer idx := 0) runs on SABP_Adapter_CT return SABP_PDU {
+	var SABP_RecvFrom rf;
+	SABP[idx].receive(tr_SABP_Recv(g_sabp_conn_id[idx], exp)) -> value rf;
+	return rf.msg;
+}
+
+
+}
