@@ -1,6 +1,6 @@
 #!/bin/sh
 
-FILES="*.ttcn TCCConversion.cc TCCInterface.cc TCCEncoding.cc IPL4asp_PT.cc IPL4asp_discovery.cc TELNETasp_PT.cc Native_FunctionDefs.cc SCTPasp_PT.cc CBSP_CodecPort_CtrlFunctdef.cc SABP_EncDec.cc "
+FILES="*.ttcn TCCConversion.cc TCCInterface.cc TCCEncoding.cc IPL4asp_PT.cc IPL4asp_discovery.cc TELNETasp_PT.cc Native_FunctionDefs.cc SCTPasp_PT.cc CBSP_CodecPort_CtrlFunctdef.cc SABP_EncDec.cc SABP_CodecPort_CtrlFunctDef.cc "
 #FILES+="*.ttcnpp "
 FILES+="*.asn"
 
