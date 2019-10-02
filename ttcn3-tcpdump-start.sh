@@ -1,9 +1,21 @@
 #!/bin/sh
 
-PIDFILE=/tmp/dumper.pid
+PIDFILE_PCAP=/tmp/pcap.pid
 TCPDUMP=/usr/sbin/tcpdump
 DUMPCAP=/usr/bin/dumpcap
+
+PIDFILE_NETCAT=/tmp/netcat.pid
+NETCAT=/bin/nc
+GSMTAP_PORT=4729
+
 TESTCASE=$1
+
+kill_rm_pidfile() {
+	if [ -e $1 ]; then
+		kill "$(cat "$1")"
+		rm $1
+	fi
+}
 
 echo "------ $TESTCASE ------"
 date
@@ -12,10 +24,8 @@ if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi
 
-if [ -e $PIDFILE ]; then
-	kill "$(cat "$PIDFILE")"
-	rm $PIDFILE
-fi
+kill_rm_pidfile $PIDFILE_NETCAT
+kill_rm_pidfile $PIDFILE_PCAP
 
 if [ "$(id -u)" = "0" ]; then
 	CMD="$TCPDUMP -U"
@@ -39,9 +49,14 @@ if [ -x $DUMPCAP ]; then
     fi
 fi
 
+# Create a dummy sink for GSMTAP packets
+$NETCAT -l -u -k -p $GSMTAP_PORT >/dev/null 2>$TESTCASE.netcat.stderr &
+PID=$!
+echo $PID > $PIDFILE_NETCAT
+
 $CMD -s 1500 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
 PID=$!
-echo $PID > $PIDFILE
+echo $PID > $PIDFILE_PCAP
 
 # Wait until packet dumper creates the pcap file and starts recording.
 # We generate some traffic until we see packet dumper catches it.
