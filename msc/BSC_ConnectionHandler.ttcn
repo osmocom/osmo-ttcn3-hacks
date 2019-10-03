@@ -1273,50 +1273,58 @@ runs on BSC_ConnHdlr {
 	var MgcpCommand mgcp_cmd;
 	var template PDU_ML3_MS_NW dtmf_dtap;
 
-	f_establish_fully();
+	f_mo_call_establish(cpars);
 
-	/* Create MNCC and MGCP expect */
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	/* Send DTMF: send the exact same DTAP message twice, the dup should be filtered out by
+	 * 3GPP TS 24.007 11.2.3.2 Message Type Octet / Duplicate Detection. */
 
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
-	MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc;
-	cpars.mncc_callref := mncc.u.signal.callref;
+	/* Find out the next NSD that will be used, from RAN emulation. */
+	var N_Sd_Array last_n_sd := f_bssmap_last_n_sd();
+	var uint2_t next_n_sd := f_next_n_sd(last_n_sd, 0 /* cc is index 0 */);
 
-	/* Send DTMF */
+	/* Compose DTAP with this correct NSD */
 	dtmf_dtap := ts_ML3_MO_CC_START_DTMF(cpars.transaction_id, "2");
-	dtmf_dtap.msgs.cc.startDTMF.nsd := int2bit(2, 2);
-	BSSAP.send(ts_PDU_DTAP_MO(dtmf_dtap, '00'O, true));
+
+	/* Here, pass skip_seq_patching == false so that the RAN Emulation NSD increments after this message. */
+	BSSAP.send(ts_PDU_DTAP_MO(dtmf_dtap, '00'O, false));
 	T.start;
 	alt {
-	[] MNCC.receive(tr_MNCC_START_DTMF_ind(cpars.mncc_callref, "2")) {}
+	[] MNCC.receive(tr_MNCC_START_DTMF_ind(cpars.mncc_callref, "2")) {
+		log("f_mo_seq_dtmf_dup() 1: got first START_DTMF_ind");
+		}
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for START_DTMF_ind");
 		mtc.stop;
 		}
 	}
 
+	/* Send the exact same DTAP with above NSD, which is now incorrect (has not incremented), so that this message
+	 * will get filtered by the duplicate detection. Write NSD into DTAP and pass skip_seq_patching == true. */
+	dtmf_dtap.msgs.cc.startDTMF.nsd := int2bit(next_n_sd, 2);
 	BSSAP.send(ts_PDU_DTAP_MO(dtmf_dtap, '00'O, true));
 	T.start;
 	alt {
 	[] MNCC.receive(tr_MNCC_START_DTMF_ind(cpars.mncc_callref, "2")) {
-		setverdict(fail, "Received duplicate START_DTMF_ind");
+		setverdict(fail, "f_mo_seq_dtmf_dup() 2: Received duplicate START_DTMF_ind");
 		mtc.stop;
 		}
 	[] T.timeout { }
 	}
 
+	/* Here the NSD should be correct again and we see a DTMF. */
 	dtmf_dtap := ts_ML3_MO_CC_START_DTMF(cpars.transaction_id, "3");
-	dtmf_dtap.msgs.cc.startDTMF.nsd := int2bit(3, 2);
-	BSSAP.send(ts_PDU_DTAP_MO(dtmf_dtap, '00'O, true));
+	BSSAP.send(ts_PDU_DTAP_MO(dtmf_dtap, '00'O, false));
 	alt {
-	[] MNCC.receive(tr_MNCC_START_DTMF_ind(cpars.mncc_callref, "3")) { }
+	[] MNCC.receive(tr_MNCC_START_DTMF_ind(cpars.mncc_callref, "3")) {
+		log("f_mo_seq_dtmf_dup() 3: got second START_DTMF_ind");
+		}
 	[] T.timeout {
-		setverdict(fail, "Received duplicate START_DTMF_ind");
+		setverdict(fail, "Timeout waiting for final START_DTMF_ind");
 		mtc.stop;
 		}
 	}
 
+	f_call_hangup(cpars, true);
 	setverdict(pass);
 }
 
