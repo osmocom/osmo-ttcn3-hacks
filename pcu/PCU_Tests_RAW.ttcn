@@ -552,6 +552,53 @@ runs on RAW_PCU_Test_CT return boolean {
 	return false;
 }
 
+/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+private function f_pcuif_tx_data_ind(octetstring data, int16_t lqual_cb := 0)
+runs on RAW_PCU_Test_CT {
+
+	BTS.send(ts_PCUIF_DATA_IND(bts_nr := 0, trx_nr := 0, ts_nr := 7, block_nr := 0,
+				   sapi := PCU_IF_SAPI_PDTCH, data := data,
+				   fn := 0, arfcn := 871, lqual_cb := lqual_cb));
+	BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PDTCH_BLOCK_SENT));
+}
+
+/* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
+private function f_pcuif_rx_data_req(out PCUIF_Message pcu_msg)
+runs on RAW_PCU_Test_CT {
+	BTS.send(ts_PCUIF_RTS_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := 871, block_nr := 0));
+	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+				      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
+}
+
+private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0)
+runs on RAW_PCU_Test_CT {
+	var octetstring data;
+	/* Encode the payload of DATA.ind */
+	data := enc_RlcmacUlBlock(valueof(ul_data));
+	data := f_pad_oct(data, 23, '00'O); /* CS-1 */
+
+	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+	f_pcuif_tx_data_ind(data, lqual_cb);
+}
+
+private function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT {
+	var PCUIF_Message pcu_msg;
+	f_pcuif_rx_data_req(pcu_msg);
+	dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
+}
+
+private function f_rx_rlcmac_dl_block_exp_ack_nack(out RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT {
+	f_rx_rlcmac_dl_block(dl_block);
+	if (not match(dl_block, tr_RLCMAC_ACK_NACK(ul_tfi := ?, tlli := ?))) {
+		setverdict(fail, "Failed to match Packet Uplink ACK / NACK");
+		mtc.stop;
+	}
+}
+
 testcase TC_pcuif_suspend() runs on RAW_PCU_Test_CT {
 	var octetstring ra_id := enc_RoutingAreaIdentification(mp_gb_cfg.cell_id.ra_id);
 	var GprsTlli tlli := 'FFFFFFFF'O;
@@ -851,31 +898,15 @@ testcase TC_cs_lqual_ul_tbf() runs on RAW_PCU_Test_CT {
 		ul_data.data.mac_hdr.countdown := (15 - i);
 		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(f_rnd_octstring(10))) };
 
-		/* Encode the payload of DATA.ind */
-		data := enc_RlcmacUlBlock(valueof(ul_data));
-		data := f_pad_oct(data, 23, '00'O); /* CS-1 */
-
 		/* Link quality in dB and our CS1-4 expectations */
 		var integer lqual := i * 2;
 
 		/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
 		log("Sending DATA.ind with link quality (dB): ", lqual);
-		BTS.send(ts_PCUIF_DATA_IND(bts_nr := 0, trx_nr := 0, ts_nr := 7, block_nr := 0,
-					   sapi := PCU_IF_SAPI_PDTCH, data := data,
-					   fn := 0, arfcn := 871, lqual_cb := lqual * 10));
-		BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PDTCH_BLOCK_SENT));
+		f_tx_rlcmac_ul_block(ul_data, lqual * 10);
 
 		/* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
-		BTS.send(ts_PCUIF_RTS_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
-					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-					  arfcn := 871, block_nr := 0));
-		BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
-					      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
-		dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
-		if (not match(dl_block, tr_RLCMAC_ACK_NACK(ul_tfi := ?, tlli := ?))) {
-			setverdict(fail, "Failed to match Packet Uplink ACK / NACK");
-			mtc.stop;
-		}
+		f_rx_rlcmac_dl_block_exp_ack_nack(dl_block);
 
 		log("Rx Packet Uplink ACK / NACK with Channel Coding Command: ",
 		    dl_block.ctrl.payload.u.ul_ack_nack.gprs.ch_coding_cmd);
