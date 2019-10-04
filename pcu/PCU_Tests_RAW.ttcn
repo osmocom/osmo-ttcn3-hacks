@@ -602,6 +602,25 @@ runs on RAW_PCU_Test_CT {
 	f_pcuif_tx_data_ind(data, lqual_cb);
 }
 
+private function f_tx_rlcmac_ul_n_blocks(PacketUlAssign ul_tbf_ass, integer num_blocks := 1)
+runs on RAW_PCU_Test_CT {
+	var template (value) RlcmacUlBlock ul_data := t_RLCMAC_UL_DATA(
+		tfi := ul_tbf_ass.dynamic.tfi_assignment,
+		cv := num_blocks - 1, /* num UL blocks to be sent (to be overridden in loop) */
+		bsn := 0, /* TODO: what should be here? */
+		blocks := { /* To be generated in loop */ });
+
+	/* HACK: patch missing TLLI; otherwise OsmoPCU rejects DATA.req */
+	ul_data.data.tlli := '00000001'O;
+
+	for (var integer i := 0; i < num_blocks; i := i + 1) {
+		/* Prepare a new UL block (CV, random payload) */
+		ul_data.data.mac_hdr.countdown := (num_blocks - i - 1);
+		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(f_rnd_octstring(10))) };
+		f_tx_rlcmac_ul_block(ul_data);
+	}
+}
+
 private function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block)
 runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
@@ -614,6 +633,15 @@ runs on RAW_PCU_Test_CT {
 	f_rx_rlcmac_dl_block(dl_block);
 	if (not match(dl_block, tr_RLCMAC_ACK_NACK(ul_tfi := ?, tlli := ?))) {
 		setverdict(fail, "Failed to match Packet Uplink ACK / NACK");
+		mtc.stop;
+	}
+}
+
+private function f_rx_rlcmac_dl_block_exp_dummy(out RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT {
+	f_rx_rlcmac_dl_block(dl_block);
+	if (not match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+		setverdict(fail, "Failed to match Packet DUMMY DL");
 		mtc.stop;
 	}
 }
@@ -937,6 +965,48 @@ testcase TC_cs_lqual_ul_tbf() runs on RAW_PCU_Test_CT {
 	}
 }
 
+/* Verify PCU drops TBF after some time of inactivity. */
+testcase TC_t3169() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var PCUIF_Message pcu_msg;
+	var octetstring data;
+	var boolean ok;
+
+	info_ind := valueof(ts_PCUIF_INFO_default);
+	/* Set timer to 1 sec (default 5) to speedup test: */
+	info_ind.t3169 := 1;
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		mtc.stop;
+	}
+
+	ok := f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not an Uplink TBF");
+		mtc.stop;
+	}
+
+	/* Send one UL block and make sure it is ACKED fine */
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block);
+
+	/* Wait until T3169 fires (plus 1 extra sec to make sure) */
+	f_sleep(int2float(info_ind.t3169) + 1.0);
+
+	/* Send an UL block once again, the TBF should be gone by now so no ACK */
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1);
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+}
+
 
 control {
 	execute( TC_ns_reset() );
@@ -953,6 +1023,7 @@ control {
 	execute( TC_ta_rach_imm_ass() );
 	execute( TC_ta_ptcch_ul_multi_tbf() );
 	execute( TC_cs_lqual_ul_tbf() );
+	execute( TC_t3169() );
 }
 
 
