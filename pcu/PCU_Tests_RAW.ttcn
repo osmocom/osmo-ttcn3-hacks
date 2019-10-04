@@ -644,6 +644,157 @@ testcase TC_ta_ptcch_idle() runs on RAW_PCU_Test_CT {
 	}
 }
 
+/* Test of correct Timing Advance during an active Uplink TBF.
+ *
+ * Unlike the circuit-switched domain, Uplink transmissions on PDCH time-slots
+ * are not continuous and there can be long time gaps between them. This happens
+ * due to a bursty nature of packet data. The actual Timing Advance of a MS may
+ * significantly change between such rare Uplink transmissions, so GPRS introduces
+ * additional mechanisms to control Timing Advance, and thus reduce interference
+ * between neighboring TDMA time-slots.
+ *
+ * At the moment of Uplink TBF establishment, initial Timing Advance is measured
+ * from ToA (Timing of Arrival) of an Access Burst. This is covered by another
+ * test case - TC_ta_rach_imm_ass. In response to that Access Burst the network
+ * sends Immediate Assignment on AGCH, which _may_ contain Timing Advance Index
+ * among with the initial Timing Advance value. And here PTCCH comes to play.
+ *
+ * PTCCH is a unidirectional channel on which the network can instruct a sub-set
+ * of 16 MS (whether TBFs are active or not) to adjust their Timing Advance
+ * continuously. To ensure continuous measurements of the signal propagation
+ * delay, the MSs shall transmit Access Bursts on Uplink (PTCCH/U) on sub-slots
+ * defined by an assigned Timing Advance Index (see 3GPP TS 45.002).
+ *
+ * The purpose of this test case is to verify the assignment of Timing Advance
+ * Index, and the process of Timing Advance notification on PTCCH/D. The MTC
+ * first establishes several Uplink TBFs, but does not transmit any Uplink
+ * blocks on them. During 4 TDMA multi-frame periods the MTC is sending RACH
+ * indications to the PCU, checking the correctness of two received PTCCH/D
+ * messages (period of PTCCH/D is two multi-frames).
+ */
+private altstep as_ta_ptcch(uint8_t bts_nr := 0, integer toa_factor := 0)
+runs on RAW_PCU_Test_CT {
+	var integer counter := 0;
+	var RAW_PCU_Event event;
+
+	/* Send Access Bursts on PTCCH/U for every TA Index */
+	[] BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PTCCH_UL_BURST)) -> value event {
+		log("Sending an Access Burst on PTCCH/U",
+		    ", fn=", event.data.tdma_fn,
+		    ", ToA=", counter * toa_factor);
+		/* TODO: do we care about RA and burst format? */
+		BTS.send(ts_PCUIF_RACH_IND(bts_nr := bts_nr,
+					   ra := oct2int('3A'O),
+					   is_11bit := 0,
+					   burst_type := BURST_TYPE_0,
+					   fn := event.data.tdma_fn,
+					   arfcn := 871,
+					   qta := counter * toa_factor * 4,
+					   sapi := PCU_IF_SAPI_PTCCH));
+		counter := counter + 1;
+		repeat;
+		}
+}
+
+private function f_TC_ta_ptcch_ul_multi_tbf(template PTCCHDownlinkMsg t_ta_msg)
+runs on RAW_PCU_Test_CT {
+	var PTCCHDownlinkMsg ta_msg;
+	var PCUIF_Message pcu_msg;
+	timer T;
+
+	/* First, send an RTS.req for the upcoming PTCCH/D block */
+	BTS.send(ts_PCUIF_RTS_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+				  sapi := PCU_IF_SAPI_PTCCH, fn := 0,
+				  arfcn := 871, block_nr := 0));
+	T.start(2.0);
+	alt {
+	/* Keep sending of Access Bursts during two multi-frames (period of PTCCH/D)
+	 * with increasing ToA (Timing of Arrival) values: 0, 7, 14, 28, 35... */
+	[] as_ta_ptcch(bts_nr := 0, toa_factor := 7);
+	/* In the end of 2nd multi-frame we should receive a PTCCH/D block */
+	[] BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
+					 sapi := PCU_IF_SAPI_PTCCH)) -> value pcu_msg {
+		ta_msg := dec_PTCCHDownlinkMsg(pcu_msg.u.data_req.data);
+		log("Rx PTCCH/D message: ", ta_msg);
+
+		/* Make sure Timing Advance values match our expectations */
+		if (match(ta_msg, t_ta_msg)) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "PTCCH/D message does not match: ", t_ta_msg);
+		}
+		}
+	[] BTS.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for a PTCCH/D block");
+		mtc.stop;
+		}
+	}
+}
+
+testcase TC_ta_ptcch_ul_multi_tbf() runs on RAW_PCU_Test_CT {
+	var template PacketUlAssign t_ul_tbf_ass;
+	var PacketUlAssign ul_tbf_ass[7];
+	var GsmRrMessage rr_msg[7];
+	var boolean ok;
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Enable forwarding of PTCCH/U TDMA events to us */
+	BTS.send(ts_RAW_PCU_CMD(TDMA_CMD_ENABLE_PTCCH_UL_FWD));
+
+	/* Establish 7 Uplink TBFs (USF flag is 3 bits long, '111'B is reserved) */
+	for (var integer i := 0; i < 7; i := i + 1) {
+		ok := f_establish_tbf(rr_msg[i], ta := 0);
+		if (not ok) {
+			setverdict(fail, "Failed to establish an Uplink TBF #", i);
+			mtc.stop;
+		}
+
+		/* Make sure we received an UL TBF Assignment */
+		if (match(rr_msg[i], tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(?)))) {
+			ul_tbf_ass[i] := rr_msg[i].payload.imm_ass.rest_octets.hh.pa.uldl.ass.ul;
+			log("Rx Uplink TBF assignment for #", i, ": ", ul_tbf_ass[i]);
+		} else {
+			setverdict(fail, "Failed to match UL TBF Assignment for #", i);
+			mtc.stop;
+		}
+
+		/* We expect incremental TFI/USF assignment (dynamic allocation) */
+		t_ul_tbf_ass := tr_PacketUlDynAssign(tfi := i, usf := i);
+		if (not match(ul_tbf_ass[i], t_ul_tbf_ass)) {
+			setverdict(fail, "Failed to match Packet Uplink Assignment for #", i);
+			mtc.stop;
+		}
+
+		/* We also expect Timing Advance Index to be a part of the assignment */
+		if (ul_tbf_ass[i].dynamic.ta_index != i) {
+			setverdict(fail, "Failed to match Timing Advance Index for #", i);
+			/* Keep going, the current OsmoPCU does not assign TA Index */
+		}
+	}
+
+	/* Now we have all 7 TBFs established in one-phase access mode,
+	 * however we will not be sending any data on them. Instead, we
+	 * will be sending RACH.ind on PTCCH/U during 4 multi-frame
+	 * periods (TAI 0..8), and then will check two PTCCH/D blocks.
+	 *
+	 * Why not 4 TBFs at once? Because Uplink is delayed by 3 TDMA
+	 * time-slots, so at the moment of scheduling a PTCCH/D block
+	 * the PCU has odd number of PTCCH/U Access Bursts received. */
+	f_TC_ta_ptcch_ul_multi_tbf(tr_PTCCHDownlinkMsg(
+		tai0_ta :=  7, tai1_ta := 14, tai2_ta := 21,
+		/* Other values are not known (yet) */
+		tai3_ta := ?));
+	f_TC_ta_ptcch_ul_multi_tbf(tr_PTCCHDownlinkMsg(
+		/* Other values are out of our interest */
+		tai0_ta :=  7, tai1_ta := 14, tai2_ta := 21,
+		tai3_ta := 28, tai4_ta := 35, tai5_ta := 42,
+		/* Other values are not known (yet) */
+		tai6_ta := ?));
+}
+
 /* Default link quality adaptation (Coding Scheme) ranges:
 /* CS1: ... 6 dB, CS2: 5 .. 8 dB, CS3: 7 .. 13 db, CS4: 12 ... dB */
 private template integer CS1_lqual_dB_range := (-infinity .. 6);
@@ -760,6 +911,7 @@ control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_ta_ptcch_idle() );
 	execute( TC_ta_rach_imm_ass() );
+	execute( TC_ta_ptcch_ul_multi_tbf() );
 	execute( TC_cs_lqual_ul_tbf() );
 }
 
