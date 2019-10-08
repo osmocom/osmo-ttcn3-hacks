@@ -571,6 +571,22 @@ runs on RAW_PCU_Test_CT return boolean {
 	return true;
 }
 
+private function f_imm_ass_verify_dl_tbf_ass(GsmRrMessage rr_imm_ass, out PacketDlAssign dl_tbf_ass)
+runs on RAW_PCU_Test_CT return boolean {
+
+	/* Make sure we received a DL TBF Assignment */
+	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := true, rest := tr_IaRestOctets_DLAss(?)))) {
+		dl_tbf_ass := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.dl;
+		log("Rx Downlink TBF assignment: ", dl_tbf_ass);
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Failed to match DL TBF Assignment");
+		return false;
+	}
+
+	return true;
+}
+
 /* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
 private function f_pcuif_tx_data_ind(octetstring data, int16_t lqual_cb := 0)
 runs on RAW_PCU_Test_CT {
@@ -589,6 +605,24 @@ runs on RAW_PCU_Test_CT {
 				  arfcn := 871, block_nr := 0));
 	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
 				      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
+}
+
+/* Expect an Immediate Assignment (paging) from PCU on PCUIF on specified sapi.  */
+private function f_pcuif_rx_pch_imm_tbf_ass(out GsmRrMessage rr_imm_ass)
+runs on RAW_PCU_Test_CT {
+	var PCUIF_Message pcu_msg;
+	var octetstring macblock;
+	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 0,
+				      sapi := PCU_IF_SAPI_PCH)) -> value pcu_msg;
+	/* First 3 bytes contain paging group: */
+	macblock := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
+	rr_imm_ass := dec_GsmRrMessage(macblock);
+	if (not match(rr_imm_ass, tr_IMM_TBF_ASS())) {
+		setverdict(fail, "Failed to match Immediate Assignment: ", rr_imm_ass);
+		mtc.stop;
+	}
+	BTS.send(ts_PCUIF_DATA_CNF(bts_nr := 0, trx_nr := 0, ts_nr := 0, block_nr := 0,
+				   fn := 0, arfcn := 871, sapi := PCU_IF_SAPI_PCH, data := macblock));
 }
 
 private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0)
@@ -1053,6 +1087,60 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
 }
 
+/* Test scenario where MS wants to send some data on PDCH against SGSN and it is
+ * answered, so TBFs for uplink and later for downlink are created.
+ */
+testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var PacketDlAssign dl_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var PCUIF_Message pcu_msg;
+	var octetstring data;
+	var boolean ok;
+	var OCT4 tlli := '00000001'O;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		mtc.stop;
+	}
+	ok := f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not an Uplink TBF");
+		mtc.stop;
+	}
+
+	/* Send one UL block and make sure it is ACKED fine */
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block);
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(tlli, mp_gb_cfg.cell_id));
+
+	/* Now SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(tlli, f_rnd_octstring(10)));
+	f_pcuif_rx_pch_imm_tbf_ass(rr_imm_ass);
+
+	ok := f_imm_ass_verify_dl_tbf_ass(rr_imm_ass, dl_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not a Downlink TBF");
+		mtc.stop;
+	}
+
+	/* TODO: ACK the assignment and the DL block somehow? */
+}
 
 control {
 	execute( TC_ns_reset() );
@@ -1070,6 +1158,7 @@ control {
 	execute( TC_ta_ptcch_ul_multi_tbf() );
 	execute( TC_cs_lqual_ul_tbf() );
 	execute( TC_t3169() );
+	execute( TC_mo_ping_pong() );
 }
 
 
