@@ -27,6 +27,9 @@ import from TELNETasp_PortType all;
 import from RLCMAC_CSN1_Types all;
 import from RLCMAC_Types all;
 
+import from MobileL3_CommonIE_Types all;
+import from L3_Templates all;
+
 import from NS_Types all;
 import from BSSGP_Types all;
 import from Osmocom_Gb_Types all;
@@ -810,6 +813,17 @@ runs on RAW_PCU_Test_CT {
 	poll_fn := dl_fn + f_rrbp_fn_delay(dl_block.ctrl.mac_hdr.rrbp);
 }
 
+private function f_rx_rlcmac_dl_block_exp_pkt_pag_req(out RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT {
+	var uint32_t dl_fn;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, tr_RLCMAC_PACKET_PAG_REQ())) {
+		setverdict(fail, "Failed to match Packet Paging Request: ", dl_block, " vs ", tr_RLCMAC_PACKET_PAG_REQ());
+		mtc.stop;
+	}
+}
+
 private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?)
 runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
@@ -1588,6 +1602,70 @@ testcase TC_imm_ass_dl_block_retrans() runs on RAW_PCU_Test_CT {
 	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
 }
 
+/* Test CS paging over the BTS<->PCU socket.
+ * When a (class B or C, not A) MS has an active TBF (or is on the PDCH), the MS can not react on CS paging over CCCH.
+ * Paging should be send on the PACCH.
+ *
+ * 1. Send a Paging Request over PCU socket.
+ * 2. Send a Ready-To-Send message over PCU socket
+ * 3. Expect a Paging Frame
+ */
+testcase TC_paging_cs_from_bts() runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var boolean ok;
+	var OCT4 tlli := '00000001'O;
+	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
+	var octetstring mi_enc_lv;
+	var MobileIdentityLV_Paging mi_res;
+	var hexstring imsi := f_gen_imsi(42);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		mtc.stop;
+	}
+
+	ok := f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not an Uplink TBF");
+		mtc.stop;
+	}
+
+
+	/* build mobile Identity */
+	mi := valueof(ts_MI_IMSI_LV(imsi));
+	mi_enc_lv := enc_MobileIdentityLV(mi);
+	/* Send paging request */
+	BTS.send(ts_PCUIF_PAG_REQ(bts_nr := 0, id_lv := mi_enc_lv, chan_needed := 0,
+				sapi :=PCU_IF_SAPI_PDTCH));
+
+	/* Receive it on BTS side towards MS */
+	f_rx_rlcmac_dl_block_exp_pkt_pag_req(dl_block);
+	/* FIXME: we must use .ps. here instead of .cs. (the one actually sent)
+	   because TTCN3 counts length up to octet boundary and thinks it's a
+	   PageInfoPs: */
+	mi_res := dl_block.ctrl.payload.u.paging.repeated_pageinfo.ps.mobile_identity;
+	if (oct2int(substr(mi_enc_lv, 0, 1)) != mi_res.len) {
+		/* TODO: Verify MI contents encoded match */
+		setverdict(fail, "Mobile Identity not matching (imsi=", imsi, ")");
+		mtc.stop;
+	}
+	setverdict(pass);
+}
+
 control {
 	execute( TC_ns_reset() );
 	execute( TC_ns_reset_retrans() );
@@ -1609,6 +1687,7 @@ control {
 	execute( TC_t3193() );
 	execute( TC_mo_ping_pong() );
 	execute( TC_imm_ass_dl_block_retrans() );
+	execute( TC_paging_cs_from_bts() );
 }
 
 
