@@ -4143,6 +4143,7 @@ testcase TC_pcu_data_req_pdtch() runs on test_CT {
 	f_pcu_to_l1(0, 0, 7, PCU_IF_SAPI_PDTCH, data); //c_PCU_DATA);
 }
 
+/* FIXME: PTTCH has nothing to do with TBFs */
 testcase TC_pcu_data_req_ptcch() runs on test_CT {
 	var TfiUsfArr tua := f_TfiUsfArrInit();
 	var octetstring data := '0000'O & f_rnd_octstring(21);
@@ -4155,6 +4156,94 @@ testcase TC_pcu_data_req_ptcch() runs on test_CT {
 	f_sleep(1.0);
 
 	f_pcu_to_l1(0, 0, 7, PCU_IF_SAPI_PTCCH, data);
+}
+
+private function f_TC_pcu_ptcch_ul(uint16_t ra)
+runs on test_CT {
+	var template PCUIF_Message pcu_rach_ind;
+	var PCUIF_send_data sd;
+	var GsmFrameNumber fn;
+	timer T;
+
+	/* Send an Access Burst on PTCCH/U over the Um-interface */
+	fn := f_L1CTL_RACH(L1CTL, ra := ra, combined := 0, offset := 0,
+			   chan_nr := ts_RslChanNr_PDCH(7),
+			   link_id := ts_RslLinkID_OSMO_PTCCH(0));
+
+	/* TODO: check time-slot and TRX number as soon as we extend the PCU interface */
+	pcu_rach_ind := tr_PCUIF_RACH_IND(ra := ra, fn := fn, sapi := PCU_IF_SAPI_PTCCH);
+
+	/* Expect a RACH.ind on the PCU interface (timeout is one multi-frame) */
+	T.start(52.0 * 4.615 / 1000.0);
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, pcu_rach_ind)) -> value sd {
+		log("Rx an Access Burst on the PCU interface: ", sd.data);
+		setverdict(pass);
+		T.stop;
+		}
+	[] PCU.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RACH.ind on the PCU interface");
+		/* Keep going, that's not the end of the world */
+		}
+	}
+}
+
+testcase TC_pcu_ptcch() runs on test_CT {
+	var L1ctlDlMessage dl;
+	var octetstring data;
+	timer T;
+
+	f_init_pcu_test();
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	/* Activate PDCH channel on TS7 */
+	f_TC_pcu_act_req(0, 0, 7, true);
+
+	/* Tune trxcon to that PDCH channel */
+	L1CTL.send(ts_L1CTL_DM_EST_REQ(arfcn := { false, mp_trx0_arfcn },
+				       chan_nr := valueof(ts_RslChanNr_PDCH(7)),
+				       tsc := 7));
+
+	/* Verify PTCCH/U: send several access bursts, make sure they're received */
+	for (var integer i := 0; i < 16; i := i + 1) {
+		log("Sending an Access Burst towards the L1CTL interface");
+		f_TC_pcu_ptcch_ul(oct2int(f_rnd_ra_ps()));
+	}
+
+	/* Generate a random payload for PTCCH/D (23 octets, CS-1) */
+	data := f_rnd_octstring(23);
+
+	/* Verify PTCCH/D: send a random data block, make sure it's received */
+	log("Sending a PTCCH/D block towards the PCU interface: ", data);
+	f_pcu_wait_rts_and_data_req(0, 0, 7, PCU_IF_SAPI_PTCCH, data);
+
+	/* PTCCH/D period is 2 multi-frames (2 * 52 * 4.615 ms), but
+	 * let's give it more time in case if we miss the beginning. */
+	T.start(2.0 * 2.0 * 52.0 * 4.615 / 1000.0);
+	alt {
+	/* PDCH is considered as traffic in trxcon => expect TRAFFIC.ind */
+	[] L1CTL.receive(tr_L1CTL_TRAFFIC_IND(chan_nr := t_RslChanNr_PDCH(7),
+					      link_id := tr_RslLinkID_OSMO_PTCCH(?),
+					      frame := data)) -> value dl {
+		log("Rx PTCCH/D data (traffic) block on L1CTL: ", dl);
+		setverdict(pass);
+		T.stop;
+		}
+	/* Other PHYs (e.g. virt_phy) may consider PDCH as data => expect DATA.ind */
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(chan_nr := t_RslChanNr_PDCH(7),
+					   link_id := tr_RslLinkID_OSMO_PTCCH(?),
+					   l2_data := data)) -> value dl {
+		log("Rx PTCCH/D data block on L1CTL: ", dl);
+		setverdict(pass);
+		T.stop;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for DATA.ind on L1CTL");
+		}
+	}
 }
 
 /* Send AGCH from PCU; check it appears on Um side */
@@ -6267,6 +6356,7 @@ control {
 		execute( TC_pcu_deact_req_wrong_ts() );
 		execute( TC_pcu_ver_si13() );
 		if (mp_l1_supports_gprs) {
+			execute( TC_pcu_ptcch() );
 			execute( TC_pcu_data_req_pdtch() );
 			execute( TC_pcu_data_req_ptcch() );
 			execute( TC_pcu_data_req_wrong_bts() );
