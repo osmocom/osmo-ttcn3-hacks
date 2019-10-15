@@ -676,6 +676,13 @@ function f_foo() runs on BSC_ConnHdlr{
 	/* re-configure MSC behaviour via VTY */
 }
 
+type record CrcxResponse {
+	integer resp,	/* 1 = reply with OK, 0 = do not reply, -1 = reply with error */
+	HostName mgw_rtp_ip,
+	PortNumber mgw_rtp_port,
+	MgcpConnectionId mgcp_connection_id	/* MGCP Connection ID BSS Side */
+}
+
 /* parameters related to a (MO?) voice call */
 type record CallParameters {
 	/* CC related parameters */
@@ -695,24 +702,24 @@ type record CallParameters {
 	PortNumber bss_rtp_port optional,		/* BSS Side RTP Port */
 	HostName mss_rtp_ip optional,			/* MSS Side RTP IP */
 	PortNumber mss_rtp_port optional,		/* MSS Side RTP Port */
-	HostName mgw_rtp_ip_bss,			/* BSS-facing MGW RTP IP */
-	PortNumber mgw_rtp_port_bss,			/* BSS-facing MGW RTP Port */
-	HostName mgw_rtp_ip_mss,			/* MSS-facing MGW RTP IP */
-	PortNumber mgw_rtp_port_mss,			/* MSS-facing MGW RTP Port */
+	integer got_crcx_count,
+	CrcxResponse mgw_conn_1,
+	CrcxResponse mgw_conn_2,
 	uint7_t rtp_payload_type,			/* dynamic RTP payload type */
 	charstring rtp_sdp_format,			/* AMR/8000 or the like */
 	boolean mgw_drop_dlcx optional,			/* Provoke errors by not responding to DLCX
 							   (f_mt_call and f_mt_call) */
+	boolean stop_after_cc_setup,			/* Special case: stop call establish after CC Setup */
+	boolean ran_clear_when_alerting,		/* Special case: send Clear upon CC Alerting */
 
 	MgcpCallId mgcp_call_id optional,		/* MGCP Call ID; CallAgent allocated */
 	MgcpEndpoint mgcp_ep optional			/* MGCP Endpoint, CallAgent or MGW allocated */,
-	MgcpConnectionId mgcp_connection_id_bss,	/* MGCP Connection ID BSS Side */
-	MgcpConnectionId mgcp_connection_id_mss,	/* MGCP Connection ID MSS Side */
 
-	boolean use_osmux				/* MSC is expected to use Osmux for this call */
+	boolean use_osmux,				/* MSC is expected to use Osmux for this call */
+	integer got_osmux_count
 }
 
-template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
+template (value) CallParameters t_CallParams(hexstring called := '12345'H, integer tid := 0) := {
 	called_party := called,
 	transaction_id := tid,
 	mo_call := false,
@@ -724,32 +731,43 @@ template (value) CallParameters t_CallParams(hexstring called, integer tid) := {
 	bss_rtp_port := 9000,
 	mss_rtp_ip := omit,
 	mss_rtp_port := omit,
-	mgw_rtp_ip_bss := "1.1.1.1",
-	mgw_rtp_port_bss := 10000,
-	mgw_rtp_ip_mss := "1.1.1.1",
-	mgw_rtp_port_mss := 11000,
+	got_crcx_count := 0,
+	mgw_conn_1 := {
+		resp := 1,
+		mgw_rtp_ip := "1.1.1.1",
+		mgw_rtp_port := 10000,
+		mgcp_connection_id := '11111'H
+	},
+	mgw_conn_2 := {
+		resp := 1,
+		mgw_rtp_ip := "1.1.1.1",
+		mgw_rtp_port := 11000,
+		mgcp_connection_id := '22222'H
+	},
 	rtp_payload_type := 98,
 	rtp_sdp_format := "AMR/8000",
 	mgw_drop_dlcx := false,
+	stop_after_cc_setup := false,
+	ran_clear_when_alerting := false,
 	mgcp_call_id := omit,
-	mgcp_ep := omit,
-	mgcp_connection_id_bss := '0'H,//
-	mgcp_connection_id_mss := '0'H,//
-	use_osmux := false
+	mgcp_ep := "rtpbridge/1@mgw",
+	use_osmux := false,
+	got_osmux_count := 0
 };
 
 /* Allocate a call reference and send SETUP via MNCC to MSC */
 function f_mt_call_initate(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
+	cpars.mo_call := false;
 	cpars.mncc_callref := f_rnd_int(2147483648);
 	MNCC.send(ts_MNCC_SETUP_req(cpars.mncc_callref, hex2str(g_pars.msisdn),
 					hex2str(cpars.called_party), hex2str(g_pars.imsi)));
 }
 
 private template (value) SDP_Message ts_SDP_CRCX_CN(CallParameters cpars) :=
-	ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+	ts_SDP(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_ip,
 		hex2str(cpars.mgcp_call_id), "42",
-		cpars.mgw_rtp_port_mss,
+		cpars.mgw_conn_2.mgw_rtp_port,
 		{ int2str(cpars.rtp_payload_type) },
 		{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 		  cpars.rtp_sdp_format)),
@@ -770,6 +788,8 @@ runs on BSC_ConnHdlr {
 
 	log("f_mt_call_complete 1");
 
+	cpars.got_osmux_count := 0;
+
 	/* MS <- MSC: Expect CC SETUP */
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_SETUP(cpars.transaction_id, *, cpars.called_party)));
 
@@ -783,53 +803,26 @@ runs on BSC_ConnHdlr {
 	/* Ask MSC via MNCC to create the RTP socket on the MSC/MGW side */
 	MNCC.send(ts_MNCC_RTP_CREATE(cpars.mncc_callref));
 
-	/* First MGCP CRCX (for BSS/RAN side) */
+	/* First MGCP CRCX */
 	MGCP.receive(tr_CRCX) -> value mgcp_cmd {
 		log("f_mt_call_complete 3");
-		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-
-		/* When the endpoint contains a wildcard we keep the endpoint
-		 * identifier we have set up in cpars. Otherwise we use the
-		 * endpoint name that the call agent has supplied */
-		if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard) == false) {
-			cpars.mgcp_ep := mgcp_cmd.line.ep;
+		if (not f_handle_crcx(cpars, mgcp_cmd)) {
+			return;
 		}
-
-		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_bss, cpars.mgw_rtp_ip_bss,
-							hex2str(cpars.mgcp_call_id), "42",
-							cpars.mgw_rtp_port_bss,
-							{ int2str(cpars.rtp_payload_type) },
-							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
-										cpars.rtp_sdp_format)),
-							  valueof(ts_SDP_ptime(20)) }));
-
-		if (cpars.use_osmux) {
-			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
-			if (osmux_cid != -1) { /* we expect MSC to use wildcard here */
-				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
-				mtc.stop;
-			}
-			osmux_cid := 0;
-			mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
-		} else {
-			mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
-		}
-
-		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
-		MGCP.send(mgcp_resp);
 		}
 
 
 	if (g_pars.ran_is_geran) {
-		var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
-			valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
+		var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+			tr_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_conn_1.mgw_rtp_ip), ?);
 
 		interleave {
 		/* Second MGCP CRCX (this time for MSS/CN side) */
 		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
 			log("f_mt_call_complete 4");
-			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			if (not f_handle_crcx(cpars, mgcp_cmd)) {
+				break;
+			}
 			}
 
 		/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
@@ -839,7 +832,7 @@ runs on BSC_ConnHdlr {
 
 		/* expect the MSC to trigger a BSSMAP ASSIGNMENT */
 		[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap {
-			var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+			var template BSSMAP_IE_AoIP_TransportLayerAddress tla;
 			var BSSMAP_IE_SpeechCodec codec;
 			var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
 			log("f_mt_call_complete 6");
@@ -853,8 +846,8 @@ runs on BSC_ConnHdlr {
 					mtc.stop;
 				}
 				osmuxCID := valueof(ts_OsmuxCID(0));
-				if (cpars.use_osmux and not match(bssap.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
-					setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+				if (not match(bssap.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
+					setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE. Expected ", osmuxCID, " Got ", bssap.pdu.bssmap.assignmentRequest.osmuxCID);
 					mtc.stop;
 				}
 				bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec, osmuxCID));
@@ -877,9 +870,9 @@ runs on BSC_ConnHdlr {
 		/* MDCX setting up the RAN side remote RTP address received from Assignment Complete */
 		[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
 			log("f_mt_call_complete 8");
-			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_ip,
 								hex2str(cpars.mgcp_call_id), "42",
-								cpars.mgw_rtp_port_mss,
+								cpars.mgw_conn_2.mgw_rtp_port,
 								{ int2str(cpars.rtp_payload_type) },
 								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 											cpars.rtp_sdp_format)),
@@ -890,9 +883,9 @@ runs on BSC_ConnHdlr {
 					setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != 0");
 					mtc.stop;
 				}
-				mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+				mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgw_conn_1.mgcp_connection_id, osmux_cid, sdp);
 			} else {
-				mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp);
+				mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_2.mgcp_connection_id, sdp);
 			}
 			MGCP.send(mgcp_resp);
 			}
@@ -900,25 +893,25 @@ runs on BSC_ConnHdlr {
 		/* MDCX setting up the CN side remote RTP address received from MNCC CONNECT */
 		[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
 			log("f_mt_call_complete 9");
-			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_ip,
 								hex2str(cpars.mgcp_call_id), "42",
-								cpars.mgw_rtp_port_mss,
+								cpars.mgw_conn_2.mgw_rtp_port,
 								{ int2str(cpars.rtp_payload_type) },
 								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 											cpars.rtp_sdp_format)),
 								  valueof(ts_SDP_ptime(20)) }));
-			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_2.mgcp_connection_id, sdp));
 			}
 
 		}
 	} else {
-		var template TransportLayerAddress rab_tla := ? /* FIXME: encode the mgw_rtp_ip_bss/mgw_rtp_port_bss */
+		var template TransportLayerAddress rab_tla := ? /* FIXME: encode the mgw_rtp_ip/mgw_rtp_port */
 		var template RAB_SetupOrModifyList rab_sml := tr_RAB_SML(rab_id := ?, tla := rab_tla, binding_id := ?);
 
 		interleave {
 		[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
 			var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_2.mgcp_connection_id, sdp));
 			/* MSC acknowledges the MNCC_CREATE to the MNCC handler */
 			MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
 			}
@@ -928,6 +921,13 @@ runs on BSC_ConnHdlr {
 
 		/* FIXME: same MNCC and MGCP as in 2G above */
 		}
+	}
+
+	if (cpars.use_osmux == (cpars.got_osmux_count != 0)) {
+		log("Osmux ok: use_osmux = ", cpars.use_osmux, " got_osmux_count = ", cpars.got_osmux_count);
+	} else {
+		setverdict(fail, "Osmux failure: use_osmux = ", cpars.use_osmux, " got_osmux_count = ", cpars.got_osmux_count);
+		mtc.stop;
 	}
 
 	log("f_mt_call_complete DONE");
@@ -958,6 +958,139 @@ runs on BSC_ConnHdlr {
 	setverdict(pass);
 }
 
+/* Reply to a received CRCX with an OK (or the reply configured in cpars), using the given parameters.
+ * Return true when an OK reply was sent, false otherwise.
+ * Count occurence of Osmux, include Osmux parameters in the reply if necessary. */
+function f_handle_crcx(inout CallParameters cpars, MgcpCommand mgcp_cmd)
+runs on BSC_ConnHdlr
+return boolean {
+	var CrcxResponse conn := cpars.mgw_conn_1;
+	if (cpars.got_crcx_count > 0) {
+		conn := cpars.mgw_conn_2;
+	}
+	cpars.got_crcx_count := cpars.got_crcx_count + 1;
+
+	var MgcpMessage mgcp_msg := {
+		command := mgcp_cmd
+	}
+	var template MgcpResponse mgcp_resp;
+	var MgcpOsmuxCID osmux_cid;
+	var MgcpCallId call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
+	if (ispresent(cpars.mgcp_call_id)) {
+		if (cpars.mgcp_call_id != call_id) {
+			setverdict(fail, "CRCX contained unexpected call id. Expected:", cpars.mgcp_call_id, " got:", call_id);
+			mtc.stop;
+		}
+	} else {
+		cpars.mgcp_call_id := call_id;
+	}
+
+	/* When the endpoint contains a wildcard we keep the endpoint
+	 * identifier we have set up in cpars. Otherwise we use the
+	 * endpoint name that the call agent has supplied */
+	if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard) == false) {
+		cpars.mgcp_ep := mgcp_cmd.line.ep;
+	}
+
+	if (conn.resp == -1) {
+		/* Reply with error */
+		var MgcpResponse mgcp_rsp := {
+			line := {
+				code := "542",
+				trans_id := mgcp_cmd.line.trans_id,
+				string := "FORCED_FAIL"
+			},
+			sdp := omit
+
+		}
+		var MgcpParameter mgcp_rsp_param := {
+			code := "Z",
+			val := cpars.mgcp_ep
+		};
+		mgcp_rsp.params[0] := mgcp_rsp_param;
+		MGCP.send(mgcp_rsp);
+		return false;
+	}
+
+	if (conn.resp == 0) {
+		/* Do not reply at all */
+		return false;
+	}
+
+	if (conn.resp != 1) {
+		setverdict(fail, "Unexpected value for cpars.mgw_conn_*.resp, expect -1, 0 or 1");
+		mtc.stop;
+	}
+
+	var SDP_Message sdp := valueof(ts_SDP(conn.mgw_rtp_ip, conn.mgw_rtp_ip,
+						hex2str(cpars.mgcp_call_id), "42",
+						conn.mgw_rtp_port,
+						{ int2str(cpars.rtp_payload_type) },
+						{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
+									cpars.rtp_sdp_format)),
+						  valueof(ts_SDP_ptime(20)) }));
+
+	if (f_mgcp_contains_par(mgcp_msg, "X-OSMUX")) {
+		if (not cpars.use_osmux) {
+			setverdict(fail, "MSC sent X-Osmux parameter in MGCP, but not expecting any Osmux");
+			mtc.stop;
+		}
+		cpars.got_osmux_count := cpars.got_osmux_count + 1;
+		/* we expect MSC to use wildcard here, i.e. osmux_cid == -1 */
+		osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+		log("f_handle_crcx(): got Osmux CID: ", osmux_cid);
+		if (osmux_cid != -1) {
+			setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
+			mtc.stop;
+		}
+
+		osmux_cid := 0;
+		mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, conn.mgcp_connection_id, osmux_cid, sdp);
+	} else {
+		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, conn.mgcp_connection_id, sdp);
+	}
+
+	f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
+	MGCP.send(mgcp_resp);
+	return true;
+}
+
+
+altstep as_optional_mgcp_crcx(CallParameters cpars) runs on BSC_ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		log("as_optional_mgcp_crcx: rx CRCX");
+		f_handle_crcx(cpars, mgcp_cmd);
+
+		/* Without this 'repeat', the as_optional_mgcp_crcx() exits currently waiting interleaves as soon as an
+		 * CRCX is handled. */
+		repeat;
+		}
+}
+
+private altstep as_optional_mgcp_mdcx(HostName mgw_rtp_ip, PortNumber mgw_rtp_port) runs on BSC_ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
+		log("as_optional_mgcp_mdcx: rx MDCX");
+		log(mgcp_cmd);
+		var charstring conn_id;
+		var charstring rtp_payload_type;
+		f_mgcp_find_param_entry(mgcp_cmd.params, "I", conn_id);
+		rtp_payload_type := mgcp_cmd.sdp.media_list[0].media_field.fmts[0];
+
+		var SDP_Message sdp := valueof(ts_SDP(mgw_rtp_ip, mgw_rtp_ip,
+							mgcp_cmd.sdp.origin.session_id, "42",
+							mgw_rtp_port,
+							{ rtp_payload_type },
+							{ valueof(ts_SDP_ptime(20)) }));
+		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, str2hex(conn_id), sdp));
+
+		/* Without this 'repeat', currently active other interleave and alt series exit as soon as an MDCX is
+		 * handled. */
+		repeat;
+	}
+}
+
 function f_mo_call_establish(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 
@@ -967,6 +1100,8 @@ runs on BSC_ConnHdlr {
 	var boolean respond_to_dlcx;
 	var PDU_BSSAP bssap;
 	var MgcpOsmuxCID osmux_cid;
+
+	cpars.mo_call := true;
 
 	if (cpars.emergency) {
 		f_establish_fully(EST_TYPE_EMERG_CALL);
@@ -984,8 +1119,14 @@ runs on BSC_ConnHdlr {
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
 	}
 
-	var BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
-		valueof(ts_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_rtp_ip_bss),cpars.mgw_rtp_port_bss));
+	if (cpars.stop_after_cc_setup) {
+		return;
+	}
+
+	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+		tr_BSSMAP_IE_AoIP_TLA4(f_inet_addr(cpars.mgw_conn_1.mgw_rtp_ip), ?);
+
+	var default mdcx := activate(as_optional_mgcp_mdcx(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_port));
 
 	interleave {
 	[] MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc {
@@ -994,43 +1135,20 @@ runs on BSC_ConnHdlr {
 		MNCC.send(ts_MNCC_RTP_CREATE(cpars.mncc_callref));
 		}
 
-	/* First MGCP CRCX (for BSS/RAN side) */
+	/* First MGCP CRCX */
 	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
 		log("f_mo_call_establish 2: rx 1st CRCX");
-		cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-
-		/* When the endpoint contains a wildcard we keep the endpoint
-		 * identifier we have set up in cpars. Otherwise we use the
-		 * endpoint name that the call agent has supplied */
-		if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard) == false) {
-			cpars.mgcp_ep := mgcp_cmd.line.ep;
+		if (not f_handle_crcx(cpars, mgcp_cmd)) {
+			break;
+		}
 		}
 
-		if (cpars.use_osmux) {
-			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
+	/* Second MGCP CRCX */
+	[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
+		log("f_mo_call_establish 6: rx 2nd CRCX");
+		if (not f_handle_crcx(cpars, mgcp_cmd)) {
+			break;
 		}
-
-		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_bss, cpars.mgw_rtp_ip_bss,
-							hex2str(cpars.mgcp_call_id), "42",
-							cpars.mgw_rtp_port_bss,
-							{ int2str(cpars.rtp_payload_type) },
-							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
-										cpars.rtp_sdp_format)),
-							  valueof(ts_SDP_ptime(20)) }));
-
-		if (cpars.use_osmux) {
-			osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
-			if (osmux_cid != -1) { /* we expect MSC to use wildcard here */
-				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
-				mtc.stop;
-			}
-			osmux_cid := 0;
-			mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
-		} else {
-			mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, sdp);
-		}
-		f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(cpars.mgcp_ep));
-		MGCP.send(mgcp_resp);
 		}
 
 	[] MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref)) {
@@ -1050,7 +1168,7 @@ runs on BSC_ConnHdlr {
 		var BSSMAP_IE_SpeechCodec codec;
 		var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
 
-		if (tla_ass != bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer) {
+		if (not match(bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer, tla_ass)) {
 			log("Expected:", tla_ass);
 			log("Got:", bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer);
 			setverdict(fail, "MSC sent Assignment Request with unexpected AoIP Transport Layer IE");
@@ -1084,9 +1202,9 @@ runs on BSC_ConnHdlr {
 	/* MDCX setting up the RAN side remote RTP address received from Assignment Complete */
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
 		log("f_mo_call_establish 5: rx MDCX for the RAN side");
-		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_ip,
 							hex2str(cpars.mgcp_call_id), "42",
-							cpars.mgw_rtp_port_mss,
+							cpars.mgw_conn_2.mgw_rtp_port,
 							{ int2str(cpars.rtp_payload_type) },
 							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 										cpars.rtp_sdp_format)),
@@ -1098,22 +1216,25 @@ runs on BSC_ConnHdlr {
 				setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != 0");
 				mtc.stop;
 			}
-			mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_bss, osmux_cid, sdp);
+			mgcp_resp := ts_MDCX_ACK_osmux(mgcp_cmd.line.trans_id, cpars.mgw_conn_1.mgcp_connection_id, osmux_cid, sdp);
 		} else {
-			mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp);
+			mgcp_resp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_2.mgcp_connection_id, sdp);
 		}
 		MGCP.send(mgcp_resp);
 		}
 
-	/* Second MGCP CRCX (this time for MSS/CN side) */
-	[] MGCP.receive(tr_CRCX(cpars.mgcp_ep)) -> value mgcp_cmd {
-		log("f_mo_call_establish 6: rx 2nd CRCX, for CN side");
-		var SDP_Message sdp := valueof(ts_SDP_CRCX_CN(cpars));
-		MGCP.send(ts_CRCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-		}
-
 	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id))) {
 		log("f_mo_call_establish 7: rx CC Alerting");
+
+		if (cpars.ran_clear_when_alerting) {
+			if (g_pars.ran_is_geran) {
+				BSSAP.send(ts_BSSMAP_ClearRequest(0));
+			} else {
+				BSSAP.send(ts_RANAP_IuReleaseRequest(ts_RanapCause_om_intervention));
+			}
+			break;
+		}
+
 		cpars.mncc_callref := mncc.u.signal.callref;
 		/* Call Proceeding */
 		MNCC.send(ts_MNCC_RTP_CONNECT(cpars.mncc_callref,
@@ -1127,31 +1248,30 @@ runs on BSC_ConnHdlr {
 		log("f_mo_call_establish 8: rx MNCC SETUP COMPLETE ind");
 		}
 
-	/* second MDCX setting up the CN side remote RTP address and codec received from MNCC RTP CONNECT */
-	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
-		log("f_mo_call_establish 9: rx MDCX for CN side");
-		var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
-							hex2str(cpars.mgcp_call_id), "42",
-							cpars.mgw_rtp_port_mss,
-							{ int2str(cpars.rtp_payload_type) },
-							{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
-										cpars.rtp_sdp_format)),
-							  valueof(ts_SDP_ptime(20)) }));
-		MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
-		}
-
 	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CONNECT(cpars.transaction_id))) {
 		log("f_mo_call_establish 10: rx CC CONNECT");
 		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CONNECT_ACK(cpars.transaction_id)));
 		}
+
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id))) {
+		log("f_mo_call_establish 11: rx CC RELEASE");
+		f_expect_clear();
+		break;
+		}
+	}
+
+	f_sleep(0.5);
+	deactivate(mdcx);
+
+	if (cpars.use_osmux == (cpars.got_osmux_count != 0)) {
+		log("Osmux ok: use_osmux = ", cpars.use_osmux, " got_osmux_count = ", cpars.got_osmux_count);
+	} else {
+		setverdict(fail, "Osmux failure: use_osmux = ", cpars.use_osmux, " got_osmux_count = ", cpars.got_osmux_count);
+		mtc.stop;
 	}
 
 	log("f_mo_call_establish DONE");
 	setverdict(pass);
-}
-
-private altstep as_optional_mgcp_mdcx() runs on BSC_ConnHdlr {
-	[] MGCP.receive(tr_MDCX) {};
 }
 
 function f_call_hangup(inout CallParameters cpars, boolean release_by_ms, boolean is_csfb := false)
@@ -1194,7 +1314,7 @@ runs on BSC_ConnHdlr {
 
 	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
 
-	var default mdcx := activate(as_optional_mgcp_mdcx());
+	var default mdcx := activate(as_optional_mgcp_mdcx(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_port));
 
 	/* clearing of radio channel */
 	interleave {

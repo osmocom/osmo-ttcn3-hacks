@@ -608,12 +608,7 @@ testcase TC_cmserv_imsi_unknown() runs on MTC_CT {
 
 friend function f_tc_lu_and_mo_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
-	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-
+	var CallParameters cpars := valueof(t_CallParams);
 	f_perform_lu();
 	f_mo_call(cpars);
 }
@@ -939,7 +934,6 @@ testcase TC_imsi_detach_by_imei() runs on MTC_CT {
 private function f_emerg_call(MobileIdentityLV mi) runs on BSC_ConnHdlr {
 	var CallParameters cpars := valueof(t_CallParams('112'H, 0));
 	cpars.emergency := true;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
 
 	f_mo_call(cpars);
 }
@@ -1213,14 +1207,14 @@ friend function f_tc_mo_setup_and_nothing(charstring id, BSC_ConnHdlrPars pars) 
 	f_init_handler(pars, 190.0);
 
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	cpars.mgw_conn_2.resp := 0;
+	cpars.stop_after_cc_setup := true;
+
+	f_vty_config(MSCVTY, "msc", "mncc guard-timeout 20");
 
 	f_perform_lu();
 
-	f_establish_fully();
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
-
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
+	f_mo_call_establish(cpars);
 
 	var default ccrel := activate(as_optional_cc_rel(cpars));
 
@@ -1247,28 +1241,15 @@ friend function f_tc_mo_crcx_ran_timeout(charstring id, BSC_ConnHdlrPars pars) r
 	var MgcpCommand mgcp_cmd;
 
 	f_perform_lu();
+	/* Do not respond to the second CRCX */
+	cpars.mgw_conn_2.resp := 0;
+	f_mo_call_establish(cpars);
 
-	f_establish_fully();
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	var default ccrel := activate(as_optional_cc_rel(cpars));
 
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
-	MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc;
-	cpars.mncc_callref := mncc.u.signal.callref;
-	MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
+	f_expect_clear(60.0);
 
-	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
-	cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-	cpars.mgcp_ep := mgcp_cmd.line.ep;
-	/* never respond to this */
-
-	/* When the connection with the MGW fails, the MSC will first request
-	 * a release via call control. We will answer this request normally. */
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
-
-	f_expect_clear(30.0);
+	deactivate(ccrel);
 }
 testcase TC_mo_crcx_ran_timeout() runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
@@ -1282,75 +1263,18 @@ testcase TC_mo_crcx_ran_timeout() runs on MTC_CT {
 /* Test MO Call with reject to RAN-side CRCX */
 friend function f_tc_mo_crcx_ran_reject(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
+
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	var MNCC_PDU mncc;
-	var MgcpCommand mgcp_cmd;
+
+	/* Respond with error for the first CRCX */
+	cpars.mgw_conn_1.resp := -1;
 
 	f_perform_lu();
+	f_mo_call_establish(cpars);
 
-	f_establish_fully();
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
-
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
-	MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc;
-	cpars.mncc_callref := mncc.u.signal.callref;
-	MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
-
-	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
-
-	/* Detect if the received CRCX is a wildcarded CRCX request. If yes,
-	 * set an endpoint name that fits the pattern. If not, just use the
-	 * endpoint name from the request */
-	if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard)) {
-		cpars.mgcp_ep := "rtpbridge/1@mgw";
-	} else {
-		cpars.mgcp_ep := mgcp_cmd.line.ep;
-	}
-
-	cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-
-	/* Respond to CRCX with error */
-	var MgcpResponse mgcp_rsp := {
-		line := {
-			code := "542",
-			trans_id := mgcp_cmd.line.trans_id,
-			string := "FORCED_FAIL"
-		},
-		sdp := omit
-	}
-	var MgcpParameter mgcp_rsp_param := {
-		code := "Z",
-		val := cpars.mgcp_ep
-	};
-	mgcp_rsp.params[0] := mgcp_rsp_param;
-	MGCP.send(mgcp_rsp);
-
-	timer T := 30.0;
-	T.start;
-	alt {
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for channel release");
-		mtc.stop;
-		}
-	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id))) {
-		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
-		repeat;
-		}
-	[] MNCC.receive { repeat; }
-	[] GSUP.receive { repeat; }
-	/* Note: As we did not respond properly to the CRCX from the MSC we
-	 * expect the MSC to omit any further MGCP operation (At least in the
-	 * the current implementation, there is no recovery mechanism implemented
-	 * and a DLCX can not be performed as the MSC does not know a specific
-	 * endpoint yet. */
-	[] MGCP.receive {
-		setverdict(fail, "Unexpected MGCP message");
-		mtc.stop;
-		}
-	[] as_clear_cmd_compl_disc();
-	}
+	var default ccrel := activate(as_optional_cc_rel(cpars));
+	f_expect_clear(60.0);
+	deactivate(ccrel);
 }
 testcase TC_mo_crcx_ran_reject() runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
@@ -1520,10 +1444,6 @@ testcase TC_mt_t310() runs on MTC_CT {
 friend function f_tc_gsup_cancel(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
 
 	/* Location Update to make subscriber known */
 	f_perform_lu();
@@ -1741,14 +1661,7 @@ testcase TC_lu_imsi_auth_tmsi_encr_013_2() runs on MTC_CT {
 private function f_tc_lu_and_mt_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '10004'H;
-	cpars.mgcp_connection_id_mss := '10005'H;
 	cpars.use_osmux := pars.use_osmux;
-
-	/* Note: This is an optional parameter. When the call-agent (MSC) does
-	 * supply a full endpoint name this setting will be overwritten. */
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
 
 	f_perform_lu();
 	f_mt_call(cpars);
@@ -1773,11 +1686,6 @@ testcase TC_lu_and_mt_call_osmux() runs on MTC_CT {
 private function f_tc_mo_setup_dtmf_dup(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.mo_call := true;
 
 	f_perform_lu();
 	f_mo_seq_dtmf_dup(cpars);
@@ -1838,20 +1746,11 @@ friend function f_tc_mo_release_timeout(charstring id, BSC_ConnHdlrPars pars) ru
 	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
 
+	/* Do not respond to the second CRCX */
+	cpars.mgw_conn_2.resp := 0;
+
 	f_perform_lu();
-
-	f_establish_fully();
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
-
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
-	MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc;
-	cpars.mncc_callref := mncc.u.signal.callref;
-	MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
-
-	/* Drop CRCX */
-	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
+	f_mo_call_establish(cpars);
 
 	var default ccrel := activate(as_optional_cc_rel(cpars));
 
@@ -1872,13 +1771,6 @@ testcase TC_mo_release_timeout() runs on MTC_CT {
 private function f_tc_lu_and_mt_call_no_dlcx_resp(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '10004'H;
-	cpars.mgcp_connection_id_mss := '10005'H;
-
-	/* Note: This is an optional parameter. When the call-agent (MSC) does
-	 * supply a full endpoint name this setting will be overwritten. */
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
 
 	/* Intentionally disable the CRCX response */
 	cpars.mgw_drop_dlcx := true;
@@ -3107,10 +2999,6 @@ runs on BSC_ConnHdlr {
 
 	/* Call parameters taken from f_tc_lu_and_mt_call */
 	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
-	cpars.mgcp_connection_id_bss := '10004'H;
-	cpars.mgcp_connection_id_mss := '10005'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.bss_rtp_port := 1110;
 
 	/* Perform location update */
 	f_perform_lu();
@@ -3190,51 +3078,13 @@ testcase TC_lu_and_mo_ussd_during_mt_call() runs on MTC_CT {
 friend function f_tc_mo_cc_bssmap_clear(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	var MNCC_PDU mncc;
-	var MgcpCommand mgcp_cmd;
+	cpars.ran_clear_when_alerting := true;
 
 	f_perform_lu();
 
-	f_establish_fully();
-	f_create_mncc_expect(hex2str(cpars.called_party));
-	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
-
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_SETUP(cpars.transaction_id, cpars.called_party)));
-	MNCC.receive(tr_MNCC_SETUP_ind(?, tr_MNCC_number(hex2str(cpars.called_party)))) -> value mncc;
-	cpars.mncc_callref := mncc.u.signal.callref;
-	log("mncc_callref=", cpars.mncc_callref);
-	MNCC.send(ts_MNCC_CALL_PROC_req(cpars.mncc_callref, cpars.mncc_bearer_cap));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
-
-	MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
-	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_ALERTING(cpars.transaction_id)));
-	MGCP.receive(tr_CRCX);
-
-	f_sleep(1.0);
-	if (pars.ran_is_geran) {
-		BSSAP.send(ts_BSSMAP_ClearRequest(0));
-	} else {
-		BSSAP.send(ts_RANAP_IuReleaseRequest(ts_RanapCause_om_intervention));
-	}
-
 	var default ccrel := activate(as_optional_cc_rel(cpars));
-
-	if (pars.ran_is_geran) {
-		interleave {
-		[] MNCC.receive(tr_MNCC_REL_ind(?, ?)) { };
-		[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
-			BSSAP.send(ts_BSSMAP_ClearComplete);
-			};
-		}
-	} else {
-		interleave {
-		[] MNCC.receive(tr_MNCC_REL_ind(?, ?)) { };
-		[] BSSAP.receive(tr_RANAP_IuReleaseCommand(?)) {
-			BSSAP.send(ts_RANAP_IuReleaseComplete);
-			};
-		}
-	}
-
+	f_mo_call_establish(cpars);
+	f_expect_clear()
 	deactivate(ccrel);
 
 	f_sleep(1.0);
@@ -3255,10 +3105,6 @@ runs on BSC_ConnHdlr {
 
 	/* Call parameters taken from f_tc_lu_and_mt_call */
 	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
-	cpars.mgcp_connection_id_bss := '10004'H;
-	cpars.mgcp_connection_id_mss := '10005'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.bss_rtp_port := 1110;
 
 	/* Perform location update */
 	f_perform_lu();
@@ -5020,13 +4866,6 @@ private function f_mt_lu_and_csfb_call(charstring id, BSC_ConnHdlrPars pars, boo
 
 	var octetstring vlr_name := f_enc_dns_hostname(mp_vlr_name);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '10004'H;
-	cpars.mgcp_connection_id_mss := '10005'H;
-
-	/* Note: This is an optional parameter. When the call-agent (MSC) does
-	 * supply a full endpoint name this setting will be overwritten. */
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
 
 	/* Initiate a call via MNCC interface */
 	f_mt_call_initate(cpars);
@@ -5142,11 +4981,6 @@ testcase TC_sgsap_vlr_failure() runs on MTC_CT {
 private function f_tc_ho_inter_bsc_unknown_cell(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.mo_call := true;
 
 	f_perform_lu();
 	f_mo_call_establish(cpars);
@@ -5175,25 +5009,20 @@ testcase TC_ho_inter_bsc_unknown_cell() runs on MTC_CT {
 private altstep as_mgcp_ack_all_mdcx(CallParameters cpars) runs on BSC_ConnHdlr {
 	var MgcpCommand mgcp_cmd;
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
-			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_rtp_ip_mss, cpars.mgw_rtp_ip_mss,
+			var SDP_Message sdp := valueof(ts_SDP(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_ip,
 								hex2str(cpars.mgcp_call_id), "42",
-								cpars.mgw_rtp_port_mss,
+								cpars.mgw_conn_2.mgw_rtp_port,
 								{ int2str(cpars.rtp_payload_type) },
 								{ valueof(ts_SDP_rtpmap(cpars.rtp_payload_type,
 											cpars.rtp_sdp_format)),
 								  valueof(ts_SDP_ptime(20)) }));
-			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgcp_connection_id_mss, sdp));
+			MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_2.mgcp_connection_id, sdp));
 			repeat;
 		}
 }
 
 private function f_tc_ho_inter_bsc0(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.mo_call := true;
 
 	f_init_handler(pars);
 
@@ -5353,11 +5182,6 @@ function f_ML3_patch_seq_nr_MS_NW(in uint2_t seq_nr, inout octetstring enc_l3) {
 
 private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
-	cpars.bss_rtp_port := 1110;
-	cpars.mgcp_connection_id_bss := '22222'H;
-	cpars.mgcp_connection_id_mss := '33333'H;
-	cpars.mgcp_ep := "rtpbridge/1@mgw";
-	cpars.mo_call := true;
 	var hexstring ho_number := f_gen_msisdn(99999);
 
 	f_init_handler(pars);
