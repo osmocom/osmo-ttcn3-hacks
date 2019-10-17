@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-SUBDIRS=bsc bsc-nat bts ggsn_tests hlr mgw msc pcu remsim sccp selftest sgsn sip sysinfo
+SUBDIRS=bsc bsc-nat bts ggsn_tests hlr mgw msc pcu remsim sccp selftest sgsn sip stp sysinfo
 
 NPROC=$(shell nproc 2>/dev/null)
 ifeq ($(NPROC),)

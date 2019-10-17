@@ -1,0 +1,451 @@
+module STP_Tests_M3UA {
+
+/* Osmocom STP test suite in in TTCN-3
+ * (C) 2019 Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+friend module STP_Tests;
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+
+import from Osmocom_VTY_Functions all;
+
+import from M3UA_Types all;
+import from M3UA_Templates all;
+import from M3UA_CodecPort all;
+import from M3UA_CodecPort_CtrlFunct all;
+
+import from M3UA_Emulation all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
+
+import from SCCP_Types all;
+import from SCCP_Templates all;
+import from SCCPasp_Types all;
+import from SCCP_Emulation all;
+
+import from STP_Tests_Common all;
+
+modulepar {
+	integer mp_stp_m3ua_port := 2905;
+	integer mp_local_m3ua_port := 9999;
+}
+
+private const integer NR_M3UA := 3;
+
+type component RAW_M3UA_CT extends Test_CT {
+	port M3UA_CODEC_PT M3UA[NR_M3UA];
+	var integer g_m3ua_conn_id[NR_M3UA];
+}
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+private altstep as_m3ua_sctp() runs on RAW_M3UA_CT {
+	[] any from M3UA.receive(tr_SctpAssocChange) { repeat; }
+	[] any from M3UA.receive(tr_SctpPeerAddrChange) { repeat; }
+}
+
+friend function f_M3UA_send(integer idx, template (present) PDU_M3UA msg, template integer stream := 0)
+runs on RAW_M3UA_CT {
+	M3UA[idx].send(t_M3UA_Send(g_m3ua_conn_id[idx], msg, stream));
+}
+
+friend function f_M3UA_exp(integer idx, template (present) PDU_M3UA msg) runs on RAW_M3UA_CT {
+	var M3UA_RecvFrom rx;
+	alt {
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(msg)) {
+		setverdict(pass);
+		}
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(?)) -> value rx {
+		setverdict(fail, "Received unexpected M3UA[", idx, "] ", rx,
+			   "while waiting for ", msg);
+		mtc.stop;
+		}
+	}
+}
+
+friend function f_M3UA_connect(integer i) runs on RAW_M3UA_CT {
+	var Result res;
+	res := M3UA_CodecPort_CtrlFunct.f_IPL4_connect(M3UA[i], mp_stp_ip, mp_stp_m3ua_port,
+						       mp_local_ip, mp_local_m3ua_port+i, -1,
+							{sctp:=valueof(ts_SCTP)});
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect M3UA socket, check your configuration");
+	mtc.stop;
+	}
+	g_m3ua_conn_id[i] := res.connId;
+}
+
+friend function f_init_m3ua() runs on RAW_M3UA_CT {
+	var integer i;
+
+	f_init_common();
+
+	activate(as_m3ua_sctp());
+
+	for (i := 0; i < NR_M3UA; i:=i+1) {
+		map(self:M3UA[i], system:M3UA_CODEC_PT);
+		f_M3UA_connect(i);
+	}
+}
+
+/* perform an outbound ASP-UP procedure */
+friend function f_M3UA_asp_up(integer idx, template (omit) OCT4 aspid := omit) runs on RAW_M3UA_CT {
+	f_M3UA_send(idx, ts_M3UA_ASPUP(aspid));
+	f_M3UA_exp(idx, tr_M3UA_ASPUP_ACK);
+}
+
+/* perform an outbound BEAT procedure */
+friend function f_M3UA_beat(integer idx, template (omit) octetstring hbd) runs on RAW_M3UA_CT {
+	if (istemplatekind(hbd, "omit")) {
+		f_M3UA_send(idx, ts_M3UA_BEAT(omit));
+		f_M3UA_exp(idx, tr_M3UA_BEAT_ACK(omit));
+	} else {
+		f_M3UA_send(idx, ts_M3UA_BEAT(ts_M3UA_hb_data(hbd)));
+		f_M3UA_exp(idx, tr_M3UA_BEAT_ACK(tr_M3UA_hb_data(hbd)));
+	}
+}
+
+/* perform an outbound ASP-ACTIVATE procedure */
+friend function f_M3UA_asp_act(integer idx, template (omit) M3UA_Traffic_Mode_Type tmt := omit,
+				template (omit) OCT4 rctx := omit) runs on RAW_M3UA_CT {
+	f_M3UA_send(idx, ts_M3UA_ASPAC(tmt, rctx));
+	f_M3UA_exp(idx, tr_M3UA_ASPAC_ACK(tmt, rctx));
+}
+
+/* perform outbound ASP-UP and ASP-ACT, optionally expect interemittent NOTIFY */
+friend function f_M3UA_asp_up_act(integer idx, template (omit) M3UA_Traffic_Mode_Type tmt := omit,
+				   template (omit) OCT4 rctx := omit,
+				   template (omit) OCT2 ntfy_after_up := c_M3UA_ST_I_AS_INACTIVE,
+				   template (omit) OCT2 ntfy_after_act := c_M3UA_ST_I_AS_ACTIVE)
+runs on RAW_M3UA_CT {
+	f_M3UA_asp_up(idx, omit);
+	if (not istemplatekind(ntfy_after_up, "omit")) {
+		f_M3UA_exp(idx, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, ntfy_after_up, *));
+	}
+	f_M3UA_asp_act(idx, tmt, rctx);
+	if (not istemplatekind(ntfy_after_act, "omit")) {
+		f_M3UA_exp(idx, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, ntfy_after_act, *));
+	}
+}
+
+
+/* Test the ASP-UP procedure */
+testcase TC_connect_asp_up() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up(0);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
+}
+
+/* Test the heartbeat procedure without optional heartbeat data payload */
+testcase TC_beat() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up(0);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
+	f_M3UA_beat(0, omit);
+}
+
+/* Test the heartbeat procedure with optional heartbeat data payload */
+testcase TC_beat_payload() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up(0);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
+	f_M3UA_beat(0, 'a1a2a3a4a5'O);
+}
+
+/* Test the ASP-ACTIVATE procedure (without traffic-mode or routing ctx) */
+testcase TC_asp_act() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up_act(0);
+}
+
+/* Test the ASP-ACTIVATE procedure with traffic-mode override */
+testcase TC_asp_act_override() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit);
+}
+
+/* Test the ASP-ACTIVATE procedure with traffic-mode override */
+testcase TC_asp_act_loadshare() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_loadshare, omit);
+}
+
+/* Test the ASP-ACTIVATE procedure with traffic-mode broadcast */
+testcase TC_asp_act_broadcast() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_broadcast, omit);
+}
+
+/* Test if traffic is routed from idx_tx/pc_tx to idx_rx/pc_rx */
+private function f_test_traffic(integer idx_tx, template (omit) OCT4 rctx_sender, OCT4 pc_tx,
+				integer idx_rx, template (omit) OCT4 rctx_receiver, OCT4 pc_rx,
+				OCT1 si := '23'O, OCT1 ni := '00'O, OCT1 mp := '00'O, OCT1 sls := '00'O)
+runs on RAW_M3UA_CT {
+	var octetstring data := f_rnd_octstring(f_rnd_int(100));
+	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender,
+					 ts_M3UA_protocol_data(pc_tx, pc_rx, si, ni, mp, sls, data)), 1);
+	f_M3UA_exp(idx_rx, tr_M3UA_DATA(rctx_receiver,
+					tr_M3UA_protocol_data(pc_tx, pc_rx, si, ni, mp, sls, data)));
+}
+
+
+/* test "traffic-mode override" behavior */
+testcase TC_tmt_override() runs on RAW_M3UA_CT {
+	var OCT4 rctx_sender := int2oct(1023, 4);
+	var OCT4 pc_sender := int2oct(23, 4);
+	var OCT4 rctx_receiver := int2oct(1042, 4);
+	var OCT4 pc_receiver := int2oct(42, 4);
+
+	f_init_m3ua();
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, omit);
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_override, rctx_receiver);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+
+	/* activate the second 'receiver' side ASP (no NOTIFY as AS state doesn't change) */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_override, rctx_receiver, omit, omit);
+
+	/* we expect a NOTIFY to the *other* ASP Other/Alternat-ASP-Active */
+	f_M3UA_exp(1, tr_M3UA_NOTIFY(c_M3UA_ST_T_OTHER, c_M3UA_ST_I_ALTERNATE_ASP, *));
+
+	/* verify traffic is routed from sender to new receiver */
+	f_test_traffic(0, rctx_sender, pc_sender, 2, rctx_receiver, pc_receiver);
+
+}
+
+private altstep as_count_rx(integer idx, template (present) PDU_M3UA exp, inout integer counter)
+runs on RAW_M3UA_CT {
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(exp)) {
+		counter := counter + 1;
+		}
+}
+
+/* test "traffic-mode load-share" behavior */
+testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
+	var OCT4 rctx_sender := int2oct(1023, 4);
+	var OCT4 pc_sender := int2oct(23, 4);
+	var OCT4 rctx_receiver := int2oct(1042, 4);
+	var OCT4 pc_receiver := int2oct(42, 4);
+	var integer i;
+
+	f_init_m3ua();
+
+	/* FIXME: configure the STP via VTY to set traffic-mode */
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, rctx_sender);
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up(1);
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_loadshare, omit); // TODO: rctx
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+	}
+
+	/* activate the second 'receiver' side ASP (no NOTIFY) */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, omit, omit, omit); // TODO: rctx
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 5;
+	var integer num_rx[NR_M3UA] := { 0, 0, 0 };
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring(f_rnd_int(100));
+		var template (value) M3UA_Protocol_Data tx_pd;
+		var template (present) M3UA_Protocol_Data rx_pd;
+		tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+		alt {
+		[] as_count_rx(1, tr_M3UA_DATA(rctx_receiver, rx_pd), num_rx[1])
+		[] as_count_rx(2, tr_M3UA_DATA(rctx_receiver, rx_pd), num_rx[2])
+		}
+	}
+	/* FIXME: check for extraneous messages? */
+	for (i := 1; i <= 2; i := i+1) {
+		if (num_rx[i] != iter_per_asp) {
+			setverdict(fail, "Received only ", num_rx[i], " out of expected ", iter_per_asp,
+				   "M3UA DATA messages");
+		}
+	}
+	setverdict(pass);
+}
+
+/* test "traffic-mode broadcast" behavior */
+testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
+	var OCT4 rctx_sender := int2oct(1023, 4);
+	var OCT4 pc_sender := int2oct(23, 4);
+	var OCT4 rctx_receiver := int2oct(1042, 4);
+	var OCT4 pc_receiver := int2oct(42, 4);
+	var integer i;
+
+	f_init_m3ua();
+
+	/* FIXME: configure the STP via VTY to set traffic-mode */
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, omit); // TODO: rctx
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up(1);
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_broadcast, omit); // TODO: rctx
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+	}
+
+	/* activate the second 'receiver' side ASP */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_broadcast, omit, omit, omit); // TODO: rctx
+
+	/* verify traffic is routed from sender to new receiver */
+	for (i := 0; i < 10; i := i+1) {
+		var octetstring data := f_rnd_octstring(f_rnd_int(100));
+		var template (value) M3UA_Protocol_Data tx_pd;
+		var template (present) M3UA_Protocol_Data rx_pd;
+		tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+		/* each message must be received both on 1 and 2 */
+		f_M3UA_exp(1, tr_M3UA_DATA(rctx_receiver, rx_pd));
+		f_M3UA_exp(2, tr_M3UA_DATA(rctx_receiver, rx_pd));
+	}
+	setverdict(pass);
+}
+
+private function f_M3UA_rkm_register(OCT4 id, OCT3 dpc, OCT4 rctx,
+				     template (present) OCT4 exp_status := c_M3UA_REGSTS_SUCCESS)
+runs on RAW_M3UA_CT
+{
+	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:=id, dpc:=dpc, rctx:=rctx)}));
+	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:=id, status:=exp_status, rctx:=rctx)}));
+}
+
+/* Send RKM registration; expect -EPERM as RCTX doesn't match config and dynamic not permitted */
+testcase TC_rkm_reg_static_notpermitted() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+
+	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='00000099'O, dpc:='aabbcc'O)}));
+	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='00000099'O, status:=c_M3UA_REGSTS_ERR_EPERM,
+						       rctx:=?)}));
+}
+
+/* Send RKM registration; expect OK as RCTX does match config */
+testcase TC_rkm_reg_static_permitted() runs on RAW_M3UA_CT {
+	var OCT3 dpc := int2oct(23, 3); // must match config
+	var OCT4 rctx := int2oct(1023, 4);  // must match config
+
+	f_init_m3ua();
+
+	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='10000099'O, dpc:=dpc, rctx:=rctx)}));
+	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='10000099'O, status:=c_M3UA_REGSTS_SUCCESS,
+						       rctx:=rctx)}));
+}
+
+/* Send RKM registration; expect OK as dynamic not permitted */
+testcase TC_rkm_reg_dynamic_permitted() runs on RAW_M3UA_CT {
+	f_init_common();
+	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
+	f_init_m3ua();
+
+	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='20000099'O, dpc:='aabbcc'O)}));
+	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='20000099'O, status:=c_M3UA_REGSTS_SUCCESS,
+						       rctx:=?)}));
+
+	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation static-only");
+}
+
+/* try to de-register a routing key that was never registered -> error */
+testcase TC_rkm_unreg_never_registered() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
+	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_NOT_REG)}));
+}
+
+/* try to de-register a routing key that is invalid (non-existant) -> error */
+testcase TC_rkm_unreg_invalid() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1234,4))));
+	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_INVAL_RCTX)}));
+}
+
+/* try to de-register a routing key that was registered -> OK*/
+testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
+	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_SUCCESS)}));
+}
+
+/* try to de-register a routing key for an active ASP -> ERROR */
+testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
+	var OCT3 dpc := int2oct(23, 3); // must match config
+	var OCT4 rctx := int2oct(1023, 4);  // must match config
+
+	f_init_m3ua();
+
+	/* first register the routing key */
+	f_M3UA_rkm_register(id:='30000099'O, dpc:=dpc, rctx:=rctx);
+
+	/* then activate the ASP */
+	f_M3UA_asp_up_act(0);
+
+	/* then try to de-regsiter */
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
+	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_ASP_ACTIVE)}));
+	/* FIXME: we now may have changed the state on the STP side! */
+}
+
+
+control {
+	/* M3UA Tests */
+	execute( TC_connect_asp_up() );
+	execute( TC_beat() );
+	execute( TC_beat_payload() );
+	execute( TC_asp_act() );
+	execute( TC_asp_act_override() );
+	execute( TC_asp_act_loadshare() );
+	execute( TC_asp_act_broadcast() );
+	execute( TC_tmt_override() );
+	execute( TC_tmt_loadshare() );
+	execute( TC_tmt_broadcast() );
+
+	/* M3UA RKM tests */
+	execute( TC_rkm_reg_static_notpermitted() );
+	execute( TC_rkm_reg_static_permitted() );
+	execute( TC_rkm_reg_dynamic_permitted() );
+	execute( TC_rkm_unreg_never_registered() );
+	execute( TC_rkm_unreg_invalid() );
+	execute( TC_rkm_unreg_registered() );
+	execute( TC_rkm_unreg_active() );
+	/* TODO: test RKM with unsupported routing keys: NA, SI, OPC */
+	/* TODO: register/unregister multiple routing contexts in one message; including mixed
+	         success/failure situations */
+}
+
+
+
+}
