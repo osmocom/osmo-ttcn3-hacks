@@ -24,7 +24,6 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.IP \
 			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
-			titan.ProtocolModules.M3UA \
 			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
 			titan.ProtocolModules.UDP \
@@ -64,6 +63,7 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.TestPorts.MTP3asp \
+			titan.ProtocolModules.M3UA \
 			titan.ProtocolEmulations.M3UA
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
@@ -75,7 +75,7 @@ ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT
 # In order to keep local changes in the repository of a dependency, set its commit to the
 # name of a local branch here (e.g. 'master').
 titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
-titan.ProtocolEmulations.M3UA_commit=		R.2.A-6-ge2965cc
+titan.ProtocolEmulations.M3UA_commit=		06b0f71a7d13fafc6f778974f6b4379ad87511ea
 titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-2-g724c83f
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
@@ -92,7 +92,7 @@ titan.ProtocolModules.L2TP_commit=		R.2.A
 titan.ProtocolModules.LLC_v7.1.0_commit=	2a3c09fbf7bae22f802aa88689800f38a1f3732d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
 titan.ProtocolModules.M2PA_commit=		R.2.A
-titan.ProtocolModules.M3UA_commit=		R.2.A
+titan.ProtocolModules.M3UA_commit=		2544b6bdc76d18313a235fbfdaf0cac04ebdd603
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
 titan.ProtocolModules.NAS_EPS_15.2.0.1_commit=	2ba853c7d197f7f39d97b76fca4726a7143fb4ad
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
