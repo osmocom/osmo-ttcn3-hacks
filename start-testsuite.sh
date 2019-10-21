@@ -60,7 +60,7 @@ if [ ! -f "$last_log" ]; then
   exit 1
 fi
 
-compare="$SUITE_DIR/../compare-results.sh"
+compare="$SUITE_DIR/../compare-results.py"
 if [ ! -x "$compare" ]; then
   echo "ERROR: cannot find $compare"
   exit 1
