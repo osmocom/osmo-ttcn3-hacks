@@ -75,7 +75,7 @@ ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT
 # In order to keep local changes in the repository of a dependency, set its commit to the
 # name of a local branch here (e.g. 'master').
 titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
-titan.ProtocolEmulations.M3UA_commit=		R.2.A-2-g742cf02
+titan.ProtocolEmulations.M3UA_commit=		R.2.A-6-ge2965cc
 titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-2-g724c83f
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
