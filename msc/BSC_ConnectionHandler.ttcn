@@ -1091,6 +1091,20 @@ private altstep as_optional_mgcp_mdcx(HostName mgw_rtp_ip, PortNumber mgw_rtp_po
 	}
 }
 
+private altstep as_optional_mgcp_dlcx(CallParameters cpars) runs on BSC_ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	var boolean respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
+	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
+		log("as_optional_mgcp_dlcx: rx MGCP DLCX");
+		if (respond_to_dlcx) {
+			MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
+		}
+		/* Without this 'repeat', currently active other interleave and alt series exit as soon as a
+		 * DLCX is handled. */
+		repeat;
+	}
+}
+
 function f_mo_call_establish(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 
@@ -1099,6 +1113,7 @@ runs on BSC_ConnHdlr {
 	var template MgcpResponse mgcp_resp;
 	var boolean respond_to_dlcx;
 	var PDU_BSSAP bssap;
+	var RANAP_PDU ranap;
 	var MgcpOsmuxCID osmux_cid;
 
 	cpars.mo_call := true;
@@ -1193,11 +1208,29 @@ runs on BSC_ConnHdlr {
 		}
 		BSSAP.send(bssap);
 		}
-	/*
-	[!g_pars.ran_is_geran] BSSAP.receive(tr_RANAP_RabAssReq(rab_sml)) {
-		//BSSAP.send(ts_RANAP_RabAssResp(rab_sml)); FIXME
+	[] BSSAP.receive(tr_RANAP_RabAssReq(*)) -> value ranap {
+		log("f_mo_call_establish 4.iu: rx RANAP RAB Assignment Request");
+		var RAB_SetupOrModifiedList l := {
+			{
+				{
+					id := id_RAB_SetupOrModifiedItem,
+					criticality := ignore,
+					value_ := {
+					  rAB_SetupOrModifiedItem := {
+						rAB_ID := int2bit(23, 8),
+						transportLayerAddress := hex2bit( '350001c0a8021500000000000000000000000000'H),
+						iuTransportAssociation := {
+							bindingID := '040c0000'O
+						},
+						dl_dataVolumes := omit,
+						iE_Extensions := omit
+						}
+					}
+				}
+			}
+		};
+		BSSAP.send(ts_RANAP_RabAssResp(l));
 		}
-	*/
 
 	/* MDCX setting up the RAN side remote RTP address received from Assignment Complete */
 	[] MGCP.receive(tr_MDCX) -> value mgcp_cmd {
@@ -1315,48 +1348,32 @@ runs on BSC_ConnHdlr {
 	respond_to_dlcx := not (isbound(cpars.mgw_drop_dlcx) and valueof(cpars.mgw_drop_dlcx));
 
 	var default mdcx := activate(as_optional_mgcp_mdcx(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_port));
+	var default dlcx := activate(as_optional_mgcp_dlcx(cpars));
 
 	/* clearing of radio channel */
-	interleave {
-	//[g_pars.ran_is_geran] BSSAP.receive(t_clear) {
-	[] BSSAP.receive(t_clear) {
+	alt {
+	[g_pars.ran_is_geran] BSSAP.receive(t_clear) {
 		log("f_call_hangup 5: rx BSSAP Clear Command");
 		BSSAP.send(ts_BSSMAP_ClearComplete);
 		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
 		log("f_call_hangup 6: rx SCCP DISC");
+		setverdict(pass);
 		}
-	/*
-	[!g_pars.ran_is_geran] BSSAP.receive(t_iurel) {
+	[not g_pars.ran_is_geran] BSSAP.receive(tr_RANAP_IuReleaseCommand(?)) {
+		log("f_call_hangup 5.iu: rx Iu Release Command");
 		BSSAP.send(ts_RANAP_IuReleaseComplete);
 		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
-		}
-	*/
-	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
-			log("f_call_hangup 7: rx MGCP DLCX");
-			if (respond_to_dlcx) {
-				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-			}
-			dlcx_contained_ci := f_MgcpCmd_contains_par(mgcp_cmd, "I");
+		log("f_call_hangup 6.iu: rx SCCP DISC");
+		setverdict(pass);
 		}
 	}
 
-	/* Two DLCXes expected, one for RAN and one for CN side.
-	 * Unless the first DLCX did not contain a CI, in which case it was a wildcard DLCX for both. */
-	if (dlcx_contained_ci) {
-		MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
-			log("f_call_hangup 8: rx MGCP DLCX");
-			if (respond_to_dlcx) {
-				MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-			}
-		}
-	}
-
+	f_sleep(1.0);
 	f_create_mgcp_delete_ep(cpars.mgcp_ep);
 	log("f_call_hangup 9: done");
 
 	deactivate(mdcx);
-
-	setverdict(pass);
+	deactivate(dlcx);
 }
 
 function f_mt_call(inout CallParameters cpars)
