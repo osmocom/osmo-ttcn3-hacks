@@ -38,6 +38,7 @@ modulepar {
 	integer mp_stp_m3ua_port := 2905;
 	integer mp_stp_m3ua_clnt_port := 2906;
 	integer mp_local_m3ua_port := 9999;
+	integer mp_recovery_timeout_msec := 2000;
 }
 
 private const integer NR_M3UA := 3;	/* number of M3UA clients in ATS */
@@ -103,6 +104,12 @@ friend function f_M3UA_connect(integer i) runs on RAW_M3UA_CT {
 	g_m3ua_conn_id[i] := res.connId;
 }
 
+friend function f_M3UA_close(integer i) runs on RAW_M3UA_CT {
+	var Result res;
+	res := M3UA_CodecPort_CtrlFunct.f_IPL4_close(M3UA[i], g_m3ua_conn_id[i], {sctp:=valueof(ts_SCTP)});
+	g_m3ua_conn_id[i] := 0;
+}
+
 friend function f_M3UA_listen(integer i) runs on RAW_M3UA_CT {
 	var Result res;
 	res := M3UA_CodecPort_CtrlFunct.f_IPL4_listen(M3UA[i], mp_local_ip, mp_local_m3ua_port+i,
@@ -124,6 +131,19 @@ friend function f_init_m3ua() runs on RAW_M3UA_CT {
 		map(self:M3UA[i], system:M3UA_CODEC_PT);
 		f_M3UA_connect(i);
 	}
+}
+
+friend function f_clear_m3ua() runs on RAW_M3UA_CT {
+	var integer i;
+
+	log("Clearing M3UA...");
+
+	for (i := 0; i < NR_M3UA; i:=i+1) {
+		f_M3UA_close(i);
+	}
+	/* Wait for recovery timer to trigger and shutdown all AS: */
+	f_sleep(int2float(mp_recovery_timeout_msec)/1000.0 + 0.5);
+	setverdict(pass, "M3UA cleared");
 }
 
 friend function f_init_m3ua_srv() runs on RAW_M3UA_CT {
@@ -192,6 +212,7 @@ testcase TC_connect_asp_up() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_asp_up(0);
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
+	f_clear_m3ua();
 }
 
 /* Test the heartbeat procedure without optional heartbeat data payload */
@@ -200,6 +221,7 @@ testcase TC_beat() runs on RAW_M3UA_CT {
 	f_M3UA_asp_up(0);
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
 	f_M3UA_beat(0, omit);
+	f_clear_m3ua();
 }
 
 /* Test the heartbeat procedure with optional heartbeat data payload */
@@ -208,30 +230,35 @@ testcase TC_beat_payload() runs on RAW_M3UA_CT {
 	f_M3UA_asp_up(0);
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
 	f_M3UA_beat(0, 'a1a2a3a4a5'O);
+	f_clear_m3ua();
 }
 
 /* Test the ASP-ACTIVATE procedure (without traffic-mode or routing ctx) */
 testcase TC_asp_act() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0);
+	f_clear_m3ua();
 }
 
 /* Test the ASP-ACTIVATE procedure with traffic-mode override */
 testcase TC_asp_act_override() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit);
+	f_clear_m3ua();
 }
 
 /* Test the ASP-ACTIVATE procedure with traffic-mode override */
 testcase TC_asp_act_loadshare() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0, c_M3UA_TMT_loadshare, omit);
+	f_clear_m3ua();
 }
 
 /* Test the ASP-ACTIVATE procedure with traffic-mode broadcast */
 testcase TC_asp_act_broadcast() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0, c_M3UA_TMT_broadcast, omit);
+	f_clear_m3ua();
 }
 
 /* Test if traffic is routed from idx_tx/pc_tx to idx_rx/pc_rx */
@@ -274,6 +301,7 @@ testcase TC_tmt_override() runs on RAW_M3UA_CT {
 	/* verify traffic is routed from sender to new receiver */
 	f_test_traffic(0, rctx_sender, pc_sender, 2, rctx_receiver, pc_receiver);
 
+	f_clear_m3ua();
 }
 
 private altstep as_count_rx(integer idx, template (present) PDU_M3UA exp, inout integer counter)
@@ -332,6 +360,8 @@ testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
 		}
 	}
 	setverdict(pass);
+
+	f_clear_m3ua();
 }
 
 /* test "traffic-mode broadcast" behavior */
@@ -373,6 +403,8 @@ testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
 		f_M3UA_exp(2, tr_M3UA_DATA(rctx_receiver, rx_pd));
 	}
 	setverdict(pass);
+
+	f_clear_m3ua();
 }
 
 private function f_M3UA_rkm_register(OCT4 id, OCT3 dpc, OCT4 rctx,
@@ -390,6 +422,8 @@ testcase TC_rkm_reg_static_notpermitted() runs on RAW_M3UA_CT {
 	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='00000099'O, dpc:='aabbcc'O)}));
 	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='00000099'O, status:=c_M3UA_REGSTS_ERR_EPERM,
 						       rctx:=?)}));
+
+	f_clear_m3ua();
 }
 
 /* Send RKM registration; expect OK as RCTX does match config */
@@ -402,6 +436,8 @@ testcase TC_rkm_reg_static_permitted() runs on RAW_M3UA_CT {
 	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='10000099'O, dpc:=dpc, rctx:=rctx)}));
 	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='10000099'O, status:=c_M3UA_REGSTS_SUCCESS,
 						       rctx:=rctx)}));
+
+	f_clear_m3ua();
 }
 
 /* Send RKM registration; expect OK as dynamic not permitted */
@@ -415,6 +451,8 @@ testcase TC_rkm_reg_dynamic_permitted() runs on RAW_M3UA_CT {
 						       rctx:=?)}));
 
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation static-only");
+
+	f_clear_m3ua();
 }
 
 /* try to de-register a routing key that was never registered -> error */
@@ -422,6 +460,7 @@ testcase TC_rkm_unreg_never_registered() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_NOT_REG)}));
+	f_clear_m3ua();
 }
 
 /* try to de-register a routing key that is invalid (non-existant) -> error */
@@ -429,6 +468,7 @@ testcase TC_rkm_unreg_invalid() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1234,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_INVAL_RCTX)}));
+	f_clear_m3ua();
 }
 
 /* try to de-register a routing key that was registered -> OK*/
@@ -436,6 +476,7 @@ testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_SUCCESS)}));
+	f_clear_m3ua();
 }
 
 /* try to de-register a routing key for an active ASP -> ERROR */
@@ -455,6 +496,8 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_ASP_ACTIVE)}));
 	/* FIXME: we now may have changed the state on the STP side! */
+
+	f_clear_m3ua();
 }
 
 /***********************************************************************
@@ -497,6 +540,8 @@ testcase TC_clnt_connect_asp_up() runs on RAW_M3UA_CT {
 	f_init_m3ua_srv();
 
 	f_M3UA_CLNT_asp_up(M3UA_SRV(0));
+
+	f_clear_m3ua();
 }
 
 /* Expect inbound connection from ASP/SCTP-client, followed by ASP-UP + ASP-ACT */
@@ -505,6 +550,8 @@ testcase TC_clnt_asp_act() runs on RAW_M3UA_CT {
 	f_init_m3ua_srv();
 
 	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0));
+
+	f_clear_m3ua();
 }
 
 /* Test traffic being routed through "server" side STP (M3UA SG), coming back in "client"
@@ -525,6 +572,8 @@ testcase TC_clnt_sg_to_asp() runs on RAW_M3UA_CT {
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	f_test_traffic(0, rctx_sender, pc_sender, M3UA_SRV(0), rctx_receiver, pc_receiver);
+
+	f_clear_m3ua();
 }
 
 /* Test traffic being routed through "client" side STP (M3UA ASP), coming back in "server"
@@ -545,6 +594,7 @@ testcase TC_clnt_asp_to_sg() runs on RAW_M3UA_CT {
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	f_test_traffic(M3UA_SRV(0), rctx_sender, pc_sender, 0, rctx_receiver, pc_receiver);
+	f_clear_m3ua();
 }
 
 
