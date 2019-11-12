@@ -265,6 +265,8 @@ struct gsm_mncc {
 
 	unsigned char	lchan_type;
 	unsigned char	lchan_mode;
+
+	char		sdp[1024];
 };
 
 struct gsm_data_frame {
@@ -296,6 +298,8 @@ struct gsm_mncc_rtp {
 	uint16_t	port;
 	uint32_t	payload_type;
 	uint32_t	payload_msg_type;
+
+	char		sdp[1024];
 };
 
 struct gsm_mncc_bridge {

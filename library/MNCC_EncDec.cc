@@ -259,7 +259,7 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 	case MNCC_RTP_FREE:
 		in_rtp = (const struct gsm_mncc_rtp *) in_mncc;
 		rtp = MNCC__PDU__Rtp(in_rtp->callref, in_rtp->ip, in_rtp->port, in_rtp->payload_type,
-				     in_rtp->payload_msg_type);
+				     in_rtp->payload_msg_type, in_rtp->sdp);
 		u.rtp() = rtp;
 		break;
 	default:
@@ -315,6 +315,7 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 		sign.imsi() = CHARSTRING(in_mncc->imsi);
 		sign.lchan__type() = in_mncc->lchan_type;
 		sign.lchan__mode() = in_mncc->lchan_mode;
+		sign.sdp() = in_mncc->sdp;
 		u.signal() = sign;
 		break;
 	}
