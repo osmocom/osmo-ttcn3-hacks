@@ -1,0 +1,199 @@
+module CCID_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Misc_Helpers all;
+
+import from USB_PortType all;
+
+import from CCID_Types all;
+import from CCID_Templates all;
+import from CCID_Emulation all;
+
+/* global test component; manages CCID device */
+type component Test_CT {
+	var CCID_Emulation_CT vc_CCID;
+	port USB_PT USB;
+	var Slot_CT vc_SLOT[NR_SLOTS];
+};
+
+/* per-slot test component; manages one slot */
+type component Slot_CT {
+	var uint8_t g_slot_nr;
+	port CCID_SLOT_PT CCID;
+	timer g_Tguard := 10.0;
+};
+
+private const integer NR_SLOTS := 4;
+
+/***********************************************************************
+ * helper infrastructure
+ ***********************************************************************/
+
+type function void_fn() runs on Slot_CT;
+
+/* altstep running on the per-slot test component */
+private altstep as_Tguard() runs on Slot_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+		}
+}
+
+/* first function inside Slot_CT; wait for CCID_EVENT_UP + call testcase-specific function */
+private function f_handler_init(void_fn fn, integer slot_nr) runs on Slot_CT {
+	g_slot_nr := slot_nr;
+	CCID.receive(CCID_Emulation_Event:{up_down:=CCID_EVENT_UP});
+	g_Tguard.start;
+	activate(as_Tguard());
+
+	fn.apply();
+}
+
+/* start a single slot handler */
+private function f_start_handler(void_fn fn, integer slot_nr) runs on Test_CT
+{
+	var Slot_CT vc;
+
+	vc_SLOT[slot_nr] := Slot_CT.create("Slot" & int2str(slot_nr));
+	connect(vc_SLOT[slot_nr]:CCID, vc_CCID:SLOT[slot_nr]);
+	vc_SLOT[slot_nr].start(f_handler_init(fn, slot_nr));
+}
+
+private function f_wait_handlers_complete() runs on Test_CT {
+	var integer i;
+
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		if (vc_SLOT[i] != null) {
+			vc_SLOT[i].done;
+		}
+	}
+	setverdict(pass);
+}
+
+private function f_start_and_wait() runs on Test_CT {
+	/* start CCID_Emulation last, it will trigger all the per-slot components */
+        vc_CCID.start(CCID_Emulation.main());
+	f_wait_handlers_complete();
+}
+
+private function f_init() runs on Test_CT {
+	var integer i;
+	vc_CCID := CCID_Emulation_CT.create("CCID");
+	map(vc_CCID:USB, system:USB);
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		vc_SLOT[i] := null;
+	}
+}
+
+private function f_power_on(CCID_PowerSelect psel := CCID_PWRSEL_AUTO) runs on Slot_CT {
+	CCID.send(ts_CCID_IccPowerOn(g_slot_nr, psel));
+	CCID.receive(tr_CCID_DataBlock(g_slot_nr));
+}
+
+private function f_xceive(octetstring tx, template octetstring rx) runs on Slot_CT return octetstring {
+	var CCID_PDU pdu;
+
+	CCID.send(ts_CCID_XfrBlock(g_slot_nr, tx, 0));
+	alt {
+	[] CCID.receive(tr_CCID_DataBlock(g_slot_nr, ?, rx)) -> value pdu {
+		return pdu.u.DataBlock.abData;
+		}
+	[] CCID.receive(tr_CCID_DataBlock(g_slot_nr, ?, ?)) -> value pdu {
+		setverdict(fail, "Received unexpected DataBlock ", pdu);
+		self.stop;
+		}
+	[] CCID.receive(CCID_PDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected CCID ", pdu);
+		self.stop;
+		}
+	}
+	return ''O;
+}
+
+
+/***********************************************************************
+ * actual test cases
+ ***********************************************************************/
+
+
+/* request 100 times the slot status */
+private function f_TC_getstatus() runs on Slot_CT
+{
+	var integer i;
+	for (i := 0; i < 100; i := i+1) {
+		CCID.send(ts_CCID_GetSlotStatus(g_slot_nr));
+		/* it would be fun to simply send more requests here, but the CCID
+		 * spec doesn't permit more than one unresponded command [per slot] */
+		alt {
+		[] CCID.receive(tr_CCID_SlotStatus(g_slot_nr));
+		[] CCID.receive {
+			setverdict(fail, "Unexpected data from device");
+			}
+		}
+	}
+	setverdict(pass);
+}
+testcase TC_get_status() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		f_start_handler(refers(f_TC_getstatus), i);
+	}
+
+	f_start_and_wait();
+}
+
+
+private function f_TC_power_on() runs on Slot_CT
+{
+	f_power_on();
+}
+testcase TC_power_on() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		f_start_handler(refers(f_TC_power_on), i);
+	}
+
+	f_start_and_wait();
+}
+
+private function f_TC_select_mf() runs on Slot_CT
+{
+	var integer i;
+	f_power_on();
+	for (i := 0; i < 10000; i := i+1) {
+		f_xceive('00a40004023f00'O, ?);
+	}
+}
+testcase TC_select_mf() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		f_start_handler(refers(f_TC_select_mf), i);
+	}
+
+	f_start_and_wait();
+}
+
+
+
+control {
+	execute( TC_get_status() );
+	execute( TC_power_on() );
+	execute( TC_select_mf() );
+}
+
+
+
+
+}

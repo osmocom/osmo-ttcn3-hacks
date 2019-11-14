@@ -67,7 +67,8 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.ProtocolEmulations.M3UA
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
-			titan.ProtocolModules.BSSMAP
+			titan.ProtocolModules.BSSMAP \
+			titan.TestPorts.USB
 
 ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
@@ -121,6 +122,7 @@ titan.TestPorts.TCPasp_commit=			R.9.A
 titan.TestPorts.TELNETasp_commit=		R.9.A
 titan.TestPorts.UDPasp_commit=			R.8.A
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-4-gbacd73d
+titan.TestPorts.USB_commit=			master
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
