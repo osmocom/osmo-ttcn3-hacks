@@ -4,6 +4,8 @@
     * A-bis side: RSL (emulates BSC-side server)
     * Um side: L1CTL to control MS
     * PCU side: pcu_socket
+    * VTY
+    * CTRL
 
 {% dot bts_tests.svg
 digraph G {
@@ -14,7 +16,7 @@ digraph G {
   BSC [label="osmo-bsc\nOML only"];
   BTS -> fake_trx [label="bursts"];
   fake_trx -> trxcon [label="bursts"];
-  trxcon -> ATS [label="bursts"];
+  trxcon -> ATS [label="GSM MAC blocks"];
 
   BTS -> BSC [label="A-bis OML"];
   BTS -> ATS [label="A-bis RSL"];

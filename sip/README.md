@@ -8,7 +8,7 @@
 {% dot sip_tests.svg
 digraph G {
   rankdir=LR;
-  SIP [label="SIP\nosmo-sip-connector",shape="box"];
+  SIP [label="IUT\nosmo-sip-connector",shape="box"];
   ATS [label="ATS\nSIP_Tests.ttcn"];
 
   ATS -> SIP [label="MNCC"];

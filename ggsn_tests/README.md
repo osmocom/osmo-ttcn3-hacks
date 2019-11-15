@@ -3,6 +3,7 @@
 * external interfaces
     * Gp: GTP (emulates SGSN)
     * Gi: IP (emulates Internet)
+    * VTY
 
 {% dot ggsn_tests.svg
 digraph G {
