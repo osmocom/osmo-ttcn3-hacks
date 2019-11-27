@@ -1778,6 +1778,68 @@ testcase TC_lu_and_mt_call_osmux() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* MT call while already Paging */
+friend function f_tc_lu_and_mt_call_already_paging(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
+	var SmsParameters spars := valueof(t_SmsPars);
+	var OCT4 tmsi;
+
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+
+	/* register an 'expect' for given IMSI (+TMSI) */
+	if (isvalue(g_pars.tmsi)) {
+		tmsi := g_pars.tmsi;
+	} else {
+		tmsi := 'FFFFFFFF'O;
+	}
+	f_ran_register_imsi(g_pars.imsi, tmsi);
+
+	log("start Paging by an SMS");
+	f_vty_sms_send(hex2str(pars.imsi), "2342", "Hello SMS");
+
+	/* MSC->BSC: expect PAGING from MSC */
+	f_expect_paging();
+
+	log("MNCC signals MT call, before Paging Response");
+	f_mt_call_initate(cpars);
+	f_ran_register_imsi(g_pars.imsi, g_pars.tmsi);
+
+	f_sleep(0.5);
+	log("phone answers Paging, expecting both SMS and MT call to be established");
+	f_establish_fully(EST_TYPE_PAG_RESP);
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+	interleave {
+	[] BSSAP.receive(f_mt_sms_deliver_pdu(spars)) {
+			log("Got SMS-DELIVER");
+		};
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_SETUP(cpars.transaction_id, *, cpars.called_party))) {
+			log("Got CC Setup");
+		};
+	}
+	setverdict(pass);
+	log("success, tear down");
+	var default ccrel := activate(as_optional_cc_rel(cpars));
+	if (g_pars.ran_is_geran) {
+		BSSAP.send(ts_BSSMAP_ClearRequest(0));
+	} else {
+		BSSAP.send(ts_RANAP_IuReleaseRequest(ts_RanapCause_om_intervention));
+	}
+	f_expect_clear();
+	deactivate(ccrel);
+	f_vty_sms_clear(hex2str(g_pars.imsi));
+}
+testcase TC_lu_and_mt_call_already_paging() runs on MTC_CT {
+	var BSC_ConnHdlrPars pars;
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	pars := f_init_pars(391);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_lu_and_mt_call_already_paging), pars);
+	vc_conn.done;
+}
+
 /* Test MO Call SETUP with DTMF */
 private function f_tc_mo_setup_dtmf_dup(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
@@ -1985,6 +2047,53 @@ testcase TC_lu_and_mt_sms() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* SMS added while already Paging */
+friend function f_tc_lu_and_mt_sms_already_paging(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+	var OCT4 tmsi;
+
+	f_init_handler(pars);
+
+	f_perform_lu();
+
+	/* register an 'expect' for given IMSI (+TMSI) */
+	if (isvalue(g_pars.tmsi)) {
+		tmsi := g_pars.tmsi;
+	} else {
+		tmsi := 'FFFFFFFF'O;
+	}
+	f_ran_register_imsi(g_pars.imsi, tmsi);
+
+	log("first SMS");
+	f_vty_sms_send(hex2str(pars.imsi), "2342", "Hello SMS");
+
+	/* MSC->BSC: expect PAGING from MSC */
+	f_expect_paging();
+
+	log("second SMS");
+	/* Now osmo-msc is in state "Paging pending", make sure that another SMS to be sent at this time just joins in
+	 * with the pending paging. Another SMS: */
+	f_vty_sms_send(hex2str(pars.imsi), "2342", "Another SMS");
+
+	/* Establish DTAP / BSSAP / SCCP connection */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+	f_mt_sms(spars);
+
+	spars.tp.ud := '41F79B8E2ECB41D3E614'O;
+	f_mt_sms(spars);
+
+	f_expect_clear();
+}
+testcase TC_lu_and_mt_sms_already_paging() runs on MTC_CT {
+	var BSC_ConnHdlrPars pars;
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	pars := f_init_pars(44);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_lu_and_mt_sms_already_paging), pars);
+	vc_conn.done;
+}
 
 /* Paging for MT SMS but no response */
 friend function f_tc_lu_and_mt_sms_paging_and_nothing(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
@@ -5089,7 +5198,6 @@ testcase TC_bssap_lu_sgsap_lu_and_mt_call() runs on MTC_CT {
 	vc_conn.done;
 }
 
-
 /* Perform a SGSAP LU and then make a CSFB call */
 private function f_tc_sgsap_lu_and_mt_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_mt_lu_and_csfb_call(id, pars, false);
@@ -5984,9 +6092,11 @@ control {
 	execute( TC_reset_two() );
 
 	execute( TC_lu_and_mt_call() );
+	execute( TC_lu_and_mt_call_already_paging() );
 
 	execute( TC_lu_and_mo_sms() );
 	execute( TC_lu_and_mt_sms() );
+	execute( TC_lu_and_mt_sms_already_paging() );
 	execute( TC_lu_and_mt_sms_paging_and_nothing() );
 	execute( TC_lu_and_mt_sms_paging_repeated() );
 	execute( TC_smpp_mo_sms() );
