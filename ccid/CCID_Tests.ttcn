@@ -1,15 +1,27 @@
 module CCID_Tests {
 
+/* TTCN-3 tests for USB CCID (Chip Card Interface Device)
+ *
+ * (C) 2018-2019 by Harald Welte <laforge@gnumonks.org>
+ */
+
 import from General_Types all;
 import from Osmocom_Types all;
 import from Misc_Helpers all;
 
 import from USB_PortType all;
+import from USB_Component all;
 
 import from CCID_Types all;
 import from CCID_Templates all;
 import from CCID_Emulation all;
 
+modulepar {
+	USB_Device_Match mp_usb_dev_match := { vid_pid := { vid := '1df0'H, pid := '6141'H } };
+	integer mp_use_slot_count := 8;
+	boolean mp_test_power_off := true;
+	boolean mp_quirk_resetpar_returns_slotsts := false;
+}
 /* global test component; manages CCID device */
 type component Test_CT {
 	var CCID_Emulation_CT vc_CCID;
@@ -24,11 +36,15 @@ type component Slot_CT {
 	timer g_Tguard := 120.0;
 };
 
-private const integer NR_SLOTS := 4;
+/* maximum number of slots we are supporting in the test suite */
+private const integer NR_SLOTS := 16;
 
 /***********************************************************************
  * helper infrastructure
  ***********************************************************************/
+
+const octetstring c_UICC_SELECT_MF := '00a40004023f00'O;
+const octetstring c_SIM_SELECT_MF := 'a0a40004023f00'O;
 
 type function void_fn() runs on Slot_CT;
 
@@ -36,6 +52,18 @@ type function void_fn() runs on Slot_CT;
 private altstep as_Tguard() runs on Slot_CT {
 	[] g_Tguard.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+		}
+}
+
+private altstep as_ccid_any() runs on Slot_CT {
+	var CCID_PDU pdu;
+	[] CCID.receive(CCID_PDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected CCID ", pdu);
+		self.stop;
+		}
+	[] CCID.receive {
+		setverdict(fail, "Received unexpected non-CCID");
+		self.stop;
 		}
 }
 
@@ -72,7 +100,8 @@ private function f_wait_handlers_complete() runs on Test_CT {
 
 private function f_start_and_wait() runs on Test_CT {
 	/* start CCID_Emulation last, it will trigger all the per-slot components */
-        vc_CCID.start(CCID_Emulation.main());
+	var CCID_Emulation_Params cep := { usb_dev_match := mp_usb_dev_match };
+        vc_CCID.start(CCID_Emulation.main(cep));
 	f_wait_handlers_complete();
 }
 
@@ -85,36 +114,124 @@ private function f_init() runs on Test_CT {
 	}
 }
 
-private function f_power_on(CCID_PowerSelect psel := CCID_PWRSEL_AUTO) runs on Slot_CT {
-	CCID.send(ts_CCID_IccPowerOn(g_slot_nr, psel));
-	CCID.receive(tr_CCID_DataBlock(g_slot_nr));
-}
 
-private function f_xceive(octetstring tx, template octetstring rx) runs on Slot_CT return octetstring {
+/* transceive a CCID command (send 'tx' on OUT; expect 'rx' on IN) */
+private function f_ccid_xceive(template (value) CCID_PDU tx, template (present) CCID_PDU exp_rx)
+runs on Slot_CT return CCID_PDU {
 	var CCID_PDU pdu;
 
-	CCID.send(ts_CCID_XfrBlock(g_slot_nr, tx, 0));
+	tx.hdr.bSlot := g_slot_nr;
+	exp_rx.hdr.bSlot := g_slot_nr;
+
+	CCID.send(tx);
 	alt {
-	[] CCID.receive(tr_CCID_DataBlock(g_slot_nr, ?, rx)) -> value pdu {
-		return pdu.u.DataBlock.abData;
+	[] CCID.receive(exp_rx) -> value pdu {
+		return pdu;
 		}
-	[] CCID.receive(tr_CCID_DataBlock(g_slot_nr, ?, ?)) -> value pdu {
-		setverdict(fail, "Received unexpected DataBlock ", pdu);
-		self.stop;
-		}
-	[] CCID.receive(CCID_PDU:?) -> value pdu {
-		setverdict(fail, "Received unexpected CCID ", pdu);
-		self.stop;
-		}
+	[] as_ccid_any();
 	}
-	return ''O;
+	return pdu;
+}
+
+private template (present) CCID_Header_IN tr_inact :=
+	tr_CCID_HeaderIN_OK(icc_status := (CCID_ICC_STATUS_PRES_INACT, CCID_ICC_STATUS_NO_ICC));
+
+private template (present) CCID_Header_IN tr_act :=
+	tr_CCID_HeaderIN_OK(icc_status := CCID_ICC_STATUS_PRES_ACT);
+
+/* Send IccPowerOn on OUT; expect DataBlock in retunr */
+private function f_ccid_power_on(CCID_PowerSelect psel := CCID_PWRSEL_AUTO,
+				 template (present) CCID_Header_IN hdr_in := tr_act)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_IccPowerOn(g_slot_nr, psel),
+			     tr_CCID_DataBlock(g_slot_nr, hdr_in := hdr_in) );
+	return pdu;
+}
+
+/* Send IccPowerOn on OUT; expect SlotStatus in return */
+private function f_ccid_power_off(template (present) CCID_Header_IN hdr_in := tr_inact)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_IccPowerOff(g_slot_nr),
+			     tr_CCID_SlotStatus(slot := g_slot_nr, hdr_in := hdr_in) );
+	return pdu;
+}
+
+/* Send IccClockCommand on OUT; expect SlotStatus in return */
+private function f_ccid_clock_cmd(CCID_ClockCommand cmd,
+				  template (present) CCID_Header_IN hdr_in := tr_CCID_HeaderIN_OK)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_ClockCommand(g_slot_nr, cmd),
+			     tr_CCID_SlotStatus(slot := g_slot_nr, hdr_in := hdr_in));
+	return pdu;
+}
+
+/* Send XfrBlock on OUT; expect DataBlock in return */
+private function f_ccid_xfr(octetstring tx, template octetstring rx) runs on Slot_CT return octetstring {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_XfrBlock(g_slot_nr, tx, 0),
+			     tr_CCID_DataBlock(g_slot_nr, ?, ?, rx) );
+	return pdu.u.DataBlock.abData;
+}
+
+/* Send SetParameters on OUT; expect Parameters on IN */
+private function f_ccid_set_par(template (value) CCID_ProtocolData par,
+				template (present) CCID_Header_IN hdr_in := tr_CCID_HeaderIN_OK)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_SetParameters(g_slot_nr, par),
+			     tr_CCID_Parameters(g_slot_nr, hdr_in := hdr_in));
+	return pdu;
+}
+
+/* Send GetParameters on OUT; expect Parameters on IN */
+private function f_ccid_get_par(template (present) CCID_Header_IN hdr_in := tr_CCID_HeaderIN_OK)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_GetParameters(g_slot_nr),
+			     tr_CCID_Parameters(g_slot_nr, hdr_in := hdr_in));
+	return pdu;
+}
+
+/* Send ResetParameters on OUT; expect Parameters on IN */
+private function f_ccid_reset_par(template (present) CCID_Header_IN hdr_in := tr_CCID_HeaderIN_OK)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	/* [at least] Omnikey seems to have failed to follow the CCID spec here :/ */
+	if (mp_quirk_resetpar_returns_slotsts) {
+		pdu := f_ccid_xceive(ts_CCID_ResetParameters(g_slot_nr),
+				     tr_CCID_SlotStatus(g_slot_nr, hdr_in := hdr_in));
+	} else {
+		pdu := f_ccid_xceive(ts_CCID_ResetParameters(g_slot_nr),
+				     tr_CCID_Parameters(g_slot_nr, hdr_in := hdr_in));
+	}
+	return pdu;
+}
+
+/* Send Escape on OUT; expect Escape on IN */
+private function f_ccid_escape(template (value) octetstring data,
+				template (present) CCID_Header_IN hdr_in := tr_CCID_HeaderIN_OK)
+runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	pdu := f_ccid_xceive(ts_CCID_Escape(g_slot_nr, data),
+			     tr_CCID_EscapeIN(g_slot_nr, hdr_in := hdr_in));
+	return pdu;
 }
 
 
 /***********************************************************************
- * actual test cases
+ * Test behavior regarding valid situations
  ***********************************************************************/
-
 
 /* request 100 times the slot status */
 private function f_TC_getstatus() runs on Slot_CT
@@ -126,9 +243,7 @@ private function f_TC_getstatus() runs on Slot_CT
 		 * spec doesn't permit more than one unresponded command [per slot] */
 		alt {
 		[] CCID.receive(tr_CCID_SlotStatus(g_slot_nr));
-		[] CCID.receive {
-			setverdict(fail, "Unexpected data from device");
-			}
+		[] as_ccid_any();
 		}
 	}
 	setverdict(pass);
@@ -139,7 +254,7 @@ testcase TC_get_status() runs on Test_CT
 
 	f_init();
 
-	for (i := 0; i < NR_SLOTS; i := i+1) {
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
 		f_start_handler(refers(f_TC_getstatus), i);
 	}
 
@@ -149,7 +264,7 @@ testcase TC_get_status() runs on Test_CT
 
 private function f_TC_power_on() runs on Slot_CT
 {
-	f_power_on();
+	f_ccid_power_on();
 }
 testcase TC_power_on() runs on Test_CT
 {
@@ -157,19 +272,65 @@ testcase TC_power_on() runs on Test_CT
 
 	f_init();
 
-	for (i := 0; i < NR_SLOTS; i := i+1) {
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
 		f_start_handler(refers(f_TC_power_on), i);
 	}
 
 	f_start_and_wait();
 }
 
+private function f_TC_power_off() runs on Slot_CT
+{
+	f_ccid_power_on();
+	f_ccid_power_off();
+}
+testcase TC_power_off() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
+		f_start_handler(refers(f_TC_power_off), i);
+	}
+
+	f_start_and_wait();
+}
+
+
+/* repeat IccPowerOn on slot that's already active (next warm reset ATR) */
+private function f_TC_power_on_warm() runs on Slot_CT
+{
+	var integer i;
+
+	/* initial power on */
+	f_ccid_power_on();
+
+	/* additional power on */
+	for (i := 0; i < 20; i := i+1) {
+		f_ccid_power_on();
+	}
+}
+testcase TC_power_on_warm() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
+		f_start_handler(refers(f_TC_power_on_warm), i);
+	}
+
+	f_start_and_wait();
+}
+
+/* transfer 1000 APDUs by issuing SELECT MF */
 private function f_TC_select_mf() runs on Slot_CT
 {
 	var integer i;
-	f_power_on();
-	for (i := 0; i < 10000; i := i+1) {
-		f_xceive('00a40004023f00'O, ?);
+	f_ccid_power_on();
+	for (i := 0; i < 1000; i := i+1) {
+		f_ccid_xfr(c_UICC_SELECT_MF, ?);
 	}
 }
 testcase TC_select_mf() runs on Test_CT
@@ -178,19 +339,231 @@ testcase TC_select_mf() runs on Test_CT
 
 	f_init();
 
-	for (i := 0; i < NR_SLOTS; i := i+1) {
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
 		f_start_handler(refers(f_TC_select_mf), i);
 	}
 
 	f_start_and_wait();
 }
 
+/* GetParametrs: verify contents */
+private function f_TC_get_params() runs on Slot_CT
+{
+	var CCID_PDU par;
+	f_ccid_power_on();
+	par := f_ccid_get_par();
+	log(par);
+}
+testcase TC_get_params() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
+		f_start_handler(refers(f_TC_get_params), i);
+	}
+	f_start_and_wait();
+}
+
+/* SetParameters: verify change */
+private function f_TC_set_params() runs on Slot_CT
+{
+	var CCID_PDU par;
+	f_ccid_power_on();
+
+	/* get current parameters */
+	par := f_ccid_get_par();
+
+	/* modify some of them */
+	var CCID_ProtocolData pd := par.u.Parameters.abProtocolData;
+	pd.T0.bGuardTimeT0 := 23;
+	pd.T0.bWaitingIntegerT0 := 42;
+	par := f_ccid_set_par(pd);
+
+	/* check if modifications were applied */
+	var template (present) CCID_ProtocolData tr_PD := {
+		T0 := {
+			Findex := ?,
+			Dindex := ?,
+			bRFU := ?,
+			inv_convention := ?,
+			bRFU2 := ?,
+			bGuardTimeT0 := 23,
+			bWaitingIntegerT0 := 42,
+			bClockStop := ?
+		}
+	};
+	if (match(par.u.Parameters.abProtocolData, tr_PD)) {
+		setverdict(pass);
+	} else {
+		setverdict(fail, "SetParameters didn't change GuardTime/WaitingInteger");
+	}
+}
+testcase TC_set_params() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
+		f_start_handler(refers(f_TC_set_params), i);
+	}
+	f_start_and_wait();
+}
+
+/* ResetParameters: verify change */
+private function f_TC_reset_params() runs on Slot_CT
+{
+	var CCID_PDU par;
+
+	f_TC_set_params();
+	par := f_ccid_reset_par();
+	if (mp_quirk_resetpar_returns_slotsts) {
+		par := f_ccid_get_par();
+	}
+	if (par.u.Parameters.abProtocolData.T0.bGuardTimeT0 == 23 or
+	    par.u.Parameters.abProtocolData.T0.bWaitingIntegerT0 == 42) {
+		setverdict(fail, "ResetParameters didn't reset properly");
+	}
+}
+testcase TC_reset_params() runs on Test_CT
+{
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < mp_use_slot_count; i := i+1) {
+		f_start_handler(refers(f_TC_reset_params), i);
+	}
+	f_start_and_wait();
+}
+
+
+
+/* TODO */
+/* IccPowerOn: verify that CCID resets all parameters to default values */
+/* IccPowerOn: verify that bPowerSelect has no effect in active state */
+/* XfrBlock: length corner cases (Lc/Le max, ...) */
+/* IccClock: verify clock has stopped/restarted */
+/* Abort for command that already terminated */
+/* Abort for command that's still processing */
+
+
+/***********************************************************************
+ * Test behavior regarding invalid situations
+ ***********************************************************************/
+
+/* message for invalid slot number (more than we have) */
+private function f_TC_inval_slot() runs on Slot_CT {
+	CCID.send(ts_CCID_GetSlotStatus(g_slot_nr));
+	alt {
+	[] CCID.receive(tr_CCID_SlotStatus(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_SLOT_NOT_EXIST))) {
+		setverdict(pass);
+		}
+	[] CCID.receive(tr_CCID_SlotStatus) {
+		setverdict(fail, "Unexpected SlotStatus");
+		mtc.stop;
+		}
+	[] as_ccid_any();
+	}
+}
+testcase TC_inval_slot() runs on Test_CT {
+	f_init();
+	f_start_handler(refers(f_TC_inval_slot), 15);
+	f_start_and_wait();
+}
+
+/* switch card off and then XfrBlock. Requires reader with IccPowerOff support */
+private function f_TC_xfer_off() runs on Slot_CT {
+	f_ccid_power_off();
+	CCID.send(ts_CCID_XfrBlock(g_slot_nr, c_SIM_SELECT_MF, 0));
+	alt {
+	[] CCID.receive(tr_CCID_DataBlock(slot:=g_slot_nr, hdr_in:=tr_CCID_HeaderIN_FAIL)) {
+		setverdict(pass);
+		}
+	[] CCID.receive(tr_CCID_DataBlock(slot:=g_slot_nr, hdr_in:=tr_CCID_HeaderIN_OK)) {
+		setverdict(fail, "Expected XfrBlock to fail");
+		mtc.stop;
+		}
+	[] as_ccid_any();
+	}
+}
+testcase TC_xfer_off() runs on Test_CT {
+	f_init();
+	f_start_handler(refers(f_TC_xfer_off), 0);
+	f_start_and_wait();
+}
+
+
+/* unsupported Mechanical */
+private function f_TC_unsupp_mechanical() runs on Slot_CT {
+	CCID.send(ts_CCID_Mechanical(g_slot_nr, CCID_MECH_FN_EJECT_CARD));
+	alt {
+	[] CCID.receive(tr_CCID_SlotStatus(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_CMD_NOT_SUPPORTED))) {
+		setverdict(pass);
+		}
+	[] as_ccid_any();
+	}
+}
+testcase TC_unsupp_mechanical() runs on Test_CT {
+	f_init();
+	f_start_handler(refers(f_TC_unsupp_mechanical), 0);
+	f_start_and_wait();
+}
+
+/* unsupported Secure */
+private function f_TC_unsupp_secure() runs on Slot_CT {
+	CCID.send(ts_CCID_Secure(g_slot_nr, 0, 0, ''O));
+	alt {
+	[] CCID.receive(tr_CCID_DataBlock(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_CMD_NOT_SUPPORTED))) {
+		setverdict(pass);
+		}
+	[] as_ccid_any();
+	}
+}
+testcase TC_unsupp_secure() runs on Test_CT {
+	f_init();
+	f_start_handler(refers(f_TC_unsupp_secure), 0);
+	f_start_and_wait();
+}
+
+
+/* TODO */
+/* truncated message */
+/* IccPowerOn with wrong voltage (> 0x04) */
+/* XfrBlock on empty slot */
+/* GetParameters on empty slot */
+/* SetParameters for bProtocolNum > 0x01 */
+/* SetParameters: invalid parameters */
+/* set unsupported frequency */
+/* set unsupported clock rate */
+/* XfrBlock: bWI in T=0? */
+/* XfrBlock: wLevelParameter not matching level? */
+/* Abort for command that was not even submitted yet*/
+/* dwMaxCCIDMessageLength */
 
 
 control {
+	/* valid transactions */
 	execute( TC_get_status() );
 	execute( TC_power_on() );
+	execute( TC_power_on_warm() );
+	if (mp_test_power_off) {
+		execute( TC_power_off() );
+	}
 	execute( TC_select_mf() );
+	execute( TC_get_params() );
+	execute( TC_set_params() );
+	execute( TC_reset_params() );
+
+	/* error handling */
+	execute( TC_inval_slot() );
+	if (mp_test_power_off) {
+		execute( TC_xfer_off() );
+	}
+	execute( TC_unsupp_mechanical() );
+	execute( TC_unsupp_secure() );
 }
 
 
