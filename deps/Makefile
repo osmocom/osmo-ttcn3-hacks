@@ -19,6 +19,7 @@ OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
 ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
+			titan.ProtocolModules.DNS \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
@@ -81,6 +82,7 @@ titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-9-g9e70fba
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A-4-g20cfaf8
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A-6-gc447f28
 titan.ProtocolModules.BSSMAP_commit=		master
+titan.ProtocolModules.DNS_commit=		R.7.B
 titan.ProtocolModules.GRE_commit=		R.2.A-5-g654c446
 titan.ProtocolModules.GTP_v13.5.0_commit=	R.2.A-5-ge120ace
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A-5-g85cb124
