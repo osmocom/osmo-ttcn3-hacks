@@ -35,11 +35,20 @@ FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types
 FILES+="SS_DataTypes.asn SS_Errors.asn SS_Operations.asn SS_PDU_Defs.asn SS_Protocol.asn SS_Types.ttcn SS_EncDec.cc"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.DNS/src
+FILES="DNS_EncDec.cc DNS_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.UDPasp/src
+FILES="UDPasp_PT.cc  UDPasp_PT.hh  UDPasp_PortType.ttcn  UDPasp_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp GSUP_Types.ttcn GSUP_Emulation.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
 FILES+="SS_Templates.ttcn USSD_Helpers.ttcn "
+FILES+="MSLookup_mDNS_Types.ttcn MSLookup_mDNS_Emulation.ttcn MSLookup_mDNS_Templates.ttcn"
 
 
 gen_links $DIR $FILES

@@ -31,6 +31,10 @@ import from USSD_Helpers all;
 import from Osmocom_VTY_Functions all;
 import from TELNETasp_PortType all;
 
+import from MSLookup_mDNS_Types all;
+import from MSLookup_mDNS_Emulation all;
+import from MSLookup_mDNS_Templates all;
+
 type component test_CT extends CTRL_Adapter_CT {
 	var IPA_Emulation_CT vc_IPA;
 	var IPA_CCM_Parameters ccm_pars;
@@ -43,6 +47,8 @@ type component test_CT extends CTRL_Adapter_CT {
 
 	port TELNETasp_PT VTY;
 
+	var MSLookup_mDNS_Emulation_CT vc_MSLookup_mDNS;
+
 	timer g_Tguard := 10.0;
 };
 
@@ -53,6 +59,9 @@ modulepar {
 	/* how many auth tuples are expected
 	   when IE ts_GSUP_IE_NUM_VECTORS_REQ is absent */
 	integer mp_default_num_auth_tuples := 5;
+
+	/* drop after osmo-hlr release > 1.2.0 */
+	boolean mp_hlr_supports_dgsm := true;
 };
 
 type record HlrSubscrAud2G {
@@ -80,6 +89,7 @@ type component HLR_ConnHdlr extends GSUP_ConnHdlr {
 	timer g_Tguard := 10.0;
 	var HLR_ConnHdlrPars g_pars;
 	port TELNETasp_PT VTY;
+	port MSLookup_mDNS_PT mDNS;
 }
 
 type record HLR_ConnHdlrPars {
@@ -116,6 +126,9 @@ function f_init_vty() runs on test_CT {
 	map(self:VTY, system:VTY);
 	f_vty_set_prompts(VTY);
 	f_vty_transceive(VTY, "enable");
+	if (mp_hlr_supports_dgsm) {
+		f_vty_config(VTY, "mslookup", "no mdns bind");
+	}
 }
 
 private altstep as_Tguard() runs on test_CT {
@@ -167,6 +180,11 @@ function f_init_gsup(charstring id, boolean legacy) runs on test_CT {
 	}
 }
 
+function f_init_mslookup() runs on test_CT {
+	vc_MSLookup_mDNS := MSLookup_mDNS_Emulation_CT.create;
+	vc_MSLookup_mDNS.start(MSLookup_mDNS_Emulation.f_main());
+}
+
 function f_init(boolean legacy := true) runs on test_CT {
 
 	/* activate default guard timer to ensure all tests eventually terminate */
@@ -175,6 +193,7 @@ function f_init(boolean legacy := true) runs on test_CT {
 
 	f_init_gsup("HLR_Test", legacy);
 	f_init_vty();
+	f_init_mslookup();
 
 	f_ipa_ctrl_start(mp_hlr_ip, mp_hlr_ctrl_port);
 }
@@ -186,6 +205,7 @@ function f_start_handler(void_fn fn, HLR_ConnHdlrPars pars) runs on test_CT retu
 	vc_conn := HLR_ConnHdlr.create(id);
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+	connect(vc_conn:mDNS, vc_MSLookup_mDNS:mDNS);
 
 	vc_conn.start(f_handler_init(fn, id, pars));
 	return vc_conn;
@@ -1511,6 +1531,65 @@ testcase TC_subscr_create_on_demand_sai() runs on test_CT {
 	vc_conn.done;
 }
 
+/* Send an mslookup mDNS request to OsmoHLR and verify the answer */
+private function f_TC_MSLookup_mDNS_server() runs on HLR_ConnHdlr {
+	timer T;
+	var MSLookup_mDNS vl_rmsg;
+	var integer id := f_rnd_int(65535); /* mDNS packet ID */
+	var hexstring msisdn := '49161'H & f_rnd_hexstring(7, 9);
+	var charstring domain := "sip.voice." & hex2str(msisdn) & ".msisdn.mdns.osmocom.org";
+
+	/* Create subscriber */
+	g_pars.sub.msisdn := msisdn;
+	f_vty_subscr_create(VTY, g_pars.sub);
+
+	/* Send mDNS query, expect timeout */
+	mDNS.send(t_MSLookup_mDNS_query(id, domain));
+	T.start(1.0);
+	alt {
+	[] mDNS.receive(tr_MSLookup_mDNS_result_IPv4(id, domain, '42424242'O, 5060)) {
+		setverdict(fail, "OsmoHLR answered to mDNS query before subscriber did LU");
+		}
+	[] mDNS.receive(MSLookup_mDNS:?) -> value vl_rmsg {
+		repeat;
+		}
+	[] T.timeout {
+		}
+	}
+
+	/* Location update */
+	f_perform_UL(g_pars.sub.imsi, msisdn, dom := OSMO_GSUP_CN_DOMAIN_CS);
+
+	/* Send mDNS query again, expect result */
+	mDNS.send(t_MSLookup_mDNS_query(id, domain));
+	T.start(1.0);
+	alt {
+	[] mDNS.receive(tr_MSLookup_mDNS_result_IPv4(id, domain, '42424242'O, 5060)) {
+		setverdict(pass);
+		}
+	[] mDNS.receive(MSLookup_mDNS:?) -> value vl_rmsg {
+		repeat;
+		}
+	[] T.timeout {
+		setverdict(fail, "OsmoHLR did not answer to mDNS query");
+		}
+	}
+
+	f_vty_subscr_delete(VTY, g_pars.sub);
+}
+testcase TC_MSLookup_mDNS_server() runs on test_CT {
+	var hexstring imsi := f_rnd_imsi('26242'H);
+	var HLR_ConnHdlr vc_conn;
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(imsi));
+
+	f_init(false);
+	f_vty_config(VTY, "mslookup", "mdns bind");
+	f_vty_config2(VTY, {"mslookup", "server"}, "service sip.voice at 66.66.66.66 5060");
+
+	vc_conn := f_start_handler(refers(f_TC_MSLookup_mDNS_server), pars);
+	vc_conn.done;
+}
+
 /* TODO:
   * UL with ISD error
   * UL with ISD timeout
@@ -1556,6 +1635,10 @@ control {
 	execute( TC_subscr_create_on_demand_check_imei_early() );
 	execute( TC_subscr_create_on_demand_ul() );
 	execute( TC_subscr_create_on_demand_sai() );
+
+	if (mp_hlr_supports_dgsm) {
+		execute( TC_MSLookup_mDNS_server() );
+	}
 };
 
 };
