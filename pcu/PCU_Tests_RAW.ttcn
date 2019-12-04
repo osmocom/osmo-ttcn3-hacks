@@ -663,13 +663,16 @@ runs on RAW_PCU_Test_CT return boolean {
 }
 
 /* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
-private function f_pcuif_tx_data_ind(octetstring data, int16_t lqual_cb := 0)
+private function f_pcuif_tx_data_ind(octetstring data, int16_t lqual_cb := 0, uint32_t fn := 0)
 runs on RAW_PCU_Test_CT {
-
+	var template RAW_PCU_EventParam ev_param := {tdma_fn := ? };
 	BTS.send(ts_PCUIF_DATA_IND(bts_nr := 0, trx_nr := 0, ts_nr := 7, block_nr := 0,
 				   sapi := PCU_IF_SAPI_PDTCH, data := data,
-				   fn := 0, arfcn := 871, lqual_cb := lqual_cb));
-	BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PDTCH_BLOCK_SENT));
+				   fn := fn, arfcn := 871, lqual_cb := lqual_cb));
+	if (fn != 0) {
+		ev_param := {tdma_fn := fn };
+	}
+	BTS.receive(tr_RAW_PCU_EV(TDMA_EV_PDTCH_BLOCK_SENT, ev_param));
 }
 
 /* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
@@ -700,7 +703,7 @@ runs on RAW_PCU_Test_CT {
 				   fn := 0, arfcn := 871, sapi := PCU_IF_SAPI_PCH, data := macblock));
 }
 
-private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0)
+private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0, uint32_t fn := 0)
 runs on RAW_PCU_Test_CT {
 	var octetstring data;
 	/* Encode the payload of DATA.ind */
@@ -708,7 +711,7 @@ runs on RAW_PCU_Test_CT {
 	data := f_pad_oct(data, 23, '00'O); /* CS-1 */
 
 	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
-	f_pcuif_tx_data_ind(data, lqual_cb);
+	f_pcuif_tx_data_ind(data, lqual_cb, fn);
 }
 
 private function f_tx_rlcmac_ul_n_blocks(PacketUlAssign ul_tbf_ass, integer num_blocks := 1)
@@ -730,16 +733,19 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
-private function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block)
+private function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block, out uint32_t dl_fn)
 runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
 	f_pcuif_rx_data_req(pcu_msg);
 	dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
+	dl_fn := pcu_msg.u.data_req.fn;
 }
 
 private function f_rx_rlcmac_dl_block_exp_ack_nack(out RlcmacDlBlock dl_block)
 runs on RAW_PCU_Test_CT {
-	f_rx_rlcmac_dl_block(dl_block);
+	var uint32_t dl_fn;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
 	if (not match(dl_block, tr_RLCMAC_UL_ACK_NACK(ul_tfi := ?, tlli := ?))) {
 		setverdict(fail, "Failed to match Packet Uplink ACK / NACK");
 		mtc.stop;
@@ -748,23 +754,29 @@ runs on RAW_PCU_Test_CT {
 
 private function f_rx_rlcmac_dl_block_exp_dummy(out RlcmacDlBlock dl_block)
 runs on RAW_PCU_Test_CT {
-	f_rx_rlcmac_dl_block(dl_block);
+	var uint32_t dl_fn;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
 	if (not match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
 		setverdict(fail, "Failed to match Packet DUMMY DL");
 		mtc.stop;
 	}
 }
 
-private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, octetstring data)
+private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data)
 runs on RAW_PCU_Test_CT {
+	var PCUIF_Message pcu_msg;
+	var uint32_t dl_fn;
 	var template RlcmacDlBlock dl_template := tr_RLCMAC_DATA_RRBP;
 	dl_template.data.blocks := ?;
 
-	f_rx_rlcmac_dl_block(dl_block);
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
 	if (not match(dl_block, dl_template)) {
 		setverdict(fail, "Failed to match Packet data: ", dl_block, " vs ", dl_template);
 		mtc.stop;
 	}
+
+	ack_fn := dl_fn + f_rrbp_fn_delay(dl_block.data.mac_hdr.mac_hdr.rrbp);
 
 	if (lengthof(dl_block.data.blocks) < 1) {
 		setverdict(fail, "DL block has no LLC payload: ", dl_block);
@@ -1358,6 +1370,7 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
 	var octetstring data := f_rnd_octstring(10);
 	var boolean ok;
+	var uint32_t sched_fn;
 	var OCT4 tlli := '00000001'O;
 	var AckNackDescription ack_nack_desc;
 
@@ -1407,10 +1420,10 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 
 	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
 	f_sleep(X2002);
-	f_rx_rlcmac_dl_block_exp_data(dl_block, data);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data);
 
 	/* ACK the DL block */
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc));
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
 }
 
 control {
