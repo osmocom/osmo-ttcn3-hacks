@@ -797,6 +797,19 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
+private function f_rx_rlcmac_dl_block_exp_pkt_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
+runs on RAW_PCU_Test_CT {
+	var uint32_t dl_fn;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_PACKET_ASS())) {
+		setverdict(fail, "Failed to match Packet Downlink Assignment");
+		mtc.stop;
+	}
+
+	poll_fn := dl_fn + f_rrbp_fn_delay(dl_block.ctrl.mac_hdr.rrbp);
+}
+
 private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?)
 runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
@@ -1402,6 +1415,60 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
 }
 
+/* Verify that a Downlink TBF can be assigned using PACCH shortly after the
+ * release of prev DL TBF due to MS staying in PDCH for a while (T3192, in PCU
+ * T3193) after DL TBF release */
+testcase TC_t3193() runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketDlAssign dl_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var boolean ok;
+	var uint32_t sched_fn;
+	var OCT4 tlli := '00000001'O;
+	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(tlli, data));
+	f_pcuif_rx_pch_imm_tbf_ass(rr_imm_ass);
+	ok := f_imm_ass_verify_dl_tbf_ass(rr_imm_ass, dl_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not a Downlink TBF");
+		mtc.stop;
+	}
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
+
+	/* ACK the DL block */
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	/* we are done with the DL-TBF here so far, let's clean up our local state: */
+	ack_nack_desc := valueof(t_AckNackDescription_init)
+
+	/* Now that final DL block is ACKED and TBF is released, T3193 in PCU
+	   (T3192 in MS) was started and until it fires the MS will be abailable
+	   on PDCH in case new data arrives from SGSN. Let's verify it: */
+	BSSGP[0].send(ts_BSSGP_DL_UD(tlli, data));
+	f_rx_rlcmac_dl_block_exp_pkt_ass(dl_block, sched_fn);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
+
+	/* Now that we confirmed the new assignment in the dl-tbf, lets receive the data and ack it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+}
+
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
  * answered, so TBFs for uplink and later for downlink are created.
  */
@@ -1539,6 +1606,7 @@ control {
 	execute( TC_cs_initial_ul() );
 	execute( TC_cs_max_ul() );
 	execute( TC_t3169() );
+	execute( TC_t3193() );
 	execute( TC_mo_ping_pong() );
 	execute( TC_imm_ass_dl_block_retrans() );
 }
