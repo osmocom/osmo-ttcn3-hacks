@@ -574,6 +574,38 @@ runs on RAW_PCU_Test_CT {
 	BTS.receive(tr_RAW_PCU_EV(BTS_EV_SI13_NEGO));
 }
 
+template AckNackDescription t_AckNackDescription_init := {
+	final_ack := '0'B,
+	starting_seq_nr := 0,
+	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
+}
+
+/* TS 44.060 sec 12.3 Ack/Nack Description */
+private function f_acknackdesc_ack_block(inout AckNackDescription desc, uint7_t bsn, BIT1 final_ack := '0'B)
+{
+	var integer i;
+	var integer inc := bsn - desc.starting_seq_nr + 1;
+	/* Filling hole? */
+	if (bsn < desc.starting_seq_nr) {
+		desc.receive_block_bitmap[lengthof(desc.receive_block_bitmap) - (desc.starting_seq_nr - bsn)] := int2bit(1, 1);
+		return;
+	}
+
+	/* SSN is increased, and so RBB values need to be moved */
+	for (i := 0; i < lengthof(desc.receive_block_bitmap) - inc; i := i+1) {
+		desc.receive_block_bitmap[i] := desc.receive_block_bitmap[i + inc];
+	}
+	for (i := lengthof(desc.receive_block_bitmap) - inc; i < lengthof(desc.receive_block_bitmap) - 1; i := i+1) {
+		desc.receive_block_bitmap[i] := int2bit(0, 1);
+	}
+	/* Now we can set current bit and update SSN */
+	desc.starting_seq_nr := bsn + 1;
+	desc.receive_block_bitmap[lengthof(desc.receive_block_bitmap) - 1] := int2bit(1, 1);
+
+	/* Finally update the final_ack bit as requested: */
+	desc.final_ack := final_ack;
+}
+
 /* FIXME: properly encode RA (see TS 24.060, table 11.2.5.2) */
 private function f_establish_tbf(out GsmRrMessage rr_imm_ass, uint8_t bts_nr := 0,
 				 uint16_t ra := oct2int('3A'O), uint8_t is_11bit := 0,
@@ -765,7 +797,7 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
-private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data)
+private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?)
 runs on RAW_PCU_Test_CT {
 	var PCUIF_Message pcu_msg;
 	var uint32_t dl_fn;
@@ -779,6 +811,11 @@ runs on RAW_PCU_Test_CT {
 	}
 
 	ack_fn := dl_fn + f_rrbp_fn_delay(dl_block.data.mac_hdr.mac_hdr.rrbp);
+
+	if (not match(dl_block.data.mac_hdr.hdr_ext.bsn, exp_bsn)) {
+		setverdict(fail, "DL block BSN doesn't match: ",
+			   dl_block.data.blocks[0].hdr.length_ind, " vs exp ", exp_bsn);
+	}
 
 	if (lengthof(dl_block.data.blocks) < 1) {
 		setverdict(fail, "DL block has no LLC payload: ", dl_block);
@@ -1378,12 +1415,7 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 	var boolean ok;
 	var uint32_t sched_fn;
 	var OCT4 tlli := '00000001'O;
-	var AckNackDescription ack_nack_desc;
-
-	ack_nack_desc.final_ack := '0'B;
-	ack_nack_desc.starting_seq_nr := 0;
-	ack_nack_desc.receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B;
-
+	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1428,9 +1460,10 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 
 	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
 	f_sleep(X2002);
-	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
 
 	/* ACK the DL block */
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
 	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
 }
 
