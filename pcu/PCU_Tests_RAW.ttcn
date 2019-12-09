@@ -738,6 +738,24 @@ runs on RAW_PCU_Test_CT {
 				   fn := 0, arfcn := 871, sapi := PCU_IF_SAPI_PCH, data := macblock));
 }
 
+/* Expect a Paging Request Type 1 from PCU on PCUIF on specified sapi.  */
+private function f_pcuif_rx_pch_pag_req1(out GsmRrMessage rr_pag_req1)
+runs on RAW_PCU_Test_CT {
+	var PCUIF_Message pcu_msg;
+	var octetstring macblock;
+	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 0,
+				      sapi := PCU_IF_SAPI_PCH)) -> value pcu_msg;
+	/* First 3 bytes contain paging group: */
+	macblock := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
+	rr_pag_req1 := dec_GsmRrMessage(macblock);
+	if (not match(rr_pag_req1, tr_PAG_REQ1())) {
+		setverdict(fail, "Failed to match Paging Request Type 1: ", rr_pag_req1);
+		mtc.stop;
+	}
+	BTS.send(ts_PCUIF_DATA_CNF(bts_nr := 0, trx_nr := 0, ts_nr := 0, block_nr := 0,
+				   fn := pcu_msg.u.data_req.fn, arfcn := 871, sapi := PCU_IF_SAPI_PCH, data := macblock));
+}
+
 private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0, uint32_t fn := 0)
 runs on RAW_PCU_Test_CT {
 	var octetstring data;
@@ -1666,6 +1684,95 @@ testcase TC_paging_cs_from_bts() runs on RAW_PCU_Test_CT {
 	setverdict(pass);
 }
 
+/* Test CS paging over Gb (SGSN->PCU->BTS[PDCH]).
+ */
+private function f_tc_paging_cs_from_sgsn(Nsvci bvci) runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var boolean ok;
+	var OCT4 tlli := '00000001'O;
+	var MobileIdentityLV_Paging mi_res;
+	var hexstring imsi := f_gen_imsi(42);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		mtc.stop;
+	}
+
+	ok := f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
+	if (not ok) {
+		setverdict(fail, "Immediate Assignment not an Uplink TBF");
+		mtc.stop;
+	}
+
+	/* Send paging request */
+	BSSGP[0].send(ts_BSSGP_CS_PAGING_IMSI(bvci, imsi));
+
+	/* Receive it on BTS side towards MS */
+	f_rx_rlcmac_dl_block_exp_pkt_pag_req(dl_block);
+
+	/* FIXME: we must use .ps. here instead of .cs. (the one actually sent)
+	   because TTCN3 counts length up to octet boundary and thinks it's a
+	   PageInfoPs: */
+	mi_res := dl_block.ctrl.payload.u.paging.repeated_pageinfo.ps.mobile_identity;
+	setverdict(pass);
+}
+
+testcase TC_paging_cs_from_sgsn_sign() runs on RAW_PCU_Test_CT {
+	f_tc_paging_cs_from_sgsn(0);
+}
+
+testcase TC_paging_cs_from_sgsn_ptp() runs on RAW_PCU_Test_CT {
+	f_tc_paging_cs_from_sgsn(mp_gb_cfg.bvci);
+}
+
+/* Test PS paging over Gb (SGSN->PCU->BTS[CCCH]).
+ */
+private function f_tc_paging_ps_from_sgsn(Nsvci bvci) runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_pag_req1;
+	var OCT4 tlli := '00000001'O;
+	var hexstring imsi := f_gen_imsi(42);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Send paging request */
+	BSSGP[0].send(ts_BSSGP_PS_PAGING_IMSI(bvci, imsi));
+
+	/* Receive it on BTS side towards MS */
+	f_pcuif_rx_pch_pag_req1(rr_pag_req1);
+
+	setverdict(pass);
+}
+
+testcase TC_paging_ps_from_sgsn_sign() runs on RAW_PCU_Test_CT {
+	f_tc_paging_ps_from_sgsn(0);
+}
+
+testcase TC_paging_ps_from_sgsn_ptp() runs on RAW_PCU_Test_CT {
+	f_tc_paging_ps_from_sgsn(mp_gb_cfg.bvci);
+}
+
 control {
 	execute( TC_ns_reset() );
 	execute( TC_ns_reset_retrans() );
@@ -1688,6 +1795,10 @@ control {
 	execute( TC_mo_ping_pong() );
 	execute( TC_imm_ass_dl_block_retrans() );
 	execute( TC_paging_cs_from_bts() );
+	execute (TC_paging_cs_from_sgsn_sign() );
+	execute (TC_paging_cs_from_sgsn_ptp() );
+	execute (TC_paging_ps_from_sgsn_sign() );
+	execute (TC_paging_ps_from_sgsn_ptp() );
 }
 
 
