@@ -1730,18 +1730,86 @@ private function f_build_meas_res_tmpl() runs on ConnHdlr return template RSL_Me
 				    ?, t_toffs);
 }
 
+/* build a template for matching measurement results that do not contain any
+ * MS related measurement (l1_info, l3_info and ms timing offset). */
+private function f_build_meas_res_tmpl_empty() runs on ConnHdlr return template RSL_Message {
+	var ConnL1Pars l1p := g_pars.l1_pars;
+	var template RSL_IE_UplinkMeas ul_meas := {
+		len := 3,
+		rfu := '0'B,
+		dtx_d := l1p.dtx_enabled,
+		rxlev_f_u := ?,
+		reserved1 := '00'B,
+		rxlev_s_u := ?,
+		reserved2 := '00'B,
+		rxq_f_u := ?,
+		rxq_s_u := ?,
+		supp_meas_info := omit
+	};
+	if (l1p.toa256_enabled) {
+		ul_meas.len := (3+8);
+		ul_meas.supp_meas_info := {
+			toa256_mean := f_tolerance(l1p.timing_offset_256syms, -63*256, 192*256, mp_tolerance_timing_offset_256syms),
+			toa256_min := ?,
+			toa256_max := ?,
+			toa256_std_dev := ?
+		}
+	}
+	var template RSL_IE_BS_Power bs_power := {
+		reserved := 0,
+		epc := false,
+		fpc := false,
+		power_level := l1p.bs_power_level
+	};
+
+	return tr_RSL_MEAS_RES_EMPTY(g_chan_nr, g_next_meas_res_nr, ul_meas, bs_power);
+}
+
 /* verify we regularly receive measurement reports with incrementing numbers */
 altstep as_meas_res(boolean verify_meas := true) runs on ConnHdlr {
 	var RSL_Message rsl;
+	var boolean chan_est := false;
+
 	[not verify_meas] RSL.receive(tr_RSL_MEAS_RES(?)) { repeat; }
+
+	/* Receive osmocom specific measurement reports. This is the normal
+	 * case. Here we verify that the measurement reports we sent are
+	 * comming back as we expect them. */
 	[] RSL.receive(f_build_meas_res_tmpl()) -> value rsl {
+		/* increment counter of next to-be-expected meas rep */
+		g_next_meas_res_nr := (g_next_meas_res_nr + 1) mod 256;
+		/* Re-start the timer expecting the next MEAS RES */
+		f_timer_safe_restart(g_Tmeas_exp);
+
+		/* The following two cases may only happen in the beginning
+		 * of the channel establishment phase. Once we have received
+		 * the "our" measurement report the first time, the channel
+		 * is established and empty or hardcoded TRXCON reports must
+		 * not occur anymore. */
+		chan_est := true;
+
+		repeat;
+		}
+
+	/* When the BTS has established the channel, the MS might need slightly
+	 * more time to establish the channel and actually start sending. The
+	 * result is then a measurement report that just lacks the measurement
+	 * information of the MS. This is normal and we tolerate this behavior. */
+	[chan_est == false] RSL.receive(f_build_meas_res_tmpl_empty()) -> value rsl {
 		/* increment counter of next to-be-expected meas rep */
 		g_next_meas_res_nr := (g_next_meas_res_nr + 1) mod 256;
 		/* Re-start the timer expecting the next MEAS RES */
 		f_timer_safe_restart(g_Tmeas_exp);
 		repeat;
 		}
-	[] RSL.receive(tr_RSL_MEAS_RES(g_chan_nr, g_next_meas_res_nr)) -> value rsl {
+
+	/* Due to the TDMA nature of GSM, TRXCON implements a way to emit dummy
+	 * measurements if the TTCN3 side does not supply measurement input in
+	 * time. In those cases TRXCON will either use a cached measurement
+	 * report or a hardcoded one. If TRXCON picks the hardcoded measurement
+	 * report the templates above will not match. We tolerate this
+	 * behavior, but only once. */
+	[chan_est == false] RSL.receive(tr_RSL_MEAS_RES(g_chan_nr, g_next_meas_res_nr)) -> value rsl {
 		/* increment counter of next to-be-expected meas rep */
 		g_next_meas_res_nr := (g_next_meas_res_nr + 1) mod 256;
 		if (g_first_meas_res) {
