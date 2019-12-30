@@ -8,6 +8,10 @@ DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
+FILES="MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
 FILES="Socket_API_Definitions.ttcn"
 gen_links $DIR $FILES
