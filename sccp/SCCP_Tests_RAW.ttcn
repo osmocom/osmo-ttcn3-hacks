@@ -1,0 +1,174 @@
+/* (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * All Rights Reserved
+ *
+ * The idea is that these tests are executed against sccp_demo_user from
+ * libosmo-sccp.git in server mode.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module SCCP_Tests_RAW {
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from M3UA_Emulation all;
+
+import from SCCP_Types all;
+import from SCCPasp_Types all;
+import from SCCP_Templates all;
+import from SCCP_Emulation all;
+import from SCCP_CodecPort all;
+
+import from TELNETasp_PortType all;
+import from Osmocom_VTY_Functions all;
+
+import from SCCP_Tests all;
+
+type component SCCP_Test_RAW_CT {
+	/* VTY to sccp_demo_user (not used yet) */
+	port TELNETasp_PT SCCP_DEMO_USER_VTY;
+
+	/* SCCP raw port runs on top of M3UA Emulation.
+	 * "System Under Test" is libosmo-sccp's sccp_demo_user example program. */
+	var M3UA_CT vc_M3UA;
+	port SCCP_CODEC_PT MTP3;
+
+	var MSC_SCCP_MTP3_parameters g_param;
+}
+
+private function f_init_raw(SCCP_Configuration cfg) runs on SCCP_Test_RAW_CT {
+	g_param := {
+		sio := {
+			ni := substr(oct2bit(cfg.sio),0,2),
+			prio := substr(oct2bit(cfg.sio),2,2),
+			si := substr(oct2bit(cfg.sio),4,4)
+		},
+		opc := cfg.own_pc,
+		dpc := cfg.peer_pc,
+		sls := 0,
+		sccp_serviceType := cfg.sccp_service_type,
+		ssn := cfg.own_ssn
+	};
+
+	map(self:SCCP_DEMO_USER_VTY, system:SCCP_DEMO_USER_VTY);
+	f_vty_set_prompts(SCCP_DEMO_USER_VTY);
+	f_vty_transceive(SCCP_DEMO_USER_VTY, "enable");
+
+	/* Create and connect test components */
+	vc_M3UA := M3UA_CT.create;
+	connect(self:MTP3, vc_M3UA:MTP3_SP_PORT);
+	map(vc_M3UA:SCTP_PORT, system:sctp);
+
+	vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr));
+}
+
+private function f_cleanup() runs on SCCP_Test_RAW_CT {
+	all component.stop;
+	unmap(vc_M3UA:SCTP_PORT, system:sctp);
+	disconnect(vc_M3UA:MTP3_SP_PORT, self:MTP3);
+	self.stop
+}
+
+/* connection oriented SCCP */
+const SCCP_param_ProtocolClass c_class2 := { class:='0010'B, messageHandling:='0000'B };//class 2
+
+function ts_SCCP_CR(OCT3 source_lref, SCCP_PAR_Address calling, SCCP_PAR_Address called)
+return template (value) PDU_SCCP {
+	var SCCP_param_CPartyAddressEnc calling_enc := ConvertASPAddressToEncodedAddress_itu(calling);
+
+	var template (value) PDU_SCCP ret := {
+		connrequest := {
+			messageType := cr,
+			sourceLocRef := source_lref,
+			protClass := c_class2,
+			pointer1 := 2,
+			pointer2 := 0, /* overwritten */
+			calledPAddress := ConvertASPAddressToEncodedAddress_itu(called),
+			optionalPart := {
+				credit := omit,
+				callingPAddress := {
+					paramName := con_SCCP_cgPA,
+					paramLength := calling_enc.paramLength, /* overwritten */
+					addr := calling_enc.addr
+				},
+				data := omit,
+				hopCounter := omit,
+				importance := omit
+			},
+			eop := { paramName:= con_SCCP_eop }
+		}
+	}
+	return ret;
+}
+
+template (present) PDU_SCCP tr_SCCP_CC(template (present) OCT3 dest_lref,
+				       template (present) OCT3 source_lref) := {
+	connconfirm := {
+		messageType := cc,
+		destLocRef := dest_lref,
+		sourceLocRef := source_lref,
+		protClass := c_class2,
+		pointer1 := ?,
+		optionalPart := *,
+		eop := *
+	}
+}
+
+private function f_send_sccp(template PDU_SCCP sccp) runs on SCCP_Test_RAW_CT {
+	var SCCP_MTP3_TRANSFERreq tx := {
+		sio := g_param.sio,
+		opc := g_param.opc,
+		dpc := g_param.dpc,
+		sls := g_param.sls,
+		data := valueof(sccp)
+	};
+	MTP3.send(tx);
+}
+
+private function f_exp_sccp(template PDU_SCCP sccp) runs on SCCP_Test_RAW_CT {
+	var SCCP_MTP3_TRANSFERind rx;
+	var template SCCP_MTP3_TRANSFERind exp := {
+		sio := g_param.sio,
+		opc := g_param.dpc,
+		dpc := g_param.opc,
+		sls := g_param.sls,
+		data := sccp
+	};
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] MTP3.receive(exp) -> value rx {
+		setverdict(pass);
+		}
+	[] MTP3.receive {
+		setverdict(fail, "Unexpected MTP/SCCP received");
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", exp);
+		}
+	}
+}
+
+/* Verify sccp_demo_user answers a CR with a CC for PC and SSN set up to echo back */
+testcase TC_cr_cc() runs on SCCP_Test_RAW_CT {
+	var SCCP_PAR_Address calling, called;
+	called := valueof(ts_SccpAddr_PC_SSN(sccp_cfg[0].peer_pc, sccp_cfg[0].peer_ssn,
+					     sccp_cfg[0].sio, sccp_cfg[0].sccp_service_type));
+	calling := valueof(ts_SccpAddr_PC_SSN(sccp_cfg[0].own_pc, sccp_cfg[0].own_ssn,
+					     sccp_cfg[0].sio, sccp_cfg[0].sccp_service_type));
+	f_init_raw(sccp_cfg[0]);
+	f_sleep(1.0);
+	f_send_sccp(ts_SCCP_CR('000001'O, calling, called));
+	f_exp_sccp(tr_SCCP_CC('000001'O, ?));
+}
+
+control {
+	execute( TC_cr_cc() );
+}
+
+
+}
