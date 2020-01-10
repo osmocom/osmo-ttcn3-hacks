@@ -57,14 +57,14 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
-			titan.ProtocolEmulations.SCCP
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolModules.M3UA \
-			titan.ProtocolEmulations.M3UA
+			titan.ProtocolEmulations.M3UA \
+			titan.ProtocolEmulations.SCCP
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
@@ -77,7 +77,7 @@ ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT
 # name of a local branch here (e.g. 'master').
 titan.Libraries.TCCUsefulFunctions_commit=	R.30.A
 titan.ProtocolEmulations.M3UA_commit=		06b0f71a7d13fafc6f778974f6b4379ad87511ea
-titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-2-g724c83f
+titan.ProtocolEmulations.SCCP_commit=	 	9e70fba95bb3dfaf09f5f8260177401ef4cceda7
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	R.2.A
 titan.ProtocolModules.BSSMAP_commit=		master
