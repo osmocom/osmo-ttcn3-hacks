@@ -24,6 +24,7 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.IP \
 			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
+			titan.ProtocolModules.M3UA \
 			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
 			titan.ProtocolModules.UDP \
@@ -53,16 +54,15 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
+			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
 			titan.ProtocolModules.NS_v7.3.0 \
+			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
-			titan.ProtocolModules.LLC_v7.1.0 \
-			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.TestPorts.MTP3asp \
-			titan.ProtocolModules.M3UA \
 			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolEmulations.SCCP
 
@@ -90,10 +90,10 @@ titan.ProtocolModules.IP_commit=		R.10.B-1-g99d0ec9
 titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A
 titan.ProtocolModules.JSON_v07_2006_commit=	R.1.A
 titan.ProtocolModules.L2TP_commit=		R.2.A
-titan.ProtocolModules.LLC_v7.1.0_commit=	2a3c09fbf7bae22f802aa88689800f38a1f3732d
+titan.ProtocolModules.LLC_v7.1.0_commit=	09817f113255d7fb56f1d45d3dd629a093d9248d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
 titan.ProtocolModules.M2PA_commit=		R.2.A
-titan.ProtocolModules.M3UA_commit=		2544b6bdc76d18313a235fbfdaf0cac04ebdd603
+titan.ProtocolModules.M3UA_commit=		c496d298876fed55c2b730278b7ee77982555563
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	R.2.A
 titan.ProtocolModules.NAS_EPS_15.2.0.1_commit=	2ba853c7d197f7f39d97b76fca4726a7143fb4ad
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A
@@ -101,7 +101,7 @@ titan.ProtocolModules.RTP_commit=		R.5.A
 titan.ProtocolModules.DIAMETER_ProtocolModule_Generator_commit=	ffd939595a08da1b8c8176aaa1f8578bfe02a912
 titan.ProtocolModules.ROSE_commit=		R.1.C
 titan.ProtocolModules.SCTP_commit=		R.2.A
-titan.ProtocolModules.SGsAP_13.2.0_commit=	520dc48dd41ee15c9fd77e71d2ea7a05c58770b9
+titan.ProtocolModules.SGsAP_13.2.0_commit=	5ccaeab7b3093e2bd8e88eee73c8362d1a2e4f32
 titan.ProtocolModules.SDP_commit=		R.14.A
 titan.ProtocolModules.SMPP_commit=		R.2.A-2-gb7aee69
 titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A
