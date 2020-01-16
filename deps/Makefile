@@ -40,7 +40,6 @@ ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.TELNETasp \
-			titan.TestPorts.UDPasp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
@@ -64,6 +63,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
+			titan.TestPorts.UDPasp \
 			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolEmulations.SCCP
 
