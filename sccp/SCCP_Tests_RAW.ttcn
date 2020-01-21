@@ -111,10 +111,9 @@ private function f_send_sccp(template PDU_SCCP sccp) runs on SCCP_Test_RAW_CT {
 	MTP3.send(tx);
 }
 
-private function f_exp_sccp(template PDU_SCCP sccp)
-runs on SCCP_Test_RAW_CT return SCCP_MTP3_TRANSFERind {
+private function tr_SCCP_MTP3_TRANSFERind(template PDU_SCCP sccp)
+runs on SCCP_Test_RAW_CT return template SCCP_MTP3_TRANSFERind {
 
-	var SCCP_MTP3_TRANSFERind rx;
 	var template SCCP_MTP3_TRANSFERind exp := {
 		sio := g_param.sio,
 		opc := g_param.dpc,
@@ -122,6 +121,13 @@ runs on SCCP_Test_RAW_CT return SCCP_MTP3_TRANSFERind {
 		sls := g_param.sls,
 		data := sccp
 	};
+	return exp;
+}
+
+private function f_exp_sccp(template PDU_SCCP sccp)
+runs on SCCP_Test_RAW_CT return SCCP_MTP3_TRANSFERind {
+	var template SCCP_MTP3_TRANSFERind exp := tr_SCCP_MTP3_TRANSFERind(sccp);
+	var SCCP_MTP3_TRANSFERind rx;
 	timer T := 10.0;
 	T.start;
 	alt {
@@ -237,10 +243,78 @@ testcase TC_tiar_timeout() runs on SCCP_Test_RAW_CT {
 	setverdict(pass);
 }
 
+/* Verify T(iar) triggers and releases the channel */
+testcase TC_it_avoids_tiar() runs on SCCP_Test_RAW_CT {
+	var SCCP_PAR_Address calling, called;
+	var OCT3 remote_lref;
+	var boolean it_received := false;
+
+	g_demo_sccp_timer_ias := 1;
+	g_demo_sccp_timer_iar := 3;
+	f_init_raw(mp_sccp_cfg[0]);
+	f_sleep(1.0);
+
+	called := valueof(ts_SccpAddr_PC_SSN(mp_sccp_cfg[0].peer_pc, mp_sccp_cfg[0].peer_ssn,
+					     mp_sccp_cfg[0].sio, mp_sccp_cfg[0].sccp_service_type));
+	calling := valueof(ts_SccpAddr_PC_SSN(mp_sccp_cfg[0].own_pc, mp_sccp_cfg[0].own_ssn,
+					     mp_sccp_cfg[0].sio, mp_sccp_cfg[0].sccp_service_type));
+	remote_lref := f_establish_conn(calling, called);
+
+	timer T_total := 7.0; /* Higher than g_demo_sccp_timer_iar */
+	timer T_tias := 1.0; /* Lower than g_demo_sccp_timer_iar */
+	T_total.start;
+	T_tias.start;
+	alt {
+	[] MTP3.receive(tr_SCCP_MTP3_TRANSFERind(tr_SCCP_IT(remote_lref, g_own_lref))) {
+		it_received := true;
+		repeat;
+		}
+	[] MTP3.receive(tr_SCCP_MTP3_TRANSFERind(tr_SCCP_RLSD(remote_lref, g_own_lref, hex2int('0D'H)))) {
+		setverdict(fail, "Unexpected SCCP RLSD received");
+		self.stop;
+		}
+	[] MTP3.receive {
+		setverdict(fail, "Unexpected MTP/SCCP received");
+		self.stop;
+		}
+	[] T_tias.timeout {
+		f_send_sccp(ts_SCCP_IT(g_own_lref, remote_lref));
+		T_tias.start;
+		repeat;
+		}
+	[] T_total.timeout {
+		/* We kept the connection alive only with IT messages for a while, cool! */
+		T_tias.stop;
+		setverdict(pass);
+		}
+	}
+
+	if (not it_received) {
+		setverdict(fail, "Didn't receive any IT (Tias) from peer");
+	}
+
+	/* After we stop sending IT, we should be receiving an RLSD triggered from T(iar) */
+	log("Waiting for RLSD");
+	alt {
+	[] MTP3.receive(tr_SCCP_MTP3_TRANSFERind(tr_SCCP_IT(remote_lref, g_own_lref))) {
+		repeat;
+		}
+	[] MTP3.receive(tr_SCCP_MTP3_TRANSFERind(tr_SCCP_RLSD(remote_lref, g_own_lref, hex2int('0D'H)))) {
+		f_send_sccp(ts_SCCP_RLC(g_own_lref, remote_lref));
+		setverdict(pass);
+		}
+	[] MTP3.receive {
+		setverdict(fail, "Unexpected MTP/SCCP received");
+		self.stop;
+		}
+	}
+}
+
 control {
 	execute( TC_cr_cc() );
 	execute( TC_udt_without_cr_cc() );
 	execute( TC_tiar_timeout() );
+	execute( TC_it_avoids_tiar() );
 }
 
 
