@@ -122,7 +122,7 @@ titan.TestPorts.SCTPasp_commit=			R.11.A-2-g2faa9cf
 titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
 titan.TestPorts.TCPasp_commit=			R.9.A-5-g2c91bc6
 titan.TestPorts.TELNETasp_commit=		R.9.A-3-g62f281b
-titan.TestPorts.UDPasp_commit=			R.8.B-3-gbf5e87b
+titan.TestPorts.UDPasp_commit=			c20d77a34f288dd70dd4aaa30e520778876e9336
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-8-g7ec4fe0
 titan.TestPorts.USB_commit=			master
 
