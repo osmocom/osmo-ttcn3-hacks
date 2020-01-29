@@ -34,6 +34,7 @@ import from TELNETasp_PortType all;
 import from MSLookup_mDNS_Types all;
 import from MSLookup_mDNS_Emulation all;
 import from MSLookup_mDNS_Templates all;
+import from DNS_Helpers all;
 
 type component test_CT extends CTRL_Adapter_CT {
 	/* emulated GSUP client (MSC/SGSN) */
@@ -1651,6 +1652,57 @@ testcase TC_MSLookup_mDNS_server() runs on test_CT {
 	vc_conn.done;
 }
 
+/* Let OsmoHLR act as proxy between MSC and another HLR during UL */
+private function f_TC_MSLookup_GSUP_proxy() runs on HLR_ConnHdlr {
+	var MSLookup_mDNS mdns_msg;
+	var integer id;
+	var hexstring imsi := g_pars.sub.imsi;
+	var hexstring msisdn := g_pars.sub.msisdn;
+	var charstring domain := "gsup.hlr." & hex2str(imsi) & ".imsi.mdns.osmocom.org";
+	var octetstring destination_name := char2oct(ccm_pars_client.ser_nr) & '00'O; /* TS-MSC IPA name */
+
+	/* [GSUP] TS-MSC  => HLR proxy: Update Location Request with unknown IMSI */
+	GSUP.send(ts_GSUP_UL_REQ(imsi, OSMO_GSUP_CN_DOMAIN_CS)) to vc_GSUP_client;
+
+	/* [GSUP] TS-HLR: expect GSUP messages with that IMSI */
+	f_create_gsup_expect_explicit(hex2str(imsi), vc_GSUP_server);
+
+	/* [mDNS] TS-HLR <=  HLR proxy: query for GSUP server who knows the IMSI */
+	mDNS.receive(tr_MSLookup_mDNS_query(domain)) -> value mdns_msg;
+
+	/* [mDNS] TS-HLR  => HLR proxy: result with IP/port of TS GSUP server */
+	id := mdns_msg.dnsMessage.header.id;
+	mDNS.send(t_MSLookup_mDNS_result_IPv4(id, domain, f_enc_IPv4(mp_hlr_ts_ip), mp_hlr_ts_port));
+
+	/* [GSUP] TS-HLR <=> HLR proxy <=> TS-MSC: finish up UL */
+	GSUP.receive(tr_GSUP_UL_REQ(imsi)) from vc_GSUP_server;
+	GSUP.send(ts_GSUP_ISD_REQ(imsi, msisdn, destination_name)) to vc_GSUP_server;
+	GSUP.receive(tr_GSUP_ISD_REQ(imsi, g_pars.sub.msisdn)) from vc_GSUP_client;
+	GSUP.send(ts_GSUP_ISD_RES(imsi, destination_name)) to vc_GSUP_server;
+	GSUP.receive(tr_GSUP_ISD_RES(imsi)) from vc_GSUP_client;
+	GSUP.send(ts_GSUP_UL_RES(imsi, destination_name)) to vc_GSUP_server;
+	GSUP.receive(tr_GSUP_UL_RES(imsi)) from vc_GSUP_client;
+
+	setverdict(pass);
+}
+testcase TC_MSLookup_GSUP_proxy() runs on test_CT {
+	var hexstring imsi := f_rnd_imsi('26242'H);
+	var hexstring msisdn := '49161'H & f_rnd_hexstring(7, 9);
+	var HLR_ConnHdlr vc_conn;
+	var HLR_ConnHdlrPars pars := valueof(t_Pars(imsi, msisdn));
+
+	f_init(false, true);
+	f_vty_config(VTY, "mslookup", "mdns bind");
+	vc_conn := f_start_handler(refers(f_TC_MSLookup_GSUP_proxy), pars, true);
+
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] vc_conn.done {}
+	[] T.timeout { setverdict(fail, "Timeout"); mtc.stop; };
+	}
+}
+
 /* TODO:
   * UL with ISD error
   * UL with ISD timeout
@@ -1699,6 +1751,7 @@ control {
 
 	if (mp_hlr_supports_dgsm) {
 		execute( TC_MSLookup_mDNS_server() );
+		execute( TC_MSLookup_GSUP_proxy() );
 	}
 };
 
