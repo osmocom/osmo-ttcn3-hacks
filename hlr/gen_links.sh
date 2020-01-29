@@ -48,7 +48,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn IP
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
 FILES+="SS_Templates.ttcn USSD_Helpers.ttcn "
-FILES+="MSLookup_mDNS_Types.ttcn MSLookup_mDNS_Emulation.ttcn MSLookup_mDNS_Templates.ttcn"
+FILES+="MSLookup_mDNS_Types.ttcn MSLookup_mDNS_Emulation.ttcn MSLookup_mDNS_Templates.ttcn DNS_Helpers.ttcn "
 
 
 gen_links $DIR $FILES
