@@ -48,7 +48,6 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.SCTP \
 			titan.ProtocolModules.SUA \
 			titan.ProtocolModules.SDP \
-			titan.TestPorts.GPIO \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
 			titan.ProtocolModules.BSSGP_v13.0.0 \
 			titan.ProtocolModules.GTP_v13.5.0 \
@@ -112,7 +111,6 @@ titan.ProtocolModules.TCP_commit=		R.3.A-5-g39e5f45
 titan.ProtocolModules.UDP_commit=		R.4.A-5-geea8aa3
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A-6-gf4380d0
 titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
-titan.TestPorts.GPIO_commit=			R.2.A-8-g9728492
 titan.TestPorts.HTTPmsg_commit=			R.9.B-4-g9a0dfde
 titan.TestPorts.IPL4asp_commit=			R.30.E
 titan.TestPorts.LANL2asp_commit=		R.8.C-3-gb07c265
