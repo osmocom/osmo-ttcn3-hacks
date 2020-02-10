@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ECLIPSEGIT:=https://github.com/eclipse
-ECLIPSEGIT2:=git://git.eclipse.org/gitroot/titan
+ECLIPSEGIT2:=https://git.eclipse.org/r/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
@@ -53,6 +53,8 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
+			titan.ProtocolModules.LLC_v7.1.0 \
+			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
@@ -62,9 +64,7 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UDPasp \
 			titan.ProtocolEmulations.M3UA \
-			titan.ProtocolEmulations.SCCP \
-			titan.ProtocolModules.LLC_v7.1.0 \
-			titan.ProtocolModules.MobileL3_v13.4.0
+			titan.ProtocolEmulations.SCCP
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
