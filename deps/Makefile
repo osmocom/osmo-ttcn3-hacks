@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ECLIPSEGIT:=https://github.com/eclipse
+ECLIPSEGITHUB:=https://github.com/eclipse
 ECLIPSEGIT2:=https://git.eclipse.org/r/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
-ECLIPSEGIT_REPOS=	titan.Libraries.TCCUsefulFunctions \
+ECLIPSEGITHUB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.DNS \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
@@ -70,7 +70,7 @@ OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
 			titan.TestPorts.USB
 
-ALL_REPOS=$(ECLIPSEGIT_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
+ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # In order to keep local changes in the repository of a dependency, set its commit to the
@@ -166,8 +166,8 @@ else
 endif
 endef
 
-$(foreach dir,$(ECLIPSEGIT_REPOS), \
-	$(eval $(call GIT_template,$(dir),$(ECLIPSEGIT))))
+$(foreach dir,$(ECLIPSEGITHUB_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(ECLIPSEGITHUB))))
 
 $(foreach dir,$(ECLIPSEGIT2_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(ECLIPSEGIT2))))
