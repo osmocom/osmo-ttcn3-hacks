@@ -1,7 +1,7 @@
 module RemsimClient_Tests {
 
 /* Integration Tests for osmo-remsim-client
- * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2019-2020 by Harald Welte <laforge@gnumonks.org>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -12,15 +12,26 @@ module RemsimClient_Tests {
  * This test suite tests osmo-remsim-client by attaching to the external interfaces.
  */
 
+import from Native_Functions all;
 import from Osmocom_Types all;
 import from IPA_Emulation all;
+
+/* the PIPEasp port allows us to interact with osmo-remsim-client-shell via stdin/stdout */
+import from PIPEasp_PortType all;
+import from PIPEasp_Types all;
 
 import from RSPRO all;
 import from RSPRO_Types all;
 import from RSPRO_Server all;
 import from REMSIM_Tests all;
 
+modulepar {
+	boolean mp_have_local_client := false; /* backwards compatible default */
+	charstring mp_client_shell_cmd := "osmo-remsim-client-shell";
+};
+
 type component client_test_CT extends rspro_server_CT {
+	port PIPEasp_PT PIPE;
 	var ComponentIdentity g_srv_comp_id, g_bankd_comp_id;
 };
 
@@ -168,6 +179,195 @@ testcase TC_bank_disconnect_reconnect() runs on client_test_CT {
 	setverdict(pass);
 }
 
+/***********************************************************************
+ * Tests interacting with local remsim-bankd-client via PIPE port
+ ***********************************************************************/
+
+template (value) ASP_PExecuteBackground ts_ExecBg(charstring cmd) := {
+	command := cmd
+}
+
+template (present) ASP_PStdout tr_Stdout(template (present) charstring line) := {
+	stdout := line
+}
+
+template (present) ASP_PStderr tr_Stderr(template (present) charstring line) := {
+	stderr := line
+}
+
+template (value) ASP_PStdin ts_Stdin(template (value) charstring line) := {
+	stdin :=line
+}
+
+/* osmo-remsim-client logs to stderr, so we need to ignore that log output */
+private altstep as_ignore_stderr() runs on client_test_CT {
+[] PIPE.receive(tr_Stderr(?)) { repeat; }
+}
+
+/* start a local osmo-remsim-client as sub-process and attach it to PIPE port */
+private function f_init_client_pipe(ClientSlot cs) runs on client_test_CT {
+	var charstring cmdline := mp_client_shell_cmd & " -i 127.0.0.1";
+	map(self:PIPE, system:PIPE);
+	PIPE.send(ts_ExecBg(cmdline & " -c " & int2str(cs.clientId)
+				    & " -n " & int2str(cs.slotNr)));
+	activate(as_ignore_stderr());
+}
+
+/* pretty-print an octet string as series of ASCII encoded hex bytes with spaces */
+function f_osmo_hexdump(octetstring input) return charstring {
+	var charstring ret := "";
+	for (var integer i := 0; i < lengthof(input); i := i+1) {
+		ret := ret & f_str_tolower(oct2str(input[i])) & " ";
+	}
+	return ret;
+}
+
+/* simulated bankd instructs client to "set ATR"; expect it to show up on stdout */
+function f_set_atr(template (value) ClientSlot cs, octetstring atr,
+		   template ResultCode exp_res := ok, integer i := 0)
+runs on client_test_CT {
+	RSPRO_SRV[i].send(ts_RSPRO_SetAtrReq(cs, atr));
+	interleave {
+	[] RSPRO_SRV[i].receive(tr_RSPRO_SetAtrRes(exp_res));
+	[] PIPE.receive(tr_Stdout("SET_ATR: " & f_osmo_hexdump(atr)));
+	}
+}
+
+/* send a C-APDU from simulated application to client stdin; expect it on simulated bankd */
+function f_client2bank(template (present) ClientSlot cs, template (present) BankSlot bs,
+			octetstring c_apdu, integer i:=0) runs on client_test_CT
+{
+	/* send C-APDU via STDIN of osmo-remsim-client-shell */
+	PIPE.send(ts_Stdin(oct2str(c_apdu)));
+	/* expect the same C-APDU to arrive via RSPRO tpduModemToCard */
+	f_rspro_srv_exp(tr_RSPRO_TpduModemToCard(cs, bs, ?, c_apdu), i);
+}
+
+/* send a R-APDU from simulated bankd to client; expect it on simualated app (client stdout) */
+function f_bank2client(template (present) BankSlot bs, template (present) ClientSlot cs,
+			octetstring r_apdu, boolean exp_fail := false, integer i:=0)
+runs on client_test_CT {
+	var TpduFlags flags := {
+		tpduHeaderPresent:=true,
+		finalPart:=true,
+		procByteContinueTx:=false,
+		procByteContinueRx:=false
+	}
+	timer T := 10.0;
+
+	RSPRO_SRV[i].send(ts_RSPRO_TpduCardToModem(bs, cs, flags, r_apdu));
+	T.start;
+	alt {
+	[] PIPE.receive(tr_Stdout("R-APDU: " & f_osmo_hexdump(r_apdu))) {
+		if (exp_fail) {
+			setverdict(fail, "Expected R-APDU to fail but still received it");
+			self.stop;
+		} else {
+			setverdict(pass);
+		}
+		}
+	[] PIPE.receive(tr_Stdout(?)) {
+		setverdict(fail, "Unexpected R-APDU on stdout of remsim-client-shell");
+		self.stop;
+		}
+	[] T.timeout {
+		if (exp_fail) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "Timeout waiting for R-APDU on remsim-client-shell");
+			self.stop;
+		}
+		}
+	}
+}
+
+/* Transceive a C+R APDU from client (via pipe) to simulated bankd and back */
+function f_xceive_apdus(ClientSlot cslot, BankSlot bslot,
+			integer count := 100, integer i := 0) runs on client_test_CT
+{
+	for (var integer j := 0; j < count; j := j+1) {
+		var octetstring c_apdu := f_rnd_octstring(f_rnd_int(270));
+		var octetstring r_apdu := f_rnd_octstring(f_rnd_int(270));
+		f_client2bank(cslot, bslot, c_apdu, i:=i);
+		f_bank2client(bslot, cslot, r_apdu, i:=i);
+	}
+}
+
+/* transceive APDUs using forked osmo-remsim-client-shell + stdio */
+testcase TC_pipe_xceive_apdus() runs on client_test_CT {
+	var BankSlot bslot := { 1, 0 };
+	var ClientSlot cslot := { 321, 123 };
+	f_init_client_pipe(cslot);
+	f_init();
+
+	/* expect inbound connectClientReq */
+	as_connectClientReq();
+	/* configure client to connect to [simulated] bankd */
+	f_rspro_config_client_bank(bslot, ts_IpPort(ts_IPv4(mp_bankd_ip), mp_bankd_port));
+	/* expect inbound connect on simulated bankd */
+	f_rspro_srv_exp_connect(1);
+	/* expect inbound connectClientReq on simulated bankd */
+	as_connectClientReq(i := 1);
+
+	f_set_atr(cslot, '3B9F96801FC78031A073BE21136743200718000001A5'O, i:=1);
+
+	f_xceive_apdus(cslot, bslot, count := 100, i:=1);
+}
+
+/* Send R-APDU from correct bankId/slotNr but to wrong ClientId */
+testcase TC_pipe_apdu_wrong_cslot() runs on client_test_CT {
+	var BankSlot bslot := { 1, 0 };
+	var ClientSlot cslot := { 321, 123 };
+	f_init_client_pipe(cslot);
+	f_init();
+
+	/* expect inbound connectClientReq */
+	as_connectClientReq();
+	/* configure client to connect to [simulated] bankd */
+	f_rspro_config_client_bank(bslot, ts_IpPort(ts_IPv4(mp_bankd_ip), mp_bankd_port));
+	/* expect inbound connect on simulated bankd */
+	f_rspro_srv_exp_connect(1);
+	/* expect inbound connectClientReq on simulated bankd */
+	as_connectClientReq(i := 1);
+
+	f_set_atr(cslot, '3B9F96801FC78031A073BE21136743200718000001A5'O, i:=1);
+
+	var octetstring c_apdu := f_rnd_octstring(f_rnd_int(270));
+	var octetstring r_apdu := f_rnd_octstring(f_rnd_int(270));
+	/* Send C-APDU from correct ClientId/Slot to simulated bankd */
+	f_client2bank(cslot, bslot, c_apdu, i:=1);
+	/* respond with R-APDU from correct bankId/Slot but stating wrong ClientId */
+	cslot.clientId := 1023;
+	f_bank2client(bslot, cslot, r_apdu, exp_fail:=true, i:=1);
+}
+
+/* Send R-APDU from wrong bankId/slotNr but to correct ClientId/Slot */
+testcase TC_pipe_apdu_wrong_bslot() runs on client_test_CT {
+	var BankSlot bslot := { 1, 0 };
+	var ClientSlot cslot := { 321, 123 };
+	f_init_client_pipe(cslot);
+	f_init();
+
+	/* expect inbound connectClientReq */
+	as_connectClientReq();
+	/* configure client to connect to [simulated] bankd */
+	f_rspro_config_client_bank(bslot, ts_IpPort(ts_IPv4(mp_bankd_ip), mp_bankd_port));
+	/* expect inbound connect on simulated bankd */
+	f_rspro_srv_exp_connect(1);
+	/* expect inbound connectClientReq on simulated bankd */
+	as_connectClientReq(i := 1);
+
+	f_set_atr(cslot, '3B9F96801FC78031A073BE21136743200718000001A5'O, i:=1);
+
+	var octetstring c_apdu := f_rnd_octstring(f_rnd_int(270));
+	var octetstring r_apdu := f_rnd_octstring(f_rnd_int(270));
+	/* Send C-APDU from correct ClientId/Slot to simulated bankd */
+	f_client2bank(cslot, bslot, c_apdu, i:=1);
+	/* respond with R-APDU from wrong bankId but stating correct ClientId */
+	bslot.bankId := 1023;
+	f_bank2client(bslot, cslot, r_apdu, exp_fail:=true, i:=1);
+}
+
 
 /* TODO:
    * send a configClientBankIpReq and change the bank of an active client
@@ -187,6 +387,12 @@ control {
 	execute( TC_bank_reconnect() );
 	execute( TC_bank_disconnect() );
 	execute( TC_bank_disconnect_reconnect() );
+
+	if (mp_have_local_client) {
+		execute( TC_pipe_xceive_apdus() );
+		execute( TC_pipe_apdu_wrong_cslot() );
+		execute( TC_pipe_apdu_wrong_bslot() );
+	}
 }
 
 

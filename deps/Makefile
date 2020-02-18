@@ -37,6 +37,7 @@ ECLIPSEGITHUB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
+			titan.TestPorts.PIPEasp \
 			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.TELNETasp \
@@ -116,6 +117,7 @@ titan.TestPorts.IPL4asp_commit=			R.30.E
 titan.TestPorts.LANL2asp_commit=		R.8.C-3-gb07c265
 titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11
 titan.TestPorts.PCAPasp_commit=			R.8.A-3-g9ad320f
+titan.TestPorts.PIPEasp_commit=			R.7.D-3-g8b01154
 titan.TestPorts.SCTPasp_commit=			R.11.A-2-g2faa9cf
 titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
 titan.TestPorts.TCPasp_commit=			R.9.A-5-g2c91bc6
