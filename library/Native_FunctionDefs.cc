@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
 
 #include <Charstring.hh>
 #include <Octetstring.hh>
@@ -74,6 +75,35 @@ CHARSTRING f__inet__hntoa(const OCTETSTRING& in)
 
 	return CHARSTRING(str);
 }
+
+CHARSTRING f__str__tolower(const CHARSTRING& in)
+{
+	TTCN_Buffer ttcn_buffer(in);
+	TTCN_Buffer buf_out;
+	CHARSTRING out;
+	unsigned int i;
+
+	const char *in_str = (const char *)ttcn_buffer.get_data();
+	for (i = 0; i < strlen(in_str); i++)
+		buf_out.put_c((unsigned char) tolower(in_str[i]));
+	buf_out.get_string(out);
+	return out;
+}
+
+CHARSTRING f__str__toupper(const CHARSTRING& in)
+{
+	TTCN_Buffer ttcn_buffer(in);
+	TTCN_Buffer buf_out;
+	CHARSTRING out;
+	unsigned int i;
+
+	const char *in_str = (const char *)ttcn_buffer.get_data();
+	for (i = 0; i < strlen(in_str); i++)
+		buf_out.put_c((unsigned char) toupper(in_str[i]));
+	buf_out.get_string(out);
+	return out;
+}
+
 
 
 } // namespace
