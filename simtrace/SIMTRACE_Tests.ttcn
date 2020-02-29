@@ -1,0 +1,162 @@
+module SIMTRACE_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Misc_Helpers all;
+
+import from USB_PortType all;
+import from USB_Types all;
+import from USB_Templates all;
+import from USB_Component all;
+import from USB_PortTypes all;
+
+import from SIMTRACE_Types all;
+import from SIMTRACE_Templates all;
+import from SIMTRACE_Emulation all;
+
+modulepar {
+	//USB_Device_Match mp_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '60e3'H} };
+	USB_Device_Match mp_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '4004'H} };
+	charstring mp_usb_path := "1-2.4.4";
+	integer mp_usb_interface := 0;
+}
+
+//private const integer NR_IF := 2;
+
+type component Test_CT {
+	var ST_Emulation_CT vc_ST;
+	port ST_USER_PT ST;
+	port ST_USER_PT ST_IRQ;
+};
+
+private template (value) USB_IF_Params ts_UsbPars_path(charstring path, uint8_t if_nr) := {
+	usb_dev_match := {
+		path := {
+			path := path
+		}
+	},
+	usb_if_nr := if_nr
+}
+
+function f_init(USB_IF_Params pars) runs on Test_CT {
+	vc_ST := ST_Emulation_CT.create("ST");
+	map(vc_ST:USB, system:USB);
+	connect(vc_ST:INOUT, self:ST);
+	connect(vc_ST:IRQ, self:ST_IRQ);
+	vc_ST.start(SIMTRACE_Emulation.main(pars));
+}
+
+function f_drain() runs on Test_CT {
+	timer T := 0.1;
+	T.start;
+	alt {
+	[] ST.receive {
+		log("Drained msg from INOUT");
+		repeat;
+		}
+	[] ST_IRQ.receive {
+		log("Drained msg from IRQ");
+		repeat;
+		}
+	[] T.timeout { }
+	}
+}
+
+
+function f_xceive(template (value) SIMTRACE_PDU tx, template (present) SIMTRACE_PDU exp_rx)
+runs on Test_CT return SIMTRACE_PDU {
+	var SIMTRACE_PDU rx;
+	timer T := 5.0;
+
+	ST.send(tx);
+	T.start;
+	alt {
+	[] ST.receive(exp_rx) -> value rx {
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", exp_rx);
+		mtc.stop;
+		}
+	}
+	return rx;
+}
+
+testcase TC_test() runs on Test_CT {
+
+	var USB_IF_Params pars := valueof(ts_UsbPars_path(mp_usb_path, mp_usb_interface));
+	f_init(pars);
+	f_drain();
+
+	/* Enable the use of the IRQ endpoint to report status updates */
+	f_xceive(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true)),
+		 tr_SIMTRACE_CEMU_CONFIG(tr_FeatureFlags(true)))
+
+	/* Choose "remote" SIM */
+	ST.send(ts_SIMTRACE_MODEM_SIM_SELECT(SIM_SELECT_REMOTE));
+	/* Trigger modem reset pulse */
+	ST.send(ts_SIMTRACE_MODEM_RESET);
+
+	f_drain();
+
+	var SIMTRACE_PDU rx;
+	while (true) {
+		/* receive TPDU header */
+		ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_CardEmu_DataFlags(tpdu_hdr:=true), ?)) -> value rx;
+		var octetstring apdu_hdr := rx.payload.cardem_do_rxdata.data;
+		/* send PB and request further Rx (command bytes) */
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_rx:=true), apdu_hdr[1]));
+		/* receive remaining data from reader */
+		ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_CardEmu_DataFlags(final:=true), ?));
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true), '9000'O));
+	}
+
+	f_sleep(100.0);
+
+
+}
+
+/* Test how firmware reacts on overly-long message (OS#4429, OS#4428) */
+testcase TC_long_out() runs on Test_CT {
+	var USB_IF_Params pars := valueof(ts_UsbPars_path(mp_usb_path, mp_usb_interface));
+	f_init(pars);
+	f_drain();
+
+	ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags, f_rnd_octstring(300)));
+	f_sleep(5.0);
+	/* FIXME: how to verify the device did not reset itself? */
+}
+
+
+/* flood the OUT endpoint with 1000 messages; much more than the firmware can handle */
+testcase TC_flood_out() runs on Test_CT {
+	var USB_IF_Params pars := valueof(ts_UsbPars_path(mp_usb_path, mp_usb_interface));
+	f_init(pars);
+	f_drain();
+
+	var integer i;
+	for (i := 0; i < 1000; i := i+1) {
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags, f_rnd_octstring(10)));
+	}
+	f_sleep(5.0);
+	/* FIXME: how to verify the device is still responsive? */
+}
+
+
+testcase TC_selftest() runs on Test_CT {
+	const octetstring c_cemu_sim_rem := '020200000000090001'O;
+	const octetstring c_cemu_rx := '010600000000130001000000050000A4000402'O;
+	/* 0106000000001300
+	   01000000
+	   0500
+	   00A4000402
+	 */
+	log(dec_SIMTRACE_PDU(c_cemu_rx));
+}
+
+
+
+
+
+
+}

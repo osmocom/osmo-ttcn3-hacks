@@ -1,0 +1,175 @@
+module SIMTRACE_Emulation {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Misc_Helpers all;
+
+import from USB_PortType all;
+import from USB_Types all;
+import from USB_Templates all;
+import from USB_Component all;
+import from USB_PortTypes all;
+
+import from SIMTRACE_Types all;
+import from SIMTRACE_Templates all;
+
+/* one USB interface */
+type component ST_Emulation_CT extends USB_CT {
+	var integer g_ep_in;
+	var integer g_ep_out;
+	var integer g_ep_irq;
+	var USB_IF_Params g_pars;
+
+	port ST_USER_PT INOUT;
+	port ST_USER_PT IRQ;
+};
+
+type port ST_USER_PT message {
+	inout SIMTRACE_PDU;
+} with { extension "internal" };
+
+/* configuration for a ST_Emulation_CT */
+type record USB_IF_Params {
+	USB_Device_Match usb_dev_match,
+	integer usb_if_nr
+};
+
+private const octetstring c_oct261 := '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'O;
+
+private function f_usb_submit_xfer(USB_endpoint ep, octetstring data := c_oct261,
+				   USB_transfer_type ttype := USB_TRANSFER_TYPE_BULK,
+				   integer tout_ms := 30000) runs on USB_CT
+{
+	var integer req_hdl := f_usb_get_req_hdl();
+	var USB_transfer xfer := {
+		device_hdl := g_dev_hdl,
+		transfer_hdl := req_hdl,
+		endpoint := ep,
+		ttype := ttype,
+		data := data,
+		timeout_msec := tout_ms
+	};
+	USB.send(xfer);
+}
+
+/* open libusb device; claim interface; resolve endpoints; submit IN/IRQ transfers */
+function main(USB_IF_Params pars) runs on ST_Emulation_CT {
+	var USB_Descriptor_Node root;
+	var integer i_config;
+	var integer i;
+
+	g_pars := pars;
+
+	f_usb_init(g_pars.usb_dev_match);
+
+	i_config := f_usb_get_config();
+	log("USB Configuration: ", i_config);
+
+	root := f_usb_get_desc_tree();
+	log(root);
+
+	/* iterate over list of interfaces in current configuration */
+	for (i := 0; i < lengthof(root.children[i_config].children); i:=i+1) {
+		var USB_Descriptor_Node ifn := root.children[i_config].children[i];
+		var USB_InterfaceDescriptor ifd := ifn.desc.interface;
+		var integer j;
+		if (ifd.bInterfaceNumber != g_pars.usb_if_nr) {
+			continue;
+		}
+		/* determine endpoints inside interface */
+		for (j := 0; j < lengthof(ifn.children); j:=j+1) {
+			if (ischosen(ifn.children[j].desc.endpoint)) {
+				var USB_EndpointDescriptor epd := ifn.children[j].desc.endpoint;
+				select (epd.bmAttributes.TranferType) {
+				case (USB_EpTransfer_BULK) {
+					if (epd.bEndpointAddress and4b '80'O == '80'O) {
+						g_ep_in := oct2int(epd.bEndpointAddress);
+					} else {
+						g_ep_out := oct2int(epd.bEndpointAddress);
+					}
+					}
+				case (USB_EpTransfer_INTERRUPT) {
+					g_ep_irq := oct2int(epd.bEndpointAddress);
+					}
+				}
+			}
+		}
+	}
+
+	log("USB Endpoints found: IN: ", int2oct(g_ep_in, 1), ", OUT: ", int2oct(g_ep_out, 1),
+	    " IRQ: ", int2oct(g_ep_irq, 1));
+
+	f_usb_claim_interface(g_dev_hdl, g_pars.usb_if_nr);
+
+	/* submit xfer fro IN and IRQ endpoints */
+	f_usb_submit_xfer(g_ep_in);
+	f_usb_submit_xfer(g_ep_irq, ttype := USB_TRANSFER_TYPE_INTERRUPT);
+
+	var USB_transfer_compl tc;
+	var SIMTRACE_PDU stpdu_out, stpdu_in;
+	while (true) {
+	alt {
+	[] USB.receive(tr_UsbXfer_compl(g_ep_out, USB_TRANSFER_TYPE_BULK,
+					USB_TRANSFER_COMPLETED, g_dev_hdl, ?)) {
+		/* do nothing; normal completion of OUT transfer */
+		}
+	[] USB.receive(tr_UsbXfer_compl(g_ep_in, USB_TRANSFER_TYPE_BULK,
+					USB_TRANSFER_COMPLETED, g_dev_hdl, ?)) -> value tc {
+		/* Submit another IN transfer */
+		f_usb_submit_xfer(g_ep_in);
+		stpdu_in := dec_SIMTRACE_PDU(tc.data);
+		INOUT.send(stpdu_in);
+		}
+	[] USB.receive(tr_UsbXfer_compl(g_ep_irq, USB_TRANSFER_TYPE_INTERRUPT,
+					USB_TRANSFER_COMPLETED, g_dev_hdl, ?))-> value tc {
+		/* Submit another IRQ transfer */
+		f_usb_submit_xfer(g_ep_irq, ttype := USB_TRANSFER_TYPE_INTERRUPT);
+		stpdu_in := dec_SIMTRACE_PDU(tc.data);
+		IRQ.send(stpdu_in);
+		}
+	[] USB.receive(tr_UsbXfer_compl(g_ep_irq, USB_TRANSFER_TYPE_INTERRUPT,
+					USB_TRANSFER_TIMED_OUT, g_dev_hdl, ?)) -> value tc {
+		/* Submit another IRQ transfer */
+		f_usb_submit_xfer(g_ep_irq, ttype := USB_TRANSFER_TYPE_INTERRUPT);
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, USB_TRANSFER_STALL, g_dev_hdl, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB_TRANSFER_STALL on EP ", int2hex(tc.endpoint, 2));
+		//mtc.stop;
+		/* Submit another IN transfer */
+		f_usb_submit_xfer(tc.endpoint);
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, USB_TRANSFER_ERROR, g_dev_hdl, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB_TRANSFER_ERROR on EP ", int2hex(tc.endpoint, 2));
+		mtc.stop;
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, USB_TRANSFER_TIMED_OUT, g_dev_hdl, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB_TRANSFER_TIMED_OUT on EP ", int2hex(tc.endpoint, 2));
+		mtc.stop;
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, USB_TRANSFER_OVERFLOW, g_dev_hdl, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB_TRANSFER_OVERFLOW on EP ", int2hex(tc.endpoint, 2));
+		mtc.stop;
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, ?, g_dev_hdl, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB Endpoint ", int2hex(tc.endpoint, 2));
+		mtc.stop;
+		}
+	[] USB.receive(tr_UsbXfer_compl(?, ?, ?, ?, ?)) -> value tc {
+		setverdict(fail, "Unexpected USB Device ", tc.device_hdl);
+		mtc.stop;
+		}
+	[] USB.receive {
+		setverdict(fail, "Unexpected Message from USB");
+		mtc.stop;
+		}
+
+
+	[] INOUT.receive(SIMTRACE_PDU:?) -> value stpdu_out {
+		f_usb_submit_xfer(g_ep_out, enc_SIMTRACE_PDU(stpdu_out), tout_ms := 3000);
+		}
+	}
+	}
+}
+
+
+}
