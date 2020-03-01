@@ -1,0 +1,180 @@
+module DIAMETER_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_CodecPort all;
+import from DIAMETER_CodecPort_CtrlFunct all;
+import from DIAMETER_Emulation all;
+
+modulepar {
+	DIAMETER_conn_parameters mp_server := {
+		remote_ip := "",
+		remote_sctp_port := -1,
+		local_ip := "127.0.0.1",
+		local_sctp_port := 8888
+	};
+	DIAMETER_conn_parameters mp_client := {
+		remote_ip := "127.0.0.1",
+		remote_sctp_port := 8888,
+		local_ip := "",
+		local_sctp_port := -1
+	};
+}
+
+type component DIAMETER_RAW_CT {
+	port DIAMETER_CODEC_PT DIAMETER;
+	var integer g_diameter_conn_id;
+	var integer msg_count_intended := 100000;
+	var integer msg_count_actual := 0;
+}
+
+private template (value) SctpTuple ts_SCTP(template (omit) integer ppid := omit) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+function f_init(DIAMETER_conn_parameters p) runs on DIAMETER_RAW_CT {
+	var Result res;
+
+	map(self:DIAMETER, system:DIAMETER_CODEC_PT);
+
+	if (p.remote_sctp_port == -1) {
+		res := DIAMETER_CodecPort_CtrlFunct.f_IPL4_listen(DIAMETER, p.local_ip, p.local_sctp_port, { sctp := valueof(ts_SCTP) });
+	} else {
+		res := DIAMETER_CodecPort_CtrlFunct.f_IPL4_connect(DIAMETER, p.remote_ip, p.remote_sctp_port,
+								p.local_ip, p.local_sctp_port, -1, { sctp := valueof(ts_SCTP) });
+	}
+
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect DIAMETER socket, check your configuration");
+		mtc.stop;
+	}
+	g_diameter_conn_id := res.connId;
+}
+
+
+function tr_DIAMETER_RecvFrom_R(template PDU_DIAMETER msg)
+runs on DIAMETER_RAW_CT return template DIAMETER_RecvFrom {
+	var template DIAMETER_RecvFrom mrf := {
+		connId := g_diameter_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+function f_rcv_main() runs on DIAMETER_RAW_CT {
+	var template IMSI imsi_t;
+	var hexstring imsi;
+	var DIAMETER_RecvFrom mrf;
+	var PortEvent port_evt;
+
+	alt {
+	[] DIAMETER.receive(PortEvent:{connOpened := ?}) -> value port_evt {
+		g_diameter_conn_id := port_evt.connOpened.connId;
+		}
+	[] DIAMETER.receive(PortEvent:?) { }
+	/* handle CER/CEA handshake */
+	[] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(tr_DIAMETER_R(cmd_code := Capabilities_Exchange))) -> value mrf {
+		var template (value) PDU_DIAMETER resp;
+		resp := ts_DIA_CEA(mrf.msg.hop_by_hop_id, mrf.msg.end_to_end_id);
+		DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, resp));
+		}
+
+	/* DIAMETER from remote peer */
+	[] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(?)) -> value mrf {
+		msg_count_actual := msg_count_actual + 1;
+		//imsi_t := f_DIAMETER_get_imsi(mrf.msg);
+		}
+	[] DIAMETER.receive(tr_SctpAssocChange) { }
+	[] DIAMETER.receive(tr_SctpPeerAddrChange)  { }
+	}
+}
+
+
+function f_server_main(DIAMETER_conn_parameters p) runs on DIAMETER_RAW_CT {
+	f_init(p);
+	while (true) {
+		f_rcv_main();
+	}
+}
+
+function f_client_main(DIAMETER_conn_parameters p) runs on DIAMETER_RAW_CT {
+	var integer i;
+	var hexstring imsi := f_rnd_hexstring(16);
+
+	f_init(p);
+
+	f_sleep(1.0);
+	log("START_XMIT");
+	for (i := 0; i < msg_count_intended; i := i+1) {
+		var template (value) PDU_DIAMETER msg;
+		msg := ts_DIA_AIR(int2oct(i, 4), int2oct(100000+i, 4), char2oct("session_id"),
+				  "dest_realm", imsi);
+		DIAMETER.send(t_DIAMETER_Send(g_diameter_conn_id, msg));
+		msg_count_actual := msg_count_actual + 1;
+	}
+	log("Transmitted ", msg_count_actual, " messages");
+}
+
+
+const integer NR_PAIRS := 1
+
+type component Test_CT {
+	var DIAMETER_RAW_CT		vc_server[NR_PAIRS];
+	var DIAMETER_RAW_CT		vc_client[NR_PAIRS];
+};
+
+
+
+testcase TC_flood() runs on Test_CT {
+	var integer i;
+
+	for (i := 0; i < sizeof(vc_server); i:=i+1) {
+		var DIAMETER_conn_parameters p_server := mp_server;
+		p_server.local_sctp_port := p_server.local_sctp_port + i;
+		log("Starting server ", i);
+		vc_server[i] := DIAMETER_RAW_CT.create("DIA_SERVER");
+		vc_server[i].start(f_server_main(p_server));
+	}
+
+	for (i := 0; i < sizeof(vc_client); i:=i+1) {
+		var DIAMETER_conn_parameters p_client := mp_client;
+		p_client.remote_sctp_port := p_client.remote_sctp_port + i;
+		log("Starting client ", i);
+		vc_client[i] := DIAMETER_RAW_CT.create("DIA_CLIENT");
+		vc_client[i].start(f_client_main(p_client));
+	}
+
+	for (i := 0; i < lengthof(vc_client); i:=i+1) {
+		vc_client[i].done;
+	}
+	f_sleep(1.0);
+}
+
+
+
+
+
+
+}
