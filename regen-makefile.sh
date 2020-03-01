@@ -40,7 +40,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -p -l -U 5 -f $*
+ttcn3_makefilegen -g -p -l -U 5 -f $*
 
 TITAN_VERSION=$(ttcn3_makefilegen -v 2>&1 |grep "Product number" |cut --delimiter="/" -f 2-| sed -e "s/[A-Z ]//g")
 
