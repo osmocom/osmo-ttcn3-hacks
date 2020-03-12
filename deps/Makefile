@@ -59,7 +59,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
-			titan.ProtocolModules.SNDCP_v7.0.0 \
+			titan.ProtocolModules.SNDCP_v7.0.0
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
@@ -69,7 +69,8 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
-			titan.TestPorts.USB
+			titan.TestPorts.USB \
+			osmo-uecups
 
 ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
@@ -125,6 +126,7 @@ titan.TestPorts.TELNETasp_commit=		R.9.A-3-g62f281b
 titan.TestPorts.UDPasp_commit=			c20d77a34f288dd70dd4aaa30e520778876e9336
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-8-g7ec4fe0
 titan.TestPorts.USB_commit=			master
+osmo-uecups_commit=				master
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)

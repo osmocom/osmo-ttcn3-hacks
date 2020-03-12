@@ -1,0 +1,606 @@
+/* GTPv2 Emulation in TTCN-3
+ *
+ * (C) 2018-2020 Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module GTPv2_Emulation {
+
+import from IPL4asp_Types all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GTPv2_Types all;
+import from GTPv2_Templates all;
+import from GTPv2_CodecPort all;
+import from GTPv2_CodecPort_CtrlFunct all;
+
+import from UECUPS_Types all;
+import from UECUPS_CodecPort all;
+import from UECUPS_CodecPort_CtrlFunct all;
+
+/***********************************************************************
+ * Main Emulation Component
+ ***********************************************************************/
+
+modulepar {
+	charstring mp_uecups_host := "127.0.0.1";
+	integer mp_uecups_port := UECUPS_SCTP_PORT;
+};
+
+const integer GTP2C_PORT := 2123;
+const integer GTP1U_PORT := 2152;
+
+type record Gtp2EmulationCfg {
+	HostName gtpc_bind_ip,
+	IPL4asp_Types.PortNumber gtpc_bind_port,
+	HostName gtpc_remote_ip,
+	IPL4asp_Types.PortNumber gtpc_remote_port,
+	//HostName gtpu_bind_ip,
+	//PortNumber gtpu_bind_port,
+	boolean sgw_role,
+	boolean use_gtpu_daemon
+};
+
+type component GTPv2_Emulation_CT {
+	/* Communication with underlying GTP CodecPort */
+	port GTPv2C_PT GTP2C;
+
+	/* Control port to GTP-U Daemon */
+	port UECUPS_CODEC_PT UECUPS;
+
+	/* Communication with Clients */
+	port GTP2EM_PT TEID0;
+	port GTP2EM_PT CLIENT;
+	port GTP2EM_PROC_PT CLIENT_PROC;
+
+	/* Configuration by the user */
+	var Gtp2EmulationCfg g_gtp2_cfg;
+
+	/* State */
+	var GtpPeer g_peer;
+	var integer g_gtp2c_id;
+	var OCT1 g_restart_ctr;
+	var uint16_t g_c_seq_nr;
+	var TidTableRec TidTable[256];
+	var SeqTableRec SeqTable[256];
+	var ImsiTableRec ImsiTable[256];
+	var PidTableRec	PidTable[256];
+	var integer g_uecups_conn_id;
+};
+
+/* local TEID <-> ConnHdlr mapping */
+type record TidTableRec {
+	OCT4 teid,
+	GTP2_ConnHdlr vc_conn
+};
+
+/* local SeqNr <-> ConnHdlr mapping (until a response is received */
+type record SeqTableRec {
+	OCT3 seq,
+	GTP2_ConnHdlr vc_conn
+};
+
+/* IMSI <-> ConnHdlr mapping */
+type record ImsiTableRec {
+	hexstring imsi,
+	GTP2_ConnHdlr vc_conn
+};
+
+/* pid <-> ConnHdlr mapping (for UECUPS process termination indication) */
+type record PidTableRec {
+	/* process ID of the running process */
+	integer pid,
+	/* component that started it */
+	GTP2_ConnHdlr vc_conn
+};
+
+private function f_comp_by_teid(OCT4 teid) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+			return TidTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for TEID ", teid);
+	mtc.stop;
+}
+
+private function f_seq_known(OCT3 seq) runs on GTPv2_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(SeqTable); i := i+1) {
+		if (isbound(SeqTable[i].seq) and SeqTable[i].seq == seq) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_seq(OCT3 seq) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(SeqTable); i := i+1) {
+		if (isbound(SeqTable[i].seq) and SeqTable[i].seq == seq) {
+			return SeqTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for SEQ ", seq);
+	mtc.stop;
+}
+
+private function f_comp_by_imsi(hexstring imsi) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (isbound(ImsiTable[i].imsi) and ImsiTable[i].imsi == imsi) {
+			return ImsiTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for IMSI ", imsi);
+	mtc.stop;
+}
+
+private function f_comp_by_pid(integer pid) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(PidTable); i := i+1) {
+		if (isbound(PidTable[i].pid) and PidTable[i].pid == pid) {
+			/* fixme: remove */
+			return PidTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for PID ", pid);
+	mtc.stop;
+}
+
+private function f_tid_tbl_add(OCT4 teid, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (not isbound(TidTable[i].teid)) {
+			TidTable[i].teid := teid;
+			TidTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in TidTable for ", teid);
+}
+
+private function f_seq_tbl_add(OCT3 seq, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(SeqTable); i := i+1) {
+		if (not isbound(SeqTable[i].seq)) {
+			SeqTable[i].seq := seq;
+			SeqTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in SeqTable for ", seq);
+}
+
+private function f_seq_tbl_del(OCT3 seq) runs on GTPv2_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(SeqTable); i := i+1) {
+		if (isbound(SeqTable[i].seq) and SeqTable[i].seq == seq) {
+			SeqTable[i] := {
+				seq := -,
+				vc_conn := null
+			}
+		}
+	}
+}
+
+private function f_imsi_tbl_add(hexstring imsi, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (not isbound(ImsiTable[i].imsi)) {
+			ImsiTable[i].imsi := imsi;
+			ImsiTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in IMSI Table for ", imsi);
+}
+
+private function f_pid_tbl_add(integer pid, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(PidTable); i := i+1) {
+		if (not isbound(PidTable[i].pid)) {
+			PidTable[i].pid := pid;
+			PidTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in PID Table for ", pid);
+}
+
+
+/* allocate an unused local teid */
+private function f_alloc_teid() runs on GTPv2_Emulation_CT return OCT4 {
+	var OCT4 teid;
+	var integer i, j;
+	for (i := 0; i < 100; i := i+1) {
+		teid := f_rnd_octstring(4);
+		for (j := 0; j < sizeof(TidTable); j := j+1) {
+			if (isbound(TidTable) and TidTable[i].teid == teid) {
+				continue;
+			}
+		}
+		/* we iterated over all entries and found no match: great! */
+		return teid;
+	}
+	testcase.stop("Cannot find unused TEID after ", i, " attempts");
+}
+
+/* obtain the IMSI from a GTPv2C PDU, if there is any IMSI contained. The way how the TITAN
+ * GTPv2 decoders are structured (explict IE members rather than a list/set of generic IE structures)
+ * doesn't make this easy, but requires lots of boilerplate code.  Oh well.. */
+function f_gtp2c_extract_imsi(PDU_GTPCv2 gtp) return template (omit) hexstring {
+	if (ischosen(gtp.gtpcv2_pdu.createSessionRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.createSessionRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.createSessionRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.downlinkDataNotification)) {
+		if (ispresent(gtp.gtpcv2_pdu.downlinkDataNotification.iMSI)) {
+			return gtp.gtpcv2_pdu.downlinkDataNotification.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.downlinkDataNotificationAcknowledgement)) {
+		if (ispresent(gtp.gtpcv2_pdu.downlinkDataNotificationAcknowledgement.iMSI)) {
+			return gtp.gtpcv2_pdu.downlinkDataNotificationAcknowledgement.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.downlinkDataNotificationFailureIndication)) {
+		if (ispresent(gtp.gtpcv2_pdu.downlinkDataNotificationFailureIndication.iMSI)) {
+			return gtp.gtpcv2_pdu.downlinkDataNotificationFailureIndication.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.createIndirectDataForwardingTunnelRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.createIndirectDataForwardingTunnelRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.createIndirectDataForwardingTunnelRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.stopPagingIndication)) {
+		if (ispresent(gtp.gtpcv2_pdu.stopPagingIndication.iMSI)) {
+			return gtp.gtpcv2_pdu.stopPagingIndication.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.forwardRelocationRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.forwardRelocationRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.forwardRelocationRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.contextRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.contextRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.contextRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.identificationResponse)) {
+		if (ispresent(gtp.gtpcv2_pdu.identificationResponse.iMSI)) {
+			return gtp.gtpcv2_pdu.identificationResponse.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.changeNotificationRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.changeNotificationRequest)) {
+			return gtp.gtpcv2_pdu.changeNotificationRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.changeNotificationResponse)) {
+		if (ispresent(gtp.gtpcv2_pdu.changeNotificationResponse.iMSI)) {
+			return gtp.gtpcv2_pdu.changeNotificationResponse.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.relocationCancelRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.relocationCancelRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.relocationCancelRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.uE_RegistrationQueryRequest)) {
+		if (ispresent(gtp.gtpcv2_pdu.uE_RegistrationQueryRequest.iMSI)) {
+			return gtp.gtpcv2_pdu.uE_RegistrationQueryRequest.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.uE_RegistrationQueryResponse)) {
+		if (ispresent(gtp.gtpcv2_pdu.uE_RegistrationQueryResponse.iMSI)) {
+			return gtp.gtpcv2_pdu.uE_RegistrationQueryResponse.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.suspendNotification)) {
+		if (ispresent(gtp.gtpcv2_pdu.suspendNotification.iMSI)) {
+			return gtp.gtpcv2_pdu.suspendNotification.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.resumeNotification)) {
+		if (ispresent(gtp.gtpcv2_pdu.resumeNotification.iMSI)) {
+			return gtp.gtpcv2_pdu.resumeNotification.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.cSPagingIndication)) {
+		if (ispresent(gtp.gtpcv2_pdu.cSPagingIndication.iMSI)) {
+			return gtp.gtpcv2_pdu.cSPagingIndication.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.pGW_DownlinkTriggeringNotification)) {
+		if (ispresent(gtp.gtpcv2_pdu.pGW_DownlinkTriggeringNotification.iMSI)) {
+			return gtp.gtpcv2_pdu.pGW_DownlinkTriggeringNotification.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.pGW_DownlinkTriggeringAcknowledge)) {
+		if (ispresent(gtp.gtpcv2_pdu.pGW_DownlinkTriggeringAcknowledge.iMSI)) {
+			return gtp.gtpcv2_pdu.pGW_DownlinkTriggeringAcknowledge.iMSI.iMSI_Value;
+		}
+	} else if (ischosen(gtp.gtpcv2_pdu.traceSessionActivation)) {
+		if (ispresent(gtp.gtpcv2_pdu.traceSessionActivation.iMSI)) {
+			return gtp.gtpcv2_pdu.traceSessionActivation.iMSI.iMSI_Value;
+		}
+	}
+	return omit;
+}
+
+private template (value) SctpTuple ts_SCTP(template (omit) integer ppid := omit) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+function tr_UECUPS_RecvFrom_R(template PDU_UECUPS msg)
+runs on GTPv2_Emulation_CT return template UECUPS_RecvFrom {
+	var template UECUPS_RecvFrom mrf := {
+		connId := g_uecups_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+private function f_uecups_xceive(template (value) PDU_UECUPS tx,
+				template PDU_UECUPS rx_t := ?)
+runs on GTPv2_Emulation_CT  return PDU_UECUPS {
+	timer T := 10.0;
+	var UECUPS_RecvFrom mrf;
+
+	UECUPS.send(t_UECUPS_Send(g_uecups_conn_id, tx));
+	alt {
+	[] UECUPS.receive(tr_UECUPS_RecvFrom_R(rx_t)) -> value mrf { }
+	[] UECUPS.receive(tr_SctpAssocChange) { repeat; }
+	[] UECUPS.receive(tr_SctpPeerAddrChange)  { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", rx_t);
+		mtc.stop;
+		}
+	}
+	return mrf.msg;
+}
+
+private function f_init(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
+	var Result res;
+
+	map(self:GTP2C, system:GTP2C);
+	res := GTPv2_CodecPort_CtrlFunct.f_IPL4_listen(GTP2C, cfg.gtpc_bind_ip,
+						     cfg.gtpc_bind_port, {udp:={}});
+	g_gtp2c_id := res.connId;
+
+	g_restart_ctr := f_rnd_octstring(1);
+	g_c_seq_nr := f_rnd_int(65535);
+	g_gtp2_cfg := cfg;
+	g_peer := {
+		connId := g_gtp2c_id,
+		remName := g_gtp2_cfg.gtpc_remote_ip,
+		remPort := g_gtp2_cfg.gtpc_remote_port
+	}
+
+	if (g_gtp2_cfg.use_gtpu_daemon) {
+		map(self:UECUPS, system:UECUPS);
+		res := UECUPS_CodecPort_CtrlFunct.f_IPL4_connect(UECUPS, mp_uecups_host, mp_uecups_port, "", -1, -1, { sctp := valueof(ts_SCTP) });
+		if (not ispresent(res.connId)) {
+			setverdict(fail, "Could not connect UECUPS socket, check your configuration");
+			testcase.stop;
+		}
+		g_uecups_conn_id := res.connId;
+
+		/* clear all tunnel state in the daemon at start */
+		f_uecups_xceive({reset_all_state := {}}, {reset_all_state_res:=?});
+	}
+
+	/* make sure we always pass incoming UECUPS indications whenever receiving fom the UECUPS port */
+	activate(as_uecups_ind());
+}
+
+private altstep as_uecups_ind() runs on GTPv2_Emulation_CT {
+var UECUPS_RecvFrom rx;
+var GTP2_ConnHdlr vc_conn;
+/* handle incoming program_term_ind; dispatch to whatever component started the process */
+[] UECUPS.receive(tr_UECUPS_RecvFrom_R({program_term_ind:=?})) -> value rx {
+	vc_conn := f_comp_by_pid(rx.msg.program_term_ind.pid);
+	CLIENT.send(rx.msg.program_term_ind) to vc_conn;
+	/* FIXME: remove from table */
+	repeat;
+	}
+}
+
+function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
+	var Gtp2cUnitdata g2c_ud;
+	var PDU_GTPCv2 g2c;
+	var GTP2_ConnHdlr vc_conn;
+	var hexstring imsi;
+	var OCT4 teid;
+	var PDU_UECUPS rx_uecups;
+	var UECUPS_CreateTun gtc;
+	var UECUPS_DestroyTun gtd;
+	var UECUPS_StartProgram sprog;
+
+	f_init(cfg);
+
+	while (true) {
+	alt {
+	/* route inbound GTP2-C based on TEID, SEQ or IMSI */
+	[] GTP2C.receive(Gtp2cUnitdata:?) -> value g2c_ud {
+		var template hexstring imsi_t := f_gtp2c_extract_imsi(g2c_ud.gtpc);
+		if (not ispresent(g2c_ud.gtpc.tEID) or g2c_ud.gtpc.tEID == int2oct(0, 4)) {
+			/* if this is a response, route by SEQ */
+			if (match(g2c_ud.gtpc, tr_PDU_GTP2C_msgtypes(gtp2_responses))
+			    and f_seq_known(g2c_ud.gtpc.sequenceNumber)) {
+				vc_conn := f_comp_by_seq(g2c_ud.gtpc.sequenceNumber);
+				CLIENT.send(g2c_ud.gtpc) to vc_conn;
+			} else {
+				TEID0.send(g2c_ud.gtpc);
+			}
+		} else if (ispresent(g2c_ud.gtpc.tEID) and g2c_ud.gtpc.tEID != int2oct(0, 4)) {
+			vc_conn := f_comp_by_teid(g2c_ud.gtpc.tEID);
+			CLIENT.send(g2c_ud.gtpc) to vc_conn;
+		} else if (isvalue(imsi_t)) {
+			vc_conn := f_comp_by_imsi(valueof(imsi_t));
+			CLIENT.send(g2c_ud.gtpc) to vc_conn;
+		} else {
+			/* Send to all clients */
+			var integer i;
+			for (i := 0; i < sizeof(TidTable); i := i+1) {
+				if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+					CLIENT.send(g2c_ud.gtpc) to TidTable[i].vc_conn;
+				}
+			}
+		}
+
+		/* remove sequence number if response was received */
+		if (match(g2c_ud.gtpc, tr_PDU_GTP2C_msgtypes(gtp2_responses))) {
+			f_seq_tbl_del(g2c_ud.gtpc.sequenceNumber);
+		}
+
+		}
+
+	[] TEID0.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
+		/* patch in the next sequence number */
+		/* FIXME: do this only for outbound requests */
+		g2c.sequenceNumber := int2oct(g_c_seq_nr, 3);
+		g_c_seq_nr := g_c_seq_nr + 1;
+		/* build Gtp2cUnitdata */
+		g2c_ud := { peer := g_peer, gtpc := g2c };
+		GTP2C.send(g2c_ud);
+		if (match(g2c, tr_PDU_GTP2C_msgtypes(gtp2_requests))) {
+			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
+		}
+		}
+
+	[] CLIENT.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
+		/* patch in the next sequence number */
+		/* FIXME: do this only for outbound requests */
+		g2c.sequenceNumber := int2oct(g_c_seq_nr, 3);
+		g_c_seq_nr := g_c_seq_nr + 1;
+		/* build Gtp2cUnitdata */
+		g2c_ud := { peer := g_peer, gtpc := g2c };
+		GTP2C.send(g2c_ud);
+		if (match(g2c, tr_PDU_GTP2C_msgtypes(gtp2_requests))) {
+			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
+		}
+		}
+
+	[] CLIENT_PROC.getcall(GTP2EM_register_imsi:{?}) -> param(imsi) sender vc_conn {
+		f_imsi_tbl_add(imsi, vc_conn);
+		CLIENT_PROC.reply(GTP2EM_register_imsi:{imsi}) to vc_conn;
+		}
+
+	[] CLIENT_PROC.getcall(GTP2EM_register_teid:{?}) -> param(teid) sender vc_conn {
+		f_tid_tbl_add(teid, vc_conn);
+		CLIENT_PROC.reply(GTP2EM_register_teid:{teid}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP2EM_allocate_teid:{}) -> sender vc_conn {
+		var OCT4 t := f_alloc_teid();
+		f_tid_tbl_add(t, vc_conn);
+		CLIENT_PROC.reply(GTP2EM_allocate_teid:{} value t) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP2EM_create_tunnel:{?}) -> param(gtc) sender vc_conn {
+		rx_uecups := f_uecups_xceive({create_tun := gtc}, {create_tun_res:={result:=OK}});
+		CLIENT_PROC.reply(GTP2EM_create_tunnel:{gtc}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP2EM_destroy_tunnel:{?}) -> param(gtd) sender vc_conn {
+		rx_uecups := f_uecups_xceive({destroy_tun := gtd}, {destroy_tun_res:={result:=OK}});
+		CLIENT_PROC.reply(GTP2EM_destroy_tunnel:{gtd}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP2EM_start_program:{?}) -> param(sprog) sender vc_conn {
+		rx_uecups := f_uecups_xceive({start_program := sprog}, {start_program_res:=?});
+		/* if successful: store (pid, vc_conn) tuple so we can route program_term_ind */
+		if (rx_uecups.start_program_res.result == OK) {
+			f_pid_tbl_add(rx_uecups.start_program_res.pid, vc_conn);
+		}
+		CLIENT_PROC.reply(GTP2EM_start_program:{sprog} value rx_uecups.start_program_res) to vc_conn;
+		}
+
+	}
+	}
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+type port GTP2EM_PT message {
+	inout PDU_GTPCv2, UECUPS_ProgramTermInd;
+} with { extension "internal" };
+
+signature GTP2EM_register_imsi(hexstring imsi);
+signature GTP2EM_register_teid(OCT4 teid);
+signature GTP2EM_allocate_teid() return OCT4;
+signature GTP2EM_create_tunnel(UECUPS_CreateTun gtc);
+signature GTP2EM_destroy_tunnel(UECUPS_DestroyTun gtd);
+signature GTP2EM_start_program(UECUPS_StartProgram sprog) return UECUPS_StartProgramRes;
+
+type port GTP2EM_PROC_PT procedure {
+	inout GTP2EM_register_imsi, GTP2EM_register_teid, GTP2EM_allocate_teid,
+	      GTP2EM_create_tunnel, GTP2EM_destroy_tunnel, GTP2EM_start_program;
+} with { extension "internal" };
+
+/***********************************************************************
+ * Client Component
+ ***********************************************************************/
+
+type component GTP2_ConnHdlr {
+	port GTP2EM_PT GTP2;
+	port GTP2EM_PROC_PT GTP2_PROC;
+};
+
+function f_gtp2_register_imsi(hexstring imsi) runs on GTP2_ConnHdlr {
+	GTP2_PROC.call(GTP2EM_register_imsi:{imsi}) {
+		[] GTP2_PROC.getreply(GTP2EM_register_imsi:{imsi});
+	}
+}
+
+function f_gtp2_register_teid(OCT4 teid) runs on GTP2_ConnHdlr {
+	GTP2_PROC.call(GTP2EM_register_teid:{teid}) {
+		[] GTP2_PROC.getreply(GTP2EM_register_teid:{teid});
+	}
+}
+
+function f_gtp2_allocate_teid() runs on GTP2_ConnHdlr return OCT4 {
+	var OCT4 t;
+	GTP2_PROC.call(GTP2EM_allocate_teid:{}) {
+		[] GTP2_PROC.getreply(GTP2EM_allocate_teid:{}) -> value t {
+			return t;
+		}
+	}
+}
+
+function f_gtp2_create_tunnel(template (value) UECUPS_CreateTun gtc)
+runs on GTP2_ConnHdlr {
+	GTP2_PROC.call(GTP2EM_create_tunnel:{valueof(gtc)}) {
+		[] GTP2_PROC.getreply(GTP2EM_create_tunnel:{gtc});
+	}
+}
+
+function f_gtp2_destroy_tunnel(template (value) UECUPS_DestroyTun gtd)
+runs on GTP2_ConnHdlr {
+	GTP2_PROC.call(GTP2EM_destroy_tunnel:{valueof(gtd)}) {
+		[] GTP2_PROC.getreply(GTP2EM_destroy_tunnel:{gtd});
+	}
+}
+
+function f_gtp2_start_program(template (value) UECUPS_StartProgram sprog)
+runs on GTP2_ConnHdlr return UECUPS_StartProgramRes {
+	var UECUPS_StartProgramRes res;
+	GTP2_PROC.call(GTP2EM_start_program:{valueof(sprog)}) {
+		[] GTP2_PROC.getreply(GTP2EM_start_program:{sprog}) -> value res;
+	}
+	return res;
+}
+
+
+
+}
