@@ -366,27 +366,42 @@ runs on RAW_PCU_Test_CT {
 }
 
 /* Expect a Paging Request Type 1 from PCU on PCUIF on specified sapi.  */
-private function f_pcuif_rx_pch_pag_req1(out integer imsi_suff_rx, out GsmRrMessage rr_pag_req1)
-runs on RAW_PCU_Test_CT {
+private function f_pcuif_rx_pch_pag_req1(template MobileIdentityV mi1 := ?,
+					 template integer pag_group := ?)
+runs on RAW_PCU_Test_CT return GsmRrMessage {
+	var GsmRrMessage rr_pag_req1;
 	var PCUIF_Message pcu_msg;
 	var octetstring imsi_suff_octstr;
+	var integer pag_group_rx;
 	var octetstring macblock;
+
 	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 0,
 				      sapi := PCU_IF_SAPI_PCH)) -> value pcu_msg;
+
 	/* First 3 bytes contain IMSI suffix to calculate paging group: */
 	imsi_suff_octstr := substr(pcu_msg.u.data_req.data, 0, 3);
-	imsi_suff_rx := str2int(oct2char(imsi_suff_octstr[0])) * 100 +
+	pag_group_rx := str2int(oct2char(imsi_suff_octstr[0])) * 100 +
 			str2int(oct2char(imsi_suff_octstr[1])) * 10 +
 			str2int(oct2char(imsi_suff_octstr[2]));
 
+	/* Make sure we've got RR Paging Request Type 1 for a given MI */
 	macblock := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
 	rr_pag_req1 := dec_GsmRrMessage(macblock);
-	if (not match(rr_pag_req1, tr_PAG_REQ1())) {
+	if (not match(rr_pag_req1, tr_PAG_REQ1(tr_MI_LV(mi1)))) {
 		setverdict(fail, "Failed to match Paging Request Type 1: ", rr_pag_req1);
 		mtc.stop;
 	}
+
+	/* Make sure that received paging froup matches the expected one */
+	if (not match(pag_group_rx, pag_group)) {
+		setverdict(fail, "Paging group", pag_group_rx, " does not match expected ", pag_group);
+		mtc.stop;
+	}
+
 	BTS.send(ts_PCUIF_DATA_CNF(bts_nr := 0, trx_nr := 0, ts_nr := 0, block_nr := 0,
 				   fn := pcu_msg.u.data_req.fn, arfcn := 871, sapi := PCU_IF_SAPI_PCH, data := macblock));
+
+	return rr_pag_req1;
 }
 
 private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0, uint32_t fn := 0)
@@ -1502,12 +1517,9 @@ testcase TC_paging_cs_from_sgsn_ptp() runs on RAW_PCU_Test_CT {
  */
 private function f_tc_paging_ps_from_sgsn(Nsvci bvci, boolean use_ptmsi := false)
 runs on RAW_PCU_Test_CT {
-	var GsmRrMessage rr_pag_req1;
 	var OCT4 tlli := '00000001'O;
-	var integer imsi_suff_rx;
 	var integer imsi_suff_tx := 423;
 	var hexstring imsi := f_gen_imsi(imsi_suff_tx);
-	var GsmTmsi tmsi;
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1519,22 +1531,17 @@ runs on RAW_PCU_Test_CT {
 	f_bssgp_establish();
 	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
 
-	/* Send paging request with or without TMSI */
+	/* Send BSSGP PAGING-PS (with or without TMSI), wait for RR Paging Request Type 1.
+	 * Make sure that both paging group (IMSI suffix) and Mobile Identity match. */
 	if (use_ptmsi) {
-		tmsi := oct2int(f_rnd_octstring(4)); /* Random P-TMSI */
-		BSSGP[0].send(ts_BSSGP_PS_PAGING_PTMSI(bvci, imsi, tmsi));
+		var OCT4 tmsi := f_rnd_octstring(4); /* Random P-TMSI */
+		BSSGP[0].send(ts_BSSGP_PS_PAGING_PTMSI(bvci, imsi, oct2int(tmsi)));
+		f_pcuif_rx_pch_pag_req1(t_MI_TMSI(tmsi), imsi_suff_tx);
 	} else {
 		BSSGP[0].send(ts_BSSGP_PS_PAGING_IMSI(bvci, imsi));
+		f_pcuif_rx_pch_pag_req1(tr_MI_IMSI(imsi), imsi_suff_tx);
 	}
 
-	/* Receive it on BTS side towards MS */
-	f_pcuif_rx_pch_pag_req1(imsi_suff_rx, rr_pag_req1);
-	if (imsi_suff_rx != imsi_suff_tx) {
-		setverdict(fail, "Wrong IMSI suffix: expected ", imsi_suff_tx, " but received ", imsi_suff_rx);
-		mtc.stop;
-	}
-
-	/* TODO: match MI (P-TMSI/IMSI) of received RR Paging Request */
 	setverdict(pass);
 }
 
