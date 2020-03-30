@@ -44,6 +44,7 @@ FILES+="RTP_CodecPort.ttcn RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttc
 FILES+="OSMUX_CodecPort.ttcn OSMUX_Emulation.ttcn OSMUX_Types.ttcn OSMUX_CodecPort_CtrlFunct.ttcn OSMUX_CodecPort_CtrlFunctDef.cc "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
+FILES+="RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 gen_links $DIR $FILES
 
 ignore_pp_results
