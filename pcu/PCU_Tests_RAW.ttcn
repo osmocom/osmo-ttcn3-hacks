@@ -26,6 +26,7 @@ import from GSM_RR_Types all;
 import from Osmocom_VTY_Functions all;
 import from TELNETasp_PortType all;
 
+import from MobileL3_GMM_SM_Types all;
 import from RLCMAC_CSN1_Types all;
 import from RLCMAC_Types all;
 
@@ -495,6 +496,20 @@ runs on RAW_PCU_Test_CT {
 
 	poll_fn := dl_fn + f_rrbp_fn_delay(dl_block.ctrl.mac_hdr.rrbp);
 }
+
+private function f_rx_rlcmac_dl_block_exp_pkt_ul_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
+runs on RAW_PCU_Test_CT {
+        var uint32_t dl_fn;
+
+        f_rx_rlcmac_dl_block(dl_block, dl_fn);
+        if (not match(dl_block, tr_RLCMAC_UL_PACKET_ASS())) {
+                setverdict(fail, "Failed to match Packet Uplink Assignment");
+                mtc.stop;
+        }
+
+        poll_fn := dl_fn + f_rrbp_fn_delay(dl_block.ctrl.mac_hdr.rrbp);
+}
+
 
 private function f_rx_rlcmac_dl_block_exp_pkt_pag_req(out RlcmacDlBlock dl_block)
 runs on RAW_PCU_Test_CT {
@@ -1201,7 +1216,7 @@ testcase TC_t3193() runs on RAW_PCU_Test_CT {
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
  * answered, so TBFs for uplink and later for downlink are created.
  */
-testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
+private function f_TC_mo_ping_pong(template (omit) MSRadioAccessCapabilityV ms_racap := omit, template (present) CodingScheme exp_cs_mcs := ?) runs on RAW_PCU_Test_CT {
 	var GsmRrMessage rr_imm_ass;
 	var PacketUlAssign ul_tbf_ass;
 	var PacketDlAssign dl_tbf_ass;
@@ -1235,6 +1250,18 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 		mtc.stop;
 	}
 
+	if (not istemplatekind(ms_racap, "omit")) {
+		/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS
+		 * (see 3GPP TS 04.60 "7.1.3.1 Initiation of the Packet resource request procedure")
+		 */
+		f_tx_rlcmac_ul_block(ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_RES_REQ(tlli, ms_racap))), 0);
+		f_rx_rlcmac_dl_block_exp_pkt_ul_ass(dl_block, sched_fn);
+		if (dl_block.ctrl.payload.u.ul_assignment.identity.tlli.tlli != tlli) {
+			setverdict(fail, "Wrong TLLI ", dl_block.ctrl.payload.u.ul_assignment.identity.tlli, " received vs exp ", tlli);
+			mtc.stop;
+		}
+	}
+
 	/* Send one UL block and make sure it is ACKED fine */
 	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
@@ -1256,11 +1283,31 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 
 	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
 	f_sleep(X2002);
-	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0, exp_cs_mcs);
 
 	/* ACK the DL block */
 	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
 	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+}
+
+/* Test scenario where MS wants to send some data on PDCH against SGSN and it is
+ * answered, so TBFs for uplink and later for downlink are created.
+ */
+testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
+	var CodingScheme exp_cs_mcs := CS_1;
+	f_TC_mo_ping_pong(omit, exp_cs_mcs);
+}
+
+
+testcase TC_mo_ping_pong_with_ul_racap() runs on RAW_PCU_Test_CT {
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+	var CodingScheme exp_cs_mcs := CS_2;
+
+	f_TC_mo_ping_pong(ms_racap, exp_cs_mcs);
 }
 
 /* Test scenario where SGSN wants to send some data against MS and it is
@@ -1724,6 +1771,7 @@ control {
 	execute( TC_t3169() );
 	execute( TC_t3193() );
 	execute( TC_mo_ping_pong() );
+	execute( TC_mo_ping_pong_with_ul_racap() );
 	execute( TC_mt_ping_pong() );
 	execute( TC_mt_ping_pong_with_dl_racap() );
 	execute( TC_imm_ass_dl_block_retrans() );
