@@ -44,12 +44,17 @@ DIR=$BASEDIR/osmo-uecups/ttcn3
 FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
+FILES="DIAMETER_EncDec.cc"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn PAP_Types.ttcn "
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Templates.ttcn "
 FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 FILES+="DNS_Helpers.ttcn "
+FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

@@ -12,22 +12,37 @@ import from UECUPS_Types all;
 
 import from DNS_Helpers all;
 
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_Emulation all;
+
+
 modulepar {
 	charstring mp_pgw_hostname := "127.0.0.3";
 	charstring mp_local_hostname_c := "127.0.0.1";
 	charstring mp_local_hostname_u := "127.0.0.1";
+
 	charstring mp_run_prog_as_user := "laforge";
 	charstring mp_ping_hostname := "10.45.0.1";
+
+	charstring mp_pcrf_local_ip := "127.0.0.5";
+	integer mp_pcrf_local_port := 3868;
 }
 
 /* main component, we typically have one per testcase */
 type component PGW_Test_CT {
 	var GTPv2_Emulation_CT vc_GTP2;
 	port GTP2EM_PT TEID0;
+
+	/* emulated PCRF */
+	var DIAMETER_Emulation_CT vc_DIAMETER;
+	port DIAMETER_PT DIAMETER_UNIT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
 }
 
 /* per-session component; we typically have 1..N per testcase */
-type component PGW_Session_CT extends GTP2_ConnHdlr {
+type component PGW_Session_CT extends GTP2_ConnHdlr, DIAMETER_ConnHdlr {
 	var SessionPars	g_pars;
 
 	/* TEI (Data) local side */
@@ -91,6 +106,35 @@ type record BearerConfig {
 
 type function void_fn() runs on PGW_Session_CT;
 
+friend function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_diameter(charstring id) runs on PGW_Test_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback)
+	};
+	var DIAMETER_conn_parameters pars := {
+		remote_ip := mp_pgw_hostname,
+		remote_sctp_port := -1,
+		local_ip := mp_pcrf_local_ip,
+		local_sctp_port := mp_pcrf_local_port,
+		origin_host := "pcrf.localdomain",
+		origin_realm := "localdomain",
+		vendor_app_id := c_DIAMETER_3GPP_Gx_AID
+	};
+	vc_DIAMETER := DIAMETER_Emulation_CT.create(id);
+	map(vc_DIAMETER:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_DIAMETER:DIAMETER_UNIT, self:DIAMETER_UNIT);
+	connect(vc_DIAMETER:DIAMETER_PROC, self:DIAMETER_PROC);
+	vc_DIAMETER.start(DIAMETER_Emulation.main(ops, pars, id));
+
+	f_diameter_wait_capability(DIAMETER_UNIT);
+}
+
 private function f_init() runs on PGW_Test_CT {
 	var Gtp2EmulationCfg cfg := {
 		gtpc_bind_ip := mp_local_hostname_c,
@@ -105,6 +149,10 @@ private function f_init() runs on PGW_Test_CT {
 	map(vc_GTP2:GTP2C, system:GTP2C);
 	connect(vc_GTP2:TEID0, self:TEID0);
 	vc_GTP2.start(GTPv2_Emulation.main(cfg));
+
+	if (mp_pcrf_local_ip != "") {
+		f_init_diameter(testcasename());
+	}
 }
 
 function f_start_handler(void_fn fn, template (omit) SessionPars pars := omit)
@@ -114,6 +162,12 @@ runs on PGW_Test_CT return PGW_Session_CT {
 	vc_conn := PGW_Session_CT.create(id);
 	connect(vc_conn:GTP2, vc_GTP2:CLIENT);
 	connect(vc_conn:GTP2_PROC, vc_GTP2:CLIENT_PROC);
+
+	if (isbound(vc_DIAMETER)) {
+		connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
+		connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+	}
+
 	vc_conn.start(f_handler_init(fn, pars));
 	return vc_conn;
 }
@@ -122,6 +176,9 @@ private function f_handler_init(void_fn fn, template (omit) SessionPars pars := 
 runs on PGW_Session_CT {
 	if (isvalue(pars)) {
 		g_pars := valueof(pars);
+	}
+	if (DIAMETER_PROC.checkstate("Connected")) {
+		f_diameter_expect(g_pars.imsi);
 	}
 	fn.apply();
 }
@@ -144,6 +201,28 @@ function f_gen_imsi(integer suffix) return hexstring {
 
 function f_gen_msisdn(integer suffix) return hexstring {
 	return f_concat_pad(12, '49123'H, suffix);
+}
+
+private altstep as_DIA_CCR(DCC_NONE_CC_Request_Type req_type) runs on PGW_Session_CT {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_CCR(req_type := req_type)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var AVP_Unsigned32 req_num;
+
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_DCC_NONE_CC_Request_Number);
+		req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
+
+		DIAMETER.send(ts_DIA_CCA(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id, sess_id,
+					 req_type, req_num));
+	}
+	[] DIAMETER.receive(PDU_DIAMETER:?) -> value rx_dia {
+		setverdict(fail, "Received unexpected DIAMETER ", rx_dia);
+		self.stop;
+	}
 }
 
 
@@ -228,6 +307,9 @@ private function f_create_session() runs on PGW_Session_CT {
 	g2c.gtpcv2_pdu.createSessionRequest.userLocationInfo := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
 
 	GTP2.send(g2c);
+	if (DIAMETER_PROC.checkstate("Connected")) {
+		as_DIA_CCR(INITIAL_REQUEST);
+	}
 	alt {
 	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_teic, cause:='10'O)) -> value rx {
 		/* extract TEIDs */
@@ -283,6 +365,9 @@ private function f_delete_session(template (omit) OCT1 tx_cause := omit,
 					  teid_list := {}, bearer_id := 1);
 
 	GTP2.send(g2c);
+	if (DIAMETER_PROC.checkstate("Connected")) {
+		as_DIA_CCR(TERMINATION_REQUEST);
+	}
 	alt {
 	[] GTP2.receive(tr_GTP2C_DeleteSessionResp(d_teid := exp_teid, cause := exp_cause)) {
 		setverdict(pass);
