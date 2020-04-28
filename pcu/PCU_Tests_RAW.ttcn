@@ -219,11 +219,28 @@ template AckNackDescription t_AckNackDescription_init := {
 	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
 }
 
+private function f_rlcmac_dl_block_get_tfi(RlcmacDlBlock dl_block) return uint5_t {
+	if (ischosen(dl_block.data)) {
+		return dl_block.data.mac_hdr.hdr_ext.tfi;
+	} else {
+		return dl_block.data_egprs.mac_hdr.tfi;
+	}
+}
+
 /* TS 44.060 sec 12.3 Ack/Nack Description */
-private function f_acknackdesc_ack_block(inout AckNackDescription desc, uint7_t bsn, BIT1 final_ack := '0'B)
+private function f_acknackdesc_ack_block(inout AckNackDescription desc, RlcmacDlBlock dl_block, BIT1 final_ack := '0'B)
 {
+	var uint7_t bsn;
 	var integer i;
-	var integer inc := bsn - desc.starting_seq_nr + 1;
+	var integer inc;
+
+	if (ischosen(dl_block.data)) {
+		bsn := dl_block.data.mac_hdr.hdr_ext.bsn;
+	} else {
+		bsn := dl_block.data_egprs.mac_hdr.bsn1;
+	}
+
+	inc := bsn - desc.starting_seq_nr + 1;
 	/* Filling hole? */
 	if (bsn < desc.starting_seq_nr) {
 		desc.receive_block_bitmap[lengthof(desc.receive_block_bitmap) - (desc.starting_seq_nr - bsn)] := int2bit(1, 1);
@@ -558,18 +575,9 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
-private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?, template (present) CodingScheme exp_cs := ?)
-runs on RAW_PCU_Test_CT {
-	var PCUIF_Message pcu_msg;
-	var uint32_t dl_fn;
-	var template RlcmacDlBlock dl_template := tr_RLCMAC_DATA_RRBP;
-	dl_template.data.blocks := ?;
-
-	f_rx_rlcmac_dl_block(dl_block, dl_fn);
-	if (not match(dl_block, dl_template)) {
-		setverdict(fail, "Failed to match Packet data: ", dl_block, " vs ", dl_template);
-		mtc.stop;
-	}
+private function f_rlcmac_dl_block_verify_data_gprs(RlcmacDlBlock dl_block, uint32_t dl_fn, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?, template (present) CodingScheme exp_cs := ?)
+{
+	log("verifying dl data block (gprs): ", dl_block);
 
 	ack_fn := dl_fn + f_rrbp_fn_delay(dl_block.data.mac_hdr.mac_hdr.rrbp);
 
@@ -598,6 +606,71 @@ runs on RAW_PCU_Test_CT {
 	if (lengthof(dl_block.data.blocks) > 1 and substr(dl_block.data.blocks[1].payload, 0, 3) != '43C001'O) {
 		setverdict(fail, "Second data payload is not a dummy frame: ", dl_block.data.blocks[1].payload);
 		mtc.stop;
+	}
+
+	/* TODO: check exp_cs */
+}
+
+private function f_rlcmac_dl_block_verify_data_egprs(RlcmacDlBlock dl_block, uint32_t dl_fn, out uint32_t ack_fn, octetstring data, template (present) uint14_t exp_bsn := ?, template (present) CodingScheme exp_cs := ?)
+{
+	log("verifying dl data block (egprs): ", dl_block);
+
+	ack_fn := dl_fn + f_rrbp_fn_delay(dl_block.data_egprs.mac_hdr.rrbp);
+
+	if (not match(dl_block.data_egprs.mac_hdr.bsn1, exp_bsn)) {
+		setverdict(fail, "DL block BSN doesn't match: ",
+			   dl_block.data_egprs.blocks[0].hdr.length_ind, " vs exp ", exp_bsn);
+	}
+
+	if (lengthof(dl_block.data_egprs.blocks) < 1) {
+		setverdict(fail, "DL block has no LLC payload: ", dl_block);
+		mtc.stop;
+	}
+
+	if (ispresent(dl_block.data_egprs.blocks[0].hdr) and dl_block.data_egprs.blocks[0].hdr.length_ind != lengthof(data)) {
+		setverdict(fail, "DL block has LLC header with wrong expected size: ",
+			   dl_block.data_egprs.blocks[0].hdr.length_ind, " vs ", lengthof(data));
+		mtc.stop;
+	}
+
+	if (dl_block.data_egprs.blocks[0].payload != data) {
+		setverdict(fail, "Failed to match content of LLC payload in DL Block: ", dl_block, " vs ", data);
+		mtc.stop;
+	}
+
+	/* Check next data blocks contain dummy frames */
+	if (lengthof(dl_block.data_egprs.blocks) > 1 and substr(dl_block.data_egprs.blocks[1].payload, 0, 3) != '43C001'O) {
+		setverdict(fail, "Second data payload is not a dummy frame: ", dl_block.data.blocks[1].payload);
+		mtc.stop;
+	}
+
+	/* TODO: Check exp_cs. In the case of EGPRS, first check mac_hdr.header_type and then decode CPS = exp_cs based on mac_hdr.header_type.
+		See wireshark's egprs_Header_type1_coding_puncturing_scheme_to_mcs. */
+}
+
+private function f_rx_rlcmac_dl_block_exp_data(out RlcmacDlBlock dl_block, out uint32_t ack_fn, octetstring data, template (present) uint7_t exp_bsn := ?, template (present) CodingScheme exp_cs := ?)
+runs on RAW_PCU_Test_CT {
+	var PCUIF_Message pcu_msg;
+	var uint32_t dl_fn;
+	var boolean is_egprs := false;
+	var template RlcmacDlBlock dl_template := tr_RLCMAC_DATA_RRBP;
+	dl_template.data.blocks := ?;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, dl_template)) {
+		dl_template := tr_RLCMAC_DATA_EGPRS;
+		dl_template.data_egprs.blocks := ?;
+		if (not match(dl_block, dl_template)) {
+			setverdict(fail, "Failed to match Packet data: ", dl_block, " vs ", dl_template);
+			mtc.stop;
+		}
+		is_egprs := true;
+	}
+
+	if (is_egprs) {
+		f_rlcmac_dl_block_verify_data_egprs(dl_block, dl_fn, ack_fn, data, exp_bsn, exp_cs);
+	} else {
+		f_rlcmac_dl_block_verify_data_gprs(dl_block, dl_fn, ack_fn, data, exp_bsn, exp_cs);
 	}
 }
 
@@ -1231,8 +1304,8 @@ testcase TC_t3193() runs on RAW_PCU_Test_CT {
 	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
 
 	/* ACK the DL block */
-	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc), 0, sched_fn);
 	/* we are done with the DL-TBF here so far, let's clean up our local state: */
 	ack_nack_desc := valueof(t_AckNackDescription_init)
 
@@ -1245,8 +1318,8 @@ testcase TC_t3193() runs on RAW_PCU_Test_CT {
 
 	/* Now that we confirmed the new assignment in the dl-tbf, lets receive the data and ack it */
 	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
-	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc), 0, sched_fn);
 }
 
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
@@ -1322,8 +1395,8 @@ private function f_TC_mo_ping_pong(template (omit) MSRadioAccessCapabilityV ms_r
 	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0, exp_cs_mcs);
 
 	/* ACK the DL block */
-	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc), 0, sched_fn);
 }
 
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
@@ -1386,8 +1459,8 @@ private function f_TC_mt_ping_pong(template (omit) MSRadioAccessCapabilityV_BSSG
 	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0, exp_cs_mcs);
 
 	/* ACK the DL block */
-	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc), 0, sched_fn);
 
 	/* Now MS wants to answer the DL data, Establish an Uplink TBF */
 	ok := f_establish_tbf(rr_imm_ass);
@@ -1478,8 +1551,8 @@ testcase TC_imm_ass_dl_block_retrans() runs on RAW_PCU_Test_CT {
 	f_rx_rlcmac_dl_block_exp_data(dl_block, sched_fn, data, 0);
 
 	/* ACK the DL block */
-	f_acknackdesc_ack_block(ack_nack_desc, dl_block.data.mac_hdr.hdr_ext.bsn, '1'B);
-	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(dl_block.data.mac_hdr.hdr_ext.tfi, ack_nack_desc), 0, sched_fn);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc), 0, sched_fn);
 }
 
 private function f_pkt_paging_match_imsi(in PacketPagingReq req, hexstring imsi) {
