@@ -56,7 +56,7 @@ gen_links $DIR $FILES
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
-FILES+="L3_Templates.ttcn RLCMAC_CSN1_Types.ttcn "
+FILES+="L3_Templates.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Emulation.ttcn "
 FILES+="NAS_Templates.ttcn GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "

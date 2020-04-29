@@ -49,7 +49,7 @@ FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
+FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Templates.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
 FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
