@@ -1,4 +1,4 @@
-# PCU_Tests_RAW.ttcn
+# PCU_Tests.ttcn
 
 * external interfaces
     * Gb (emulates SGSN side NS/BSSGP)
