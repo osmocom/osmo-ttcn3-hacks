@@ -606,10 +606,14 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 	if (ret_val.mac__hdr().tlli__ind()) {
 		ret_val.tlli() = OCTETSTRING(4, ttcn_buffer.get_read_data());
 		ttcn_buffer.increase_pos(4);
+	} else {
+		ret_val.tlli() = OMIT_VALUE;
 	}
 	/* parse optional PFI */
 	if (ret_val.mac__hdr().pfi__ind()) {
 		ret_val.pfi().decode(RlcmacUlDataBlock_pfi_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+	} else {
+		ret_val.pfi() = OMIT_VALUE;
 	}
 
 	/* RLC blocks at end */
@@ -734,10 +738,14 @@ RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream, Co
 	if (ret_val.tlli__ind()) {
 		ret_val.tlli() = OCTETSTRING(4, aligned_buffer.get_read_data());
 		aligned_buffer.increase_pos(4);
+	} else {
+		ret_val.tlli() = OMIT_VALUE;
 	}
 	/* parse optional PFI */
 	if (ret_val.mac__hdr().pfi__ind()) {
 		ret_val.pfi().decode(RlcmacUlDataBlock_pfi_descr_, aligned_buffer, TTCN_EncDec::CT_RAW);
+	} else {
+		ret_val.pfi() = OMIT_VALUE;
 	}
 
 	/* RLC blocks at end */
