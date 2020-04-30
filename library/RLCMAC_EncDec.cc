@@ -743,7 +743,7 @@ RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream, Co
 	}
 	/* parse optional PFI */
 	if (ret_val.mac__hdr().pfi__ind()) {
-		ret_val.pfi().decode(RlcmacUlDataBlock_pfi_descr_, aligned_buffer, TTCN_EncDec::CT_RAW);
+		ret_val.pfi().decode(RlcmacUlEgprsDataBlock_pfi_descr_, aligned_buffer, TTCN_EncDec::CT_RAW);
 	} else {
 		ret_val.pfi() = OMIT_VALUE;
 	}
@@ -1130,7 +1130,7 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 	}
 
 	if (in.mac__hdr().pfi__ind()) {
-		in.pfi().encode(RlcmacUlDataBlock_pfi_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+		in.pfi().encode(RlcmacUlEgprsDataBlock_pfi_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 	}
 
 	if (in.blocks().is_bound()) {
