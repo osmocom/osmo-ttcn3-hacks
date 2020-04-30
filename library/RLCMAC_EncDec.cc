@@ -1078,13 +1078,13 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 
 	switch (in.mac__hdr().header__type()) {
 	case EgprsHeaderType::RLCMAC__HDR__TYPE__1:
-		enc__RlcmacUlEgprsDataHeader_type1(si.mac__hdr(), ttcn_buffer);
+		enc__RlcmacUlEgprsDataHeader_type1(in.mac__hdr(), ttcn_buffer);
 		break;
 	case EgprsHeaderType::RLCMAC__HDR__TYPE__2:
-		enc__RlcmacUlEgprsDataHeader_type2(si.mac__hdr(), ttcn_buffer);
+		enc__RlcmacUlEgprsDataHeader_type2(in.mac__hdr(), ttcn_buffer);
 		break;
 	case EgprsHeaderType::RLCMAC__HDR__TYPE__3:
-		enc__RlcmacUlEgprsDataHeader_type3(si.mac__hdr(), ttcn_buffer);
+		enc__RlcmacUlEgprsDataHeader_type3(in.mac__hdr(), ttcn_buffer);
 	default:
 		break; /* TODO: error */
 	}
