@@ -2,6 +2,7 @@
 #include <endian.h>
 
 #include "RLCMAC_Types.hh"
+#include "RLCMAC_Templates.hh"
 #include "GSM_Types.hh"
 /* Decoding of TS 44.060 GPRS RLC/MAC blocks, portions requiring manual functions
  * beyond what TITAN RAW coder can handle internally.
@@ -172,6 +173,22 @@ struct gprs_rlc_dl_header_egprs_3 {
 #endif
 } __attribute__ ((packed));
 
+/*
+static const char hex_chars[] = "0123456789abcdef";
+void printbuffer(const char* ptr, TTCN_Buffer& buf) {
+	int len = buf.get_len();
+	const unsigned char* cbuf = buf.get_data();
+
+	fprintf(stderr, "printbuffer %s (len=%d): [", ptr, len);
+
+	for (int i = 0; i < len; i++) {
+		fprintf(stderr, " %c%c", hex_chars[cbuf[i] >> 4], hex_chars[cbuf[i] & 0xf]);
+	}
+
+	fprintf(stderr, " ]\n");
+}
+*/
+
 static CodingScheme::enum_type payload_len_2_coding_scheme(size_t payload_len) {
 	switch (payload_len) {
 	case 23:
@@ -294,7 +311,7 @@ static void clone_aligned_buffer_lsbf(unsigned int offset_bits, unsigned int len
 	hdr_bytes = offset_bits / 8;
 	extra_bits = offset_bits % 8;
 
-	fprintf(stderr, "RLMAC: clone: hdr_bytes=%u extra_bits=%u (length_bytes=%u)\n", hdr_bytes, extra_bits, length_bytes);
+	//fprintf(stderr, "RLMAC: clone: hdr_bytes=%u extra_bits=%u (length_bytes=%u)\n", hdr_bytes, extra_bits, length_bytes);
 
 	if (extra_bits == 0) {
 		/* It is aligned already */
@@ -324,9 +341,8 @@ static void get_egprs_data_block(const TTCN_Buffer& orig_ttcn_buffer, unsigned i
 	size_t length_bytes = (initial_spare_bits + length_bits + 7) / 8;
 	size_t accepted_len = length_bytes;
 
-	fprintf(stderr, "RLMAC: trying to allocate %u bytes (orig is %zu bytes long with read pos %zu)\n", length_bytes, orig_ttcn_buffer.get_len(), orig_ttcn_buffer.get_pos());
+	//fprintf(stderr, "RLMAC: trying to allocate %u bytes (orig is %zu bytes long with read pos %zu)\n", length_bytes, orig_ttcn_buffer.get_len(), orig_ttcn_buffer.get_pos());
 	dst_ttcn_buffer.get_end(aligned_buf, accepted_len);
-	fprintf(stderr, "RLMAC: For dst ptr=%p with length=%zu\n", aligned_buf, accepted_len);
 	if (accepted_len < length_bytes) {
 		fprintf(stderr, "RLMAC: ERROR! asked for %zu bytes but got %zu\n", length_bytes, accepted_len);
 	}
@@ -337,14 +353,90 @@ static void get_egprs_data_block(const TTCN_Buffer& orig_ttcn_buffer, unsigned i
 		orig_ttcn_buffer.get_data(),
 		aligned_buf);
 
-	fprintf(stderr, "RLMAC: clone_aligned_buffer_lsbf success\n");
-
 	/* clear spare bits and move block header bits to the right */
 	aligned_buf[0] = aligned_buf[0] >> initial_spare_bits;
 
 	dst_ttcn_buffer.increase_length(length_bytes);
 }
 
+/* bit-shift the entire 'src' of length 'length_bytes'
+ * and store the result to caller-allocated 'buffer'  by 'offset_bits'.  The shifting is
+ * done lsb-first. */
+static void clone_unaligned_buffer_lsbf(unsigned int offset_bits, unsigned int length_bytes,
+	const uint8_t *src, uint8_t *buffer)
+{
+	unsigned int hdr_bytes;
+	unsigned int extra_bits;
+	unsigned int i;
+
+	uint8_t c, last_hdr_c, last_c;
+	uint8_t *dst;
+
+	hdr_bytes = offset_bits / 8;
+	extra_bits = offset_bits % 8;
+
+	//fprintf(stderr, "RLMAC: clone: hdr_bytes=%u extra_bits=%u (length_bytes=%u)\n", hdr_bytes, extra_bits, length_bytes);
+
+	if (extra_bits == 0) {
+		/* It is aligned already */
+		memcpy(buffer, src + hdr_bytes, length_bytes);
+		return;
+	}
+
+	/* Copy first header+data byte, it's not handled correctly by loop */
+	dst = buffer + hdr_bytes;
+	last_hdr_c = *dst;
+	last_c = *dst << (8 - extra_bits);
+
+	for (i = 0; i < length_bytes; i++) {
+		c = src[i];
+		*(dst++) = (last_c >> (8 - extra_bits)) | (c << extra_bits);
+		last_c = c;
+	}
+	/* overwrite the lower extra_bits */
+	*dst = (*dst & (0xff << extra_bits)) | (last_c >> (8 - extra_bits));
+
+	/* Copy back first header+data byte */
+	dst = buffer + hdr_bytes;
+	*(dst++) = last_hdr_c | (src[0] << (8 - extra_bits));
+	*dst |= (src[0] >> (extra_bits)) & (0xff >> (8 - extra_bits));
+}
+
+/* put an (aligned) EGPRS data block with given bit-offset and
+ * bit-length into parent buffer */
+static void put_egprs_data_block(const TTCN_Buffer& aligned_data_block_buffer, unsigned int offset_bits,
+	unsigned int length_bits, TTCN_Buffer& dst_ttcn_buffer)
+{
+	const unsigned int initial_spare_bits = 6;
+	unsigned char *unaligned_buf = NULL;
+	char tmpbuf[120];
+	int tmplen = dst_ttcn_buffer.get_len();
+	//size_t max_length_bytes = (initial_spare_bits + length_bits + 7) / 8;
+	size_t length_bytes = tmplen + aligned_data_block_buffer.get_len();
+	size_t accepted_len = length_bytes;
+
+	//fprintf(stderr, "RLMAC: trying to allocate %u bytes\n", length_bytes);
+
+	/* API .get_end() is the only one I could find to access writeable
+	   memory in the buffer. It points to the end. Hence, we first copy
+	   (readonly) data to tmpbuf and later clear() so that .get_end()
+	   provides us with a pointer to the start of the buffer. */
+	memcpy(tmpbuf, dst_ttcn_buffer.get_data(), tmplen);
+	dst_ttcn_buffer.clear();
+	dst_ttcn_buffer.get_end(unaligned_buf, accepted_len);
+	if (accepted_len < tmplen) {
+		fprintf(stderr, "RLMAC: ERROR! asked for %zu bytes but got %zu\n", length_bytes, accepted_len);
+	}
+	memcpy(unaligned_buf, tmpbuf, tmplen);
+
+	/* Copy the data out of the tvb to an aligned buffer */
+	clone_unaligned_buffer_lsbf(
+		offset_bits - initial_spare_bits, length_bytes,
+		aligned_data_block_buffer.get_data(),
+		unaligned_buf);
+
+	dst_ttcn_buffer.increase_length(length_bytes);
+}
 
 /////////////////////
 // DECODE
@@ -1078,8 +1170,15 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 {
 	RlcmacUlEgprsDataBlock in = si;
 	OCTETSTRING ret_val;
-	TTCN_Buffer ttcn_buffer;
+	TTCN_Buffer ttcn_buffer, aligned_buffer;
 	int i;
+	unsigned int data_block_bits, data_block_offsets[2];
+	unsigned int num_calls;
+	CodingScheme mcs;
+	boolean tlli_ind, e;
+
+	mcs = RLCMAC__Templates::f__rlcmac__cps__htype__to__mcs(in.mac__hdr().cps(), in.mac__hdr().header__type());
+	//fprintf(stderr, "RLCMAC: infered MCS %s (%d)\n", mcs.enum_to_str(static_cast<CodingScheme::enum_type>(mcs.as_int())), mcs.as_int());
 
 	if (!in.blocks().is_bound()) {
 		/* we don't have nay blocks: Add length value (zero) */
@@ -1109,10 +1208,14 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 		break; /* TODO: error */
 	}
 
+	/* Put first TI + E byte */
+	aligned_buffer.put_c(tlli_ind << 1 | e << 0); /* M=0, E=1 LEN=0 */
+	//printbuffer("After encoding first byte", aligned_buffer);
+
 	if (in.e() == false) {
 		/* Add LI octets, if any */
 		if (!in.blocks().is_bound()) {
-			ttcn_buffer.put_c(0x01); /* M=0, E=1 LEN=0 */
+			aligned_buffer.put_c(0x01); /* M=0, E=1 LEN=0 */
 		} else {
 			for (i = 0; i < in.blocks().size_of(); i++) {
 #if 0
@@ -1138,28 +1241,38 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 				}
 #endif
 				if (in.blocks()[i].hdr() != OMIT_VALUE) {
-					in.blocks()[i].hdr()().encode(EgprsLlcBlockHdr_descr_, ttcn_buffer,
+					in.blocks()[i].hdr()().encode(EgprsLlcBlockHdr_descr_, aligned_buffer,
 									TTCN_EncDec::CT_RAW);
 				}
 			}
 		}
 	}
 
+
+
 	if (in.tlli__ind()) {
-		ttcn_buffer.put_string(in.tlli());
+		aligned_buffer.put_string(in.tlli());
 	}
 
 	if (in.mac__hdr().pfi__ind()) {
-		in.pfi().encode(RlcmacUlEgprsDataBlock_pfi_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
+		in.pfi().encode(RlcmacUlEgprsDataBlock_pfi_descr_, aligned_buffer, TTCN_EncDec::CT_RAW);
 	}
 
+	//printbuffer("Before encoding EgprsLlc payload", aligned_buffer);
 	if (in.blocks().is_bound()) {
 		for (i = 0; i < in.blocks().size_of(); i++) {
 			if (!in.blocks()[i].is_bound())
 				continue;
-			ttcn_buffer.put_string(in.blocks()[i].payload());
+			aligned_buffer.put_string(in.blocks()[i].payload());
 		}
 	}
+	//printbuffer("After encoding EgprsLlc payload", aligned_buffer);
+
+	setup_rlc_mac_priv(mcs, in.mac__hdr().header__type(), true,
+			   &num_calls, &data_block_bits, data_block_offsets);
+	//printbuffer("before merging data block", ttcn_buffer);
+	put_egprs_data_block(aligned_buffer, data_block_offsets[0], data_block_bits, ttcn_buffer);
+	//printbuffer("after merging data block", ttcn_buffer);
 
 	ttcn_buffer.get_string(ret_val);
 	return ret_val;
