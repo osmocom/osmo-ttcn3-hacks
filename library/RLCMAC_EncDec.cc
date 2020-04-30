@@ -1040,13 +1040,13 @@ void enc__RlcmacUlEgprsDataHeader_type3(const EgprsUlMacDataHeader& si, TTCN_Buf
 	egprs3.si = bs2uint8(si.foi__si());
 	egprs3.cv = si.countdown();
 	egprs3.tfi_hi = si.tfi() >> 0;
-	egprs3.tfi_lo = si.tfi() >> 1;
+	egprs3.tfi_lo = si.tfi() >> 2;
 	egprs3.bsn1_hi = si.bsn1() >> 0;
 	egprs3.bsn1_lo = si.bsn1() >> 5;
 	egprs3.cps_hi = si.cps() >> 0;
 	egprs3.cps_lo = si.cps() >> 2;
 	egprs3.spb = bs2uint8(si.spb());
-	egprs3.rsb = bs2uint8(si.spb());
+	egprs3.rsb = bs2uint8(si.rsb());
 	egprs3.pi = si.pfi__ind();
 	egprs3.spare = 0;
 	egprs3.dummy = 0;
