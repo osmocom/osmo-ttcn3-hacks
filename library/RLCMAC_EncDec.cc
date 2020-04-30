@@ -279,7 +279,7 @@ setup_rlc_mac_priv(CodingScheme::enum_type mcs, EgprsHeaderType::enum_type hdrty
 }
 
 /* bit-shift the entire 'src' of length 'length_bytes' by 'offset_bits'
- * and store the reuslt to caller-allocated 'buffer'.  The shifting is
+ * and store the result to caller-allocated 'buffer'.  The shifting is
  * done lsb-first. */
 static void clone_aligned_buffer_lsbf(unsigned int offset_bits, unsigned int length_bytes,
 	const uint8_t *src, uint8_t *buffer)
@@ -938,7 +938,7 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 	int i;
 
 	if (!in.blocks().is_bound()) {
-		/* we don't have nay blocks: Add length value (zero) */
+		/* we don't have any blocks: Add length value (zero) */
 		in.mac__hdr().e() = false; /* E=0: extension octet follows */
 	} else if (in.blocks().size_of() == 1 && in.blocks()[0].hdr() == OMIT_VALUE) {
 		/* If there's only a single block, and that block has no HDR value defined, */
