@@ -673,10 +673,30 @@ EgprsUlMacDataHeader dec__EgprsUlMacDataHeader_type2(const OCTETSTRING& stream)
 static
 EgprsUlMacDataHeader dec__EgprsUlMacDataHeader_type3(const OCTETSTRING& stream)
 {
+	TTCN_Buffer ttcn_buffer(stream);
 	EgprsUlMacDataHeader ret_val;
+	const struct gprs_rlc_ul_header_egprs_3 *egprs3;
+	uint8_t tmp;
 
-	fprintf(stderr, "FIXME: Not implemented! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+	egprs3 = static_cast<const struct gprs_rlc_ul_header_egprs_3 *>
+		((const void *)ttcn_buffer.get_data());
 
+	ret_val.header__type() = EgprsHeaderType::RLCMAC__HDR__TYPE__3;
+	ret_val.tfi() = egprs3->tfi_lo << 2 | egprs3->tfi_hi << 0;
+	ret_val.countdown() = egprs3->cv;
+	tmp = egprs3->si;
+	ret_val.foi__si() = BITSTRING(1, &tmp);
+	tmp = egprs3->r;
+	ret_val.r__ri() = BITSTRING(1, &tmp);
+	ret_val.bsn1() = egprs3->bsn1_lo << 5 | egprs3->bsn1_hi << 0;
+	ret_val.cps() = egprs3->cps_lo << 2 | egprs3->cps_hi << 0;
+	ret_val.pfi__ind() = egprs3->pi;
+	tmp = egprs3->rsb;
+	ret_val.rsb() = BITSTRING(1, &tmp);
+	tmp = egprs3->spb;
+	ret_val.spb() = BITSTRING(2, &tmp);
+
+	ttcn_buffer.increase_pos(sizeof(*egprs3));
 	return ret_val;
 }
 
