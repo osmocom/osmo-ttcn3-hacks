@@ -1600,6 +1600,86 @@ testcase TC_imm_ass_dl_block_retrans() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify scheduling of multiple Downlink data blocks during one RRBP. */
+testcase TC_dl_flow_more_blocks() runs on RAW_PCU_Test_CT {
+	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
+	var octetstring data := f_rnd_octstring(16);
+	var OCT4 tlli := f_rnd_octstring(4);
+	var PacketDlAssign dl_tbf_ass;
+	var GsmRrMessage rr_imm_ass;
+	var RlcmacDlBlock dl_block;
+	var uint32_t ack_fn;
+	var uint32_t fn;
+	timer T := 5.0;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(tlli, data));
+	f_pcuif_rx_pch_imm_tbf_ass(rr_imm_ass);
+
+	/* Make sure we've got a Downlink TBF assignment with DL TFI */
+	f_imm_ass_verify_dl_tbf_ass(rr_imm_ass, dl_tbf_ass);
+	if (not ispresent(dl_tbf_ass.group1)) {
+		setverdict(fail, "Immediate Assignment contains no DL TFI");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Get DL TFI from received Downlink TBF assignment */
+	var uint5_t tfi := dl_tbf_ass.group1.tfi_assignment;
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+
+	/* Expect the first (GPRS DL) block with bsn=0 and rrbp_valid=1 */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, fn, data, 0);
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block);
+
+	/* TDMA frame number on which we are supposed to send the ACK */
+	ack_fn := f_dl_block_ack_fn(dl_block, fn);
+
+	/* SGSN sends more blocks during the indicated RRBP */
+	for (var integer bsn := 1; bsn < 63; bsn := bsn + 1) {
+		data := f_rnd_octstring(16); /* Random LLC data */
+		BSSGP[0].send(ts_BSSGP_DL_UD(tlli, data));
+
+		f_rx_rlcmac_dl_block_exp_data(dl_block, fn, data, bsn);
+
+		/* Make sure this block has the same TFI as was assigned
+		 * FIXME: this is only valid for GPRS, not EGPRS. */
+		if (dl_block.data.mac_hdr.hdr_ext.tfi != tfi) {
+			setverdict(fail, "Rx DL data block with unexpected TFI: ",
+				   dl_block.data.mac_hdr.hdr_ext.tfi);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		/* Keep Ack/Nack description updated */
+		f_acknackdesc_ack_block(ack_nack_desc, dl_block);
+
+		/* Break if this is the end of RRBP */
+		if (fn == ack_fn) {
+			ack_nack_desc.final_ack := '1'B;
+			break;
+		}
+	}
+
+	/* This is the end of RRBP, send Packet Downlink Ack/Nack */
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(tfi, ack_nack_desc), fn := fn);
+
+	/* Make sure that the next block (after the Ack) is dummy */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 private function f_pkt_paging_match_imsi(in PacketPagingReq req, hexstring imsi)
 runs on RAW_PCU_Test_CT {
 	var MobileIdentityLV_Paging mi_lv := req.repeated_pageinfo.cs.mobile_identity;
@@ -1930,6 +2010,7 @@ control {
 	execute( TC_mt_ping_pong() );
 	execute( TC_mt_ping_pong_with_dl_racap() );
 	execute( TC_imm_ass_dl_block_retrans() );
+	execute( TC_dl_flow_more_blocks() );
 	execute( TC_paging_cs_from_bts() );
 	execute( TC_paging_cs_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_cs_from_sgsn_sign() );
