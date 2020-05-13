@@ -243,12 +243,20 @@ template AckNackDescription t_AckNackDescription_init := {
 	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
 }
 
-private function f_rlcmac_dl_block_get_tfi(RlcmacDlBlock dl_block) return uint5_t {
+private function f_rlcmac_dl_block_get_tfi(RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT return uint5_t {
 	if (ischosen(dl_block.data)) {
 		return dl_block.data.mac_hdr.hdr_ext.tfi;
-	} else {
+	} else if (ischosen(dl_block.data_egprs)) {
 		return dl_block.data_egprs.mac_hdr.tfi;
+	} else { /* Ctrl block */
+		if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_GPRS(?, tr_PktUlAssGprsDynamic(?)))) {
+			return dl_block.ctrl.payload.u.ul_assignment.gprs.dyn_block_alloc.ul_tfi_assignment;
+		}
 	}
+	setverdict(fail, "DlBlock doesn't contain a TFI:", dl_block);
+	f_shutdown(__BFILE__, __LINE__);
+	return 0; /* make compiler happy */
 }
 
 /* TS 44.060 sec 12.3 Ack/Nack Description */
@@ -381,22 +389,16 @@ runs on RAW_PCU_Test_CT return boolean {
 				  bts_nr := bts_nr);
 }
 
-private function f_imm_ass_verify_ul_tbf_ass(in GsmRrMessage rr_imm_ass, out PacketUlAssign ul_tbf_ass)
+private function f_imm_ass_verify_ul_tbf_ass(in GsmRrMessage rr_imm_ass, out PacketUlAssign ul_tbf_ass, template PacketUlAssign ul_ass := tr_PacketUlDynAssign)
 runs on RAW_PCU_Test_CT {
 
 	/* Make sure we received an UL TBF Assignment */
-	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(?)))) {
+	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(ul_ass)))) {
 		ul_tbf_ass := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.ul;
 		log("Rx Uplink TBF assignment: ", ul_tbf_ass);
 		setverdict(pass);
 	} else {
 		setverdict(fail, "Failed to match UL TBF Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-	}
-
-	/* Make sure we have got a TBF with Dynamic Block Allocation */
-	if (ul_tbf_ass.dynamic == omit) {
-		setverdict(fail, "Single Block Allocation is not handled by ", testcasename());
 		f_shutdown(__BFILE__, __LINE__);
 	}
 }
@@ -503,10 +505,10 @@ runs on RAW_PCU_Test_CT {
 	f_pcuif_tx_data_ind(data, lqual_cb, fn);
 }
 
-private function f_tx_rlcmac_ul_n_blocks(PacketUlAssign ul_tbf_ass, integer num_blocks := 1, template (omit) GprsTlli tlli := omit)
+private function f_tx_rlcmac_ul_n_blocks(uint5_t tfi, integer num_blocks := 1, template (omit) GprsTlli tlli := omit)
 runs on RAW_PCU_Test_CT {
 	var template (value) RlcmacUlBlock ul_data := t_RLCMAC_UL_DATA(
-		tfi := ul_tbf_ass.dynamic.tfi_assignment,
+		tfi := tfi,
 		cv := num_blocks - 1, /* num UL blocks to be sent (to be overridden in loop) */
 		bsn := 0, /* TODO: what should be here? */
 		blocks := { /* To be generated in loop */ });
@@ -583,6 +585,19 @@ runs on RAW_PCU_Test_CT {
         f_rx_rlcmac_dl_block(dl_block, dl_fn);
         if (not match(dl_block, tr_RLCMAC_UL_PACKET_ASS())) {
                 setverdict(fail, "Failed to match Packet Uplink Assignment");
+		f_shutdown(__BFILE__, __LINE__);
+        }
+
+	poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+}
+
+private function f_rx_rlcmac_dl_block_exp_pkt_dl_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
+runs on RAW_PCU_Test_CT {
+        var uint32_t dl_fn;
+
+        f_rx_rlcmac_dl_block(dl_block, dl_fn);
+        if (not match(dl_block, tr_RLCMAC_DL_PACKET_ASS())) {
+                setverdict(fail, "Failed to match Packet Downlink Assignment");
 		f_shutdown(__BFILE__, __LINE__);
         }
 
@@ -1298,7 +1313,7 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, unused_fn);
 	/* UL block should be received in SGSN */
 	BSSGP[0].receive(tr_BSSGP_UL_UD(tlli, mp_gb_cfg.cell_id));
@@ -1307,7 +1322,7 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	f_sleep(int2float(info_ind.t3169) + 1.0);
 
 	/* Send an UL block once again, the TBF should be gone by now so no ACK */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1);
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
@@ -1374,7 +1389,7 @@ testcase TC_t3193() runs on RAW_PCU_Test_CT {
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
  * answered, so TBFs for uplink and later for downlink are created.
  */
-private function f_TC_mo_ping_pong(template (omit) MSRadioAccessCapabilityV ms_racap := omit, template (present) CodingScheme exp_cs_mcs := ?) runs on RAW_PCU_Test_CT {
+private function f_TC_mo_ping_pong_1phase_access(template (present) CodingScheme exp_cs_mcs := ?) runs on RAW_PCU_Test_CT {
 	var GsmRrMessage rr_imm_ass;
 	var PacketUlAssign ul_tbf_ass;
 	var PacketDlAssign dl_tbf_ass;
@@ -1407,21 +1422,9 @@ private function f_TC_mo_ping_pong(template (omit) MSRadioAccessCapabilityV ms_r
 	/* Make sure we've got an Uplink TBF assignment */
 	f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
 
-	if (not istemplatekind(ms_racap, "omit")) {
-		/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS
-		 * (see 3GPP TS 04.60 "7.1.3.1 Initiation of the Packet resource request procedure")
-		 */
-		f_tx_rlcmac_ul_block(ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_RES_REQ(tlli, ms_racap))), 0);
-		f_rx_rlcmac_dl_block_exp_pkt_ul_ass(dl_block, sched_fn);
-		if (dl_block.ctrl.payload.u.ul_assignment.identity.tlli.tlli != tlli) {
-			setverdict(fail, "Wrong TLLI ", dl_block.ctrl.payload.u.ul_assignment.identity.tlli, " received vs exp ", tlli);
-			f_shutdown(__BFILE__, __LINE__);
-		}
-	}
-
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
 	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
@@ -1453,9 +1456,84 @@ private function f_TC_mo_ping_pong(template (omit) MSRadioAccessCapabilityV ms_r
  */
 testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 	var CodingScheme exp_cs_mcs := CS_1;
-	f_TC_mo_ping_pong(omit, exp_cs_mcs);
+	f_TC_mo_ping_pong_1phase_access(exp_cs_mcs);
 }
 
+/* Test scenario where MS wants to send some data on PDCH against SGSN and it is
+ * answered, so TBFs for uplink and later for downlink are created.
+ */
+private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessCapabilityV ms_racap, template (present) CodingScheme exp_cs_mcs := ?) runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var PacketDlAssign dl_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var PCUIF_Message pcu_msg;
+	var octetstring data := f_rnd_octstring(10);
+	var boolean ok;
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var OCT4 tlli := '00000001'O;
+	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
+	/* 0111 0xxx: Single block packet access; one block period on a PDCH is needed for two phase packet access or other RR signalling purpose. */
+	var uint16_t ra := oct2int('70'O);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass, ra := ra);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Make sure we've got an Uplink TBF assignment */
+	f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass, tr_PacketUlSglAssign);
+
+	/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS
+	 * (see 3GPP TS 04.60 "7.1.3.1 Initiation of the Packet resource request procedure")
+	 */
+	f_tx_rlcmac_ul_block(ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_RES_REQ(tlli, ms_racap))), 0);
+	f_rx_rlcmac_dl_block_exp_pkt_ul_ass(dl_block, sched_fn);
+	if (dl_block.ctrl.payload.u.ul_assignment.identity.tlli.tlli != tlli) {
+		setverdict(fail, "Wrong TLLI ", dl_block.ctrl.payload.u.ul_assignment.identity.tlli, " received vs exp ", tlli);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Send one UL block (without TLLI since we are in Second-Phase Access)
+	   and make sure it is ACKED fine */
+	f_tx_rlcmac_ul_n_blocks(f_rlcmac_dl_block_get_tfi(dl_block), 1);
+
+	//f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(tlli, mp_gb_cfg.cell_id));
+
+	/* Now SGSN sends some DL data, PCU will page on PACCH */
+	BSSGP[0].send(ts_BSSGP_DL_UD(tlli, data));
+	f_rx_rlcmac_dl_block_exp_pkt_dl_ass(dl_block, sched_fn);
+	/* DL Ass sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
+
+	/* After acking the dl assignment, dl tbf goes into FLOW state and PCU will provide DL data when BTS asks for it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0, exp_cs_mcs);
+
+	/* ACK the DL block */
+	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
+	f_tx_rlcmac_ul_block(ts_RLCMAC_DL_ACK_NACK(f_rlcmac_dl_block_get_tfi(dl_block), ack_nack_desc),
+			     0, f_dl_block_ack_fn(dl_block, dl_fn));
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
 
 testcase TC_mo_ping_pong_with_ul_racap() runs on RAW_PCU_Test_CT {
 	var MultislotCap_GPRS mscap_gprs := {
@@ -1465,7 +1543,7 @@ testcase TC_mo_ping_pong_with_ul_racap() runs on RAW_PCU_Test_CT {
 	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
 	var CodingScheme exp_cs_mcs := CS_2;
 
-	f_TC_mo_ping_pong(ms_racap, exp_cs_mcs);
+	f_TC_mo_ping_pong_2phase_access(ms_racap, exp_cs_mcs);
 }
 
 /* Test scenario where SGSN wants to send some data against MS and it is
@@ -1522,7 +1600,7 @@ private function f_TC_mt_ping_pong(template (omit) MSRadioAccessCapabilityV_BSSG
 
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
 	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
