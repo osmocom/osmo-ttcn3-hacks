@@ -22,13 +22,22 @@ re_testcase = re.compile(r'''<testcase classname=['"]([^'"]+)['"].* name=['"]([^
 re_testcase_end = re.compile(r'''(</testcase>|<testcase [^>]*/>)''')
 re_failure = re.compile(r'''(<failure\b|<error\b)''')
 
-RESULT_PASS = 'pass'
-RESULT_FAIL = 'pass->FAIL'
-RESULT_SKIP = 'skip'
-RESULT_XFAIL = 'xfail'
-RESULT_FIXED = 'xfail->PASS'
-RESULT_NEW_PASS = 'NEW: PASS'
-RESULT_NEW_FAIL = 'NEW: FAIL'
+RED = "\033[1;31m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+BLUE = "\033[1;34m"
+NOCOLOR = "\033[0;m"
+
+def col(color, text):
+	return color + text + NOCOLOR
+
+RESULT_PASS = col(GREEN, 'pass')
+RESULT_FAIL = col(RED, 'pass->FAIL')
+RESULT_SKIP = col(BLUE, 'skip')
+RESULT_XFAIL = col(YELLOW, 'xfail')
+RESULT_FIXED = col(GREEN, 'xfail->PASS')
+RESULT_NEW_PASS = col(GREEN, 'NEW: PASS')
+RESULT_NEW_FAIL = col(RED, 'NEW: FAIL')
 
 RESULTS = (
 	RESULT_FAIL,
