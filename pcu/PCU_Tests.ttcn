@@ -262,6 +262,20 @@ runs on RAW_PCU_Test_CT return uint5_t {
 	return 0; /* make compiler happy */
 }
 
+/* Get the Chan coding command from a dl block containing PACCH UL Assignment */
+private function f_rlcmac_dl_block_get_assigned_ul_cs_mcs(RlcmacDlBlock dl_block)
+runs on RAW_PCU_Test_CT return CodingScheme {
+	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_GPRS(?, tr_PktUlAssGprsDynamic(?)))) {
+		return f_rlcmac_block_ChCodingCommand2cs_mcs(dl_block.ctrl.payload.u.ul_assignment.gprs.ch_coding_cmd);
+	}
+	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_EGPRS(?, tr_PktUlAssEgprsDynamic(?)))) {
+		return f_rlcmac_block_EgprsChCodingCommand2cs_mcs(dl_block.ctrl.payload.u.ul_assignment.egprs.chan_coding_cmd);
+	}
+	setverdict(fail, "DlBlock doesn't contain CS_MCS information:", dl_block);
+	f_shutdown(__BFILE__, __LINE__);
+	return CS_1; /* make compiler happy */
+}
+
 /* TS 44.060 sec 12.3 Ack/Nack Description */
 private function f_acknackdesc_ack_block(inout AckNackDescription desc, RlcmacDlBlock dl_block, BIT1 final_ack := '0'B)
 {
@@ -1465,7 +1479,10 @@ testcase TC_mo_ping_pong() runs on RAW_PCU_Test_CT {
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
  * answered, so TBFs for uplink and later for downlink are created.
  */
-private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessCapabilityV ms_racap, template (present) CodingScheme exp_cs_mcs := ?) runs on RAW_PCU_Test_CT {
+private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessCapabilityV ms_racap,
+						 template (present) CodingScheme exp_ul_cs_mcs := ?,
+						 template (present) CodingScheme exp_dl_cs_mcs := ?)
+runs on RAW_PCU_Test_CT {
 	var GsmRrMessage rr_imm_ass;
 	var PacketUlAssign ul_tbf_ass;
 	var PacketDlAssign dl_tbf_ass;
@@ -1477,6 +1494,7 @@ private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessC
 	var uint32_t dl_fn;
 	var OCT4 tlli := '00000001'O;
 	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
+	var CodingScheme cs_mcs;
 	/* 0111 0xxx: Single block packet access; one block period on a PDCH is needed for two phase packet access or other RR signalling purpose. */
 	var uint16_t ra := oct2int('70'O);
 
@@ -1509,10 +1527,15 @@ private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessC
 		setverdict(fail, "Wrong TLLI ", dl_block.ctrl.payload.u.ul_assignment.identity.tlli, " received vs exp ", tlli);
 		f_shutdown(__BFILE__, __LINE__);
 	}
+	cs_mcs := f_rlcmac_dl_block_get_assigned_ul_cs_mcs(dl_block);
+	if (not match(cs_mcs, exp_ul_cs_mcs)) {
+		setverdict(fail, "Wrong CS_MCS ", cs_mcs, " received vs exp ", exp_ul_cs_mcs);
+		f_shutdown(__BFILE__, __LINE__);
+	}
 
 	/* Send one UL block (without TLLI since we are in Second-Phase Access)
 	   and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(f_rlcmac_dl_block_get_tfi(dl_block), 1);
+	f_tx_rlcmac_ul_n_blocks(f_rlcmac_dl_block_get_tfi(dl_block), 1);  /* TODO: send using cs_mcs */
 
 	//f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
@@ -1528,7 +1551,7 @@ private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessC
 	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
 
 	/* After acking the dl assignment, dl tbf goes into FLOW state and PCU will provide DL data when BTS asks for it */
-	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0, exp_cs_mcs);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0, exp_dl_cs_mcs);
 
 	/* ACK the DL block */
 	f_acknackdesc_ack_block(ack_nack_desc, dl_block, '1'B);
@@ -1544,9 +1567,29 @@ testcase TC_mo_ping_pong_with_ul_racap() runs on RAW_PCU_Test_CT {
 		gprsextendeddynalloccap := '0'B
 	};
 	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
-	var CodingScheme exp_cs_mcs := CS_2;
+	var CodingScheme exp_ul_cs_mcs := f_rlcmac_block_int2cs_mcs(g_mcs_initial_ul, false);
+	var CodingScheme exp_dl_cs_mcs := CS_2;
 
-	f_TC_mo_ping_pong_2phase_access(ms_racap, exp_cs_mcs);
+	f_TC_mo_ping_pong_2phase_access(ms_racap, exp_ul_cs_mcs, exp_dl_cs_mcs);
+}
+
+testcase TC_mo_ping_pong_with_ul_racap_egprs_only() runs on RAW_PCU_Test_CT {
+	/* Initialize the PCU interface abstraction with EGPRS-only */
+	g_egprs_only := true;
+
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MultislotCap_EGPRS mscap_egprs := {
+		egprsmultislotclass := '00011'B,
+		egprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, mscap_egprs)) };
+	var CodingScheme exp_ul_cs_mcs := f_rlcmac_block_int2cs_mcs(g_mcs_initial_ul, true);
+	var CodingScheme exp_dl_cs_mcs := MCS_1;
+
+	f_TC_mo_ping_pong_2phase_access(ms_racap, exp_ul_cs_mcs, exp_dl_cs_mcs);
 }
 
 /* Test scenario where SGSN wants to send some data against MS and it is
@@ -2108,6 +2151,8 @@ control {
 	execute( TC_egprs_pkt_chan_req_signalling() );
 	execute( TC_egprs_pkt_chan_req_one_phase() );
 	execute( TC_egprs_pkt_chan_req_two_phase() );
+
+	execute( TC_mo_ping_pong_with_ul_racap_egprs_only() );
 }
 
 
