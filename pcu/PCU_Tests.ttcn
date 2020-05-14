@@ -521,23 +521,31 @@ runs on RAW_PCU_Test_CT return GsmRrMessage {
 	return rr_pag_req1;
 }
 
+/* Send one rlcmac UL block adding necessary extra padding at the end.
+ * returns length of extra padding added at the end, in octets.
+ *  FIXME: Only supports CS-1 so far.
+ */
 private function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0, uint32_t fn := 0)
-runs on RAW_PCU_Test_CT {
+runs on RAW_PCU_Test_CT return integer {
 	var octetstring data;
+	var integer padding_len;
 	/* Encode the payload of DATA.ind */
 	data := enc_RlcmacUlBlock(valueof(ul_data));
+	padding_len := 23 - lengthof(data);
 	data := f_pad_oct(data, 23, '00'O); /* CS-1 */
 
 	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
 	f_pcuif_tx_data_ind(data, lqual_cb, fn);
+	return padding_len;
 }
 
-private function f_tx_rlcmac_ul_n_blocks(uint5_t tfi, integer num_blocks := 1, template (omit) GprsTlli tlli := omit)
-runs on RAW_PCU_Test_CT {
+private function f_tx_rlcmac_ul_n_blocks(uint5_t tfi, inout uint14_t bsn, integer num_blocks := 1, template (omit) GprsTlli tlli := omit)
+runs on RAW_PCU_Test_CT return octetstring {
+	var octetstring total_payload := ''O;
 	var template (value) RlcmacUlBlock ul_data := t_RLCMAC_UL_DATA(
 		tfi := tfi,
 		cv := 15, /* num UL blocks to be sent (to be overridden in loop) */
-		bsn := 0, /* TODO: what should be initial value? */
+		bsn := 0, /* To be generated in loop */
 		blocks := { /* To be generated in loop */ });
 
 	if (not istemplatekind(tlli, "omit")) {
@@ -546,16 +554,21 @@ runs on RAW_PCU_Test_CT {
 	}
 
 	for (var integer i := 0; i < num_blocks; i := i + 1) {
+		var integer padding_len;
+		var octetstring payload := f_rnd_octstring(10);
 		/* Prepare a new UL block (CV, random payload) */
 		var integer cv := num_blocks - i - 1;
 		if (cv > g_bs_cv_max) {
 			cv := 15;
 		}
 		ul_data.data.mac_hdr.countdown := cv;
-		ul_data.data.mac_hdr.bsn := i;
-		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(f_rnd_octstring(10))) };
-		f_tx_rlcmac_ul_block(ul_data);
+		ul_data.data.mac_hdr.bsn := bsn + i;
+		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(payload)) };
+		padding_len := f_tx_rlcmac_ul_block(ul_data);
+		total_payload := total_payload & payload & f_pad_oct(''O, padding_len, '00'O);
 	}
+	bsn := valueof(ul_data.data.mac_hdr.bsn) + 1; /* update bsn to point to next one */
+	return total_payload;
 }
 
 private function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block, out uint32_t dl_fn, template (present) CodingScheme exp_cs_mcs := ?)
@@ -1318,6 +1331,7 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	var boolean ok;
 	var uint32_t unused_fn;
 	var OCT4 tlli := '00000001'O;
+	var uint14_t bsn := 0;
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1345,7 +1359,7 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, bsn, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, unused_fn);
 	/* UL block should be received in SGSN */
 	BSSGP[0].receive(tr_BSSGP_UL_UD(tlli, mp_gb_cfg.cell_id));
@@ -1354,7 +1368,8 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	f_sleep(int2float(info_ind.t3169) + 1.0);
 
 	/* Send an UL block once again, the TBF should be gone by now so no ACK */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1);
+	bsn := 0;
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, bsn, 1);
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
@@ -1433,6 +1448,7 @@ private function f_TC_mo_ping_pong_1phase_access(template (present) CodingScheme
 	var uint32_t dl_fn;
 	var OCT4 tlli := '00000001'O;
 	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
+	var uint14_t bsn := 0;
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1456,7 +1472,7 @@ private function f_TC_mo_ping_pong_1phase_access(template (present) CodingScheme
 
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, bsn, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
 	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
@@ -1510,6 +1526,7 @@ runs on RAW_PCU_Test_CT {
 	var OCT4 tlli := '00000001'O;
 	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
 	var CodingScheme cs_mcs;
+	var uint14_t bsn := 0;
 	/* 0111 0xxx: Single block packet access; one block period on a PDCH is needed for two phase packet access or other RR signalling purpose. */
 	var uint16_t ra := oct2int('70'O);
 	if (g_force_two_phase_access) {
@@ -1556,7 +1573,7 @@ runs on RAW_PCU_Test_CT {
 
 	/* Send one UL block (without TLLI since we are in Second-Phase Access)
 	   and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(f_rlcmac_dl_block_get_tfi(dl_block), 1);  /* TODO: send using cs_mcs */
+	f_tx_rlcmac_ul_n_blocks(f_rlcmac_dl_block_get_tfi(dl_block), bsn, 1);  /* TODO: send using cs_mcs */
 
 	//f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
@@ -1642,6 +1659,7 @@ private function f_TC_mt_ping_pong(template (omit) MSRadioAccessCapabilityV_BSSG
 	var uint32_t sched_fn;
 	var uint32_t dl_fn;
 	var OCT4 tlli := '00000001'O;
+	var uint14_t bsn := 0;
 	var AckNackDescription ack_nack_desc := valueof(t_AckNackDescription_init);
 
 	/* Initialize NS/BSSGP side */
@@ -1682,7 +1700,7 @@ private function f_TC_mt_ping_pong(template (omit) MSRadioAccessCapabilityV_BSSG
 
 	/* Send one UL block (with TLLI since we are in One-Phase Access
 	   contention resoultion) and make sure it is ACKED fine */
-	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, 1, tlli);
+	f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, bsn, 1, tlli);
 	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
 	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
