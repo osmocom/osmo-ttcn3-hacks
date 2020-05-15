@@ -1787,6 +1787,100 @@ testcase TC_mt_ping_pong_with_dl_racap() runs on RAW_PCU_Test_CT {
 	f_TC_mt_ping_pong(ms_racap, exp_cs_mcs);
 }
 
+/* Verify that if PCU doesn't get one of the intermediate UL data blocks in a UL
+ * TBF, it will request retransmission through UL ACK/NACK (with missing block
+ * in its bitmap) when CV=0 is received (and hence it knows no more data is to
+ * be transferred).
+ */
+testcase TC_ul_intermediate_retrans() runs on RAW_PCU_Test_CT {
+	var GsmRrMessage rr_imm_ass;
+	var PacketUlAssign ul_tbf_ass;
+	var RlcmacDlBlock dl_block;
+	var template (value) RlcmacUlBlock ul_data;
+	var boolean ok;
+	var uint32_t sched_fn;
+	var OCT4 tlli := '00000001'O;
+	var uint14_t bsn := 5;
+	var PDU_BSSGP bssgp_pdu;
+	var octetstring total_payload;
+	var octetstring payload;
+	var octetstring lost_payload;
+	var integer padding_len;
+	var uint5_t tfi;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, tlli);
+
+	/* Establish an Uplink TBF */
+	ok := f_establish_tbf(rr_imm_ass);
+	if (not ok) {
+		setverdict(fail, "Failed to establish TBF");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* Make sure we've got an Uplink TBF assignment */
+	f_imm_ass_verify_ul_tbf_ass(rr_imm_ass, ul_tbf_ass);
+	tfi := ul_tbf_ass.dynamic.tfi_assignment;
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resoultion) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(16); /* 16 bytes fills the llc block (because TLLI takes 4 bytes) */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(
+		tfi := tfi,
+		cv := 15, /* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+		bsn := 0,
+		blocks := { valueof(t_RLCMAC_LLCBLOCK(payload)) },
+		tlli := tlli);
+
+	f_tx_rlcmac_ul_block(ul_data, 0);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
+	total_payload := payload;
+
+	/* Send 2 packets, skip 1 (inc bsn) and send another one */
+	payload := f_rnd_octstring(20); /* 20 bytes fills the CS-1 llc block */
+	ul_data := t_RLCMAC_UL_DATA(tfi := tfi, cv := 15, bsn := 1, blocks := {t_RLCMAC_LLCBLOCK(payload)});
+	f_tx_rlcmac_ul_block(ul_data, 0);
+	total_payload := total_payload & payload;
+
+	payload := f_rnd_octstring(20); /* 20 bytes fills the CS-1 llc block */
+	ul_data := t_RLCMAC_UL_DATA(tfi := tfi, cv := 15, bsn := 2, blocks := {t_RLCMAC_LLCBLOCK(payload)});
+	f_tx_rlcmac_ul_block(ul_data, 0);
+	total_payload := total_payload & payload;
+
+	lost_payload := f_rnd_octstring(20); /* LOST PAYLOAD bsn=3, will be retransmitted, next bsn is increased +2 */
+	total_payload := total_payload & lost_payload;
+
+	payload := f_rnd_octstring(20); /* 20 bytes fills the CS-1 llc block */
+	ul_data := t_RLCMAC_UL_DATA(tfi := tfi, cv := 15, bsn := 4, blocks := {t_RLCMAC_LLCBLOCK(payload)});
+	f_tx_rlcmac_ul_block(ul_data, 0);
+	total_payload := total_payload & payload;
+
+	/* Send enough blocks to finish the transmission (since we were sending BSN=15, send BS_CV_MAX packets) */
+	total_payload := total_payload & f_tx_rlcmac_ul_n_blocks(ul_tbf_ass.dynamic.tfi_assignment, bsn, g_bs_cv_max);
+
+	/* On CV=0, we'll receive a UL ACK asking about missing block */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* TODO: check ack ack bitmap (URBB) */
+	ul_data := t_RLCMAC_UL_DATA(tfi := tfi, cv := 15, bsn := 3, blocks := {t_RLCMAC_LLCBLOCK(lost_payload)});
+	f_tx_rlcmac_ul_block(ul_data, 0);
+
+	/* Now final ack is recieved */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_tx_rlcmac_ul_block(ts_RLCMAC_CTRL_ACK(tlli), 0, sched_fn);
+
+	/* receive one message on BSSGP with all aggregated data in payload: */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(tlli, mp_gb_cfg.cell_id, total_payload));
+}
+
 /* Verify that if PCU doesn't get an ACK for first DL block after IMM ASS, it
  * will retry by retransmitting both the IMM ASS + DL block after poll (ack)
  * timeout occurs (specified by sent RRBP on DL block). */
@@ -2252,6 +2346,7 @@ control {
 	execute( TC_force_two_phase_access() );
 	execute( TC_mt_ping_pong() );
 	execute( TC_mt_ping_pong_with_dl_racap() );
+	execute (TC_ul_intermediate_retrans() );
 	execute( TC_imm_ass_dl_block_retrans() );
 	execute( TC_dl_flow_more_blocks() );
 	execute( TC_paging_cs_from_bts() );
