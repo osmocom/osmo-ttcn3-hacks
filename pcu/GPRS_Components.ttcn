@@ -63,9 +63,10 @@ type union PacketUlAssignChan {
 };
 
 type record UlTbf {
-	GsmRrMessage		rr_imm_ass,
-	PacketUlAssignChan	ass,
+	GsmRrMessage		rr_imm_ass optional,
+	PacketUlAssignChan	ass optional,
 	uint5_t			tfi,
+	uint3_t			usf[8],
 	boolean			is_egprs,
 	uint14_t		bsn,
 	CodingScheme		tx_cs_mcs
@@ -90,6 +91,8 @@ template AckNackDescription t_AckNackDescription_init := {
 	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
 }
 
+const uint3_t USF_UNUSED := 7; /* used to indicate PRACH */
+
 template (value) GprsMS t_GprsMS_def := {
         imsi := f_gen_imsi(42),
         tlli := '00000001'O,
@@ -100,6 +103,16 @@ template (value) GprsMS t_GprsMS_def := {
         lqual_cb := 0,
         ul_tbf := omit,
         dl_tbf := omit
+};
+
+template (value) UlTbf t_UlTbf_def := {
+	rr_imm_ass := omit,
+	ass := omit,
+	tfi := 0,
+	usf := { USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED },
+	is_egprs := false,
+	bsn := 0,
+	tx_cs_mcs := CS_1
 };
 
 type component MS_BTS_IFACE_CT {
@@ -143,10 +156,10 @@ runs on MS_BTS_IFACE_CT {
 
 function f_ultbf_new_from_rr_imm_ass(in GsmRrMessage rr_imm_ass)
 runs on MS_BTS_IFACE_CT return UlTbf {
-	var UlTbf ul_tbf;
+	var UlTbf ul_tbf := valueof(t_UlTbf_def);
+	var uint3_t tn_allocated := rr_imm_ass.payload.imm_ass.pkt_chan_desc.tn;
 
 	ul_tbf.rr_imm_ass := rr_imm_ass;
-	ul_tbf.bsn := 0;
 
 	/* Make sure we received an UL TBF Assignment */
 	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(?)))) {
@@ -155,6 +168,7 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 		ul_tbf.is_egprs := false;
 		if (match(ul_tbf.ass.ccch, tr_PacketUlDynAssign)) {
 			ul_tbf.tfi := ul_tbf.ass.ccch.dynamic.tfi_assignment;
+			ul_tbf.usf[tn_allocated] := ul_tbf.ass.ccch.dynamic.usf;
 		} else if (match(ul_tbf.ass.ccch, tr_PacketUlSglAssign)) {
 			/* Nothing to do here  yet */
 		}
@@ -164,6 +178,7 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 		ul_tbf.is_egprs := true;
 		if (match(ul_tbf.ass.ccch_egprs, tr_EgprsUlAssDynamic)) {
 			ul_tbf.tfi := ul_tbf.ass.ccch_egprs.dynamic.tfi_assignment;
+			ul_tbf.usf[tn_allocated] := ul_tbf.ass.ccch_egprs.dynamic.usf;
 		} else if (match(ul_tbf.ass.ccch_egprs, tr_EgprsUlAssMultiblock)) {
 			/* Nothing to do here yet */
 		}
@@ -178,10 +193,9 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 
 function f_ultbf_new_from_ass_pacch(RlcmacDlBlock dl_block)
 runs on MS_BTS_IFACE_CT return UlTbf {
-	var UlTbf ul_tbf;
+	var UlTbf ul_tbf := valueof(t_UlTbf_def);
 
 	ul_tbf.ass.pacch := dl_block.ctrl.payload.u.ul_assignment;
-	ul_tbf.bsn := 0;
 	ul_tbf.tx_cs_mcs := f_rlcmac_dl_block_get_assigned_ul_cs_mcs(dl_block);
 	ul_tbf.tfi := f_rlcmac_dl_block_get_tfi(dl_block);
 	/* TODO: handle GlobalTfiOrTlli	 tfi_or_tlli from pkt_ul_ass */
@@ -190,10 +204,19 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_GPRS(?, tr_PktUlAssGprsDynamic(tr_DynamicAllocation(?))))) {
 		ul_tbf.tfi := dl_block.ctrl.payload.u.ul_assignment.gprs.dyn_block_alloc.ul_tfi_assignment;
 		ul_tbf.is_egprs := false;
-	}
-	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_EGPRS(?, tr_PktUlAssEgprsDynamic(tr_DynamicAllocation(?))))) {
+		for (var integer i := 0; i < 8; i := i + 1) {
+			if (dl_block.ctrl.payload.u.ul_assignment.gprs.dyn_block_alloc.ts_allocation.ts[i].presence == '1'B) {
+				ul_tbf.usf[i] := dl_block.ctrl.payload.u.ul_assignment.gprs.dyn_block_alloc.ts_allocation.ts[i].usf_tn;
+			}
+		}
+	} else if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_EGPRS(?, tr_PktUlAssEgprsDynamic(tr_DynamicAllocation(?))))) {
 		ul_tbf.tfi := dl_block.ctrl.payload.u.ul_assignment.egprs.dyn_block_alloc.ul_tfi_assignment;
 		ul_tbf.is_egprs := true;
+		for (var integer i := 0; i < 8; i := i + 1) {
+			if (dl_block.ctrl.payload.u.ul_assignment.egprs.dyn_block_alloc.ts_allocation.ts[i].presence == '1'B) {
+				ul_tbf.usf[i] := dl_block.ctrl.payload.u.ul_assignment.egprs.dyn_block_alloc.ts_allocation.ts[i].usf_tn;
+			}
+		}
 	}
 	return ul_tbf;
 }
