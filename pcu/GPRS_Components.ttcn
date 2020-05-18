@@ -44,15 +44,82 @@ import from IPL4asp_Types all;
 import from Native_Functions all;
 import from SGSN_Components all;
 
+type union PacketDlAssignChan {
+	PacketDlAssign		ccch,
+	PacketDlAssignment	pacch
+};
+
+type record DlTbf {
+	GsmRrMessage		rr_imm_ass,
+	PacketDlAssignChan	ass,
+	uint5_t			tfi,
+	AckNackDescription	acknack_desc
+};
+
+type union PacketUlAssignChan {
+	PacketUlAssign		ccch,
+	EgprsUlAss		ccch_egprs,
+	PacketUlAssignment	pacch
+};
+
+type record UlTbf {
+	GsmRrMessage		rr_imm_ass,
+	PacketUlAssignChan	ass,
+	uint5_t			tfi,
+	boolean			is_egprs,
+	uint14_t		bsn,
+	CodingScheme		tx_cs_mcs
+};
+
+type record GprsMS {
+	hexstring	imsi,
+	GprsTlli	tlli,
+	uint16_t	ra,
+	uint8_t		ra_is_11bit,
+	PCUIF_BurstType	burst_type,
+	TimingAdvance	ta,
+	int16_t		lqual_cb,
+	UlTbf		ul_tbf optional, /* TODO: Only 1 UL tbf supported for now */
+	DlTbf		dl_tbf optional /* TODO: Only 1 DL tbf supported for now */
+};
+type record of GprsMS GprsMSArray;
+
+template AckNackDescription t_AckNackDescription_init := {
+	final_ack := '0'B,
+	starting_seq_nr := 0,
+	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
+}
+
+template (value) GprsMS t_GprsMS_def := {
+        imsi := f_gen_imsi(42),
+        tlli := '00000001'O,
+        ra := bit2int(chan_req_def),
+        ra_is_11bit := 0,
+        burst_type := BURST_TYPE_0,
+        ta := 0,
+        lqual_cb := 0,
+        ul_tbf := omit,
+        dl_tbf := omit
+};
+
 type component MS_BTS_IFACE_CT {
 	/* Virtual BTS component */
 	var RAW_PCU_BTS_CT vc_BTS;
 	/* Connection to the BTS component (one for now) */
 	port RAW_PCU_MSG_PT BTS;
 
+	/* Support only 1 ms for now */
+	var GprsMS g_ms[1];
+
 	/* Value at which Countdown Procedure starts. Announced by network (GPRS Cell Options as per TS 04.60 Chapter 12.24) */
 	var uint4_t g_bs_cv_max := 4;
 }
+
+function f_init_gprs_ms(template (value) GprsMS ms_params := t_GprsMS_def) runs on MS_BTS_IFACE_CT
+{
+	g_ms[0] := valueof(ms_params);
+}
+
 
 function f_shutdown(charstring file, integer line,
 		    boolean final := false)
@@ -74,10 +141,275 @@ runs on MS_BTS_IFACE_CT {
 	mtc.stop;
 }
 
-template AckNackDescription t_AckNackDescription_init := {
-	final_ack := '0'B,
-	starting_seq_nr := 0,
-	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
+function f_ultbf_new_from_rr_imm_ass(in GsmRrMessage rr_imm_ass)
+runs on MS_BTS_IFACE_CT return UlTbf {
+	var UlTbf ul_tbf;
+
+	ul_tbf.rr_imm_ass := rr_imm_ass;
+	ul_tbf.bsn := 0;
+
+	/* Make sure we received an UL TBF Assignment */
+	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(?)))) {
+		ul_tbf.ass.ccch := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.ul;
+		log("Rx Uplink TBF GPRS assignment: ", ul_tbf.ass.ccch);
+		ul_tbf.is_egprs := false;
+		if (match(ul_tbf.ass.ccch, tr_PacketUlDynAssign)) {
+			ul_tbf.tfi := ul_tbf.ass.ccch.dynamic.tfi_assignment;
+		} else if (match(ul_tbf.ass.ccch, tr_PacketUlSglAssign)) {
+			/* Nothing to do here  yet */
+		}
+	} else if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_EGPRSULAss(?)))) {
+		ul_tbf.ass.ccch_egprs := rr_imm_ass.payload.imm_ass.rest_octets.lh.egprs_ul;
+		log("Rx Uplink TBF EGPRS assignment: ", ul_tbf.ass.ccch_egprs);
+		ul_tbf.is_egprs := true;
+		if (match(ul_tbf.ass.ccch_egprs, tr_EgprsUlAssDynamic)) {
+			ul_tbf.tfi := ul_tbf.ass.ccch_egprs.dynamic.tfi_assignment;
+		} else if (match(ul_tbf.ass.ccch_egprs, tr_EgprsUlAssMultiblock)) {
+			/* Nothing to do here yet */
+		}
+	} else {
+		setverdict(fail, "Failed to match UL TBF Assignment: ", rr_imm_ass);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	setverdict(pass);
+	return ul_tbf;
+}
+
+function f_ultbf_new_from_ass_pacch(RlcmacDlBlock dl_block)
+runs on MS_BTS_IFACE_CT return UlTbf {
+	var UlTbf ul_tbf;
+
+	ul_tbf.ass.pacch := dl_block.ctrl.payload.u.ul_assignment;
+	ul_tbf.bsn := 0;
+	ul_tbf.tx_cs_mcs := f_rlcmac_dl_block_get_assigned_ul_cs_mcs(dl_block);
+	ul_tbf.tfi := f_rlcmac_dl_block_get_tfi(dl_block);
+	/* TODO: handle GlobalTfiOrTlli	 tfi_or_tlli from pkt_ul_ass */
+
+	/* TODO: support single block allocation */
+	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_GPRS(?, tr_PktUlAssGprsDynamic(tr_DynamicAllocation(?))))) {
+		ul_tbf.tfi := dl_block.ctrl.payload.u.ul_assignment.gprs.dyn_block_alloc.ul_tfi_assignment;
+		ul_tbf.is_egprs := false;
+	}
+	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_EGPRS(?, tr_PktUlAssEgprsDynamic(tr_DynamicAllocation(?))))) {
+		ul_tbf.tfi := dl_block.ctrl.payload.u.ul_assignment.egprs.dyn_block_alloc.ul_tfi_assignment;
+		ul_tbf.is_egprs := true;
+	}
+	return ul_tbf;
+}
+
+function f_dltbf_new_from_rr_imm_ass(in GsmRrMessage rr_imm_ass, template PacketDlAssign dl_ass := tr_PacketDlAssign(?))
+runs on MS_BTS_IFACE_CT return DlTbf {
+	var DlTbf dl_tbf;
+
+	dl_tbf.rr_imm_ass := rr_imm_ass;
+	dl_tbf.acknack_desc := valueof(t_AckNackDescription_init);
+
+	/* Make sure we received a DL TBF Assignment */
+	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := true, rest := tr_IaRestOctets_DLAss(dl_ass)))) {
+		dl_tbf.ass.ccch := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.dl;
+		log("Rx Downlink TBF assignment: ", dl_tbf.ass);
+	} else {
+		setverdict(fail, "Failed to match DL TBF Assignment: ", rr_imm_ass);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* TODO: match TLLI */
+	if (dl_tbf.ass.ccch.group1_present == '1'B) {
+		dl_tbf.tfi := dl_tbf.ass.ccch.group1.tfi_assignment;
+	} else {
+		setverdict(fail, "Immediate Assignment contains no DL TFI");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	setverdict(pass);
+	return dl_tbf;
+}
+
+/* TODO: get stuff from f_rx_rlcmac_dl_block_exp_pkt_ass */
+function f_dltbf_new_from_ass_pacch(RlcmacDlBlock dl_block)
+runs on MS_BTS_IFACE_CT return DlTbf {
+	var DlTbf dl_tbf;
+
+	dl_tbf.ass.pacch := dl_block.ctrl.payload.u.dl_assignment;
+	dl_tbf.tfi := f_rlcmac_dl_block_get_tfi(dl_block);
+	/* TODO: handle GlobalTfiOrTlli	 tfi_or_tlli from pkt_dl_ass */
+	dl_tbf.acknack_desc := valueof(t_AckNackDescription_init);
+	return dl_tbf;
+}
+
+function f_ms_use_ra(inout GprsMS ms, uint16_t ra, uint8_t ra_is_11bit := 0)
+runs on MS_BTS_IFACE_CT {
+	ms.ra_is_11bit := ra_is_11bit;
+	ms.ra := ra;
+	if (ra_is_11bit == 0) {
+		ms.burst_type := BURST_TYPE_0;
+	} else {
+		ms.burst_type := BURST_TYPE_1;
+	}
+}
+
+function f_ms_rx_imm_ass_ccch(inout GprsMS ms, template PCUIF_Sapi sapi := PCU_IF_SAPI_AGCH, template GsmRrMessage t_imm_ass := ?)
+runs on MS_BTS_IFACE_CT return GsmRrMessage {
+	var PCUIF_Message pcu_msg;
+	var GsmRrMessage rr_imm_ass;
+	var octetstring data;
+	timer T;
+
+	T.start(2.0);
+	alt {
+	[] BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 0,
+					 sapi := sapi, data := ?)) -> value pcu_msg {
+		/* On PCH the payload is prefixed with paging group (3 octets): skip it.
+		 * TODO: add an additional template parameter, so we can match it. */
+		if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_PCH) {
+			data := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
+		} else {
+			data := pcu_msg.u.data_req.data;
+		}
+
+		rr_imm_ass := dec_GsmRrMessage(data);
+		if (not match(rr_imm_ass, t_imm_ass)) {
+		        /* Not for us? Wait for more. */
+		        repeat;
+		}
+
+		log("Rx Immediate Assignment: ", rr_imm_ass);
+		f_pcuif_tx_data_cnf(pcu_msg);
+		setverdict(pass);
+		return rr_imm_ass;
+		}
+	[] BTS.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Immediate Assignment");
+		f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+	return rr_imm_ass; /* make compiler happy */
+}
+
+function f_ms_rx_imm_ass_pacch(inout GprsMS ms, out uint32_t poll_fn, template RlcmacDlBlock t_imm_ass := ?)
+runs on MS_BTS_IFACE_CT return RlcmacDlBlock {
+	var RlcmacDlBlock dl_block;
+	var uint32_t dl_fn;
+
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, t_imm_ass)) {
+		setverdict(fail, "Failed to match Packet Assignment:", t_imm_ass);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+
+	if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS)) {
+	       ms.ul_tbf := f_ultbf_new_from_ass_pacch(dl_block);
+	       if (ms.ul_tbf.ass.pacch.identity.tlli.tlli != ms.tlli) {
+		       setverdict(fail, "Wrong TLLI ", ms.ul_tbf.ass.pacch.identity.tlli, " received vs exp ", ms.tlli);
+		       f_shutdown(__BFILE__, __LINE__);
+	       }
+	} else if (match(dl_block, tr_RLCMAC_DL_PACKET_ASS)) {
+		ms.dl_tbf := f_dltbf_new_from_ass_pacch(dl_block);
+		/* TODO: match tlli from ms.dl_tbf.ass.pacch with ms.tlli), or error */
+	} else {
+		setverdict(fail, "Should not happen:", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	return dl_block;
+}
+
+function f_ms_establish_ul_tbf(inout GprsMS ms, uint32_t fn := 1337)
+runs on MS_BTS_IFACE_CT {
+	var GsmRrMessage rr_imm_ass;
+	var uint8_t exp_ra;
+
+	/* Send RACH.ind */
+	log("Sending RACH.ind on fn=", fn, " with RA=", ms.ra, ", TA=", ms.ta);
+	BTS.send(ts_PCUIF_RACH_IND(bts_nr := 0, trx_nr := 0, ts_nr := 0,
+				   ra := ms.ra, is_11bit := ms.ra_is_11bit,
+				   burst_type := ms.burst_type,
+				   fn := fn, arfcn := 871,
+				   qta := ms.ta * 4));
+
+	/* 3GPP TS 44.018, table 9.1.8.1, note 2b: Request Reference shall be set to 127
+	 * when Immediate Assignment is triggered by EGPRS Packet Channel Request. Here
+	 * we assume that 11 bit RA always contains EGPRS Packet Channel Request. */
+	if (ms.ra_is_11bit == 0) {
+		exp_ra := ms.ra;
+	} else {
+		exp_ra := 127;
+	}
+
+	/* Expect Immediate (TBF) Assignment on TS0/AGCH */
+	rr_imm_ass := f_ms_rx_imm_ass_ccch(ms, PCU_IF_SAPI_AGCH,
+	                                   tr_IMM_TBF_ASS(false, exp_ra, fn));
+
+	ms.ul_tbf := f_ultbf_new_from_rr_imm_ass(rr_imm_ass);
+}
+
+function f_ms_exp_dl_tbf_ass_ccch(inout GprsMS ms, template PCUIF_Sapi sapi := PCU_IF_SAPI_AGCH, template GsmRrMessage t_imm_ass := tr_IMM_TBF_ASS(true, ?, ?))
+runs on MS_BTS_IFACE_CT {
+	var GsmRrMessage rr_imm_ass;
+
+	rr_imm_ass := f_ms_rx_imm_ass_ccch(ms, sapi, t_imm_ass);
+	ms.dl_tbf := f_dltbf_new_from_rr_imm_ass(rr_imm_ass, tr_PacketDlAssign(ms.tlli));
+}
+
+/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+function f_ms_tx_data_ind(inout GprsMS ms, octetstring data, uint32_t fn := 0)
+runs on MS_BTS_IFACE_CT {
+	f_pcuif_tx_data_ind(data, ms.lqual_cb, fn);
+}
+
+function f_ms_tx_ul_block(inout GprsMS ms, template (value) RlcmacUlBlock ul_data, uint32_t fn := 0)
+runs on MS_BTS_IFACE_CT return integer {
+	var octetstring data;
+	var integer padding_len;
+	/* Encode the payload of DATA.ind */
+	data := enc_RlcmacUlBlock(valueof(ul_data));
+	padding_len := 23 - lengthof(data);
+	data := f_pad_oct(data, 23, '00'O); /* CS-1 */
+
+	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+	f_ms_tx_data_ind(ms, data, fn);
+	return padding_len;
+}
+
+/* FIXME: Only supports sending CS-1 so far */
+function f_ms_tx_ul_data_block(inout GprsMS ms, octetstring payload, uint4_t cv := 15, boolean with_tlli := false, uint32_t fn := 0)
+runs on MS_BTS_IFACE_CT return integer {
+	var template (value) RlcmacUlBlock ul_data;
+	ul_data := t_RLCMAC_UL_DATA(tfi := ms.ul_tbf.tfi,
+				    cv := cv,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := {t_RLCMAC_LLCBLOCK(payload)});
+	if (with_tlli) {
+		ul_data.data.mac_hdr.tlli_ind := true;
+		ul_data.data.tlli := ms.tlli;
+	}
+	ms.ul_tbf.bsn := ms.ul_tbf.bsn + 1;
+	ms.ul_tbf.bsn := ms.ul_tbf.bsn mod 128; /* FIXME: EGPRS SNS: 2048 */
+	return f_ms_tx_ul_block(ms, ul_data, fn);
+
+}
+
+/* Send random payload for last "num_blocks" blocks in Ul TBF (ending with CV=0). */
+function f_ms_tx_ul_data_block_multi(inout GprsMS ms, integer num_blocks := 1, boolean with_tlli := false)
+runs on MS_BTS_IFACE_CT return octetstring {
+	var octetstring total_payload := ''O;
+
+	for (var integer i := 0; i < num_blocks; i := i + 1) {
+		var integer padding_len;
+		var octetstring payload := f_rnd_octstring(10);
+		/* Prepare a new UL block (CV, random payload) */
+		var integer cv := num_blocks - i - 1;
+		if (cv > g_bs_cv_max) {
+			cv := 15;
+		}
+		padding_len :=  f_ms_tx_ul_data_block(ms, payload, cv := cv, with_tlli := with_tlli)
+		total_payload := total_payload & payload & f_pad_oct(''O, padding_len, '00'O);
+	}
+	return total_payload;
 }
 
 function f_rlcmac_dl_block_get_tfi(RlcmacDlBlock dl_block)
@@ -92,6 +424,9 @@ runs on MS_BTS_IFACE_CT return uint5_t {
 		}
 		if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS_EGPRS(?, tr_PktUlAssEgprsDynamic(tr_DynamicAllocation(?))))) {
 			return dl_block.ctrl.payload.u.ul_assignment.egprs.dyn_block_alloc.ul_tfi_assignment;
+		}
+		if (match(dl_block, tr_RLCMAC_DL_PACKET_ASS(?))) {
+			return dl_block.ctrl.payload.u.dl_assignment.dl_tfi_assignment;
 		}
 	}
 	setverdict(fail, "DlBlock doesn't contain a TFI:", dl_block);
@@ -168,6 +503,10 @@ runs on MS_BTS_IFACE_CT {
 
 	BTS.send(pcu_msg_cnf);
 }
+
+////////////////////////
+// OLD APIs
+////////////////////////
 
 function f_pcuif_rx_imm_ass(out GsmRrMessage rr_imm_ass,
 			    template PCUIF_Sapi sapi := PCU_IF_SAPI_AGCH,
@@ -248,34 +587,6 @@ runs on MS_BTS_IFACE_CT return boolean {
 				  tr_IMM_TBF_ASS(false, ra, fn));
 }
 
-function f_imm_ass_verify_ul_tbf_ass(in GsmRrMessage rr_imm_ass, out PacketUlAssign ul_tbf_ass, template PacketUlAssign ul_ass := tr_PacketUlDynAssign)
-runs on MS_BTS_IFACE_CT {
-
-	/* Make sure we received an UL TBF Assignment */
-	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_ULAss(ul_ass)))) {
-		ul_tbf_ass := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.ul;
-		log("Rx Uplink TBF assignment: ", ul_tbf_ass);
-		setverdict(pass);
-	} else {
-		setverdict(fail, "Failed to match UL TBF Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-	}
-}
-
-function f_imm_ass_verify_dl_tbf_ass(in GsmRrMessage rr_imm_ass, out PacketDlAssign dl_tbf_ass)
-runs on MS_BTS_IFACE_CT {
-
-	/* Make sure we received a DL TBF Assignment */
-	if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := true, rest := tr_IaRestOctets_DLAss(?)))) {
-		dl_tbf_ass := rr_imm_ass.payload.imm_ass.rest_octets.hh.pa.uldl.ass.dl;
-		log("Rx Downlink TBF assignment: ", dl_tbf_ass);
-		setverdict(pass);
-	} else {
-		setverdict(fail, "Failed to match DL TBF Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-	}
-}
-
 /* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
 function f_pcuif_tx_data_ind(octetstring data, int16_t lqual_cb := 0, uint32_t fn := 0)
 runs on MS_BTS_IFACE_CT {
@@ -297,23 +608,6 @@ runs on MS_BTS_IFACE_CT {
 				  arfcn := 871, block_nr := 0));
 	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 7,
 				      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
-}
-
-/* Expect an Immediate Assignment (paging) from PCU on PCUIF on specified sapi.  */
-function f_pcuif_rx_pch_imm_tbf_ass(out GsmRrMessage rr_imm_ass)
-runs on MS_BTS_IFACE_CT {
-	var PCUIF_Message pcu_msg;
-	var octetstring macblock;
-	BTS.receive(tr_PCUIF_DATA_REQ(bts_nr := 0, trx_nr := 0, ts_nr := 0,
-				      sapi := PCU_IF_SAPI_PCH)) -> value pcu_msg;
-	/* First 3 bytes contain paging group: */
-	macblock := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
-	rr_imm_ass := dec_GsmRrMessage(macblock);
-	if (not match(rr_imm_ass, tr_IMM_TBF_ASS())) {
-		setverdict(fail, "Failed to match Immediate Assignment: ", rr_imm_ass);
-		f_shutdown(__BFILE__, __LINE__);
-	}
-	f_pcuif_tx_data_cnf(pcu_msg);
 }
 
 /* Expect a Paging Request Type 1 from PCU on PCUIF on specified sapi.  */
@@ -351,56 +645,6 @@ runs on MS_BTS_IFACE_CT return GsmRrMessage {
 
 	f_pcuif_tx_data_cnf(pcu_msg);
 	return rr_pag_req1;
-}
-
-/* Send one rlcmac UL block adding necessary extra padding at the end.
- * returns length of extra padding added at the end, in octets.
- *  FIXME: Only supports CS-1 so far.
- */
-function f_tx_rlcmac_ul_block(template (value) RlcmacUlBlock ul_data, int16_t lqual_cb := 0, uint32_t fn := 0)
-runs on MS_BTS_IFACE_CT return integer {
-	var octetstring data;
-	var integer padding_len;
-	/* Encode the payload of DATA.ind */
-	data := enc_RlcmacUlBlock(valueof(ul_data));
-	padding_len := 23 - lengthof(data);
-	data := f_pad_oct(data, 23, '00'O); /* CS-1 */
-
-	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
-	f_pcuif_tx_data_ind(data, lqual_cb, fn);
-	return padding_len;
-}
-
-function f_tx_rlcmac_ul_n_blocks(uint5_t tfi, inout uint14_t bsn, integer num_blocks := 1, template (omit) GprsTlli tlli := omit)
-runs on MS_BTS_IFACE_CT return octetstring {
-	var octetstring total_payload := ''O;
-	var template (value) RlcmacUlBlock ul_data := t_RLCMAC_UL_DATA(
-		tfi := tfi,
-		cv := 15, /* num UL blocks to be sent (to be overridden in loop) */
-		bsn := 0, /* To be generated in loop */
-		blocks := { /* To be generated in loop */ });
-
-	if (not istemplatekind(tlli, "omit")) {
-		ul_data.data.mac_hdr.tlli_ind := true;
-		ul_data.data.tlli := tlli;
-	}
-
-	for (var integer i := 0; i < num_blocks; i := i + 1) {
-		var integer padding_len;
-		var octetstring payload := f_rnd_octstring(10);
-		/* Prepare a new UL block (CV, random payload) */
-		var integer cv := num_blocks - i - 1;
-		if (cv > g_bs_cv_max) {
-			cv := 15;
-		}
-		ul_data.data.mac_hdr.countdown := cv;
-		ul_data.data.mac_hdr.bsn := bsn + i;
-		ul_data.data.blocks := { valueof(t_RLCMAC_LLCBLOCK(payload)) };
-		padding_len := f_tx_rlcmac_ul_block(ul_data);
-		total_payload := total_payload & payload & f_pad_oct(''O, padding_len, '00'O);
-	}
-	bsn := valueof(ul_data.data.mac_hdr.bsn) + 1; /* update bsn to point to next one */
-	return total_payload;
 }
 
 function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block, out uint32_t dl_fn, template (present) CodingScheme exp_cs_mcs := ?)
@@ -442,46 +686,6 @@ runs on MS_BTS_IFACE_CT {
 		f_shutdown(__BFILE__, __LINE__);
 	}
 }
-
-function f_rx_rlcmac_dl_block_exp_pkt_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
-runs on MS_BTS_IFACE_CT {
-	var uint32_t dl_fn;
-
-	f_rx_rlcmac_dl_block(dl_block, dl_fn);
-	if (not match(dl_block, tr_RLCMAC_DL_PACKET_ASS())) {
-		setverdict(fail, "Failed to match Packet Downlink Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-	}
-
-	poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
-}
-
-function f_rx_rlcmac_dl_block_exp_pkt_ul_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
-runs on MS_BTS_IFACE_CT {
-        var uint32_t dl_fn;
-
-        f_rx_rlcmac_dl_block(dl_block, dl_fn);
-        if (not match(dl_block, tr_RLCMAC_UL_PACKET_ASS())) {
-                setverdict(fail, "Failed to match Packet Uplink Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-        }
-
-	poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
-}
-
-function f_rx_rlcmac_dl_block_exp_pkt_dl_ass(out RlcmacDlBlock dl_block, out uint32_t poll_fn)
-runs on MS_BTS_IFACE_CT {
-        var uint32_t dl_fn;
-
-        f_rx_rlcmac_dl_block(dl_block, dl_fn);
-        if (not match(dl_block, tr_RLCMAC_DL_PACKET_ASS())) {
-                setverdict(fail, "Failed to match Packet Downlink Assignment");
-		f_shutdown(__BFILE__, __LINE__);
-        }
-
-	poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
-}
-
 
 function f_rx_rlcmac_dl_block_exp_pkt_pag_req(out RlcmacDlBlock dl_block)
 runs on MS_BTS_IFACE_CT {
