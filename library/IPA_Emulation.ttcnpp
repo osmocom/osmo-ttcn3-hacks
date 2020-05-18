@@ -84,16 +84,20 @@ type enumerated ASP_IPA_EventType {
 
 /* an event indicating us whether or not a connection is physically up or down,
  * and whether we have received an ID_ACK */
-type union ASP_IPA_Event {
-	ASP_IPA_EventType	up_down
+type record ASP_IPA_Event {
+	ASP_IPA_EventType	ev_type,
+	integer			conn_id
 }
 
-template (value) ASP_IPA_Event ts_ASP_IPA_EV(ASP_IPA_EventType ud) := {
-	up_down := ud
+template (value) ASP_IPA_Event ts_ASP_IPA_EV(ASP_IPA_EventType ev_type, integer conn_id) := {
+	ev_type := ev_type,
+	conn_id := conn_id
 }
 
-template ASP_IPA_Event tr_ASP_IPA_EV(template ASP_IPA_EventType ud) := {
-	up_down := ud
+template ASP_IPA_Event tr_ASP_IPA_EV(template ASP_IPA_EventType ev_type,
+				     template integer conn_id := ?) := {
+	ev_type := ev_type,
+	conn_id := conn_id
 }
 
 template ASP_IPA_Unitdata t_ASP_IPA_UD(IpaStreamId sid, octetstring pl,
@@ -212,9 +216,13 @@ type component IPA_Emulation_CT {
 	port IPA_SP_PT IPA_SP_PORT;
 
 	var boolean g_initialized := false;
-	var IPL4asp_Types.ConnectionId g_ipa_conn_id := -1;
 	/* Are we a BSC/MGW (truel) or MSC (false) */
 	var boolean g_is_bsc_mgw;
+
+	/* Connection identifier of the client / server itself */
+	var IPL4asp_Types.ConnectionId g_self_conn_id := -1;
+	/* Connection identifier of the last connected client (server only) */
+	var IPL4asp_Types.ConnectionId g_last_conn_id := -1;
 
 	var IpaMode g_mode;
 	var boolean g_ccm_enabled;
@@ -260,7 +268,7 @@ function f_connect(charstring remote_host, IPL4asp_Types.PortNumber remote_port,
 			   " to ", remote_host, " port ", remote_port, "; check your configuration");
 		mtc.stop;
 	}
-	g_ipa_conn_id := res.connId;
+	g_self_conn_id := res.connId;
 	g_ccm_pars := ccm_pars;
 	g_is_bsc_mgw := true;
 }
@@ -275,7 +283,7 @@ function f_bind(charstring local_host, IPL4asp_Types.PortNumber local_port,
 		setverdict(fail, "Could not listen IPA socket ", local_host, ":", local_port, ", check your configuration");
 		mtc.stop;
 	}
-	g_ipa_conn_id := res.connId;
+	g_self_conn_id := res.connId;
 	g_ccm_pars := ccm_pars;
 	g_is_bsc_mgw := false;
 }
@@ -384,8 +392,9 @@ private function f_ccm_make_id_resp(PDU_IPA_CCM get) runs on IPA_Emulation_CT re
 }
 
 /* transmit IPA CCM message */
-private function f_ccm_tx(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
-	var IPA_Send ipa_tx := valueof(t_IPA_Send(g_ipa_conn_id, IPAC_PROTO_CCM, enc_PDU_IPA_CCM(ccm)));
+private function f_ccm_tx(PDU_IPA_CCM ccm, IPL4asp_Types.ConnectionId conn_id)
+runs on IPA_Emulation_CT {
+	var IPA_Send ipa_tx := valueof(t_IPA_Send(conn_id, IPAC_PROTO_CCM, enc_PDU_IPA_CCM(ccm)));
 	log("CCM Tx:", ccm);
 	IPA_PORT.send(ipa_tx);
 }
@@ -413,13 +422,13 @@ template PDU_IPA_CCM ts_IPA_ID_GET := {
 private function f_ccm_rx_client(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
 	select (ccm.msg_type) {
 		case (IPAC_MSGT_PING) {
-			f_ccm_tx(valueof(ts_IPA_PONG));
+			f_ccm_tx(valueof(ts_IPA_PONG), g_self_conn_id);
 		}
 		case (IPAC_MSGT_ID_ACK) {
-			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK));
+			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK, g_self_conn_id));
 		}
 		case (IPAC_MSGT_ID_GET) {
-			f_ccm_tx(f_ccm_make_id_resp(ccm));
+			f_ccm_tx(f_ccm_make_id_resp(ccm), g_self_conn_id);
 		}
 		case else {
 			log("Unknown/unsupported IPA CCM message type", ccm);
@@ -427,10 +436,11 @@ private function f_ccm_rx_client(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
 	}
 }
 
-private function f_ccm_rx_server(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
+private function f_ccm_rx_server(PDU_IPA_CCM ccm, IPL4asp_Types.ConnectionId conn_id)
+runs on IPA_Emulation_CT {
 	select (ccm.msg_type) {
 		case (IPAC_MSGT_PING) {
-			f_ccm_tx(valueof(ts_IPA_PONG));
+			f_ccm_tx(valueof(ts_IPA_PONG), conn_id);
 		}
 		case (IPAC_MSGT_ID_ACK) {
 			/* the IPA server should at some point receive an ID_ACK from the client,
@@ -438,12 +448,12 @@ private function f_ccm_rx_server(PDU_IPA_CCM ccm) runs on IPA_Emulation_CT {
 			 * the TCP connection is established.  Other implementations may differ.
 			 * We currently ignore it completely - but actually we should make sure that
 			 * one ID_ACK is received by the server at some point */
-			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK));
+			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK, conn_id));
 		}
 		case (IPAC_MSGT_ID_RESP) {
 			log("IPA ID RESP: ", ccm.u.resp);
 			/* acknowledge any identity that the client may have sent */
-			f_ccm_tx(valueof(ts_IPA_ACK));
+			f_ccm_tx(valueof(ts_IPA_ACK), conn_id);
 		}
 		case else {
 			log("Unknown/unsupported IPA CCM message type", ccm);
@@ -492,9 +502,9 @@ function main_client(charstring remote_host, IPL4asp_Types.PortNumber remote_por
 	f_connect(remote_host, remote_port, local_host, local_port, ccm_pars);
 	if (g_ccm_enabled) {
 		/* we're a client: Send ID_ACK immediately after connect */
-		f_ccm_tx(valueof(ts_IPA_ACK));
+		f_ccm_tx(valueof(ts_IPA_ACK), g_self_conn_id);
 	}
-	f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_UP));
+	f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_UP, g_self_conn_id));
 	ScanEvents();
 }
 
@@ -553,6 +563,28 @@ private function f_mgcp_to_ud(octetstring payload) runs on IPA_Emulation_CT retu
 }
 #endif
 
+/* Resolve TCP/IP connection identifier depending on g_mode */
+private function f_ipa_conn_id() runs on IPA_Emulation_CT
+return IPL4asp_Types.ConnectionId {
+	var IPL4asp_Types.ConnectionId conn_id;
+
+	select (g_mode) {
+	case (IPA_MODE_CLIENT) { conn_id := g_self_conn_id; }
+	case (IPA_MODE_SERVER) { conn_id := g_last_conn_id; }
+	case else {
+		setverdict(fail, "Unknown mode");
+		mtc.stop;
+		}
+	}
+
+	if (conn_id == -1) { /* Just to be sure */
+		setverdict(fail, "Connection is not established");
+		mtc.stop;
+	}
+
+	return conn_id;
+}
+
 /* main loop function for both client and server. 'thread' of the component */
 private function ScanEvents() runs on IPA_Emulation_CT {
 	var IPA_RecvFrom ipa_rx;
@@ -585,7 +617,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 
 	/* Set function for dissecting the binary */
 	var f_IPL4_getMsgLen vl_f := refers(f_IPL4_fixedMsgLen);
-	IPA_CodecPort_CtrlFunct.f_IPL4_setGetMsgLen(IPA_PORT, g_ipa_conn_id, vl_f, {0, 2, 3, 1, 0});
+	IPA_CodecPort_CtrlFunct.f_IPL4_setGetMsgLen(IPA_PORT, g_self_conn_id, vl_f, {0, 2, 3, 1, 0});
 
 	while (true) {
 		alt {
@@ -598,7 +630,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 					f_ccm_rx_client(ccm);
 				}
 				case (IPA_MODE_SERVER) {
-					f_ccm_rx_server(ccm);
+					f_ccm_rx_server(ccm, ipa_rx.connId);
 				}
 				case else {
 					setverdict(fail, "Unknown mode");
@@ -670,16 +702,17 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 
 		/* server only */
 		[] IPA_PORT.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
-			log("IPA: Connected");
-			g_ipa_conn_id := asp_evt.connOpened.connId;
-			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_UP));
+			g_last_conn_id := asp_evt.connOpened.connId;
+			log("Established a new IPA connection (conn_id=", g_last_conn_id, ")");
+
+			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_UP, g_last_conn_id));
 			if (g_mode == IPA_MODE_SERVER and g_ccm_enabled) {
 				select (g_init_behavior) {
 					case (IPA_INIT_SEND_IPA_ID_GET) {
-						f_ccm_tx(valueof(ts_IPA_ID_GET));
+						f_ccm_tx(valueof(ts_IPA_ID_GET), g_last_conn_id);
 					}
 					case (IPA_INIT_SEND_IPA_ID_ACK) {
-						f_ccm_tx(valueof(ts_IPA_ACK));
+						f_ccm_tx(valueof(ts_IPA_ACK), g_last_conn_id);
 					}
 				}
 			}
@@ -687,22 +720,22 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 
 		[] IPA_PORT.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
 			log("IPA: Closed");
-			g_ipa_conn_id := -1;
-			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_DOWN));
+			g_self_conn_id := -1;
+			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_DOWN, asp_evt.connClosed.connId));
 			self.stop;
 		}
 
 		[] IPA_PORT.receive(Socket_API_Definitions.PortEvent:{result:={errorCode:=ERROR_SOCKET, connId:=?, os_error_code:=?, os_error_text:=?}}) -> value port_evt {
 			log("PortEvent: ERROR_SOCKET: ", port_evt);
-			g_ipa_conn_id := -1;
-			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_DOWN));
+			g_self_conn_id := -1;
+			f_send_IPA_EVT(ts_ASP_IPA_EV(ASP_IPA_EVENT_DOWN, port_evt.result.connId));
 			self.stop;
 		}
 
 #ifdef IPA_EMULATION_SCCP
 		/* Received SCCP -> down into IPA */
 		[] MTP3_SP_PORT.receive(ASP_MTP3_TRANSFERreq: ?) -> value mtp_req {
-			var IPA_Send ipa_tx := valueof(t_IPA_Send(g_ipa_conn_id, IPAC_PROTO_SCCP,
+			var IPA_Send ipa_tx := valueof(t_IPA_Send(f_ipa_conn_id(), IPAC_PROTO_SCCP,
 							mtp_req.data));
 			IPA_PORT.send(ipa_tx);
 		}
@@ -713,12 +746,12 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 		[] IPA_MGCP_PORT.receive(MgcpCommand:?) -> value mgcp_cmd {
 			payload := char2oct(enc_MgcpCommand(mgcp_cmd));
 			ipa_ud := f_mgcp_to_ud(payload);
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 		[] IPA_MGCP_PORT.receive(MgcpResponse:?) -> value mgcp_rsp {
 			payload := char2oct(enc_MgcpResponse(mgcp_rsp));
 			ipa_ud := f_mgcp_to_ud(payload);
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 #endif
 
@@ -726,7 +759,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 		[] IPA_CTRL_PORT.receive(CtrlMessage:?) -> value ctrl_msg {
 			payload := char2oct(enc_CtrlMessage(ctrl_msg));
 			ipa_ud := valueof(t_ASP_IPA_UD(IPAC_PROTO_OSMO, payload, IPAC_PROTO_EXT_CTRL));
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 #endif
 
@@ -735,7 +768,7 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 			f_gsup_preprocess_encoded(gsup_msg);
 			payload := enc_GSUP_PDU(gsup_msg);
 			ipa_ud := valueof(t_ASP_IPA_UD(IPAC_PROTO_OSMO, payload, IPAC_PROTO_EXT_GSUP));
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 #endif
 
@@ -743,28 +776,28 @@ private function ScanEvents() runs on IPA_Emulation_CT {
 		[] IPA_RSPRO_PORT.receive(RsproPDU:?) -> value rspro {
 			payload := enc_RsproPDU(rspro);
 			ipa_ud := valueof(t_ASP_IPA_UD(IPAC_PROTO_OSMO, payload, IPAC_PROTO_EXT_RSPRO));
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 #endif
 
 #ifdef IPA_EMULATION_RSL
 		/* Received RSL -> down into IPA */
 		[] IPA_RSL_PORT.receive(ASP_RSL_Unitdata:?) -> value rsl {
-			IPA_PORT.send(f_from_rsl(g_ipa_conn_id, rsl));
+			IPA_PORT.send(f_from_rsl(f_ipa_conn_id(), rsl));
 		}
 #endif
 #ifdef IPA_EMULATION_OML
 		/* Received OML -> down into IPA */
 		[] IPA_OML_PORT.receive(OML_PDU:?) -> value oml {
-			IPA_PORT.send(f_from_oml(g_ipa_conn_id, oml));
+			IPA_PORT.send(f_from_oml(f_ipa_conn_id(), oml));
 		}
 		[] IPA_OML_PORT.receive(octetstring:?) -> value payload {
-			IPA_PORT.send(t_IPA_Send(g_ipa_conn_id, IPAC_PROTO_OML, payload));
+			IPA_PORT.send(t_IPA_Send(f_ipa_conn_id(), IPAC_PROTO_OML, payload));
 		}
 #endif
 		/* Received MISC (OML/CTRL) -> down into IPA */
 		[] IPA_SP_PORT.receive(ASP_IPA_Unitdata: ?) -> value ipa_ud {
-			IPA_PORT.send(f_from_asp(g_ipa_conn_id, ipa_ud));
+			IPA_PORT.send(f_from_asp(f_ipa_conn_id(), ipa_ud));
 		}
 
 
