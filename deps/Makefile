@@ -40,7 +40,6 @@ ECLIPSEGITHUB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.PIPEasp \
 			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TCPasp \
-			titan.TestPorts.TELNETasp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
@@ -64,6 +63,7 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolModules.GRE \
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UDPasp \
+			titan.TestPorts.TELNETasp \
 			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolEmulations.SCCP
 
@@ -122,7 +122,7 @@ titan.TestPorts.PIPEasp_commit=			R.7.D-3-g8b01154
 titan.TestPorts.SCTPasp_commit=			R.11.A-2-g2faa9cf
 titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
 titan.TestPorts.TCPasp_commit=			R.9.A-5-g2c91bc6
-titan.TestPorts.TELNETasp_commit=		R.9.A-3-g62f281b
+titan.TestPorts.TELNETasp_commit=		R.9.A-5-g7a07a97
 titan.TestPorts.UDPasp_commit=			c20d77a34f288dd70dd4aaa30e520778876e9336
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-8-g7ec4fe0
 titan.TestPorts.USB_commit=			master
