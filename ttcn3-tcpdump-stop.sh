@@ -22,9 +22,9 @@ fi
 date
 
 if [ x"$VERDICT" = x"pass" ]; then
-	echo "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+	echo -e "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
 else
-	echo "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
+	echo -e "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
 fi
 echo
 
