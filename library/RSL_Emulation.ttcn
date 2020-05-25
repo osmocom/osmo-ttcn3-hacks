@@ -64,12 +64,33 @@ template (value) RSLDC_ChanRqd ts_RSLDC_ChanRqd_anyFN(OCT1 ra) := {
 	fn := omit
 }
 
+type enumerated RSLEm_EventType {
+	RSLEM_EV_TRX_UP,
+	RSLEM_EV_TRX_DOWN
+};
+
+type record RSLEm_Event {
+	RSLEm_EventType		ev_type,
+	IpaStreamId		sid
+};
+
+template (value) RSLEm_Event ts_RSLEm_EV(RSLEm_EventType ev_type,
+					 IpaStreamId sid) := {
+	ev_type := ev_type,
+	sid := sid
+};
+template RSLEm_Event tr_RSLEm_EV(template RSLEm_EventType ev_type,
+				 template IpaStreamId sid := ?) := {
+	ev_type := ev_type,
+	sid := sid
+};
+
 type port RSL_DCHAN_PT message {
 	inout RSLDC_ChanRqd, RSL_Message;
 } with { extension "internal" };
 
 type port RSL_CCHAN_PT message {
-	inout ASP_RSL_Unitdata, ASP_IPA_Event;
+	inout ASP_RSL_Unitdata, RSLEm_Event;
 } with { extension "internal" };
 
 
@@ -314,6 +335,67 @@ private function f_last_act_table_init() runs on RSL_Emulation_CT {
 	}
 }
 
+private function f_trx_conn_map_init()
+runs on RSL_Emulation_CT {
+	for (var integer i := 0; i < sizeof(TrxConnMap); i := i + 1) {
+		TrxConnMap[i] := -1;
+	}
+}
+
+private function f_trx_conn_map_register(integer conn_id, in IpaCcmIdResp id_resp)
+runs on RSL_Emulation_CT return IpaStreamId {
+	var template charstring unit_id_fmt := pattern "(\d+)/(\d+)/(\d+)";
+	var charstring unit_id;
+	var integer trx_nr;
+	var integer idx;
+
+	/* Check if we have room for a new connection */
+	if (TrxConnNum >= sizeof(TrxConnMap)) {
+		testcase.stop("We cannot handle more than ", sizeof(TrxConnMap), " transceivers");
+	}
+
+	/* Find IPAC_IDTAG_UNITID in the IPA IDENTITY RESPONSE */
+	idx := f_ipa_id_resp_find_ie(id_resp, IPAC_IDTAG_UNITID);
+	if (idx < 0) {
+		testcase.stop("IPA IDENTITY RESPONSE contains no unit-id");
+	}
+
+	/* Make sure that IPA unit-id is valid */
+	unit_id := oct2char(id_resp[idx].data);
+	if (not match(unit_id, unit_id_fmt)) {
+		testcase.stop("IPA unit-id has unknown/unexpected format");
+	}
+
+	/* Parse transceiver number (site/bts/trx).
+	 * TODO: implement and use declaratice types. */
+	unit_id := regexp(unit_id, unit_id_fmt, 2);
+	trx_nr  := str2int(unit_id);
+
+	if (trx_nr >= sizeof(TrxConnMap)) {
+		testcase.stop("Transceiver #", trx_nr, " does not fit");
+	} else if (TrxConnMap[trx_nr] != -1) {
+		testcase.stop("Transceiver #", trx_nr, " is already connected?!?");
+	}
+
+	/* Finally, store the connection ID */
+	log("Mapped TRX#", trx_nr, " to TCP/IP conn_id=", conn_id);
+	TrxConnMap[trx_nr] := conn_id;
+	TrxConnNum := TrxConnNum + 1;
+
+	return f_streamId_by_trx(trx_nr);
+}
+
+private function f_trx_conn_map_resolve(IpaStreamId id)
+runs on RSL_Emulation_CT return integer {
+	var integer trx_nr := f_trx_by_streamId(id);
+
+	if (TrxConnMap[trx_nr] == -1) {
+		testcase.stop("Transceiver #", trx_nr, " is not connected");
+	}
+
+	return TrxConnMap[trx_nr];
+}
+
 type component RSL_Emulation_CT {
 	/* port facing down towards IPA emulation */
 	port IPA_RSL_PT IPA_PT;
@@ -329,6 +411,10 @@ type component RSL_Emulation_CT {
 
 	/* last RSL CHAN ACT for each chan_nr */
 	var LastActData LastActTable[64];
+
+	/* IPA stream ID -> TCP/IP connection ID mapping for transceivers */
+	var integer TrxConnNum := 0; /* number of connected transceivers */
+	var integer TrxConnMap[4]; /* up to 4 transceivers for now */
 }
 
 
@@ -356,12 +442,14 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 	var RSL_DchanHdlr vc_conn;
 	var RslChannelNr chan_nr;
 	var uint8_t trx_nr;
+	var integer conn_id;
 	var integer cid;
 	var integer i;
 	/* special synchronization handling during hand-over */
 	var boolean dchan_suspended := false;
 
 	f_conn_table_init();
+	f_trx_conn_map_init();
 	f_last_act_table_init();
 
 	while (true) {
@@ -369,7 +457,15 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 		[bts_role] IPA_PT.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP)) {
 			}
 		[not bts_role] IPA_PT.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP)) -> value evt {
-			CCHAN_PT.send(evt);
+			log("A new IPA/RSL connection has been established (conn_id=",
+			    evt.conn_id, "), waiting for IDENTITY RESPONSE...");
+			}
+		[not bts_role] IPA_PT.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_RESP)) -> value evt {
+			log("Got IDENTITY RESPONSE (conn_id=", evt.conn_id, "): ", evt.id_resp);
+			/* Update [ IPA stream ID -> TCP/IP connection ID ] mapping */
+			var IpaStreamId sid := f_trx_conn_map_register(evt.conn_id, evt.id_resp);
+			/* Notify the upper layers about a new connection */
+			CCHAN_PT.send(ts_RSLEm_EV(RSLEM_EV_TRX_UP, sid));
 			}
 		[bts_role] IPA_PT.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Lost IPA connection!");
@@ -485,14 +581,24 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 			f_cid_create(chan_rqd.ra, chan_rqd.fn, vc_conn);
 			}
 
-		[] CLIENT_PT.receive(tr_RSL_MsgType(?)) -> value rx_rsl_msg sender vc_conn {
-			/* forward to BSC */
+		/* RSL message from a component that runs on RSL_DchanHdlr */
+		[bts_role] CLIENT_PT.receive(tr_RSL_MsgType(?)) -> value rx_rsl_msg sender vc_conn {
 			cid := f_cid_by_comp_ref(vc_conn);
 			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl_msg, ConnectionTable[cid].stream_id));
 			}
+		[not bts_role] CLIENT_PT.receive(tr_RSL_MsgType(?)) -> value rx_rsl_msg sender vc_conn {
+			cid := f_cid_by_comp_ref(vc_conn);
+			conn_id := f_trx_conn_map_resolve(ConnectionTable[cid].stream_id);
+			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl_msg, ConnectionTable[cid].stream_id, conn_id));
+			}
 
-		[] CCHAN_PT.receive(tr_ASP_RSL_UD(?, sid := ?)) -> value rx_rsl {
+		/* RSL message from MTC */
+		[bts_role] CCHAN_PT.receive(tr_ASP_RSL_UD(?, sid := ?)) -> value rx_rsl {
 			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl.rsl, rx_rsl.streamId));
+			}
+		[not bts_role] CCHAN_PT.receive(tr_ASP_RSL_UD(?, sid := ?)) -> value rx_rsl {
+			conn_id := f_trx_conn_map_resolve(rx_rsl.streamId);
+			IPA_PT.send(ts_ASP_RSL_UD(rx_rsl.rsl, rx_rsl.streamId, conn_id));
 			}
 
 		/* explicit registration, e.g. in (non-immediate) assignment case */
