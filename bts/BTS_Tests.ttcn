@@ -84,6 +84,9 @@ modulepar {
 	charstring mp_rsl_ip := "127.0.0.2";
 	integer mp_rsl_port := 3003;
 	integer mp_trx0_arfcn := 871;
+	integer mp_trx1_arfcn := 873;
+	integer mp_trx2_arfcn := 875;
+	integer mp_trx3_arfcn := 877;
 	charstring mp_bts_trxc_ip := "127.0.0.1";
 	integer mp_bts_trxc_port := 5701;
 	charstring mp_pcu_socket := PCU_SOCK_DEFAULT;
@@ -207,7 +210,14 @@ type record ConnHdlrPars {
 	ConnL1Pars l1_pars,
 	TestSpecUnion spec optional,
 	RSL_IE_EncryptionInfo encr optional,
-	BtsBand bts0_band optional
+	BtsBand bts0_band optional,
+
+	/* Frequency hopping parameters (disabled if absent) */
+	MaioHsn maio_hsn optional,
+	/* MA bitmap to be indicated in RR Immediate Assignment */
+	MobileAllocation ma_map,
+	/* The actual Mobile Allocation (ARFCN list) to be used */
+	L1ctlMA ma
 }
 
 /* Test-specific parameters */
@@ -587,8 +597,13 @@ function f_rsl_chan_deact() runs on ConnHdlr {
 			"RF CHAN REL", true);
 }
 
+/* Default Mobile Allocation to be used for frequency hopping */
+private const L1ctlMA l1ctl_ma_def := { { false, mp_trx0_arfcn }, { false, mp_trx1_arfcn },
+					{ false, mp_trx2_arfcn }, { false, mp_trx3_arfcn } };
+
 friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 					template RSL_IE_ChannelMode chan_mode,
+					template (omit) MaioHsn maio_hsn := omit,
 					float t_guard := 20.0) := {
 	chan_nr := valueof(chan_nr),
 	chan_mode := valueof(chan_mode),
@@ -613,7 +628,10 @@ friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 	},
 	spec := omit,
 	encr := omit,
-	bts0_band := omit
+	bts0_band := omit,
+	maio_hsn := maio_hsn,
+	ma_map := c_MA_null,
+	ma := l1ctl_ma_def
 }
 
 /***********************************************************************
@@ -1906,6 +1924,7 @@ private function f_rach_req_wait_chan_rqd(integer ra) runs on ConnHdlr return Gs
 private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies := {}) runs on ConnHdlr {
 	var GsmFrameNumber fn;
 	var ImmediateAssignment imm_ass;
+	var ChannelDescription ch_desc;
 	var integer ra := 23;
 
 	/* Send RACH request and wait for ChanReq */
@@ -1914,26 +1933,28 @@ private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies 
 	/* Activate channel on BTS side */
 	f_rsl_chan_act(g_pars.chan_mode, encr_enable, more_ies);
 
+	/* Craft channel description (with or without frequency hopping parameters) */
+	if (ispresent(g_pars.maio_hsn)) {
+		ch_desc := valueof(ts_ChanDescH1(g_pars.chan_nr, maio_hsn := g_pars.maio_hsn));
+	} else {
+		ch_desc := valueof(ts_ChanDescH0(g_pars.chan_nr));
+	}
+
 	/* Send IMM.ASS via CCHAN */
-	var ChannelDescription ch_desc := {
-		chan_nr := g_pars.chan_nr,
-		tsc := 7,
-		h := false,
-		arfcn := mp_trx0_arfcn,
-		maio_hsn := omit
-	};
-	var MobileAllocation ma := {
-		len := 0,
-		ma := ''B
-	};
-	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, ma));
+	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.ma_map));
 	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
 
 	/* receive IMM.ASS on MS side */
 	var ImmediateAssignment ia_um;
 	ia_um := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
+
+	/* Make sure that IMM.ASS contains hopping parameters (if enabled) */
+	if (ch_desc.h != ia_um.chan_desc.h) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Hopping parameters mismatch");
+	}
+
 	/* enable dedicated mode */
-	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um);
+	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um, ma := g_pars.ma);
 	/* enable encryption, if requested */
 	if (encr_enable) {
 		var uint8_t alg_id := f_alg_id_to_l1ctl(g_pars.encr.alg_id);
