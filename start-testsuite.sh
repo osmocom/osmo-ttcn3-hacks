@@ -3,6 +3,9 @@
 # Helper script to starte a TITAN-generated test suite, supporting
 # dynamically linked suites to ensure JUNIT generation is possible.
 
+# Environment variables:
+# * TTCN3_BIN_DIR: override where to look for ttcn3_start
+
 # Copyright 2017 Harald Welte
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
 #
@@ -43,7 +46,7 @@ fi
 #TTCN3_BIN_DIR="$TTCN3_DIR/bin"
 
 # below is for the debian packages
-TTCN3_BIN_DIR="/usr/bin"
+TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="/usr/lib/titan:/usr/ttcn3/lib"
 LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SUITE_DIR:$TITAN_LIBRARY_PATH" "$TTCN3_BIN_DIR/ttcn3_start" $SUITE $CFG $TEST
 
