@@ -118,6 +118,7 @@ type component test_CT extends CTRL_Adapter_CT {
 	var RSL_Emulation_CT vc_RSL;
 	/* Direct RSL_CCHAN_PT */
 	port RSL_CCHAN_PT RSL_CCHAN;
+	timer g_rslem_up_timer;
 
 	/* L1CTL port (for classic tests) */
 	port L1CTL_PT L1CTL;
@@ -180,9 +181,14 @@ type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 	port PCUIF_CODEC_PT PCU;
 }
 
-function f_init_rsl(charstring id) runs on test_CT {
-	timer T := mp_ipa_up_timeout;
+private altstep as_rsl_init_guard() runs on test_CT {
+	[] g_rslem_up_timer.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout waiting for RSL bring up");
+		}
+}
 
+function f_init_rsl(charstring id) runs on test_CT {
 	vc_IPA := IPA_Emulation_CT.create(id & "-RSL-IPA");
 	vc_RSL := RSL_Emulation_CT.create(id & "-RSL");
 
@@ -193,14 +199,27 @@ function f_init_rsl(charstring id) runs on test_CT {
 	vc_IPA.start(IPA_Emulation.main_server(mp_rsl_ip, mp_rsl_port));
 	vc_RSL.start(RSL_Emulation.main(false));
 
-	T.start;
-	alt {
-	/* TODO: handle connection events from multiple transceivers */
-	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP));
-	[] T.timeout {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for ASP_IPA_EVENT_UP");
-		}
+	/* TTCN-3 offers no way to guard 'interleave' statements */
+	g_rslem_up_timer.start(mp_ipa_up_timeout);
+	var default d := activate(as_rsl_init_guard());
+
+	/* We expect all 4 transceivers to connect here (separate IPA/RSL connections).
+	 * See https://gerrit.osmocom.org/q/Ib5ad31388ae25399ad09739aac3fdcb0b3a1f78b. */
+	interleave {
+	/* These events are sent by the RSL_Emulation_CT */
+	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX0));
+	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX1));
+	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX2));
+	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX3));
+	/* These messages (RF RESource INDication) are sent by the IUT itself */
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX0));
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX1));
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX2));
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX3));
 	}
+
+	g_rslem_up_timer.stop;
+	deactivate(d);
 }
 
 type record ConnHdlrPars {
@@ -2956,13 +2975,6 @@ type record PagingTestState {
 	integer num_overload
 }
 
-/* receive + ignore RSL RF RES IND */
-altstep as_rsl_res_ind() runs on test_CT {
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND)) {
-		repeat;
-	}
-}
-
 /* Helper function for paging related testing */
 private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTestState {
 	f_init();
@@ -3045,7 +3057,6 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 			}
 			}
 		[] T_total.timeout { }
-		[] as_rsl_res_ind();
 		}
 	}
 
@@ -3061,7 +3072,6 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 	[] T_wait.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Waiting for empty paging queue");
 		}
-	[] as_rsl_res_ind();
 	}
 
 	log("num_paging_sent=", st.num_paging_sent, " rcvd_msgs=", st.num_paging_rcv_msgs,
