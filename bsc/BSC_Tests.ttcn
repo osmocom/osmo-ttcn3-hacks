@@ -20,6 +20,7 @@ module BSC_Tests {
  * level testing.
  */
 
+import from Misc_Helpers all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from GSM_Types all;
@@ -367,6 +368,14 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 	f_vty_transceive(BSCVTY, "enable");
 	f_cs7_inst_0_cfg(BSCVTY, {"sccp-timer ias " & int2str(g_bsc_sccp_timer_ias),
 			  "sccp-timer iar " & int2str(g_bsc_sccp_timer_iar)});
+}
+
+private function f_logp(charstring log_msg) runs on MSC_ConnHdlr
+{
+	// log on TTCN3 log output
+	log(log_msg);
+	// log in stderr log
+	f_vty_transceive(BSCVTY, "logp lglobal notice " & log_msg);
 }
 
 /* global initialization function
@@ -4445,6 +4454,628 @@ testcase TC_assignment_verify_ms_power_params_ie() runs on test_CT {
 	vc_conn.done;
 }
 
+/***********************************************************************
+ * MSC Pooling
+ ***********************************************************************/
+
+function f_tmsi_nri(integer nri_v, octetstring base_tmsi := '42000023'O, integer nri_bitlen := 10) return octetstring
+{
+	return int2oct( oct2int(base_tmsi) + bit2int( (int2bit(nri_v, 32) << ( 24 - nri_bitlen)) ),
+	                4);
+}
+
+template MobileIdentityLV ts_MI_TMSI_NRI_LV(integer nri_v, integer nri_bitlen := 10) :=
+	ts_MI_TMSI_LV(tmsi := f_tmsi_nri(nri_v, nri_bitlen := nri_bitlen));
+
+private function f_perform_clear(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
+	f_logp("MSC instructs BSC to clear channel");
+	BSSAP.send(ts_BSSMAP_ClearCommand(0));
+	interleave {
+	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {
+			f_logp("Got RSL RR Release");
+		}
+	[] rsl.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {
+			f_logp("Got RSL Deact SACCH");
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearComplete) {
+			f_logp("Got BSSMAP Clear Complete");
+			/* Also drop the SCCP connection */
+			BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+		}
+	[] rsl.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			f_logp("Got RSL RF Chan Rel, sending Rel Ack");
+			rsl.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+		}
+	}
+}
+
+private function f_perform_compl_l3(RSL_DCHAN_PT rsl, template PDU_ML3_MS_NW l3_info, boolean do_clear := true)
+runs on MSC_ConnHdlr {
+	timer T := 10.0;
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(valueof(l3_info));
+
+	f_logp("establish channel, send Complete Layer 3 Info");
+	f_create_bssmap_exp(l3_enc);
+
+	/* RSL_Emulation.f_chan_est() on rsl:
+	 * This is basically code dup with s/RSL/rsl from:
+	 * RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn);
+	 */
+	var RSL_Message rx_rsl;
+	var GsmRrMessage rr;
+
+	/* request a channel to be established */
+	rsl.send(ts_RSLDC_ChanRqd(g_pars.ra, g_pars.fn));
+	/* expect immediate assignment.
+	 * Code dup with s/RSL/rsl from:
+	 * rx_rsl := f_rx_or_fail(tr_RSL_IMM_ASSIGN);
+	 */
+	timer Tt := 10.0;
+
+	/* request a channel to be established */
+	Tt.start;
+	alt {
+		[] rsl.receive(tr_RSL_IMM_ASSIGN) -> value rx_rsl {
+			Tt.stop;
+		}
+		[] rsl.receive {
+			setverdict(fail, "Unexpected RSL message on DCHAN");
+			mtc.stop;
+		}
+		[] Tt.timeout {
+			setverdict(fail, "Timeout waiting for RSL on DCHAN");
+			mtc.stop;
+		}
+	}
+	rr := dec_GsmRrMessage(rx_rsl.ies[1].body.full_imm_ass_info.payload);
+	g_chan_nr := rr.payload.imm_ass.chan_desc.chan_nr;
+	rsl.send(ts_RSL_EST_IND(g_chan_nr, valueof(g_pars.link_id), l3_enc));
+
+
+	f_logp("expect BSSAP Complete Layer 3 Info at MSC");
+	var template PDU_BSSAP exp_l3_compl;
+	exp_l3_compl := tr_BSSMAP_ComplL3()
+	if (g_pars.aoip == false) {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := omit;
+	} else {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := ?;
+	}
+
+	var PDU_BSSAP bssap;
+	T.start;
+	alt {
+	[] BSSAP.receive(exp_l3_compl) -> value bssap {
+		f_logp("received expected Complete Layer 3 Info at MSC");
+		log("rx exp_l3_compl = ", bssap);
+		}
+	[] BSSAP.receive(tr_BSSMAP_ComplL3) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Received non-matching COMPLETE LAYER 3 INFORMATION");
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	/* start ciphering, if requested */
+	if (ispresent(g_pars.encr)) {
+		f_logp("start ciphering");
+		f_cipher_mode(g_pars.encr.enc_alg, g_pars.encr.enc_key);
+	}
+
+	if (do_clear) {
+		f_perform_clear(rsl);
+	}
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+private function f_tc_mscpool_compl_l3(charstring id) runs on MSC_ConnHdlr {
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	if (g_pars.mscpool.rsl_idx == 0) {
+		f_perform_compl_l3(RSL, g_pars.mscpool.l3_info);
+	} else if (g_pars.mscpool.rsl_idx == 1) {
+		f_perform_compl_l3(RSL1, g_pars.mscpool.l3_info);
+	} else if (g_pars.mscpool.rsl_idx == 2) {
+		f_perform_compl_l3(RSL2, g_pars.mscpool.l3_info);
+	}
+}
+
+/* Various Complete Layer 3 by IMSI all end up with the first MSC, because the other MSCs are not connected. */
+private function f_tc_mscpool_L3Compl_on_1_msc(charstring id) runs on MSC_ConnHdlr {
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	f_perform_compl_l3(RSL, ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('001010000000001'H)), '00F110'O) );
+	f_perform_compl_l3(RSL, ts_CM_SERV_REQ(CM_TYPE_MO_SMS, valueof(ts_MI_IMSI_LV('001010000000002'H))) );
+	f_perform_compl_l3(RSL, ts_PAG_RESP(valueof(ts_MI_IMSI_LV('001010000000003'H))) );
+	f_perform_compl_l3(RSL, ts_ML3_MO_MM_IMSI_DET_Ind(valueof(ts_MI_IMSI_LV('001010000000004'H))) );
+}
+testcase TC_mscpool_L3Compl_on_1_msc() runs on test_CT {
+
+	f_init(1, true);
+	f_sleep(1.0);
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	vc_conn := f_start_handler(refers(f_tc_mscpool_L3Compl_on_1_msc), pars);
+	vc_conn.done;
+}
+
+/* Three Layer 3 Complete by IMSI are round-robin'ed across two connected MSCs */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_L3Complete_by_imsi_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('001010000000001'H)), '00F110'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV('001010000000002'H))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* Test round-robin wrap to the first MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_IMSI_LV('001010000000003'H))));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Three LU by TMSI are round-robin'ed across two connected MSCs, because they contain the NULL-NRI 0
+ * (configured in osmo-bsc.cfg). */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_LU_by_tmsi_null_nri_0_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(0)), '00F110'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(0)), '00F110'O));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* Test round-robin wrap to the first MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(0)), '00F110'O));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Three LU by TMSI are round-robin'ed across two connected MSCs, because they contain the NULL-NRI 1
+ * (configured in osmo-bsc.cfg). In this case, one of the MSC also has the NULL-NRI as part of its owned NRIs, but the
+ * NULL-NRI setting is stronger than that. */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_LU_by_tmsi_null_nri_1_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(1)), '00F110'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(1)), '00F110'O));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* Test round-robin wrap to the first MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(1)), '00F110'O));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Three Layer 3 Complete by TMSI are round-robin'ed across two connected MSCs, because they contain an NRI not
+ * assigned to any MSC (configured in osmo-bsc.cfg). */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_L3Complete_by_tmsi_unassigned_nri_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	/* An NRI that is not assigned to any MSC */
+	pars1.mscpool.l3_info := valueof(ts_ML3_MO_MM_IMSI_DET_Ind(valueof(ts_MI_TMSI_NRI_LV(1023))));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	/* An NRI that is not assigned to any MSC */
+	pars2.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(768)), '00F110'O));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* Test round-robin wrap to the first MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	/* An NRI that is not assigned to any MSC */
+	pars3.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_SS_ACT, valueof(ts_MI_TMSI_NRI_LV(819))));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Three Layer 3 Complete by TMSI are round-robin'ed across two connected MSCs, because they contain an NRI
+ * assigned to an MSC that is currently not connected (configured in osmo-bsc.cfg). */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	/* An NRI that is assigned to an unconnected MSC */
+	pars1.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_TMSI_NRI_LV(512))));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	/* An NRI that is assigned to an unconnected MSC */
+	pars2.mscpool.l3_info := valueof(ts_ML3_MO_MM_IMSI_DET_Ind(valueof(ts_MI_TMSI_NRI_LV(767))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* Test round-robin wrap to the first MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	/* An NRI that is assigned to an unconnected MSC */
+	pars3.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(750)), '00F110'O));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Three Layer 3 Complete by TMSI with valid NRI for the second MSC are all directed to the second MSC (configured in
+ * osmo-bsc.cfg). */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_1() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* All TMSIs in this test point at the second MSC, set the round robin to point at the first MSC to make sure
+	 * this is not using round-robin. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars1.mscpool.rsl_idx := 0;
+	/* An NRI of the second MSC's range (256-511) */
+	pars1.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_SMS, valueof(ts_MI_TMSI_NRI_LV(256))));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars2.mscpool.rsl_idx := 1;
+	/* An NRI of the second MSC's range (256-511) */
+	pars2.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_TMSI_NRI_LV(260))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars3.mscpool.rsl_idx := 2;
+	/* An NRI of the second MSC's range (256-511) */
+	pars3.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(511)), '00F110'O));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* Layer 3 Complete by TMSI with valid NRI for the third MSC are directed to the third MSC (configured in osmo-bsc.cfg),
+ * while a round-robin remains unaffected by that. */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_2() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* All TMSIs in this test point at the third MSC, set the round robin to point at the second MSC to make sure
+	 * this is not using round-robin. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 1");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 2);
+	pars1.mscpool.rsl_idx := 0;
+	/* An NRI of the third MSC's range (512-767) */
+	pars1.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_SMS, valueof(ts_MI_TMSI_NRI_LV(512))));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 2);
+	pars2.mscpool.rsl_idx := 1;
+	/* An NRI of the third MSC's range (512-767) */
+	pars2.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_TMSI_NRI_LV(678))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	/* The above forwardings to third MSC have not affected the round robin, which still points at the second MSC */
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('001010000000013'H)), '00F110'O));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+}
+
+/* LU with a TMSI but indicating a different PLMN in its previous LAI: ignore the NRI. */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_LU_by_tmsi_from_other_PLMN() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* The TMSIs in this test points at the second MSC, but since it is from a different PLMN, round-robin is used
+	 * instead, and hits msc 0. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	/* An NRI of the second MSC's range (256-511), but a PLMN that doesn't match with osmo-bsc.cfg */
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(260)), '99F999'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	/* An NRI of the third MSC's range (512-767) and a matching PLMN gets directed by NRI. */
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 2);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_TMSI_NRI_LV(555)), '00F110'O));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+}
+
+/* Make sure that whichever MSC paged a subscriber will also get the Paging Response. Page by IMSI, which would be
+ * round-robined to another MSC, to make sure the Paging->Response relation is stronger than the NRI->MSC mapping. */
+private function f_tc_mscpool_paging_imsi(charstring id) runs on MSC_ConnHdlr {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list := { cIl_CI := { ts_BSSMAP_CI_CI(0) } };
+	//cid_list := { cIl_allInBSS := ''O };
+	var RSL_ChanNeeded rsl_chneed := RSL_CHANNEED_SDCCH;
+	var template BSSMAP_IE_ChannelNeeded bssmap_chneed := ts_BSSMAP_IE_ChanNeeded(int2bit(enum2int(valueof(rsl_chneed)),2));
+	var BSSAP_N_UNITDATA_req paging;
+	var hexstring imsi := '001010000000123'H;
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+
+	paging := valueof(ts_BSSAP_UNITDATA_req(g_pars.mscpool.sccp_addr_bsc, g_pars.mscpool.sccp_addr_msc,
+						valueof(ts_BSSMAP_Paging(imsi, cid_list, omit, bssmap_chneed))));
+	BSSAP.send(paging);
+
+	/* Register any RSL conn so that the Paging Command gets received here. With the current RSL_Emulation's main()
+	 * handling of '[bts_role] IPA_PT.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD()))' it doesn't matter at all which
+	 * channel number is picked here. */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(0, RSL_CHAN_NR_INVALID));
+	f_rslem_register(0, new_chan_nr);
+	RSL.receive(tr_RSL_PAGING_CMD(tr_MI_IMSI(imsi)));
+	f_rslem_unregister(0, new_chan_nr);
+
+	/* Despite the round robin pointing at the second MSC ('roundrobin next 1'), the earlier Paging for the same IMSI
+	 * causes this Paging Response to go to the first MSC (bssap_idx := 0). */
+	f_perform_compl_l3(RSL, ts_PAG_RESP(valueof(ts_MI_IMSI_LV(imsi))) );
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_mscpool_paging_and_response_imsi() runs on test_CT {
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* Testing a Paging on the first MSC to get a Paging Response back to the first MSC. Set round robin to the
+	 * second MSC to make sure we're getting the Paging logic, not a coincidental round robin match. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 1");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_peer;
+	pars1.mscpool.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_own;
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_paging_imsi), pars1);
+	vc_conn1.done;
+}
+
+/* Make sure that whichever MSC paged a subscriber will also get the Paging Response.  Page by TMSI with an NRI value
+ * that matches a different MSC, to make sure the Paging->Response relation is stronger than the NRI->MSC mapping. */
+private function f_tc_mscpool_paging_tmsi(charstring id) runs on MSC_ConnHdlr {
+	var template BSSMAP_FIELD_CellIdentificationList cid_list := { cIl_CI := { ts_BSSMAP_CI_CI(0) } };
+	//cid_list := { cIl_allInBSS := ''O };
+	var RSL_ChanNeeded rsl_chneed := RSL_CHANNEED_SDCCH;
+	var template BSSMAP_IE_ChannelNeeded bssmap_chneed := ts_BSSMAP_IE_ChanNeeded(int2bit(enum2int(valueof(rsl_chneed)),2));
+	var integer nri_v := 300; /* <-- second MSC's NRI */
+	var octetstring tmsi := f_tmsi_nri(nri_v);
+	var BSSAP_N_UNITDATA_req paging;
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+
+	paging := valueof(ts_BSSAP_UNITDATA_req(g_pars.mscpool.sccp_addr_bsc, g_pars.mscpool.sccp_addr_msc,
+						valueof(ts_BSSMAP_Paging('001010000000011'H, cid_list, tmsi, bssmap_chneed))));
+	BSSAP.send(paging);
+
+	/* Register any RSL conn so that the Paging Command gets received here. With the current RSL_Emulation's main()
+	 * handling of '[bts_role] IPA_PT.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD()))' it doesn't matter at all which
+	 * channel number is picked here. */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(0, RSL_CHAN_NR_INVALID));
+	f_rslem_register(0, new_chan_nr);
+	RSL.receive(tr_RSL_PAGING_CMD(t_MI_TMSI(tmsi)));
+	f_rslem_unregister(0, new_chan_nr);
+
+	/* Despite the NRI matching the second MSC (NRI from 'msc 1' in osmo-bsc.cfg) and round robin pointing at the
+	 * third MSC ('roundrobin next 2'), the earlier Paging for the same TMSI causes this Paging Response to go to
+	 * the first MSC (bssap_idx := 0). */
+	f_perform_compl_l3(RSL, ts_PAG_RESP(valueof(ts_MI_TMSI_NRI_LV(nri_v))) );
+	setverdict(pass);
+	f_sleep(1.0);
+}
+testcase TC_mscpool_paging_and_response_tmsi() runs on test_CT {
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* Testing a Paging on the first MSC to get a Paging Response back to the first MSC. Set round robin to the
+	 * third MSC to make sure we're getting the Paging logic, not a coincidental round robin match. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 2");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_peer;
+	pars1.mscpool.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_own;
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_paging_tmsi), pars1);
+	vc_conn1.done;
+}
+
+/* For round-robin, skip an MSC that has 'no allow-attach' set. */
+/* FIXME: each run is using a separate RSLem: RSL, RSL1, RSL2. It should work
+ * just as well using only RSL. */
+testcase TC_mscpool_no_allow_attach_round_robin() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	/* Mark the second MSC as offloading, round-robin should skip this MSC now. */
+	f_vty_enter_cfg_msc(BSCVTY, 1);
+	f_vty_transceive(BSCVTY, "no allow-attach");
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('001010000000001'H)), '00F110'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 2);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV('001010000000002'H))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_IMSI_LV('001010000000003'H))));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+
+	f_vty_enter_cfg_msc(BSCVTY, 1);
+	f_vty_transceive(BSCVTY, "allow-attach");
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+}
+
+/* An MSC that has 'no allow-attach' set should still serve subscribers that are already attached according to their
+ * TMSI NRI. */
+testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 3);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	/* Mark the second MSC as offloading, round-robin should skip this MSC now. */
+	f_vty_enter_cfg_msc(BSCVTY, 1);
+	f_vty_transceive(BSCVTY, "no allow-attach");
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+
+	/* Round robin points at msc 0, but the valid NRI directs to msc 1, even though msc 1 has 'no allow-attach'. */
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars1.mscpool.rsl_idx := 0;
+	/* An NRI of the second MSC's range (256-511) */
+	pars1.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_TMSI_NRI_LV(260))));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV('001010000000002'H))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+
+	var MSC_ConnHdlr vc_conn3;
+	var TestHdlrParams pars3 := f_gen_test_hdlr_pars(bssap_idx := 2);
+	pars3.mscpool.rsl_idx := 2;
+	pars3.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV('001010000000003'H))));
+	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
+	vc_conn3.done;
+
+	f_vty_enter_cfg_msc(BSCVTY, 1);
+	f_vty_transceive(BSCVTY, "allow-attach");
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+}
+
 /* Dyn PDCH todo:
    * activate OSMO as TCH/F
    * activate OSMO as TCH/H
@@ -4616,6 +5247,28 @@ control {
 
 	/* Power control related */
 	execute( TC_assignment_verify_ms_power_params_ie() );
+
+	/* MSC pooling */
+	/* FIXME: in SCCPlite, indicating how many MSCs should be connected does currently not work. Since
+	 * RESET->RESET-ACK is unconditionally negotiated for all configured MSCs, they always all appear as connected
+	 * to osmo-bsc. The MSC pooling tests however require disconnecting selected MSCs, and hence don't work out as
+	 * intended on SCCPlite. So for now, run these only for SCCP/M3UA. */
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		execute( TC_mscpool_L3Compl_on_1_msc() );
+		execute( TC_mscpool_L3Complete_by_imsi_round_robin() );
+		execute( TC_mscpool_LU_by_tmsi_null_nri_0_round_robin() );
+		execute( TC_mscpool_LU_by_tmsi_null_nri_1_round_robin() );
+		execute( TC_mscpool_L3Complete_by_tmsi_unassigned_nri_round_robin() );
+		execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin() );
+		execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_1() );
+		execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_2() );
+		execute( TC_mscpool_LU_by_tmsi_from_other_PLMN() );
+		execute( TC_mscpool_paging_and_response_imsi() );
+		execute( TC_mscpool_paging_and_response_tmsi() );
+		execute( TC_mscpool_no_allow_attach_round_robin() );
+		execute( TC_mscpool_no_allow_attach_valid_nri() );
+	}
+
 	/* at bottom as they might crash OsmoBSC before OS#3182 is fixed */
 	execute( TC_early_conn_fail() );
 	execute( TC_late_conn_fail() );
