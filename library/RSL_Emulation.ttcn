@@ -103,10 +103,13 @@ type port RSL_CCHAN_PT message {
 signature RSLEM_register(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_unregister(uint8_t trx_nr, RslChannelNr chan_nr, RSL_DchanHdlr hdlr);
 signature RSLEM_suspend(boolean suspend);
+signature RSLEM_wait_queue(boolean enable);
 signature RSLEM_get_last_act(in uint8_t trx_nr, in RslChannelNr chan_nr, out RSL_Message chan_act);
 
 type port RSLEM_PROC_PT procedure {
-	inout RSLEM_register, RSLEM_unregister, RSLEM_suspend, RSLEM_get_last_act;
+	inout RSLEM_register, RSLEM_unregister,
+	      RSLEM_suspend, RSLEM_wait_queue,
+	      RSLEM_get_last_act;
 } with { extension "internal" };
 
 /***********************************************************************
@@ -415,6 +418,8 @@ runs on RSL_Emulation_CT {
 	testcase.stop("Failed to patch IPA stream ID in ASP RSL UD: ", ud);
 }
 
+private type record of ASP_RSL_Unitdata ASP_RSL_UDList;
+
 type component RSL_Emulation_CT {
 	/* port facing down towards IPA emulation */
 	port IPA_RSL_PT IPA_PT;
@@ -427,6 +432,9 @@ type component RSL_Emulation_CT {
 
 	/* state of all concurrent connections / dedicated channels */
 	var ConnectionData ConnectionTable[64];
+
+	/* RSL messages for which no handler is currently registered */
+	var ASP_RSL_UDList WaitingQueue := { };
 
 	/* last RSL CHAN ACT for each chan_nr */
 	var LastActData LastActTable[64];
@@ -466,6 +474,10 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 	var integer i;
 	/* special synchronization handling during hand-over */
 	var boolean dchan_suspended := false;
+	/* Whether to keep RSL messages, for which no handler is found in ConnectionTable,
+	 * in a queue. These messages will remain in the queue until the appropriate
+	 * connection handler is registered. */
+	var boolean wait_queue_enabled := false;
 
 	f_conn_table_init();
 	f_trx_conn_map_init();
@@ -584,6 +596,9 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 						rx_rsl.rsl.ies[0].body.chan_nr);
 			if (cid != -1) {
 				CLIENT_PT.send(rx_rsl.rsl) to ConnectionTable[cid].comp_ref;
+			} else if (wait_queue_enabled) {
+				log("Storing an RSL message in the waiting queue");
+				WaitingQueue := WaitingQueue & { rx_rsl };
 			} else {
 				setverdict(fail, "RSL for unknown Dchan");
 				mtc.stop;
@@ -650,6 +665,26 @@ function main(boolean bts_role := true) runs on RSL_Emulation_CT {
 			RSL_PROC.reply(RSLEM_suspend:{false}) to vc_conn;
 			}
 
+		[not wait_queue_enabled] RSL_PROC.getcall(RSLEM_wait_queue:{true}) -> sender vc_conn {
+			wait_queue_enabled := true;
+			log("Enabled queueing of DChan messages");
+			RSL_PROC.reply(RSLEM_wait_queue:{wait_queue_enabled}) to vc_conn;
+			}
+
+		[wait_queue_enabled] RSL_PROC.getcall(RSLEM_wait_queue:{false}) -> sender vc_conn {
+			/* Dispatch stalled messages (if any) */
+			f_WaitingQueue_dispatch();
+
+			wait_queue_enabled := false;
+			log("Disabled queueing of DChan messages");
+			RSL_PROC.reply(RSLEM_wait_queue:{wait_queue_enabled}) to vc_conn;
+			}
+
+		[] RSL_PROC.getcall(RSLEM_wait_queue:{?}) -> sender vc_conn {
+			log("Queueing of DChan messages is already enabled/disabled");
+			RSL_PROC.reply(RSLEM_wait_queue:{wait_queue_enabled}) to vc_conn;
+			}
+
 		[] RSL_PROC.getcall(RSLEM_get_last_act:{?,?,?}) -> param(trx_nr, chan_nr) sender vc_conn {
 			var RSL_Message last_chan_act := f_lookup_last_act(trx_nr, chan_nr);
 			RSL_PROC.reply(RSLEM_get_last_act:{trx_nr, chan_nr, last_chan_act}) to vc_conn;
@@ -666,6 +701,27 @@ runs on RSL_Emulation_CT {
 	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
 		f_cid_clear(i);
 	}
+}
+
+private function f_WaitingQueue_dispatch()
+runs on RSL_Emulation_CT {
+	var integer cid;
+
+	for (var integer i := 0; i < lengthof(WaitingQueue); i := i + 1) {
+		cid := f_cid_by_chan_nr(f_trx_by_streamId(WaitingQueue[i].streamId),
+					WaitingQueue[i].rsl.ies[0].body.chan_nr);
+		if (cid == -1) {
+			setverdict(fail, "No Dchan handler found for: ", WaitingQueue[i]);
+			mtc.stop;
+			break;
+		}
+
+		/* Dispatch a stalled message to the appropriate handler */
+		CLIENT_PT.send(WaitingQueue[i].rsl) to ConnectionTable[cid].comp_ref;
+	}
+
+	/* All messages dispatched, clear the queue */
+	WaitingQueue := { };
 }
 
 /* client/conn_hdlr side function to use procedure port to register stream_id/chan_nr */
@@ -697,6 +753,24 @@ function f_rslem_resume(RSLEM_PROC_PT PT)
 runs on RSL_DchanHdlr {
 	PT.call(RSLEM_suspend:{false}) {
 		[] PT.getreply(RSLEM_suspend:{false}) {};
+	}
+}
+
+/* Enable queueing of RSL DChan messages from IPA until f_rslem_dchan_queue_disable() is called. */
+function f_rslem_dchan_queue_enable(RSLEM_PROC_PT PT := RSL_PROC)
+runs on RSL_DchanHdlr {
+	PT.call(RSLEM_wait_queue:{true}) {
+		[] PT.getreply(RSLEM_wait_queue:{true}) {};
+	}
+}
+
+/* Disable queueing of RSL DChan messages after f_rslem_dchan_queue_enable() is called.
+ * Dispatch all stalled messages to the registered handlers. Make sure that no
+ * messages for which there is no handler are left in the queue (mtc.stop if so). */
+function f_rslem_dchan_queue_dispatch(RSLEM_PROC_PT PT := RSL_PROC)
+runs on RSL_DchanHdlr {
+	PT.call(RSLEM_wait_queue:{false}) {
+		[] PT.getreply(RSLEM_wait_queue:{false}) {};
 	}
 }
 
