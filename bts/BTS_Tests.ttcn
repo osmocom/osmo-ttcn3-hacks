@@ -109,6 +109,8 @@ modulepar {
 	float mp_ipa_up_delay := 0.0;
 	/* false for now, as only virtphy supports it, not calypso-l1 nor trxcon */
 	boolean mp_l1_supports_gprs := false;
+	/* how many transceivers do we expect to connect */
+	integer mp_transceiver_num := 1;
 }
 
 type record of RslChannelNr ChannelNrs;
@@ -120,7 +122,6 @@ type component test_CT extends CTRL_Adapter_CT {
 	var RSL_Emulation_CT vc_RSL;
 	/* Direct RSL_CCHAN_PT */
 	port RSL_CCHAN_PT RSL_CCHAN;
-	timer g_rslem_up_timer;
 
 	/* L1CTL port (for classic tests) */
 	port L1CTL_PT L1CTL;
@@ -183,16 +184,12 @@ type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 	port PCUIF_CODEC_PT PCU;
 }
 
-private altstep as_rsl_init_guard() runs on test_CT {
-	[] g_rslem_up_timer.timeout {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-			"Timeout waiting for RSL bring up");
-		}
-	/* osmo-bts may send us CCCH LOAD INDication or whatever else */
-	[] RSL_CCHAN.receive(ASP_RSL_Unitdata:?) { repeat; }
-}
-
 function f_init_rsl(charstring id) runs on test_CT {
+	var bitstring trx_mask := '00000000'B;
+	var integer trx_count := 0;
+	var RSLEm_Event ev;
+	timer T;
+
 	vc_IPA := IPA_Emulation_CT.create(id & "-RSL-IPA");
 	vc_RSL := RSL_Emulation_CT.create(id & "-RSL");
 
@@ -203,27 +200,33 @@ function f_init_rsl(charstring id) runs on test_CT {
 	vc_IPA.start(IPA_Emulation.main_server(mp_rsl_ip, mp_rsl_port));
 	vc_RSL.start(RSL_Emulation.main(false));
 
-	/* TTCN-3 offers no way to guard 'interleave' statements */
-	g_rslem_up_timer.start(mp_ipa_up_timeout);
-	var default d := activate(as_rsl_init_guard());
-
-	/* We expect all 4 transceivers to connect here (separate IPA/RSL connections).
+	/* We expect (N = mp_transceiver_num) IPA/RSL transceiver connections here.
 	 * See https://gerrit.osmocom.org/q/Ib5ad31388ae25399ad09739aac3fdcb0b3a1f78b. */
-	interleave {
+	T.start(mp_ipa_up_timeout);
+	alt {
 	/* These events are sent by the RSL_Emulation_CT */
-	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX0));
-	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX1));
-	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX2));
-	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, IPAC_PROTO_RSL_TRX3));
-	/* These messages (RF RESource INDication) are sent by the IUT itself */
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX0));
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX1));
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX2));
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, IPAC_PROTO_RSL_TRX3));
-	}
+	[] RSL_CCHAN.receive(tr_RSLEm_EV(RSLEM_EV_TRX_UP, ?)) -> value ev {
+		/* Make sure that all transceivers use unique stream ID */
+		if (trx_mask[enum2int(ev.sid)] == '1'B) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("Duplicate RSL stream ID (", ev.sid, ")"));
+		}
 
-	g_rslem_up_timer.stop;
-	deactivate(d);
+		/* This message (RF RESource INDication) is sent by the IUT itself */
+		RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND, ev.sid));
+		trx_mask[enum2int(ev.sid)] := '1'B;
+		trx_count := trx_count + 1;
+
+		log(trx_count, "/", mp_transceiver_num, " transceiver(s) connected");
+		if (trx_count < mp_transceiver_num) { repeat; }
+		}
+	/* osmo-bts may send us CCCH LOAD INDication or whatever else */
+	[] RSL_CCHAN.receive(ASP_RSL_Unitdata:?) { repeat; }
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout waiting for RSL bring up");
+		}
+	}
 }
 
 type record ConnHdlrPars {
