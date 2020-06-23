@@ -173,6 +173,9 @@ type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 	port TRXC_CODEC_PT BTS_TRXC;
 	var integer g_bts_trxc_conn_id;
 
+	/* port to be initialized optionally to access BSC VTY */
+	port TELNETasp_PT BSCVTY;
+
 	timer g_Tguard;
 	timer g_Tmeas_exp := 2.0; /* >= 103 SACCH multiframe ~ 500ms */
 
@@ -369,6 +372,12 @@ friend function f_init_vty(charstring id) runs on test_CT {
 }
 
 friend function f_init_vty_bsc() runs on test_CT {
+	map(self:BSCVTY, system:BSCVTY);
+	f_vty_set_prompts(BSCVTY, "OsmoBSC");
+	f_vty_transceive(BSCVTY, "enable");
+}
+
+friend function f_connhdlr_init_vty_bsc() runs on ConnHdlr {
 	map(self:BSCVTY, system:BSCVTY);
 	f_vty_set_prompts(BSCVTY, "OsmoBSC");
 	f_vty_transceive(BSCVTY, "enable");
@@ -2024,12 +2033,34 @@ function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
 	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
 }
 
-/* Verify Tx power reduction and ramping up during BTS bring up */
-function f_TC_tx_power_start_ramp_up_bcch(charstring id) runs on ConnHdlr {
+/* Wait until the BTS has reached full tx power (nominal tx power minus configured attenuation) */
+private function f_wait_ramp_up() runs on ConnHdlr return integer {
 	var L1ctlDlMessage l1_dl;
-	f_l1_tune(L1CTL);
-	RSL.clear;
+	var integer max_rx_lvl := mp_bts_tx_nom_pwr_exp - mp_bts_tx_pwr_att_exp;
+	timer Tup := 10.0;
+	Tup.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
+		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
+		log("Received rx_level=", rx_lvl);
 
+		if (rx_lvl != max_rx_lvl) {
+			repeat;
+		}
+		Tup.stop;
+		}
+	[] L1CTL.receive { repeat; }
+	[] Tup.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Didn't reach full power ", max_rx_lvl));
+		}
+	}
+	return max_rx_lvl;
+}
+
+/* verify BTS ramps power up to full tx power (nominal tx power minus configured attenuation) */
+private function f_verify_ramp_up() runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
 	var integer initial_rx_lvl := -1;
 	var integer last_rx_lvl := -1;
 	var integer max_rx_lvl := mp_bts_tx_nom_pwr_exp - mp_bts_tx_pwr_att_exp;
@@ -2087,6 +2118,61 @@ function f_TC_tx_power_start_ramp_up_bcch(charstring id) runs on ConnHdlr {
 					log2str("No Tx power increase during whole ramp up: ",
 						initial_rx_lvl , " -> ", last_rx_lvl));
 	}
+}
+
+/* verify BTS ramps power down to rx_level 0 */
+private function f_verify_ramp_down(integer max_rx_lvl) runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	var integer last_rx_lvl := max_rx_lvl;
+
+	timer Tdown := 5.0;
+	Tdown.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
+		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
+		log("Received rx_level=", rx_lvl);
+
+		/* received Rx level bigger than maximum allowed power by CN */
+		if (rx_lvl > max_rx_lvl) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Detected Tx power higher than full power: ",
+							rx_lvl , " > ", max_rx_lvl));
+		}
+
+		/* Make sure it never increases, since we are rumping down */
+		if (last_rx_lvl < rx_lvl) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Detected Tx power increase during ramp up: ",
+							last_rx_lvl , " -> ", rx_lvl));
+		}
+
+		last_rx_lvl := rx_lvl;
+		if (last_rx_lvl != 0) {
+			repeat;
+		}
+		/* we reached power level 0, we are done */
+		Tdown.stop;
+		}
+	[] L1CTL.receive { repeat; }
+	[] Tdown.timeout { }
+	}
+
+	/* We didn't increase tx power during ramp down */
+	if (max_rx_lvl > last_rx_lvl) {
+		log("Tx power decreased during ramp down: ", max_rx_lvl , " -> ", last_rx_lvl);
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("No Tx power decrease during whole ramp down: ",
+						max_rx_lvl , " -> ", last_rx_lvl));
+	}
+}
+
+/* Verify Tx power reduction and ramping up during BTS bring up */
+function f_TC_tx_power_start_ramp_up_bcch(charstring id) runs on ConnHdlr {
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	f_verify_ramp_up();
 
 	setverdict(pass);
 }
@@ -2096,6 +2182,33 @@ testcase TC_tx_power_start_ramp_up_bcch() runs on test_CT {
 	f_init();
 	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN));
 	vc_conn := f_start_handler(refers(f_TC_tx_power_start_ramp_up_bcch), pars,
+				   pcu_comp := false, trxc_comp := true);
+	vc_conn.done;
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Verify Tx power reduction and ramping downd uring BTS bring shutdown due to Abis link failure */
+function f_TC_tx_power_start_ramp_down_bcch(charstring id) runs on ConnHdlr {
+	f_connhdlr_init_vty_bsc();
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* Wait until BTS is started and at full power */
+	var integer max_rx_lvl := f_wait_ramp_up();
+	log("Reached nominal level ", max_rx_lvl, ", shutting down OML link");
+
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+	f_verify_ramp_down(max_rx_lvl);
+
+	setverdict(pass);
+}
+testcase TC_tx_power_start_ramp_down_bcch() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+	f_init();
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN));
+	vc_conn := f_start_handler(refers(f_TC_tx_power_start_ramp_down_bcch), pars,
 				   pcu_comp := false, trxc_comp := true);
 	vc_conn.done;
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
@@ -6519,6 +6632,7 @@ control {
 	execute( TC_meas_res_sign_sdcch8() );
 	execute( TC_meas_res_sign_tchh_toa256() );
 	execute( TC_tx_power_start_ramp_up_bcch() );
+	execute( TC_tx_power_start_ramp_down_bcch() );
 	execute( TC_rsl_bs_pwr_static_ass() );
 	execute( TC_rsl_bs_pwr_static_power_control() );
 	execute( TC_rsl_ms_pwr_ctrl() );
