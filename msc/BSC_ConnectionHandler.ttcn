@@ -59,6 +59,8 @@ import from Osmocom_VTY_Functions all;
 
 import from SGsAP_Emulation all;
 
+import from TCCConversion_Functions { function f_strstr };
+
 /* this component represents a single subscriber connection */
 type component BSC_ConnHdlr extends RAN_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr, MGCP_ConnHdlr, SMPP_ConnHdlr, CTRL_Adapter_CT, SGsAP_ConnHdlr {
 	var BSC_ConnHdlrPars g_pars;
@@ -101,7 +103,8 @@ type record BSC_ConnHdlrPars {
 	integer ran_idx,
 	boolean use_umts_aka,
 	boolean ran_is_geran,
-	boolean use_osmux
+	boolean use_osmux,
+	boolean verify_cell_id
 };
 
 /* get a one-octet bitmaks of supported algorithms based on Classmark information */
@@ -364,6 +367,8 @@ runs on BSC_ConnHdlr {
 	/* Send BSSAP_Conn_Req with COMPL L3 INFO to MSC */
 	f_cl3_or_initial_ue(l3_info);
 
+	f_verify_vty_lac_ci(verify_vlr := false);
+
 	f_mm_common();
 	if (g_pars.net.expect_ciph or not g_pars.ran_is_geran) {
 		/* implicit CM SERVICE ACCEPT? */
@@ -571,6 +576,96 @@ function f_expect_mm_info() runs on BSC_ConnHdlr {
 	 }
 }
 
+private function f_lac_ci_vty_str(BSSMAP_IE_CellIdentifier cell_id) return charstring
+{
+	return "LAC / cell ID: "
+		& int2str(oct2int(cell_id.cellIdentification.cI_CGI.lac)) & " / "
+		& int2str(oct2int(cell_id.cellIdentification.cI_CGI.ci));
+}
+
+/* Get an IMSI's info and verify that the g_pars.cell_id is reflected in the info.
+ * Verify both the "LAC / cell ID" in the VLR and the "LAC / cell ID" in the "Connection:" part, if any.
+ * If verify_vlr == false, then only verify the "Connection:" part, and fail if there is no "Connection:"; this is
+ * useful when a conn has been established, but the subscriber has not been authenticated, so the VLR does not yet
+ * reflect the new conn's cell ID.
+ */
+function f_verify_vty_lac_ci(boolean verify_vlr := true) runs on BSC_ConnHdlr {
+	if (not g_pars.ran_is_geran) {
+		 log("Skipping f_verify_vty_lac_ci(), disabled for Iu");
+		 setverdict(pass);
+		 return;
+	}
+	if (not g_pars.verify_cell_id) {
+		/* Skip this verification; either the TC expects no cell id to end up being accepted, or this was
+		 * disabled globally to test an older osmo-msc which doesn't store the cell id properly yet. */
+		 log("Skipping f_verify_vty_lac_ci()");
+		 setverdict(pass);
+		 return;
+	}
+
+	var charstring vty_cmd := "show subscriber imsi " & hex2str(g_pars.imsi) & " conn";
+	var charstring result := f_vty_transceive_ret(MSCVTY, vty_cmd);
+	var charstring expect_lac_ci := "LAC / cell ID: "
+		& int2str(oct2int(g_pars.cell_id.cellIdentification.cI_CGI.lac)) & " / "
+		& int2str(oct2int(g_pars.cell_id.cellIdentification.cI_CGI.ci));
+
+	var boolean vlr_matches := false;
+	var boolean connection_present := false;
+	var boolean connection_matches := false;
+
+	/* There are two occurences of LAC / cell ID: once for the VLR record, and once for the active connection. The
+	 * active connection part starts with 'Connection:'. If there is no active connection, that part is omitted.
+	 * So, first find out whether there is a 'Connection:' part. Then verify the LAC / cell ID above 'Connection:'
+	 * and below 'Connection:', separately.
+	 */
+	var integer connection_start := f_strstr(result, "Connection:");
+	connection_present := (connection_start >= 0);
+
+	var integer lac_ci_match := f_strstr(result, expect_lac_ci);
+	if (connection_present) {
+		if (lac_ci_match > connection_start) {
+			/* The first match is below 'Connection:', so the VLR part above it did not match. */
+			vlr_matches := false;
+			connection_matches := true;
+		} else if (lac_ci_match >= 0) {
+			/* The first match is above 'Connection:', so the VLR part matches. */
+			vlr_matches := true;
+
+			/* Now find a match below 'Connection:' */
+			lac_ci_match := f_strstr(result, expect_lac_ci, connection_start);
+			connection_matches := (lac_ci_match > 0);
+		}
+	} else {
+		/* There is no 'Connection:', so a match, if any, is from the VLR part. */
+		vlr_matches := (lac_ci_match >= 0);
+	}
+
+	if (verify_vlr) {
+		if (not vlr_matches) {
+			setverdict(fail, vty_cmd, " shows mismatching LAC / cell ID in the VLR part, expecting: ",
+				   expect_lac_ci, " -- got: ", result);
+			return;
+		} else {
+			log("f_verify_vty_lac_ci(): VLR record matches ", expect_lac_ci);
+			setverdict(pass);
+		}
+	}
+
+	if (connection_present) {
+		if (not connection_matches) {
+			setverdict(fail, vty_cmd, " shows mismatching LAC cell ID in the 'Connection' part, expecting: ",
+				   expect_lac_ci, " -- got: ", result);
+		} else {
+			log("f_verify_vty_lac_ci(): Active connection matches ", expect_lac_ci);
+			setverdict(pass);
+		}
+	}
+
+	if (not verify_vlr and not connection_present) {
+		setverdict(fail, "f_verify_vty_lac_ci(verify_vlr := false) called, which requires an active connection, but there is no 'Connection:' part to verify in ", result);
+	}
+}
+
 function f_perform_lu()
 runs on BSC_ConnHdlr {
 	var PDU_ML3_MS_NW l3_lu := f_build_lu_imsi(g_pars.imsi)
@@ -588,6 +683,10 @@ runs on BSC_ConnHdlr {
 	} else {
 		f_ranap_initial_ue(l3_lu);
 	}
+
+	/* at this point the conn has been established, but the subscriber has not been authenticated, so the VLR does
+	 * not yet reflect this conn's cell ID. */
+	f_verify_vty_lac_ci(verify_vlr := false);
 
 	f_mm_imei_early();
 	f_mm_common();
@@ -1574,7 +1673,7 @@ altstep as_clear_cmd_compl_disc(float t := 5.0) runs on BSC_ConnHdlr {
 		}
 }
 
-function f_expect_clear(float t := 5.0) runs on BSC_ConnHdlr {
+function f_expect_clear(float t := 5.0, boolean verify_vlr_cell_id := true) runs on BSC_ConnHdlr {
 	timer T := t;
 
 	T.start;
@@ -1585,6 +1684,11 @@ function f_expect_clear(float t := 5.0) runs on BSC_ConnHdlr {
 		setverdict(fail, "Timeout waiting for ClearCommand/Release");
 		mtc.stop;
 		}
+	}
+
+	if (verify_vlr_cell_id) {
+		/* Now the conn is gone, but the VLR reflects the cell ID */
+		f_verify_vty_lac_ci();
 	}
 }
 
