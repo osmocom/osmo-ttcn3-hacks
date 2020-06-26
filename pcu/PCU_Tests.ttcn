@@ -1333,6 +1333,110 @@ testcase TC_dl_flow_more_blocks() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify Decoding and segmentation of UL LLC PDUs into RLC data blocks, OS#4559.
+ * Check "GPRS from A-Z" slide "Example of LI-Field and E-Bit" page 186.
+ * Check "3GPP TS 44.060" Annex B. */
+testcase TC_ul_flow_multiple_llc_blocks() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring dataA := f_rnd_octstring(20);
+	var octetstring dataB := f_rnd_octstring(13);
+	var octetstring dataC := f_rnd_octstring(3);
+	var octetstring dataD := f_rnd_octstring(12);
+	var uint32_t sched_fn;
+	var GprsMS ms;
+	var template (value) RlcmacUlBlock ul_data;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Summary of what's transmitted:
+	 * 1- UL RlcDataBlock(dataA) [BSN=0, CV=3]
+	 * 2- UL RlcDataBlock(dataA finished, dataB starts) [BSN=1, CV=2]
+	 * 3- UL RlcDataBlock(dataB finished, dataC starts and finishes, dataD starts) [BSN=2, CV=1]
+	 * 4- UL RlcDataBlock(dataD finishes) [BSN=3, CV=0]
+	 * And on SGSN we receive 4 packets, one for each LlcBlock dataA..D.
+	 * We'll also receive some UL ACK/NACK we need to reply with CTRL ACK.
+	 */
+
+	/*  UL RlcDataBlock(dataA) [BSN=0, CV=3] */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(tfi := ms.ul_tbf.tfi,
+				    cv := 3,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := { t_RLCMAC_LLCBLOCK(substr(dataA, 0, 16)) },
+				    tlli := ms.tlli);
+	/* Indicate no llc header, meaning first LLC block doesn't finish in current
+	 * RLCMAC block being sent. */
+	ul_data.data.mac_hdr.e := true;
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data);
+
+	/* UL RlcDataBlock(dataA finished, dataB starts) [BSN=1, CV=2] */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(tfi := ms.ul_tbf.tfi,
+				    cv := 2,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := { t_RLCMAC_LLCBLOCK(substr(dataA, 16, 4),
+								  t_RLCMAC_LLCBLOCK_HDR(length_ind := 4, more := true, e := true)),
+						t_RLCMAC_LLCBLOCK(substr(dataB, 0, 11))
+					      },
+				    tlli := ms.tlli);
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data);
+
+	/* UL block dataA should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, dataA));
+
+	/* UL RlcDataBlock(dataB finished, dataC starts and finishes, dataD starts) [BSN=2, CV=1] */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(tfi := ms.ul_tbf.tfi,
+				    cv := 1,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := { t_RLCMAC_LLCBLOCK(substr(dataB, 11, 2),
+								 t_RLCMAC_LLCBLOCK_HDR(length_ind := 2, more := true, e := false)),
+						t_RLCMAC_LLCBLOCK(substr(dataC, 0, 3),
+								  t_RLCMAC_LLCBLOCK_HDR(length_ind := 3, more := true, e := true)),
+						t_RLCMAC_LLCBLOCK(substr(dataD, 0, 9))
+					      },
+				    tlli := ms.tlli);
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data);
+
+	/* UL block dataB and dataC should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, dataB));
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, dataC));
+
+	/* UL RlcDataBlock(dataD finishes) [BSN=3, CV=0] */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(tfi := ms.ul_tbf.tfi,
+				    cv := 0,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := { t_RLCMAC_LLCBLOCK(substr(dataD, 9, 3),
+								  t_RLCMAC_LLCBLOCK_HDR(length_ind := 3, more := false, e := true))
+					      },
+				    tlli := ms.tlli);
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data);
+
+	/* UL block dataB and dataD should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, dataD));
+
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 private function f_pkt_paging_match_imsi(in PacketPagingReq req, hexstring imsi)
 runs on RAW_PCU_Test_CT {
 	var MobileIdentityLV_Paging mi_lv := req.repeated_pageinfo.cs.mobile_identity;
@@ -1766,6 +1870,7 @@ control {
 	execute (TC_ul_intermediate_retrans() );
 	execute( TC_imm_ass_dl_block_retrans() );
 	execute( TC_dl_flow_more_blocks() );
+	execute (TC_ul_flow_multiple_llc_blocks() );
 	execute( TC_paging_cs_from_bts() );
 	execute( TC_paging_cs_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_cs_from_sgsn_sign() );
