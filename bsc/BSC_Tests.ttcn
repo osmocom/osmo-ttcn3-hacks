@@ -84,6 +84,36 @@ const CounterNameVals counternames_msc_mscpool := {
 	{ "mscpool:subscr:paged", 0 }
 };
 
+/* One System Information payload as received on RSL.
+ * Note that some System Information may be sent on RSL, but lacking actual SI data, to indicate that the BTS should not
+ * broadcast that SI type.
+ */
+type record SystemInformation {
+	RSL_IE_SysinfoType si_type,
+	RSL_MessageType from_rsl_msg_type,
+	octetstring data optional
+}
+/* Set of all System Information received during one RSL port's startup */
+type set of SystemInformation SystemInformationConfig;
+/* List of all the System Information received on all RSL ports */
+type record of SystemInformationConfig SystemInformationConfig_list;
+
+const SystemInformationConfig SystemInformationConfig_default := {
+	{ si_type := RSL_SYSTEM_INFO_1, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_2, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_2bis, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_2quater, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_2ter, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_3, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_4, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_13, from_rsl_msg_type := RSL_MT_BCCH_INFO, data := omit },
+
+	{ si_type := RSL_SYSTEM_INFO_5, from_rsl_msg_type := RSL_MT_SACCH_FILL, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_5bis, from_rsl_msg_type := RSL_MT_SACCH_FILL, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_5ter, from_rsl_msg_type := RSL_MT_SACCH_FILL, data := omit },
+	{ si_type := RSL_SYSTEM_INFO_6, from_rsl_msg_type := RSL_MT_SACCH_FILL, data := omit }
+};
+
 type component test_CT extends CTRL_Adapter_CT {
 	/* Array of per-BTS state */
 	var BTS_State bts[NUM_BTS];
@@ -117,6 +147,62 @@ type component test_CT extends CTRL_Adapter_CT {
 	timer T_guard := 30.0;
 
 	var CounterNameValsList g_ctr_msc;
+
+	/* System Information bytes as received during RSL startup, for each RSL[idx]. */
+	var SystemInformationConfig_list g_system_information := {};
+}
+
+/* Add a System Information (received on an RSL port) in g_system_information. */
+private function f_sysinfo_seen(integer rsl_idx, in SystemInformation si) runs on test_CT
+{
+	log("RSL ", rsl_idx, ": got System Information ", si);
+	var integer idx := 0;
+	if (lengthof(g_system_information) > rsl_idx) {
+		idx := lengthof(g_system_information[rsl_idx]);
+		for (var integer i := 0; i < lengthof(g_system_information[rsl_idx]); i := i + 1) {
+			if (g_system_information[rsl_idx][i].si_type == si.si_type) {
+				idx := i;
+				break;
+			}
+		}
+	}
+	g_system_information[rsl_idx][idx] := si;
+}
+
+/* Verify that all System Information types in expected_types are present in g_system_information[rsl_idx].
+ * (Ignore the SI data presence and content).
+ */
+private function f_sysinfo_verify_presence(integer rsl_idx, SystemInformationConfig expected_types := SystemInformationConfig_default)
+runs on test_CT
+{
+	if (lengthof(expected_types) > 0
+	    and (lengthof(g_system_information) < rsl_idx or lengthof(g_system_information[rsl_idx]) == 0))  {
+		setverdict(fail, "RSL ", rsl_idx, ": Expected to see ", lengthof(expected_types), " System Informations, but did not receive any");
+		return;
+	}
+
+	for (var integer i := 0; i < lengthof(expected_types); i := i + 1) {
+		var boolean found := false;
+		for (var integer j := 0; j < lengthof(g_system_information[rsl_idx]); j := j + 1) {
+			if (g_system_information[rsl_idx][j].si_type != expected_types[i].si_type) {
+				continue;
+			}
+			if (g_system_information[rsl_idx][j].from_rsl_msg_type != expected_types[i].from_rsl_msg_type) {
+				setverdict(fail, "RSL ", rsl_idx, ": Expected to see ", expected_types[i], " in ",
+						expected_types[i].from_rsl_msg_type, " but got it from ",
+						g_system_information[rsl_idx][j].from_rsl_msg_type);
+				return;
+			}
+			found := true;
+			break;
+		}
+		if (not found) {
+			setverdict(fail, "RSL ", rsl_idx, ": Expected to see ", expected_types[i], " during startup, but it was not sent");
+			return;
+		}
+	}
+	log("RSL ", rsl_idx, ": verified presence of ", lengthof(expected_types), " System Informations");
+	setverdict(pass);
 }
 
 modulepar {
@@ -425,6 +511,77 @@ private function f_logp(charstring log_msg) runs on MSC_ConnHdlr
 	f_vty_transceive(BSCVTY, "logp lglobal notice " & log_msg);
 }
 
+private function f_rsl_get_sysinfo(RSL_Message rsl)
+return SystemInformation
+{
+	var SystemInformation ret;
+	var RSL_IE_Body sysinfo_type_ie;
+
+	if (f_rsl_find_ie(rsl, RSL_IE_SYSINFO_TYPE, sysinfo_type_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_SYSINFO_TYPE");
+		mtc.stop;
+	}
+	ret.si_type := sysinfo_type_ie.sysinfo_type;
+	ret.from_rsl_msg_type := rsl.msg_type;
+
+	if (rsl.msg_type == RSL_MT_BCCH_INFO) {
+		var RSL_IE_Body bcch_ie;
+		if (f_rsl_find_ie(rsl, RSL_IE_FULL_BCCH_INFO, bcch_ie) == false) {
+			ret.data := omit;
+		} else {
+			ret.data := bcch_ie.other.payload;
+		}
+	} else if (rsl.msg_type == RSL_MT_SACCH_FILL) {
+		var RSL_IE_Body l3_ie;
+		if (f_rsl_find_ie(rsl, RSL_IE_L3_INFO, l3_ie) == false) {
+			ret.data := omit;
+		} else {
+			ret.data := l3_ie.l3_info.payload;
+		}
+	}
+	return ret;
+}
+
+altstep as_catch_RSL_sysinfo(integer rsl_idx) runs on test_CT {
+	var ASP_RSL_Unitdata rx_rsl_ud;
+
+	/* For handler_mode := false, receiving the RSL bootstrap messages directly on IPA_RSL */
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+
+	/* For handler_mode := true, receiving the RSL bootstrap messages via RSL_Emulation  */
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, f_rsl_get_sysinfo(rx_rsl_ud.rsl));
+		repeat;
+		}
+}
+
 /* global initialization function
  * \param nr_bts Number of BTSs we should start/bring up
  * \param handler_mode Start an RSL_Emulation_CT component (true) or not (false).
@@ -472,10 +629,16 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false, boolea
 	for (i := 0; i < nr_bts; i := i+1) {
 		/* wait until osmo-bts-omldummy has respawned */
 		f_wait_oml(i, "degraded", 5.0);
+
+		var default sysinfo := activate(as_catch_RSL_sysinfo(i));
+
 		/* start RSL connection */
 		f_ipa_rsl_start(bts[i].rsl, mp_bsc_ip, mp_bsc_rsl_port, i, handler_mode);
 		/* wait until BSC tells us "connected" */
 		f_wait_oml(i, "connected", 5.0);
+
+		deactivate(sysinfo);
+		f_sysinfo_verify_presence(i);
 	}
 
 }
