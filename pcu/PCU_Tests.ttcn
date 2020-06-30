@@ -876,6 +876,96 @@ testcase TC_countdown_procedure() runs on RAW_PCU_Test_CT  {
 	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, total_payload));
 }
 
+/* Verify PCU handles correctly CS1..4 with all possible LLC payload sizes fitting alone in one RLC block */
+testcase TC_ul_all_sizes() runs on RAW_PCU_Test_CT  {
+	var RlcmacDlBlock dl_block;
+	var uint32_t dl_fn, sched_fn;
+	var octetstring payload;
+	var template (value) RlcmacUlBlock ul_data;
+	var GprsMS ms;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resoultion) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(16); /* 16 bytes fills the llc block (because TLLI takes 4 bytes) */
+	/* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(tfi := ms.ul_tbf.tfi,
+				    cv := 15,
+				    bsn := ms.ul_tbf.bsn,
+				    blocks := { t_RLCMAC_LLCBLOCK(payload,
+								  t_RLCMAC_LLCBLOCK_HDR(length_ind := lengthof(payload), more := false, e := true))
+					      },
+				    tlli := ms.tlli);
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data);
+
+	/* ACK and check it was received fine */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	/* receive one message on BSSGP with all aggregated data in payload: */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, payload));
+
+	/* Test sending LLC PDUS of incrementing size */
+	var integer max_size := 49;
+	for (var integer i := 1; i <= max_size; i := i + 1) {
+		var integer cv;
+		/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
+		log("Sending DATA.ind with LLC payload size ", i);
+		if (i < max_size - g_bs_cv_max) {
+			cv := 15;
+		} else {
+			cv := max_size - i;
+		}
+
+		payload := f_rnd_octstring(i);
+		/* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+		ul_data := t_RLCMAC_UL_DATA(tfi := ms.ul_tbf.tfi,
+					    cv := cv,
+					    bsn := ms.ul_tbf.bsn,
+					    blocks := { t_RLCMAC_LLCBLOCK(payload,
+									  t_RLCMAC_LLCBLOCK_HDR(length_ind := lengthof(payload), more := false, e := true))
+						      });
+		f_ultbf_inc_bsn(ms.ul_tbf);
+		f_ms_tx_ul_block(ms, ul_data);
+
+		/* receive one message on BSSGP with all aggregated data in payload: */
+		BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.cell_id, payload));
+
+		/* we will receive UL ACK/NACK from time to time, handle it. */
+		f_rx_rlcmac_dl_block(dl_block, dl_fn);
+		if (match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+			continue;
+		}
+		if (not match(dl_block, tr_RLCMAC_UL_ACK_NACK_GPRS(ul_tfi := ?)) and
+		    not match(dl_block, tr_RLCMAC_UL_ACK_NACK_EGPRS(ul_tfi := ?))) {
+			setverdict(fail, "Failed to match Packet Uplink ACK / NACK:", dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		log("Rx Packet Uplink ACK / NACK");
+		sched_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+		/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
+	setverdict(pass);
+}
+
 /* Test scenario where MS wants to send some data on PDCH against SGSN and it is
  * answered, so TBFs for uplink and later for downlink are created.
  */
@@ -1862,6 +1952,7 @@ control {
 	execute( TC_t3169() );
 	execute( TC_t3193() );
 	execute( TC_countdown_procedure() );
+	execute( TC_ul_all_sizes() );
 	execute( TC_mo_ping_pong() );
 	execute( TC_mo_ping_pong_with_ul_racap() );
 	execute( TC_force_two_phase_access() );
