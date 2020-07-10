@@ -1498,13 +1498,15 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 			   boolean expect_rr_chan_rel := true,
 			   boolean expect_rll_rel_req := true,
 			   boolean handle_rll_rel := true,
-			   boolean is_csfb := false
+			   boolean is_csfb := false,
+			   template CellSelIndValue csfb_expect_cells := omit
 			   ) runs on test_CT {
 
 	var RslLinkId main_dcch := valueof(ts_RslLinkID_DCCH(0));
 	var boolean got_deact_sacch := false;
 	var boolean got_rr_chan_rel := false;
 	var boolean got_rll_rel_req := false;
+	var ASP_RSL_Unitdata ud;
 	log("f_expect_chan_rel() expecting: expect_deact_sacch=", expect_deact_sacch, " expect_rr_chan_rel=", expect_rr_chan_rel,
 	    " expect_rll_rel_req=", expect_rll_rel_req);
 	alt {
@@ -1512,8 +1514,27 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 		got_deact_sacch := true;
 		repeat;
 	}
-	[is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE_CSFB))) {
+	[is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE_CSFB))) -> value ud {
 		got_rr_chan_rel := true;
+
+		if (not istemplatekind(csfb_expect_cells, "omit")) {
+			var RSL_IE_Body l3_ie;
+			if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
+				setverdict(fail, "cannot find L3");
+				mtc.stop;
+			}
+			var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(l3_ie.l3_info.payload);
+			var CellSelIndValue cells := dec_CellSelIndValue(
+				l3.msgs.rrm.channelRelease.cellSelectionIndicator.cellSelectionIndicatorValue);
+
+			log("GOT RR CHANNEL RELEASE CSFB CELLS: ", cells);
+			if (match(cells, csfb_expect_cells)) {
+				setverdict(pass);
+			} else {
+				log("EXPECTED CSFB CELLS: ", csfb_expect_cells);
+				setverdict(fail, "Received CSFB cells list on RR Channel Release does not match expectations");
+			}
+		}
 		repeat;
 	}
 	[not is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) {
@@ -1792,7 +1813,8 @@ private function f_test_si2quater_earfcn_by_idx(integer earfcn_index) return uin
 	}
 }
 
-function f_test_si2quater(integer total_earfcns, template SystemInformationConfig expect_si) runs on test_CT {
+function f_test_si2quater(integer total_earfcns, template SystemInformationConfig expect_si,
+			  template CellSelIndValue expect_cells := omit) runs on test_CT {
 
 	f_init(0);
 
@@ -1803,6 +1825,30 @@ function f_test_si2quater(integer total_earfcns, template SystemInformationConfi
 	}
 
 	f_init_bts_and_check_sysinfo(0, expect_si := expect_si);
+
+	f_init(1);
+
+	if (not istemplatekind(expect_cells, "omit")) {
+		/* Also check that RR Channel Release contains these EARFCNs.
+		 * (copied code from TC_chan_rel_hard_clear_csfb) */
+		var BSSAP_N_DATA_ind rx_di;
+		var DchanTuple dt;
+
+		dt := f_est_dchan('23'O, 23, '00010203040506'O);
+
+		/* Instruct BSC to clear channel */
+		var BssmapCause cause := 0;
+		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommandCSFB(cause)));
+
+		/* expect Clear Complete from BSC on A */
+		BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete)) {
+			/* release the SCCP connection */
+			BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
+		}
+
+		f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, is_csfb := true,
+				  csfb_expect_cells := expect_cells);
+	}
 
 	for (var integer i := 1; i < total_earfcns; i := i + 1) {
 		f_bts_0_cfg(BSCVTY, {"si2quater neighbor-list del earfcn " & int2str(f_test_si2quater_earfcn_by_idx(i))});
@@ -1827,11 +1873,24 @@ private function f_tr_si2quater_earfcns(integer count) return template SI2quater
 	return si2quater;
 }
 
+private function f_tr_rr_chan_rel_earfcns(integer count) return template CellSelIndValue
+{
+	var template CellSelIndValue_EUTRAN_Descrs cells := {};
+
+	for (var integer i := 0; i < count; i := i + 1) {
+		var integer earfcn := f_test_si2quater_earfcn_by_idx(i);
+		cells[i] := tr_CellSelIndValue_EUTRAN_Descr(earfcn, meas_bw_presence := '0'B, meas_bw := omit);
+	}
+
+	return tr_CellSelIndValue_EUTRAN(cells);
+}
+
 private function f_tc_si2quater_n_earfcns(integer n) runs on test_CT
 {
 	var template SystemInformationConfig sic := SystemInformationConfig_default;
         sic.si2quater := f_tr_si2quater_earfcns(n);
-	f_test_si2quater(n, sic);
+	var template CellSelIndValue cells := f_tr_rr_chan_rel_earfcns(n);
+	f_test_si2quater(n, sic, cells);
 }
 
 testcase TC_si2quater_2_earfcns() runs on test_CT {
