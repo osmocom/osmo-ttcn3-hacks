@@ -1499,7 +1499,8 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 			   boolean expect_rll_rel_req := true,
 			   boolean handle_rll_rel := true,
 			   boolean is_csfb := false,
-			   template CellSelIndValue csfb_expect_cells := omit
+			   template CellSelIndValue csfb_expect_cells := omit,
+			   template RR_Cause expect_rr_cause := ?
 			   ) runs on test_CT {
 
 	var RslLinkId main_dcch := valueof(ts_RslLinkID_DCCH(0));
@@ -1507,6 +1508,9 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 	var boolean got_rr_chan_rel := false;
 	var boolean got_rll_rel_req := false;
 	var ASP_RSL_Unitdata ud;
+	var RSL_IE_Body l3_ie;
+	var PDU_ML3_NW_MS l3;
+	var RR_Cause got_cause;
 	log("f_expect_chan_rel() expecting: expect_deact_sacch=", expect_deact_sacch, " expect_rr_chan_rel=", expect_rr_chan_rel,
 	    " expect_rll_rel_req=", expect_rll_rel_req);
 	alt {
@@ -1517,13 +1521,13 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 	[is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE_CSFB))) -> value ud {
 		got_rr_chan_rel := true;
 
+		if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
+			setverdict(fail, "cannot find L3");
+			mtc.stop;
+		}
+		l3 := dec_PDU_ML3_NW_MS(l3_ie.l3_info.payload);
+
 		if (not istemplatekind(csfb_expect_cells, "omit")) {
-			var RSL_IE_Body l3_ie;
-			if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
-				setverdict(fail, "cannot find L3");
-				mtc.stop;
-			}
-			var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(l3_ie.l3_info.payload);
 			var CellSelIndValue cells := dec_CellSelIndValue(
 				l3.msgs.rrm.channelRelease.cellSelectionIndicator.cellSelectionIndicatorValue);
 
@@ -1535,10 +1539,38 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 				setverdict(fail, "Received CSFB cells list on RR Channel Release does not match expectations");
 			}
 		}
+
+		if (not istemplatekind(expect_rr_cause, "omit")) {
+			int2enum(oct2int(l3.msgs.rrm.channelRelease.rRCause.valuePart), got_cause);
+			log("GOT CAUSE CODE: ", l3.msgs.rrm.channelRelease.rRCause.valuePart, " = ", got_cause);
+			if (match(got_cause, expect_rr_cause)) {
+				setverdict(pass);
+			} else {
+				log("EXPECTED CAUSE CODE: ", expect_rr_cause);
+				setverdict(fail, "Received RR Channel Release Cause code does not match expectations");
+			}
+		}
 		repeat;
 	}
-	[not is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) {
+	[not is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) -> value ud {
 		got_rr_chan_rel := true;
+
+		if (not istemplatekind(expect_rr_cause, "omit")) {
+			if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
+				setverdict(fail, "cannot find L3");
+				mtc.stop;
+			}
+			l3 := dec_PDU_ML3_NW_MS(l3_ie.l3_info.payload);
+
+			int2enum(oct2int(l3.msgs.rrm.channelRelease.rRCause.valuePart), got_cause);
+			log("GOT CAUSE CODE: ", l3.msgs.rrm.channelRelease.rRCause.valuePart, " = ", got_cause);
+			if (match(got_cause, expect_rr_cause)) {
+				setverdict(pass);
+			} else {
+				log("EXPECTED CAUSE CODE: ", expect_rr_cause);
+				setverdict(fail, "Received RR Channel Release Cause code does not match expectations");
+			}
+		}
 		repeat;
 	}
 	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_REL_REQ(rsl_chan_nr, ?))) {
@@ -1686,6 +1718,34 @@ testcase TC_chan_rel_sccp_tiar_timeout() runs on test_CT {
 	dt := f_est_dchan('23'O, 23, '00010203040506'O);
 	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
 	setverdict(pass);
+}
+
+private function f_tc_chan_rel_rr_cause(myBSSMAP_Cause clear_cmd_cause, template RR_Cause expect_rr_cause)
+runs on test_CT
+{
+	var DchanTuple dt;
+
+	dt := f_est_dchan('23'O, 23, '00010203040506'O);
+	var BssmapCause cause := 0;
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(enum2int(clear_cmd_cause))));
+	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete)) {
+		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
+	}
+
+	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_rr_cause := expect_rr_cause);
+	setverdict(pass);
+}
+
+/* Test that Clear Command cause codes affect the RR Channel Release cause code */
+testcase TC_chan_rel_rr_cause() runs on test_CT {
+	f_init(1);
+
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_CALL_CONTROL, GSM48_RR_CAUSE_NORMAL);
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_HANDOVER_SUCCESSFUL, GSM48_RR_CAUSE_NORMAL);
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_PREEMPTION, GSM48_RR_CAUSE_PREMPTIVE_REL);
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_RADIO_INTERFACE_MESSAGE_FAILURE, GSM48_RR_CAUSE_PROT_ERROR_UNSPC);
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_RADIO_INTERFACE_FAILURE, GSM48_RR_CAUSE_ABNORMAL_UNSPEC);
+	f_tc_chan_rel_rr_cause(GSM0808_CAUSE_EQUIPMENT_FAILURE, GSM48_RR_CAUSE_ABNORMAL_UNSPEC);
 }
 
 /* Test behavior if RSL EST IND for non-active channel */
@@ -6231,6 +6291,7 @@ control {
 	execute( TC_chan_rel_hard_rlsd_ms_dead() );
 	execute( TC_chan_rel_a_reset() );
 	execute( TC_chan_rel_sccp_tiar_timeout() );
+	execute( TC_chan_rel_rr_cause() );
 
 	execute( TC_outbound_connect() );
 
