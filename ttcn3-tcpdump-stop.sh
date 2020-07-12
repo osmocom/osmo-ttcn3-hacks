@@ -48,3 +48,5 @@ done
 
 kill_rm_pidfile "$PIDFILE_PCAP"
 kill_rm_pidfile "$PIDFILE_NETCAT"
+
+gzip "$TTCN3_PCAP_PATH/$TESTCASE.pcap"
