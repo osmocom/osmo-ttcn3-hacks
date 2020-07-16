@@ -5961,6 +5961,142 @@ testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
 	f_ctrs_msc_expect(2, "mscpool:subscr:new");
 }
 
+/* Allow/Deny emergency calls globally via VTY */
+private function f_vty_allow_emerg_msc(boolean allow) runs on test_CT {
+	f_vty_enter_cfg_msc(BSCVTY, 0);
+	if (allow) {
+		f_vty_transceive(BSCVTY, "allow-emergency allow");
+	} else {
+		f_vty_transceive(BSCVTY, "allow-emergency deny");
+	}
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+}
+
+/* Allow/Deny emergency calls per BTS via VTY */
+private function f_vty_allow_emerg_bts(boolean allow, integer bts_nr) runs on test_CT {
+	f_vty_enter_cfg_bts(BSCVTY, bts_nr);
+	if (allow) {
+		f_vty_transceive(BSCVTY, "rach emergency call allowed 1");
+	} else {
+		f_vty_transceive(BSCVTY, "rach emergency call allowed 0");
+	}
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+}
+
+/* Begin assignmet procedure and send an EMERGENCY SETUP (RR) */
+private function f_assignment_emerg_setup() runs on MSC_ConnHdlr {
+	var PDU_ML3_MS_NW emerg_setup;
+	var octetstring emerg_setup_enc;
+	var RSL_Message emerg_setup_data_ind;
+
+	f_establish_fully(omit, omit);
+
+	emerg_setup := valueof(ts_ML3_MO_CC_EMERG_SETUP(1, valueof(ts_Bcap_voice)));
+	emerg_setup_enc := enc_PDU_ML3_MS_NW(emerg_setup);
+	emerg_setup_data_ind := valueof(ts_RSL_DATA_IND(g_chan_nr, valueof(ts_RslLinkID_DCCH(0)), emerg_setup_enc));
+
+	RSL.send(emerg_setup_data_ind);
+}
+
+/* Test if the EMERGENCY SETUP gets passed on to the MSC via A when EMERGENCY
+ * CALLS are permitted by the BSC config. */
+private function f_TC_assignment_emerg_setup_allow(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP emerg_setup_data_ind_bssap;
+	var PDU_ML3_MS_NW emerg_setup;
+	timer T := 3.0;
+
+	f_assignment_emerg_setup()
+
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_DTAP) -> value emerg_setup_data_ind_bssap {
+		emerg_setup := dec_PDU_ML3_MS_NW(emerg_setup_data_ind_bssap.pdu.dtap);
+		if (not isbound(emerg_setup.msgs.cc.emergencySetup)) {
+			setverdict(fail, "no emergency setup");
+		}
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "unexpected BSSAP message!");
+		}
+	[] T.timeout {
+		setverdict(fail, "timout waiting for EMERGENCY SETUP!");
+		}
+	}
+
+	setverdict(pass);
+}
+
+/* Test if the EMERGENCY SETUP gets blocked by the BSC if EMERGENCY CALLS are
+ * forbidden by the BSC config. */
+private function f_TC_assignment_emerg_setup_deny(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP emerg_setup_data_ind_bssap;
+	timer T := 3.0;
+
+	f_assignment_emerg_setup()
+
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {
+		setverdict(pass);
+		}
+	[] RSL.receive {
+		setverdict(fail, "unexpected RSL message!");
+		}
+	[] T.timeout {
+		setverdict(fail, "timout waiting for RR CHANNEL RELEASE!");
+		}
+	}
+}
+
+/* EMERGENCY CALL situation #1, allowed globally and by BTS */
+testcase TC_assignment_emerg_setup_allow() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_vty_allow_emerg_msc(true);
+	f_vty_allow_emerg_bts(true, 0);
+	vc_conn := f_start_handler(refers(f_TC_assignment_emerg_setup_allow), pars);
+	vc_conn.done;
+}
+
+/* EMERGENCY CALL situation #2, forbidden globally but allowed by BTS */
+testcase TC_assignment_emerg_setup_deny_msc() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_vty_allow_emerg_msc(false);
+	f_vty_allow_emerg_bts(true, 0);
+	vc_conn := f_start_handler(refers(f_TC_assignment_emerg_setup_deny), pars);
+	vc_conn.done;
+}
+
+/* EMERGENCY CALL situation #3, allowed globally but forbidden by BTS */
+testcase TC_assignment_emerg_setup_deny_bts() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	/* Note: This simulates a spec violation by the MS, correct MS
+	 * implementations would not try to establish an emergency call because
+	 * the system information tells in advance that emergency calls are
+	 * not forbidden */
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_vty_allow_emerg_msc(true);
+	f_vty_allow_emerg_bts(false, 0);
+	vc_conn := f_start_handler(refers(f_TC_assignment_emerg_setup_deny), pars);
+	vc_conn.done;
+}
+
 /* Dyn PDCH todo:
    * activate OSMO as TCH/F
    * activate OSMO as TCH/H
@@ -6176,6 +6312,10 @@ control {
 	execute( TC_early_conn_fail() );
 	execute( TC_late_conn_fail() );
 
+	/* Emergency call handling (deny / allow) */
+	execute( TC_assignment_emerg_setup_allow() );
+	execute( TC_assignment_emerg_setup_deny_msc() );
+	execute( TC_assignment_emerg_setup_deny_bts() );
 }
 
 }
