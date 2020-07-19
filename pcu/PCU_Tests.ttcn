@@ -2069,6 +2069,266 @@ testcase TC_egprs_pkt_chan_req_reject_exhaustion() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+private function f_TC_pcuif_fh_check_imm_ass(in PCUIF_info_ind info_ind,
+					     in GsmRrMessage rr_msg)
+{
+	var ImmediateAssignment ia := rr_msg.payload.imm_ass;
+	var PCUIF_InfoTrxTs ts := info_ind.trx.v10[0].ts[ia.pkt_chan_desc.tn];
+
+	var template PacketChannelDescription tr_pkt_chan_desc := {
+		channel_Type_spare := ?,
+		tn := ?,
+		tsc := ts.tsc,
+		presence := '1'B,
+		zero := omit,
+		one := {
+			maio := ts.maio,
+			hsn := ts.hsn
+		}
+	};
+
+	if (not match(ia.pkt_chan_desc, tr_pkt_chan_desc)) {
+		setverdict(fail, "Packet Channel Description does not match: ",
+			   ia.pkt_chan_desc, " vs ", tr_pkt_chan_desc);
+	}
+
+	var MobileAllocation tr_ma := { len := 0, ma := ''B };
+	var octetstring ma_oct := bit2oct(ts.ma);
+
+	/* Calculate length of the useful part of Mobile Allocation */
+	for (var integer i := 0; i < lengthof(ma_oct); i := i + 1) {
+		if (ma_oct[i] != '00'O) {
+			tr_ma.len := i + 1;
+		}
+	}
+
+	/* Strip zero bytes from the right side of MA */
+	tr_ma.ma := substr(ts.ma, 0, tr_ma.len * 8);
+
+	if (not match(ia.mobile_allocation, tr_ma)) {
+		setverdict(fail, "Mobile Allocation does not match: ",
+			   ia.mobile_allocation, " vs ", tr_ma);
+	}
+
+	setverdict(pass);
+}
+
+/* Make sure that Immediate (UL EGPRS TBF) Assignment contains hopping parameters */
+testcase TC_pcuif_fh_imm_ass_ul_egprs() runs on RAW_PCU_Test_CT {
+	var template PCUIF_info_ind info_ind := ts_PCUIF_INFO_default;
+	var GprsMS ms := valueof(t_GprsMS_def);
+
+	/* Enable frequency hopping of TRX0/TS7 */
+	info_ind.trx.v10[0].ts[7] := ts_PCUIF_InfoTrxTsH1(
+		tsc := f_rnd_int(7),
+		hsn := f_rnd_int(63),
+		maio := f_rnd_int(63),
+		ma := f_rnd_bitstring(32));
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* EGPRS Packet Channel Request (cause=Signalling) */
+	f_ms_use_ra(ms, bit2int('11001101010'B), ra_is_11bit := 1);
+
+	/* Establish an Uplink EGPRS TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	f_TC_pcuif_fh_check_imm_ass(valueof(info_ind), ms.ul_tbf.rr_imm_ass);
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Make sure that Immediate (UL TBF) Assignment contains hopping parameters */
+testcase TC_pcuif_fh_imm_ass_ul() runs on RAW_PCU_Test_CT {
+	var template PCUIF_info_ind info_ind := ts_PCUIF_INFO_default;
+	var GprsMS ms := valueof(t_GprsMS_def);
+
+	/* Enable frequency hopping of TRX0/TS7 */
+	info_ind.trx.v10[0].ts[7] := ts_PCUIF_InfoTrxTsH1(
+		tsc := f_rnd_int(7),
+		hsn := f_rnd_int(63),
+		maio := f_rnd_int(63),
+		ma := f_rnd_bitstring(32));
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	f_TC_pcuif_fh_check_imm_ass(valueof(info_ind), ms.ul_tbf.rr_imm_ass);
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Make sure that Immediate (DL TBF) Assignment contains hopping parameters */
+testcase TC_pcuif_fh_imm_ass_dl() runs on RAW_PCU_Test_CT {
+	var template PCUIF_info_ind info_ind := ts_PCUIF_INFO_default;
+	var GprsMS ms := valueof(t_GprsMS_def);
+
+	/* Enable frequency hopping of TRX0/TS7 */
+	info_ind.trx.v10[0].ts[7] := ts_PCUIF_InfoTrxTsH1(
+		tsc := f_rnd_int(7),
+		hsn := f_rnd_int(63),
+		maio := f_rnd_int(63),
+		ma := f_rnd_bitstring(16));
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, f_rnd_octstring(12)));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	f_TC_pcuif_fh_check_imm_ass(valueof(info_ind), ms.dl_tbf.rr_imm_ass);
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+private function f_TC_pcuif_fh_check_pkt_ass(in PCUIF_info_ind info_ind,
+					     in FrequencyParameters fp)
+{
+	/* FIXME: TRX0/TS7 is a hard-coded expectation, make it configurable */
+	var PCUIF_InfoTrxTs ts := info_ind.trx.v10[0].ts[7];
+	var integer ma_bit_len := 0;
+
+	/* Calculate length of the useful part of Mobile Allocation */
+	for (var integer i := 0; i < lengthof(ts.ma); i := i + 1) {
+		if (ts.ma[i] == '1'B) {
+			ma_bit_len := i + 1;
+		}
+	}
+
+	/* Table 12.8.1: Frequency Parameters information elements */
+	var template FrequencyParameters tr_fp := {
+		tsc := ts.tsc,
+		presence := '10'B, /* Direct encoding 1 */
+		arfcn := omit,
+		indirect := omit,
+		direct1 := {
+			maio := ts.maio,
+			/* Table 12.10a.1: GPRS Mobile Allocation information elements */
+			mobile_allocation := {
+				hsn := ts.hsn,
+				rfl_number_list_present := '0'B,
+				rfl_number_list := omit,
+				ma_present := '0'B, /* inverted logic */
+				ma_length := ma_bit_len,
+				ma_bitmap := substr(ts.ma, 0, ma_bit_len)
+			}
+		},
+		direct2 := omit
+	};
+
+	if (not match(fp, tr_fp)) {
+		setverdict(fail, "Frequency Parameters IE does not match: ",
+			   fp, " vs ", tr_fp);
+	}
+
+	setverdict(pass);
+}
+
+/* Make sure that Packet Uplink Assignment contains hopping parameters */
+testcase TC_pcuif_fh_pkt_ass_ul() runs on RAW_PCU_Test_CT {
+	var template PCUIF_info_ind info_ind := ts_PCUIF_INFO_default;
+	var GprsMS ms := valueof(t_GprsMS_def);
+	var uint32_t poll_fn;
+
+	/* Enable frequency hopping of TRX0/TS7 */
+	info_ind.trx.v10[0].ts[7] := ts_PCUIF_InfoTrxTsH1(
+		tsc := f_rnd_int(7),
+		hsn := f_rnd_int(63),
+		maio := f_rnd_int(63),
+		ma := f_rnd_bitstring(33));
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send Packet Resource Request, so the network will allocate an Uplink resource */
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, omit)));
+
+	/* Expect an RLC/MAC block with Packet Uplink Assignment on PACCH (see 11.2.29) */
+	var RlcmacDlBlock blk := f_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_UL_PACKET_ASS);
+	var PacketUlAssignment ua := blk.ctrl.payload.u.ul_assignment;
+
+	/* 3GPP TS 44.060, section 12.8 "Frequency Parameters" */
+	var template (omit) FrequencyParameters fp;
+	if (ua.is_egprs == '1'B) {
+		fp := ua.egprs.freq_par;
+	} else {
+		fp := ua.gprs.freq_par;
+	}
+
+	/* This is an optional IE, so it's worth to check its presence */
+	if (istemplatekind(fp, "omit")) {
+		setverdict(fail, "Frequency Parameters IE is not present");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	f_TC_pcuif_fh_check_pkt_ass(valueof(info_ind), valueof(fp));
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Make sure that Packet Downlink Assignment contains hopping parameters */
+testcase TC_pcuif_fh_pkt_ass_dl() runs on RAW_PCU_Test_CT {
+	var template PCUIF_info_ind info_ind := ts_PCUIF_INFO_default;
+	var octetstring data := f_rnd_octstring(10);
+	var GprsMS ms := valueof(t_GprsMS_def);
+	var RlcmacDlBlock dl_block;
+	var uint32_t poll_fn;
+
+	/* Enable frequency hopping of TRX0/TS7 */
+	info_ind.trx.v10[0].ts[7] := ts_PCUIF_InfoTrxTsH1(
+		tsc := f_rnd_int(7),
+		hsn := f_rnd_int(63),
+		maio := f_rnd_int(63),
+		ma := f_rnd_bitstring(33));
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign('FFFFFFFF'O, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send an Uplink block, so this TBF becomes "active" */
+	f_ms_tx_ul_data_block(ms, data, with_tlli := true);
+
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, poll_fn);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), poll_fn);
+
+	/* SGSN sends some DL data, PCU will assign Downlink resource on PACCH */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+
+	/* Expect an RLC/MAC block with Packet Downlink Assignment on PACCH (see 11.2.29) */
+	dl_block := f_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_DL_PACKET_ASS);
+	var PacketDlAssignment da := dl_block.ctrl.payload.u.dl_assignment;
+
+	/* This is an optional IE, so it's worth to check its presence */
+	if (not ispresent(da.freq_par)) {
+		setverdict(fail, "Frequency Parameters IE is not present");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	f_TC_pcuif_fh_check_pkt_ass(valueof(info_ind), da.freq_par);
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_ta_ptcch_idle() );
@@ -2109,6 +2369,17 @@ control {
 	execute( TC_egprs_pkt_chan_req_reject_exhaustion() );
 
 	execute( TC_mo_ping_pong_with_ul_racap_egprs_only() );
+
+	/* Frequency hopping specific test cases */
+	if (PCUIF_Types.mp_pcuif_version >= 10) {
+		/* Immediate Assignment on AGCH/PCH */
+		execute( TC_pcuif_fh_imm_ass_ul_egprs() );
+		execute( TC_pcuif_fh_imm_ass_ul() );
+		execute( TC_pcuif_fh_imm_ass_dl() );
+		/* Packet Uplink/Downlink Assignment on PACCH */
+		execute( TC_pcuif_fh_pkt_ass_ul() );
+		execute( TC_pcuif_fh_pkt_ass_dl() );
+	}
 }
 
 
