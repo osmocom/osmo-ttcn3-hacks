@@ -1865,12 +1865,37 @@ private function f_acc09_count_allowed(AccessControlClass acc) return uint8_t
 	return count;
 }
 
+private function f_recv_next_si1(integer rsl_idx := 0) runs on test_CT return SystemInformationType1
+{
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	var SystemInformationType1 last_si1;
+
+	timer T := 30.0;
+	T.start;
+	alt {
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD((tr_RSL_NO_BCCH_INFO,
+						   tr_RSL_BCCH_INFO,
+						   tr_RSL_NO_SACCH_FILL,
+						   tr_RSL_SACCH_FILL))
+				   ) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		if (g_system_information[rsl_idx].si1 == omit) {
+			repeat;
+		}
+		last_si1 := g_system_information[rsl_idx].si1;
+		g_system_information[rsl_idx].si1 := omit;
+		T.stop;
+		}
+	[] T.timeout { setverdict(fail, "Timeout receiving next SI1"); }
+	}
+	return last_si1;
+}
+
 /* verify ACC rotate feature */
 testcase TC_si_acc_rotate() runs on test_CT {
 	var template SystemInformationConfig sic := SystemInformationConfig_default;
-	var SystemInformationConfig last_si;
+	var SystemInformationType1 last_si1;
 	var AccessControlClass acc;
-	var ASP_RSL_Unitdata rx_rsl_ud;
 	var uint8_t count;
 	var integer times_allowed[10] := { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
@@ -1883,22 +1908,9 @@ testcase TC_si_acc_rotate() runs on test_CT {
 	/* Init and get first sysinfo */
 	f_init_bts_and_check_sysinfo(0, expect_si := ?);
 
-	var integer i := 0;
-	while (i < 20) {
-		IPA_RSL[0].receive(tr_ASP_RSL_UD((tr_RSL_NO_BCCH_INFO,
-						     tr_RSL_BCCH_INFO,
-						     tr_RSL_NO_SACCH_FILL,
-						     tr_RSL_SACCH_FILL))
-				  ) -> value rx_rsl_ud;
-
-		f_sysinfo_seen(0, rx_rsl_ud.rsl);
-		last_si := g_system_information[0];
-		if (last_si.si1 == omit) {
-			continue;
-		}
-
-		g_system_information[0].si1 := omit;
-		acc := last_si.si1.rach_control.acc;
+	for (var integer i:= 0; i < 20; i := i + 1) {
+		last_si1 := f_recv_next_si1(0);
+		acc := last_si1.rach_control.acc;
 		count := f_acc09_count_allowed(acc);
 		log("RSL: GOT SI1 ACC len=", count, ": ", acc);
 
@@ -1913,8 +1925,6 @@ testcase TC_si_acc_rotate() runs on test_CT {
 				times_allowed[j] := times_allowed[j] + 1;
 			}
 		}
-
-		i := i + 1;
 	}
 
 	for (var integer j := 0; j < 10; j := j + 1) {
@@ -1928,6 +1938,66 @@ testcase TC_si_acc_rotate() runs on test_CT {
 
 	f_bts_0_cfg(BSCVTY, {"access-control-class-rotate 10",
 			     "rach access-control-class 5 allowed"});
+}
+
+/* verify ACC startup ramp+rotate feature */
+testcase TC_si_acc_ramp_rotate() runs on test_CT {
+	var template SystemInformationConfig sic := SystemInformationConfig_default;
+	var SystemInformationType1 last_si1;
+	var AccessControlClass acc;
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	var uint8_t count;
+	var uint8_t prev_count;
+	var integer times_allowed[10] := { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+	f_init(0, guard_timeout := 80.0);
+
+	f_bts_0_cfg(BSCVTY, {"rach access-control-class 4 barred",
+			     "access-control-class-rotate 0",
+			     "access-control-class-rotate-quantum 1",
+			     "access-control-class-ramping",
+			     "access-control-class-ramping-step-interval 5",
+			     "access-control-class-ramping-step-size 5"});
+
+	/* Init and get first sysinfo */
+	f_init_bts_and_check_sysinfo(0, expect_si := ?);
+	last_si1 := g_system_information[0].si1;
+	acc := last_si1.rach_control.acc;
+	count := f_acc09_count_allowed(acc);
+	/* Adm subset size was set to 0 above, so wait until all ACC are barred */
+	while (count > 0) {
+		last_si1 := f_recv_next_si1(0);
+		acc := last_si1.rach_control.acc;
+		count := f_acc09_count_allowed(acc);
+		log("RSL: wait len()=0: GOT SI1 ACC len=", count, ": ", acc);
+	}
+
+	/* Increase adm subset size, we should see ramping start up */
+	f_bts_0_cfg(BSCVTY, {"access-control-class-rotate 10"});
+	prev_count := 0;
+	while (true) {
+		last_si1 := f_recv_next_si1(0);
+		acc := last_si1.rach_control.acc;
+		count := f_acc09_count_allowed(acc);
+		log("RSL: GOT SI1 ACC len=", count, ": ", acc);
+
+		if (prev_count > count) {
+			setverdict(fail, "ACC allowed count dropped while expecting grow: ", prev_count, " -> ", count);
+			break;
+		}
+
+		if (count == 9) {
+			break; /* Maximum reached (10 - 1 perm barred), done here */
+		}
+
+		prev_count := count;
+	}
+
+	setverdict(pass);
+
+	f_bts_0_cfg(BSCVTY, {"access-control-class-rotate 10",
+			     "rach access-control-class 4 allowed",
+			     "no access-control-class-ramping"});
 }
 
 testcase TC_ctrl_msc_connection_status() runs on test_CT {
@@ -5905,6 +5975,7 @@ control {
 	execute( TC_si2quater_48_earfcns() );
 	execute( TC_si2quater_49_earfcns() );
 	execute( TC_si_acc_rotate() );
+	execute (TC_si_acc_ramp_rotate() );
 
 	/* RSL DCHAN Channel ACtivation / Deactivation */
 	execute( TC_chan_act_noreply() );
