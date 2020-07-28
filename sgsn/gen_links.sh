@@ -84,7 +84,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Templates.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
-FILES+="NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
+FILES+="NS_Emulation.ttcn PCUIF_Types.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
