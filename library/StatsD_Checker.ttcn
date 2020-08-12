@@ -1,0 +1,272 @@
+module StatsD_Checker {
+
+/* Verifies that  StatsD metrics in a test match the expected values
+ * Uses StatsD_CodecPort to receive the statsd messages from the DUT
+ * and a separate VTY connection to reset and trigger the stats.
+ *
+ * When using this you should configure your stats reporter to disable
+ * interval-based reports and always send all metrics:
+ * > stats interval 0
+ * > stats reporter statsd
+ * >  remote-ip a.b.c.d
+ * >  remote-port 8125
+ * >  level subscriber
+ * >  flush-period 1
+ * >  mtu 1024
+ * >  enable
+ *
+ * (C) 2020 by sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Author: Daniel Willmann <dwillmann@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+
+import from Osmocom_Types all;
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+modulepar {
+	/* Whether to test stats values */
+	boolean mp_enable_stats := false;
+}
+
+type record StatsDExpect {
+	MetricName	name,
+	MetricType	mtype,
+	MetricValue	min,
+	MetricValue	max
+};
+
+type set of StatsDExpect StatsDExpects;
+
+type record StatsDExpectPriv {
+	StatsDExpect expect,
+	integer seen
+}
+
+type set of StatsDExpectPriv StatsDExpectPrivs;
+
+type enumerated StatsDResultType {
+	e_Matched,
+	e_Mismatched,
+	e_NotFound
+}
+
+type record StatsDExpectResult {
+	StatsDResultType kind,
+	integer idx
+}
+
+type component StatsD_Checker_CT {
+	port TELNETasp_PT STATSVTY;
+	port STATSD_PROC_PT STATSD_PROC;
+	port STATSD_CODEC_PT STATS;
+	timer T_statsd := 5.0;
+}
+
+type component StatsD_ConnHdlr {
+	port STATSD_PROC_PT STATSD_PROC;
+}
+
+signature STATSD_reset();
+signature STATSD_expect(in StatsDExpects expects) return boolean;
+
+type port STATSD_PROC_PT procedure {
+	inout STATSD_reset, STATSD_expect;
+} with {extension "internal"};
+
+/* Expect templates and functions */
+
+
+/* StatsD checker component */
+function main(charstring statsd_host, integer statsd_port) runs on StatsD_Checker_CT {
+	var StatsD_ConnHdlr vc_conn;
+	var StatsDExpects expects;
+
+	while (not mp_enable_stats) {
+		log("StatsD checker disabled by modulepar");
+		f_sleep(3600.0);
+	}
+
+	map(self:STATS, system:STATS);
+	StatsD_CodecPort_CtrlFunct.f_IPL4_listen(STATS, statsd_host, statsd_port, { udp := {} }, {});
+
+	/* Connect to VTY and reset stats */
+	map(self:STATSVTY, system:STATSVTY);
+	f_vty_set_prompts(STATSVTY);
+	f_vty_transceive(STATSVTY, "enable");
+
+	/* Reset the stats system at start */
+	f_vty_transceive(STATSVTY, "stats reset");
+
+	while (true) {
+		alt {
+		[] STATSD_PROC.getcall(STATSD_reset:{}) -> sender vc_conn {
+			f_vty_transceive(STATSVTY, "stats reset");
+			STATSD_PROC.reply(STATSD_reset:{}) to vc_conn;
+			}
+		[] STATSD_PROC.getcall(STATSD_expect:{?}) -> param(expects) sender vc_conn {
+			var boolean success := f_statsd_checker_expect(expects);
+			STATSD_PROC.reply(STATSD_expect:{expects} value success) to vc_conn;
+			}
+		}
+	}
+}
+
+
+/* Return false if the expectation doesn't match the metric, otherwise return true */
+private function f_compare_expect(StatsDMetric metric, StatsDExpect expect) return boolean {
+	if ((metric.name == expect.name) and (metric.mtype == expect.mtype)
+		and (metric.val >= expect.min) and (metric.val <= expect.max)) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+private function f_statsd_checker_metric_expects(StatsDExpectPrivs exp_seen, StatsDMetric metric)
+return StatsDExpectResult {
+	var StatsDExpectResult result := {
+		kind := e_NotFound,
+		idx := -1
+	};
+
+	for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
+		var StatsDExpectPriv exp := exp_seen[i];
+		if (exp.expect.name != metric.name) {
+			continue;
+		}
+		if (not f_compare_expect(metric, exp.expect)) {
+			log("EXP mismatch: ", metric, exp.expect);
+			result := {
+				kind := e_Mismatched,
+				idx := i
+			};
+			break;
+		} else {
+			log("EXP match: ", metric, exp.expect);
+			result := {
+				kind := e_Matched,
+				idx := i
+			};
+			break;
+		}
+	}
+	return result;
+}
+
+template StatsDExpectPriv t_statsd_expect_priv(template StatsDExpect expect) := {
+	expect := expect,
+	seen := 0
+}
+
+private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_Checker_CT return boolean {
+	var default t;
+	var StatsDMessage msg;
+	var StatsDExpectResult res;
+	var StatsDExpectPrivs exp_seen := {};
+
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		exp_seen := exp_seen & {valueof(t_statsd_expect_priv(expects[i]))};
+	}
+
+	/* Dismiss any messages we might have skipped from the last report */
+	STATS.clear;
+
+	f_vty_transceive(STATSVTY, "stats report");
+
+	var boolean seen_all := false;
+	T_statsd.start;
+	while (not seen_all) {
+		var StatsD_RecvFrom rf;
+		alt {
+		[] STATS.receive(tr_StatsD_RecvFrom(?, ?)) -> value rf {
+			msg := rf.msg;
+			}
+		[] T_statsd.timeout {
+			for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
+				/* We're still missing some expects, keep looking */
+				if (exp_seen[i].seen == 0) {
+					log("Timeout waiting for ", exp_seen[i].expect.name, " (min: ", exp_seen[i].expect.min,
+						", max: ", exp_seen[i].expect.max, ")");
+				}
+			}
+			setverdict(fail, "Timeout waiting for metrics");
+			return false;
+		}
+		}
+
+		for (var integer i := 0; i < lengthof(msg); i := i + 1) {
+			var StatsDMetric metric := msg[i];
+
+			res := f_statsd_checker_metric_expects(exp_seen, metric);
+			if (res.kind == e_NotFound) {
+				continue;
+			}
+
+			if (res.kind == e_Mismatched) {
+				log("Metric: ", metric);
+				log("Expect: ", exp_seen[res.idx].expect);
+				setverdict(fail, "Metric failed expectation ", metric, " vs ", exp_seen[res.idx].expect);
+				return false;
+			} else if (res.kind == e_Matched) {
+				exp_seen[res.idx].seen := exp_seen[res.idx].seen + 1;
+			}
+		}
+
+		/* Check if all expected metrics were received */
+		seen_all := true;
+		for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
+			/* We're still missing some expects, keep looking */
+			if (exp_seen[i].seen == 0) {
+				seen_all := false;
+				break;
+			}
+		}
+	}
+
+	T_statsd.stop;
+	return seen_all;
+}
+
+function f_init_statsd(charstring id, inout StatsD_Checker_CT vc_STATSD, charstring dst_addr, integer dst_port) {
+	id := id & "-STATS";
+
+	vc_STATSD := StatsD_Checker_CT.create(id);
+	vc_STATSD.start(StatsD_Checker.main(dst_addr, dst_port));
+}
+
+
+/* StatsD connhdlr */
+function f_statsd_reset() runs on StatsD_ConnHdlr {
+	if (not mp_enable_stats) {
+		return;
+	}
+
+	STATSD_PROC.call(STATSD_reset:{}) {
+		[] STATSD_PROC.getreply(STATSD_reset:{}) {}
+	}
+}
+
+function f_statsd_expect(StatsDExpects expects) runs on StatsD_ConnHdlr return boolean {
+	var boolean res;
+
+	if (not mp_enable_stats) {
+		return true;
+	}
+
+	STATSD_PROC.call(STATSD_expect:{expects}) {
+		[] STATSD_PROC.getreply(STATSD_expect:{expects}) -> value res;
+	}
+	return res;
+}
+
+}
