@@ -8,6 +8,7 @@
     * MGW side: MGCP (emulates MGW side)
     * VTY
     * CTRL
+    * StatsD
 
 {% dot bsc_tests.svg
 digraph G {
@@ -22,6 +23,7 @@ digraph G {
   ATS -> BSC [label="A-bis RSL"];
   ATS -> BSC [label="CTRL"];
   ATS -> BSC [label="VTY"];
+  BSC -> ATS [label="StatsD"];
   ATS -> STP [label="A BSSAP\nSCCP/M3UA"];
   BSC -> STP [label="A BSSAP\nSCCP/M3UA"];
 }
@@ -39,6 +41,7 @@ digraph G {
   ATS -> BSC [label="A-bis RSL"];
   ATS -> BSC [label="CTRL"];
   ATS -> BSC [label="VTY"];
+  BSC -> ATS [label="StatsD"];
   ATS -> BSC [label="A BSSAP\nSCCP/IPA"];
 }
 %}
