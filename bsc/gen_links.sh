@@ -70,7 +70,9 @@ DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp L3_Templates.ttcn BSSMAP_Templates.ttcn RAN_Emulation.ttcnpp RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn GSM_RR_Types.ttcn RSL_Types.ttcn RSL_Emulation.ttcn MGCP_Emulation.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc BSSAP_CodecPort.ttcn RAN_Adapter.ttcnpp Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_EncDec.cc IuUP_Emulation.ttcn SCCP_Templates.ttcn IPA_Testing.ttcn GSM_SystemInformation.ttcn GSM_RestOctets.ttcn "
 FILES+="CBSP_Types.ttcn CBSP_Templates.ttcn "
 FILES+="CBSP_CodecPort.ttcn CBSP_CodecPort_CtrlFunct.ttcn CBSP_CodecPort_CtrlFunctdef.cc CBSP_Adapter.ttcn "
-FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcn"
+FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcn "
+FILES+="BSSAP_LE_CodecPort.ttcn BSSAP_LE_Emulation.ttcn BSSAP_LE_Types.ttcn BSSAP_LE_Adapter.ttcn BSSLAP_Types.ttcn BSSMAP_LE_Templates.ttcn "
+
 gen_links $DIR $FILES
 
 ignore_pp_results
