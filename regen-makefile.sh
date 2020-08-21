@@ -45,13 +45,13 @@ ttcn3_makefilegen -g -p -l -U 5 -f $*
 TITAN_VERSION=$(ttcn3_makefilegen -v 2>&1 |grep "Product number" |cut --delimiter="/" -f 2-| sed -e "s/[A-Z ]//g")
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
-sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan /' Makefile
+sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan -lsctp /' Makefile
 #sed -i -e 's/TTCN3_LIB = ttcn3-parallel/TTCN3_LIB = ttcn3/' Makefile
 
 # The -DMAKEDEPEND_RUN is a workaround for Debian packaging issue,
 # see https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=879816 for details
 if [ $(($TITAN_VERSION >= 65)) = 1 ]; then
-	sed -i -e 's/CPPFLAGS = -D$(PLATFORM)/CPPFLAGS = -D$(PLATFORM) -DMAKEDEPEND_RUN -DUSE_SCTP/' Makefile
+	sed -i -e 's/CPPFLAGS = -D$(PLATFORM)/CPPFLAGS = -D$(PLATFORM) -DMAKEDEPEND_RUN -DUSE_SCTP -DLKSCTP_MULTIHOMING_ENABLED/' Makefile
 else
 	sed -i -e 's/CPPFLAGS = -D$(PLATFORM) -I$(TTCN3_DIR)\/include/CPPFLAGS = -D$(PLATFORM) -DMAKEDEPEND_RUN -DUSE_SCTP -I$(TTCN3_DIR)\/include -I\/usr\/include\/titan/' Makefile
 fi
