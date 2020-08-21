@@ -1,0 +1,704 @@
+module BSSAP_LE_Emulation {
+
+/* BSSAP_LE Emulation, runs on top of BSSAP_LE_CodecPort.  It multiplexes/demultiplexes
+ * the individual connections, so there can be separate TTCN-3 components handling
+ * each of the connections.
+ *
+ * The BSSAP_LE_Emulation.main() function processes SCCP primitives from the SCCP
+ * stack via the BSSAP_CodecPort, and dispatches them to the per-connection components.
+ *
+ * Outbound BSSAP/SCCP connections are initiated by sending a BSSAP_LE_Conn_Req primitive
+ * to the component running the BSSAP_LE_Emulation.main() function.
+ *
+ * For each new inbound connections, the BssapLeOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that inbound
+ * connection is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound connection, it can
+ * do so by registering an "expect" with the expected Layer 3 (DTAP) payload.  This is e.g. useful
+ * if you are simulating BTS + MSC, and first trigger a connection from BTS/RSL side in a
+ * component which then subsequently should also handle the MSC emulation.
+ *
+ * Inbound Unit Data messages (such as are dispatched to the BssapLeOps.unitdata_cb() callback,
+ * which is registered with an argument to the main() function below.
+ *
+ * (C) 2017-2020 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from SCCP_Emulation all;
+import from SCCPasp_Types all;
+import from IPA_Emulation all;
+import from MobileL3_Types all;
+import from Misc_Helpers all;
+
+import from BSSAP_LE_Types all;
+import from BSSAP_LE_CodecPort all;
+import from BSSMAP_LE_Templates all;
+import from BSSMAP_Templates all;
+import from RAN_Emulation all;
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component BSSAP_LE_ConnHdlr {
+	/* port towards MSC Emulator core / SCCP connection dispatchar */
+	port BSSAP_LE_Conn_PT BSSAP_LE;
+	/* procedure based port to register for incoming connections */
+	port BSSAP_LE_PROC_PT BSSAP_LE_PROC;
+}
+
+/* Auxiliary primitive that can happen on the port between per-connection client and this dispatcher */
+type enumerated BSSAP_LE_Conn_Prim {
+	/* SCCP tell us that connection was released */
+	CONN_PRIM_DISC_IND,
+	/* we tell SCCP to release connection */
+	CONN_PRIM_DISC_REQ,
+	/* Connection confirmed indication */
+	CONN_PRIM_CONF_IND
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port BSSAP_LE_Conn_PT message {
+	inout
+		PDU_BSSAP_LE,
+		BSSAP_LE_N_UNITDATA_req,
+		/* Client requests us to create SCCP Connection */
+		BSSAP_LE_Conn_Req,
+		/* direct DTAP messages from/to clients */
+		PDU_DTAP_MO, PDU_DTAP_MT,
+		PDU_DTAP_PS_MO, PDU_DTAP_PS_MT,
+		/* misc indications / requests between SCCP and client */
+		BSSAP_LE_Conn_Prim;
+} with { extension "internal" };
+
+type uint2_t N_Sd_Array[4];
+
+/* represents a single BSSAP connection over SCCP */
+type record ConnectionData {
+	/* reference to the instance of the per-connection component */
+	BSSAP_LE_ConnHdlr	comp_ref,
+	integer			sccp_conn_id,
+	/* array of N(SD) values for MO DTAP messages, indexed by discriminator */
+	N_Sd_Array		n_sd
+}
+
+type record ImsiMapping {
+	BSSAP_LE_ConnHdlr	comp_ref,
+	hexstring		imsi optional,
+	OCT4			tmsi
+}
+
+type component BSSAP_LE_Emulation_CT {
+	/* SCCP ports on the bottom side, using ASP primitives */
+	port BSSAP_LE_CODEC_PT BSSAP_LE;
+	/* BSSAP port to the per-connection clients */
+	port BSSAP_LE_Conn_PT CLIENT;
+
+	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
+	var ConnectionData ConnectionTable[16];
+
+	/* pending expected incoming connections */
+	var ExpectData ExpectTable[8];
+
+	/* tables for mapping inbound unitdata (like paging) */
+	var ImsiMapping ImsiTable[16];
+
+	/* procedure based port to register for incoming connections */
+	port BSSAP_LE_PROC_PT PROC;
+
+	var charstring g_ran_id;
+	var integer g_next_e1_ts := 1;
+	var BssapLeOps g_ran_ops;
+};
+
+private function f_conn_id_known(integer sccp_conn_id)
+runs on BSSAP_LE_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id){
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(BSSAP_LE_ConnHdlr client)
+runs on BSSAP_LE_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* resolve component reference by connection ID */
+private function f_comp_by_conn_id(integer sccp_conn_id)
+runs on BSSAP_LE_Emulation_CT return BSSAP_LE_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id) {
+			return ConnectionTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "BSSAP-LE Connection table not found by SCCP Connection ID ", sccp_conn_id);
+	mtc.stop;
+}
+
+/* resolve connection ID by component reference */
+private function f_conn_id_by_comp(BSSAP_LE_ConnHdlr client)
+runs on BSSAP_LE_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return ConnectionTable[i].sccp_conn_id;
+		}
+	}
+	setverdict(fail, "BSSAP-LE Connection table not found by component ", client);
+	mtc.stop;
+}
+
+/* resolve ConnectionTable index component reference */
+private function f_idx_by_comp(BSSAP_LE_ConnHdlr client)
+runs on BSSAP_LE_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return i;
+		}
+	}
+	setverdict(fail, "BSSAP-LE Connection table not found by component ", client);
+	mtc.stop;
+}
+
+private function f_gen_conn_id()
+runs on BSSAP_LE_Emulation_CT return integer {
+	var integer conn_id;
+
+	do {
+		conn_id := float2int(rnd()*SCCP_Emulation.tsp_max_ConnectionId);
+	} while (f_conn_id_known(conn_id) == true);
+
+	return conn_id;
+}
+
+private function f_conn_table_init()
+runs on BSSAP_LE_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		ConnectionTable[i].comp_ref := null;
+		ConnectionTable[i].sccp_conn_id := -1;
+		ConnectionTable[i].n_sd := { 0, 0, 0, 0 };
+	}
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		ImsiTable[i].comp_ref := null;
+		ImsiTable[i].imsi := omit;
+		ImsiTable[i].tmsi := 'FFFFFFFF'O;
+	}
+}
+
+private function f_conn_table_add(BSSAP_LE_ConnHdlr comp_ref, integer sccp_conn_id)
+runs on BSSAP_LE_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == -1) {
+			ConnectionTable[i].comp_ref := comp_ref;
+			ConnectionTable[i].sccp_conn_id := sccp_conn_id;
+			ConnectionTable[i].n_sd := { 0, 0, 0, 0 };
+			log("Added conn table entry ", i, comp_ref, sccp_conn_id);
+			return;
+		}
+	}
+	testcase.stop("BSSAP-LE Connection table full!");
+}
+
+private function f_conn_table_del(integer sccp_conn_id)
+runs on BSSAP_LE_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].sccp_conn_id == sccp_conn_id) {
+			log("Deleted conn table entry ", i,
+			    ConnectionTable[i].comp_ref, sccp_conn_id);
+			ConnectionTable[i].sccp_conn_id := -1;
+			ConnectionTable[i].comp_ref := null;
+			return
+		}
+	}
+	setverdict(fail, "BSSAP-LE Connection table attempt to delete non-existant ", sccp_conn_id);
+	mtc.stop;
+}
+
+private function f_imsi_table_find(hexstring imsi, template OCT4 tmsi)
+runs on BSSAP_LE_Emulation_CT return BSSAP_LE_ConnHdlr {
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (ImsiTable[i].imsi == imsi or
+		    isvalue(tmsi) and match(ImsiTable[i].tmsi, tmsi)) {
+			return ImsiTable[i].comp_ref;
+		}
+	}
+	return null;
+}
+
+type record BSSAP_LE_Conn_Req {
+	SCCP_PAR_Address	addr_peer,
+	SCCP_PAR_Address	addr_own,
+	PDU_BSSAP_LE		bssap
+}
+template BSSAP_LE_Conn_Req ts_BSSAP_LE_Conn_Req(SCCP_PAR_Address peer, SCCP_PAR_Address own, PDU_BSSAP_LE bssap) := {
+	addr_peer := peer,
+	addr_own := own,
+	bssap := bssap
+};
+
+/* handle (optional) userData portion of various primitives and dispatch it to the client */
+private function f_handle_userData(BSSAP_LE_ConnHdlr client, PDU_BSSAP_LE bssap)
+runs on BSSAP_LE_Emulation_CT {
+	/* decode + send decoded BSSAP to client */
+
+	if (ischosen(bssap.pdu.dtap) and g_ran_ops.decode_dtap) {
+		if (g_ran_ops.role_ms) {
+			/* we are the MS, so any message to us must be MT */
+			var PDU_DTAP_MT mt := {
+				dlci := bssap.dlci,
+				dtap := dec_PDU_ML3_NW_MS(bssap.pdu.dtap)
+			};
+			CLIENT.send(mt) to client;
+		} else {
+			/* we are the Network, so any message to us must be MO */
+			var PDU_DTAP_MO mo := {
+				dlci := bssap.dlci,
+				dtap := dec_PDU_ML3_MS_NW(bssap.pdu.dtap)
+			};
+			CLIENT.send(mo) to client;
+		}
+	} else {
+		CLIENT.send(bssap) to client;
+	}
+}
+
+/* call-back type, to be provided by specific implementation; called when new SCCP connection
+ * arrives */
+type function BssmapLeCreateCallback(BSSAP_LE_N_CONNECT_ind conn_ind, charstring id)
+runs on BSSAP_LE_Emulation_CT return BSSAP_LE_ConnHdlr;
+
+type function BssmapLeUnitdataCallback(PDU_BSSAP_LE bssap)
+runs on BSSAP_LE_Emulation_CT return template PDU_BSSAP_LE;
+
+/* handle common Unitdata such as Paging */
+private function CommonBssmapUnitdataCallback(PDU_BSSAP_LE bssap)
+runs on BSSAP_LE_Emulation_CT return template PDU_BSSAP_LE {
+	if (match(bssap, tr_BSSMAP_LE_Paging)) {
+		var BSSAP_LE_ConnHdlr client := null;
+		client := f_imsi_table_find(bssap.pdu.bssmap.paging.iMSI.digits,
+					   bssap.pdu.bssmap.paging.tMSI.tmsiOctets);
+		if (client != null) {
+			log("CommonBssmapUnitdataCallback: IMSI/TMSI found in table, dispatching to ",
+				client);
+			CLIENT.send(bssap) to client;
+			return omit;
+		}
+		log("CommonBssmapUnitdataCallback: IMSI/TMSI not found in table");
+	} else {
+		log("CommonBssmapUnitdataCallback: Not a paging message");
+	}
+	/* ELSE: handle in user callback */
+	return g_ran_ops.unitdata_cb.apply(bssap);
+}
+
+private function f_bssap_le_reset(SCCP_PAR_Address peer, SCCP_PAR_Address own) runs on BSSAP_LE_Emulation_CT {
+	timer T := 5.0;
+
+	BSSAP_LE.send(ts_BSSAP_LE_UNITDATA_req(peer, own, ts_BSSMAP_LE_Reset(GSM0808_CAUSE_RADIO_INTERFACE_MESSAGE_FAILURE)));
+	T.start;
+	alt {
+	[] BSSAP_LE.receive(tr_BSSAP_LE_UNITDATA_ind(own, peer, tr_BSSMAP_LE_ResetAck)) {
+		log("Received RESET-ACK in response to RESET, we're ready to go!");
+		}
+	[] as_reset_ack();
+	[] BSSAP_LE.receive { repeat };
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RESET-ACK after sending RESET");
+		mtc.stop;
+		}
+	}
+}
+
+private function f_bssap_l3_is_rr(PDU_BSSAP_LE bssap) return boolean {
+	var template octetstring l3 := f_bssap_le_extract_l3(bssap);
+	return f_L3_is_rr(l3);
+}
+
+
+
+type record BssapLeOps {
+	BssmapLeCreateCallback create_cb optional,
+	BssmapLeUnitdataCallback unitdata_cb optional,
+	boolean decode_dtap,
+	boolean role_ms,
+	/* needed for performing BSSMAP RESET */
+	SCCP_PAR_Address sccp_addr_local optional,
+	SCCP_PAR_Address sccp_addr_peer optional
+}
+
+private altstep as_reset_ack() runs on BSSAP_LE_Emulation_CT {
+	var BSSAP_LE_N_UNITDATA_ind ud_ind;
+	[] BSSAP_LE.receive(tr_BSSAP_LE_UNITDATA_ind(?, ?, tr_BSSMAP_LE_Reset)) -> value ud_ind {
+		log("Respoding to inbound RESET with RESET-ACK");
+		BSSAP_LE.send(ts_BSSAP_LE_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
+			   ts_BSSMAP_LE_ResetAck));
+		repeat;
+	}
+}
+
+
+private altstep as_main_bssap_le() runs on BSSAP_LE_Emulation_CT {
+		var BSSAP_LE_N_UNITDATA_ind ud_ind;
+		var BSSAP_LE_N_CONNECT_ind conn_ind;
+		var BSSAP_LE_N_CONNECT_cfm conn_cfm;
+		var BSSAP_LE_N_DATA_ind data_ind;
+		var BSSAP_LE_N_DISCONNECT_ind disc_ind;
+		var BSSAP_LE_Conn_Req creq;
+		var PDU_BSSAP_LE bssap;
+		var BSSAP_LE_N_UNITDATA_req bssap_ud;
+		var BSSAP_LE_ConnHdlr vc_conn;
+		var integer targetPointCode;
+		var N_Sd_Array last_n_sd;
+
+		/* SCCP -> Client: UNIT-DATA (connectionless SCCP) from a BSC */
+		[] BSSAP_LE.receive(BSSAP_LE_N_UNITDATA_ind:?) -> value ud_ind {
+			/* Connectionless Procedures like RESET */
+			var template PDU_BSSAP_LE resp;
+			resp := CommonBssmapUnitdataCallback(ud_ind.userData);
+			if (isvalue(resp)) {
+				BSSAP_LE.send(ts_BSSAP_LE_UNITDATA_req(ud_ind.callingAddress,
+								ud_ind.calledAddress, resp));
+			}
+			}
+		/* SCCP -> Client: new connection from BSC */
+		[] BSSAP_LE.receive(BSSAP_LE_N_CONNECT_ind:?) -> value conn_ind {
+			vc_conn := g_ran_ops.create_cb.apply(conn_ind, g_ran_id);
+			/* store mapping between client components and SCCP connectionId */
+			f_conn_table_add(vc_conn, conn_ind.connectionId);
+			/* handle user payload */
+			f_handle_userData(vc_conn, conn_ind.userData);
+			/* confirm connection establishment */
+			BSSAP_LE.send(ts_BSSAP_LE_CONNECT_res(conn_ind.connectionId, omit));
+			}
+		/* SCCP -> Client: connection-oriented data in existing connection */
+		[] BSSAP_LE.receive(BSSAP_LE_N_DATA_ind:?) -> value data_ind {
+			vc_conn := f_comp_by_conn_id(data_ind.connectionId);
+			if (ispresent(data_ind.userData)) {
+				f_handle_userData(vc_conn, data_ind.userData);
+			}
+			}
+		/* SCCP -> Client: disconnect of an existing connection */
+		[] BSSAP_LE.receive(BSSAP_LE_N_DISCONNECT_ind:?) -> value disc_ind {
+			vc_conn := f_comp_by_conn_id(disc_ind.connectionId);
+			if (ispresent(disc_ind.userData)) {
+				f_handle_userData(vc_conn, disc_ind.userData);
+			}
+			/* notify client about termination */
+			var BSSAP_LE_Conn_Prim prim := CONN_PRIM_DISC_IND;
+			CLIENT.send(prim) to vc_conn;
+			f_conn_table_del(disc_ind.connectionId);
+			/* TOOD: return confirm to other side? */
+			}
+		/* SCCP -> Client: connection confirm for outbound connection */
+		[] BSSAP_LE.receive(BSSAP_LE_N_CONNECT_cfm:?) -> value conn_cfm {
+			vc_conn := f_comp_by_conn_id(conn_cfm.connectionId);
+			var BSSAP_LE_Conn_Prim prim := CONN_PRIM_CONF_IND;
+			CLIENT.send(prim) to vc_conn;
+			/* handle user payload */
+			if (ispresent(conn_cfm.userData)) {
+				f_handle_userData(vc_conn, conn_cfm.userData);
+			}
+			}
+		[] CLIENT.receive(PDU_BSSAP_LE:?) -> value bssap sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			/* send it to dispatcher */
+			BSSAP_LE.send(ts_BSSAP_LE_DATA_req(conn_id, bssap));
+			}
+
+		[] CLIENT.receive(BSSAP_LE_N_UNITDATA_req:?) -> value bssap_ud sender vc_conn {
+			BSSAP_LE.send(bssap_ud);
+			}
+
+		/* Disconnect request client -> SCCP */
+		[] CLIENT.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_REQ) -> sender vc_conn {
+			var integer conn_id := f_conn_id_by_comp(vc_conn);
+			BSSAP_LE.send(ts_BSSAP_LE_DISC_req(conn_id, 0));
+			f_conn_table_del(conn_id);
+			}
+
+		/* BSSAP from client -> SCCP */
+		[] CLIENT.receive(BSSAP_LE_Conn_Req:?) -> value creq sender vc_conn {
+			var integer conn_id;
+			/* send to dispatcher */
+
+			if (f_comp_known(vc_conn) == false) {
+				/* unknown client, create new connection */
+				conn_id := f_gen_conn_id();
+
+				/* store mapping between client components and SCCP connectionId */
+				f_conn_table_add(vc_conn, conn_id);
+
+				BSSAP_LE.send(ts_BSSAP_LE_CONNECT_req(creq.addr_peer, creq.addr_own, conn_id,
+								creq.bssap));
+			} else {
+				/* known client, send via existing connection */
+				conn_id := f_conn_id_by_comp(vc_conn);
+				BSSAP_LE.send(ts_BSSAP_LE_DATA_req(conn_id, creq.bssap));
+			}
+
+			/* InitialL3 contains RR (PAG RESP) or MM (CM SRV REQ), we must increment
+			 * counter only on MM/CC/SS, but not on RR */
+			if (g_ran_ops.role_ms and not f_bssap_l3_is_rr(creq.bssap)) {
+				/* we have just sent the first MM message, increment the counter */
+				var integer idx := f_idx_by_comp(vc_conn);
+				ConnectionTable[idx].n_sd[0] := 1;
+				log("patch: N(SD) for ConnIdx ", idx, " set to 1");
+			}
+			}
+
+		[] PROC.getcall(BSSAP_LE_last_n_sd:{?,-}) -> param(vc_conn) {
+			var integer idx := f_idx_by_comp(vc_conn);
+			last_n_sd := ConnectionTable[idx].n_sd;
+			PROC.reply(BSSAP_LE_last_n_sd:{vc_conn, last_n_sd}) to vc_conn;
+			}
+
+		[] PROC.getcall(BSSAP_LE_continue_after_n_sd:{?,?}) -> param(last_n_sd, vc_conn) {
+			var integer idx := f_idx_by_comp(vc_conn);
+			ConnectionTable[idx].n_sd := last_n_sd;
+			PROC.reply(BSSAP_LE_continue_after_n_sd:{last_n_sd, vc_conn}) to vc_conn;
+			}
+}
+
+
+/* send a raw (encoded) L3 message over given SCCP connection */
+private function f_xmit_raw_l3(integer sccp_conn_id, OCT1 dlci, octetstring l3_enc) runs on BSSAP_LE_Emulation_CT
+{
+	var PDU_BSSAP_LE bssap;
+	bssap := valueof(ts_BSSAP_LE_DTAP(l3_enc, dlci));
+	BSSAP_LE.send(ts_BSSAP_LE_DATA_req(sccp_conn_id, bssap));
+}
+
+/* patch N(SD) into enc_l3, according to 24.007 11.2.3.2 */
+private function f_ML3_patch_seq(inout ConnectionData cd, in PDU_ML3_MS_NW dtap, inout octetstring enc_l3) {
+	var integer n_sd_idx := f_ML3_n_sd_idx(dtap);
+	if (n_sd_idx < 0) {
+		return;
+	}
+	var uint2_t seq_nr := f_next_n_sd(cd.n_sd, n_sd_idx);
+	f_ML3_patch_seq_nr(seq_nr, enc_l3);
+}
+
+function main(BssapLeOps ops, charstring id) runs on BSSAP_LE_Emulation_CT {
+
+	g_ran_id := id;
+	g_ran_ops := ops;
+	f_conn_table_init();
+	f_expect_table_init();
+
+	if (isvalue(ops.sccp_addr_peer) and isvalue(ops.sccp_addr_local)) {
+		f_sleep(1.0);	/* HACK to wait for M3UA/ASP to be ACTIVE */
+		f_bssap_le_reset(ops.sccp_addr_peer, ops.sccp_addr_local);
+	}
+
+	while (true) {
+		var BSSAP_LE_ConnHdlr vc_conn;
+		var PDU_DTAP_MO dtap_mo;
+		var PDU_DTAP_MT dtap_mt;
+		var BSSAP_LE_ConnHdlr vc_hdlr;
+		var octetstring l3_info;
+		var hexstring imsi;
+		var OCT4 tmsi;
+		var integer targetPointCode;
+
+		alt {
+		[] as_main_bssap_le();
+
+		[g_ran_ops.role_ms] CLIENT.receive(PDU_DTAP_MO:?) -> value dtap_mo sender vc_conn {
+			var integer idx := f_idx_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_ML3_MS_NW(dtap_mo.dtap);
+			/* patch correct L3 send sequence number N(SD) into l3_enc */
+			if (dtap_mo.skip_seq_patching == false) {
+				f_ML3_patch_seq(ConnectionTable[idx], dtap_mo.dtap, l3_enc);
+			}
+			f_xmit_raw_l3(ConnectionTable[idx].sccp_conn_id, dtap_mo.dlci, l3_enc);
+			}
+
+		[not g_ran_ops.role_ms] CLIENT.receive(PDU_DTAP_MT:?) -> value dtap_mt sender vc_conn {
+			var integer idx := f_idx_by_comp(vc_conn);
+			/* convert from decoded DTAP to encoded DTAP */
+			var octetstring l3_enc := enc_PDU_ML3_NW_MS(dtap_mt.dtap);
+			f_xmit_raw_l3(ConnectionTable[idx].sccp_conn_id, dtap_mt.dlci, l3_enc);
+			}
+
+		[] PROC.getcall(BSSAP_LE_register:{?,?}) -> param(l3_info, vc_hdlr) {
+			f_create_expect(l3_info, vc_hdlr);
+			PROC.reply(BSSAP_LE_register:{l3_info, vc_hdlr}) to vc_hdlr;
+			}
+
+		[] PROC.getcall(BSSAP_LE_register_handoverRequest:{?,?}) -> param(targetPointCode, vc_hdlr) {
+			f_create_expect(omit, vc_hdlr, targetPointCode);
+			PROC.reply(BSSAP_LE_register_handoverRequest:{targetPointCode, vc_hdlr}) to vc_hdlr;
+			}
+
+		[] PROC.getcall(BSSAP_LE_register_imsi:{?,?,?}) -> param(imsi, tmsi, vc_hdlr) {
+			f_create_imsi(imsi, tmsi, vc_hdlr);
+			PROC.reply(BSSAP_LE_register_imsi:{imsi, tmsi, vc_hdlr}) to vc_hdlr;
+			}
+
+
+		}
+	}
+}
+
+/***********************************************************************
+ * "Expect" Handling (mapping for expected incoming SCCP connections)
+ ***********************************************************************/
+
+/* data about an expected future incoming connection */
+type record ExpectData {
+	/* L3 payload based on which we can match it */
+	octetstring l3_payload optional,
+	integer handoverRequestPointCode optional,
+	/* component reference for this connection */
+	BSSAP_LE_ConnHdlr vc_conn
+}
+
+/* procedure based port to register for incoming connections */
+signature BSSAP_LE_register(in octetstring l3, in BSSAP_LE_ConnHdlr hdlr);
+signature BSSAP_LE_register_handoverRequest(in integer targetPointCode, in BSSAP_LE_ConnHdlr hdlr);
+
+/* procedure based port to register for incoming IMSI/TMSI */
+signature BSSAP_LE_register_imsi(in hexstring imsi, in OCT4 tmsi, in BSSAP_LE_ConnHdlr hdlr);
+
+/* If DTAP happens across other channels (e.g. GSUP), provide manual advancing of the n_sd sequence number */
+signature BSSAP_LE_last_n_sd(in BSSAP_LE_ConnHdlr hdlr, out N_Sd_Array last_n_sd);
+
+/* Update conn's n_sd sequence nr after the connection was taken over from elsewhere */
+signature BSSAP_LE_continue_after_n_sd(N_Sd_Array last_n_sd, in BSSAP_LE_ConnHdlr hdlr);
+
+type port BSSAP_LE_PROC_PT procedure {
+	inout BSSAP_LE_register, BSSAP_LE_register_imsi, BSSAP_LE_register_handoverRequest, BSSAP_LE_last_n_sd, BSSAP_LE_continue_after_n_sd;
+} with { extension "internal" };
+
+/* CreateCallback that can be used as create_cb and will use the expectation table */
+function ExpectedCreateCallback(BSSAP_LE_N_CONNECT_ind conn_ind, charstring id)
+runs on BSSAP_LE_Emulation_CT return BSSAP_LE_ConnHdlr {
+	var BSSAP_LE_ConnHdlr ret := null;
+	var octetstring l3_info;
+	var integer i;
+
+	if (ischosen(conn_ind.userData.pdu.bssmap.perf_loc_req)) {
+		var BSSMAP_LE_PerfLocReq plr := conn_ind.userData.pdu.bssmap.perf_loc_req;
+		if (not ispresent(plr.imsi)) {
+			log("ExpectedCreateCallback: Cannot handle PerformLocReq without IMSI!");
+			mtc.stop;
+		}
+		var hexstring imsi := plr.imsi.imsi.oddEvenInd_identity.imsi.digits;
+		/* Find the component by the IMSI [usually] contained in this message */
+		ret := f_imsi_table_find(imsi, omit);
+		if (ret != null) {
+			log("ExpectedCreateCallback: Found ConnHdlr ", ret, " for IMSI ", imsi);
+			return ret;
+		}
+	} else if (ischosen(conn_ind.userData.pdu.bssmap.completeLayer3Information)) {
+		l3_info := conn_ind.userData.pdu.bssmap.completeLayer3Information.layer3Information.layer3info;
+		log("ExpectedCreateCallback completeLayer3Information");
+	} else {
+		setverdict(fail, "N-CONNECT.ind with L3 != COMPLETE L3");
+		mtc.stop;
+	}
+
+	for (i := 0; i < sizeof(ExpectTable); i:= i+1) {
+		if (not ispresent(ExpectTable[i].l3_payload)) {
+			continue;
+		}
+		if (l3_info == ExpectTable[i].l3_payload) {
+			ret := ExpectTable[i].vc_conn;
+			/* release this entry to be used again */
+			ExpectTable[i].l3_payload := omit;
+			ExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", l3_info, " handled at ", ret);
+			/* return the component reference */
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for incoming connection ", conn_ind);
+	mtc.stop;
+}
+
+
+private function f_create_expect(template octetstring l3, BSSAP_LE_ConnHdlr hdlr,
+				 template integer handoverRequestPointCode := omit)
+runs on BSSAP_LE_Emulation_CT {
+	var integer i;
+	log("f_create_expect(l3 := ", l3, ", handoverRequest := ", handoverRequestPointCode);
+	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
+		if (not ispresent(ExpectTable[i].l3_payload)
+		    and not ispresent(ExpectTable[i].handoverRequestPointCode)) {
+			if (ispresent(l3)) {
+				ExpectTable[i].l3_payload := valueof(l3);
+			}
+			if (ispresent(handoverRequestPointCode)) {
+				ExpectTable[i].handoverRequestPointCode := valueof(handoverRequestPointCode);
+			}
+			ExpectTable[i].vc_conn := hdlr;
+			if (ispresent(handoverRequestPointCode)) {
+				log("Created Expect[", i, "] for handoverRequest to be handled at ", hdlr);
+			} else {
+				log("Created Expect[", i, "] for ", l3, " to be handled at ", hdlr);
+			}
+			return;
+		}
+	}
+	testcase.stop("No space left in ExpectTable");
+}
+
+private function f_create_imsi(hexstring imsi, OCT4 tmsi, BSSAP_LE_ConnHdlr hdlr)
+runs on BSSAP_LE_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		if (not ispresent(ImsiTable[i].imsi)) {
+			ImsiTable[i].imsi := imsi;
+			ImsiTable[i].tmsi := tmsi;
+			ImsiTable[i].comp_ref := hdlr;
+			log("Created IMSI[", i, "] for ", imsi, tmsi, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	testcase.stop("No space left in ImsiTable");
+}
+
+
+private function f_expect_table_init()
+runs on BSSAP_LE_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
+		ExpectTable[i].l3_payload := omit;
+		ExpectTable[i].handoverRequestPointCode := omit;
+	}
+}
+
+/* helper function for clients to register their IMSI/TMSI */
+function f_bssap_le_register_imsi(hexstring imsi, template (omit) OCT4 tmsi_or_omit)
+runs on BSSAP_LE_ConnHdlr {
+	var OCT4 tmsi;
+
+	/* Resolve omit to a special reserved value */
+	if (istemplatekind(tmsi_or_omit, "omit")) {
+		tmsi := 'FFFFFFFF'O;
+	} else {
+		tmsi := valueof(tmsi_or_omit);
+	}
+
+	BSSAP_LE_PROC.call(BSSAP_LE_register_imsi:{imsi, tmsi, self}) {
+		[] BSSAP_LE_PROC.getreply(BSSAP_LE_register_imsi:{?,?,?}) {};
+	}
+}
+
+
+}

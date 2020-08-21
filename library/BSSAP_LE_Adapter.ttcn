@@ -1,0 +1,130 @@
+module BSSAP_LE_Adapter {
+
+/* This module implements a 'dumb' BSSAP_LE adapter.  It creates the M3UA and SCCP components and stacks a
+ * BSSAP_LE codec port on top.  As a result, it provides the ability to transceive SCCP-User-SAP primitives
+ * with deoded BSSAP_LE payload.  Use this if you want to have full control about what you transmit or
+ * receive, without any automatisms in place.  Allows you to refuse connections or other abnormal behavior. */
+
+/* (C) 2017-2020 Harald Welte <laforge@gnumonks.org>
+ * contributions by sysmocom - s.f.m.c. GmbH
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from M3UA_Emulation all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
+
+import from IPA_Emulation all;
+
+import from SCCP_Types all;
+import from SCCPasp_Types all;
+import from SCCP_Emulation all;
+import from SCCP_Templates all;
+
+import from SCTPasp_Types all;
+import from SCTPasp_PortType all;
+
+import from BSSMAP_LE_Templates all;
+import from BSSAP_LE_Emulation all;
+
+type record BSSAP_LE_Adapter {
+	/* component references */
+	M3UA_CT vc_M3UA,		/* only in 3GPP AoIP */
+	SCCP_CT vc_SCCP,
+
+	MSC_SCCP_MTP3_parameters sccp_pars,
+	SCCP_PAR_Address sccp_addr_own,
+	SCCP_PAR_Address sccp_addr_peer,
+
+	/* handler mode */
+	BSSAP_LE_Emulation_CT vc_BSSAP_LE
+}
+
+type record BSSAP_LE_Configuration {
+	charstring sccp_service_type,
+	SCTP_Association_Address sctp_addr,
+	integer own_pc,
+	integer own_ssn,
+	integer peer_pc,
+	integer peer_ssn,
+	octetstring sio,
+	integer rctx
+};
+type record of BSSAP_LE_Configuration BSSAP_LE_Configurations;
+
+private function init_pars(inout BSSAP_LE_Adapter ba, in BSSAP_LE_Configuration cfg) {
+	ba.sccp_pars := {
+		sio := {
+			ni := substr(oct2bit(cfg.sio),0,2),
+			prio := substr(oct2bit(cfg.sio),2,2),
+			si := substr(oct2bit(cfg.sio),4,4)
+		},
+		opc := cfg.own_pc,
+		dpc := cfg.peer_pc,
+		sls := 0,
+		sccp_serviceType := cfg.sccp_service_type,
+		ssn := cfg.own_ssn
+	};
+	ba.sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(cfg.own_pc, cfg.own_ssn, cfg.sio, cfg.sccp_service_type));
+	ba.sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(cfg.peer_pc, cfg.peer_ssn, cfg.sio, cfg.sccp_service_type));
+}
+
+
+function f_bssap_le_adapter_init(inout BSSAP_LE_Adapter ba, in BSSAP_LE_Configuration cfg, charstring id,
+				  template BssapLeOps ops) {
+	init_pars(ba, cfg);
+	ops.sccp_addr_local := ba.sccp_addr_own;
+	ops.sccp_addr_peer := ba.sccp_addr_peer;
+
+	/* create components */
+	ba.vc_SCCP := SCCP_CT.create(id & "-SCCP");
+	if (isvalue(ops)) {
+		ba.vc_BSSAP_LE := BSSAP_LE_Emulation_CT.create(id & "-BSSAP_LE");
+	} else {
+		ba.vc_BSSAP_LE := null;
+	}
+	ba.vc_M3UA := M3UA_CT.create(id & "-M3UA");
+	map(ba.vc_M3UA:SCTP_PORT, system:sctp);
+	/* connect MTP3 service provider (M3UA) to lower side of SCCP */
+	connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+	ba.vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr, cfg.rctx));
+
+	if (isvalue(ops)) {
+		timer T := 5.0;
+		T.start;
+		//T.timeout;
+		/* connect BSSNAP component to upper side of SCCP */
+		log("Connecting BSSAP_LE_Emulation to SCCP_SP_PORT");
+		connect(ba.vc_BSSAP_LE:BSSAP_LE, ba.vc_SCCP:SCCP_SP_PORT);
+		log("Starting BSSAP_LE_Emulation");
+		ba.vc_BSSAP_LE.start(BSSAP_LE_Emulation.main(valueof(ops), ""));
+	}
+
+
+}
+
+function f_bssap_le_adapter_start(inout BSSAP_LE_Adapter ba) {
+	ba.vc_SCCP.start(SCCPStart(ba.sccp_pars));
+}
+
+function f_bssap_le_adapter_cleanup(inout BSSAP_LE_Adapter ba) {
+	if (ba.vc_BSSAP_LE != null) {
+		disconnect(ba.vc_BSSAP_LE:BSSAP_LE, ba.vc_SCCP:SCCP_SP_PORT);
+		ba.vc_BSSAP_LE.stop;
+	}
+	unmap(ba.vc_M3UA:SCTP_PORT, system:sctp);
+	disconnect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+	ba.vc_M3UA.stop;
+	ba.vc_SCCP.stop;
+}
+
+
+}
