@@ -6797,6 +6797,277 @@ testcase TC_emerg_premption() runs on test_CT {
 	chan_nr := rx_rsl.ies[0].body.chan_nr;
 	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 33));
 	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+}
+
+/* Hopping parameters per a timeslot */
+private type record length(0..64) of integer ArfcnList;
+private type record FHParamsTs {
+	boolean		enabled,
+	uint6_t		hsn,
+	uint6_t		maio,
+	ArfcnList	ma
+};
+
+/* Hopping parameters per a transceiver */
+private type record length(8) of FHParamsTs FHParamsTrx;
+
+/* Randomly generate the hopping parameters for the given timeslot numbers */
+private function f_TC_fh_params_gen(template integer tr_tn := (1, 3, 5))
+runs on test_CT return FHParamsTrx {
+	var FHParamsTrx fhp;
+
+	for (var integer tn := 0; tn < 8; tn := tn + 1) {
+		if (not match(tn, tr_tn)) {
+			fhp[tn].enabled := false;
+			fhp[tn].ma := { };
+			continue;
+		}
+
+		/* Random HSN / MAIO values: 0..63 */
+		fhp[tn].hsn := f_rnd_int(64);
+		fhp[tn].maio := f_rnd_int(64);
+		fhp[tn].ma := { };
+
+		/* Random Mobile Allocation (hopping channels) */
+		var integer ma_len := 2 + f_rnd_int(9); /* 2..10 channels */
+		var integer step := 3 + f_rnd_int(4); /* 3..6 stepping */
+		for (var integer i := 1; i <= ma_len; i := i + 1) {
+			fhp[tn].ma := fhp[tn].ma & { i * step };
+		}
+
+		fhp[tn].enabled := true;
+	}
+
+	log("f_TC_fh_params_gen(): ", fhp);
+	return fhp;
+}
+
+/* Make sure that the given Channel Description IE matches the hopping configuration */
+private function f_TC_fh_params_match_chan_desc(in FHParamsTrx fhp, in ChannelDescription cd)
+{
+	var template (present) ChannelDescription tr_cd;
+	var template (present) MaioHsn tr_maio_hsn;
+	var uint3_t tn := cd.chan_nr.tn;
+
+	if (fhp[tn].enabled) {
+		tr_maio_hsn := tr_HsnMaio(fhp[tn].hsn, fhp[tn].maio);
+		tr_cd := tr_ChanDescH1(cd.chan_nr, tr_maio_hsn);
+	} else {
+		tr_cd := tr_ChanDescH0(cd.chan_nr);
+	}
+
+	if (not match(cd, tr_cd)) {
+		setverdict(fail, "Channel Description IE does not match: ",
+			   cd, " vs expected ", tr_cd);
+	}
+}
+
+/* Make sure that the given Mobile Allocation IE matches the hopping configuration */
+private function f_TC_fh_params_match_ma(in FHParamsTrx fhp, uint3_t tn,
+					 in MobileAllocationLV ma)
+{
+	var template MobileAllocationLV tr_ma := f_TC_fh_params_gen_tr_ma(fhp, tn, ma);
+
+	if (not match(ma, tr_ma)) {
+		setverdict(fail, "Mobile Allocation IE does not match (tn := ",
+			   tn, "): ", ma, " vs expected: ", tr_ma);
+	} else {
+		setverdict(pass);
+	}
+}
+
+private function f_TC_fh_params_gen_tr_ma(in FHParamsTrx fhp, uint3_t tn,
+					  in MobileAllocationLV ma)
+return template MobileAllocationLV {
+	/* Mobile Allocation IE is expected to be empty if hopping is not enabled */
+	if (not fhp[tn].enabled) {
+		return { len := 0, ma := ''B };
+	}
+
+	var bitstring full_mask := f_pad_bit(''B, 1024, '0'B);
+	var bitstring slot_mask := f_pad_bit(''B, 1024, '0'B);
+	var bitstring ma_mask := ''B;
+	var integer ma_mask_len := 0;
+
+	/* Compose the full bit-mask (all channels, up to 1024 entries) */
+	for (var integer i := 0; i < lengthof(fhp); i := i + 1) {
+		for (var integer j := 0; j < lengthof(fhp[i].ma); j := j + 1) {
+			if (full_mask[fhp[i].ma[j]] == '1'B)
+				{ continue; }
+			full_mask[fhp[i].ma[j]] := '1'B;
+		}
+	}
+
+	/* Compose a bit-mask for the given timeslot number */
+	for (var integer i := 0; i < lengthof(fhp[tn].ma); i := i + 1) {
+		slot_mask[fhp[tn].ma[i]] := '1'B;
+	}
+
+	/* Finally, compose the Mobile Allocation bit-mask */
+	for (var integer i := 0; i < lengthof(full_mask); i := i + 1) {
+		if (full_mask[i] != '1'B)
+			{ continue; }
+
+		/* FIXME: ma_mask := ma_mask & slot_mask[i]; // triggers a bug in TITAN */
+		if (slot_mask[i] == '1'B) {
+			ma_mask := ma_mask & '1'B;
+			ma_mask_len := lengthof(ma_mask);
+		} else {
+			ma_mask := ma_mask & '0'B;
+		}
+	}
+
+	/* Ensure that ma_mask is octet-aligned */
+	ma_mask := substr(ma_mask, 0, ma_mask_len + 1);
+	ma_mask_len := (ma_mask_len + 8 - 1) / 8;
+	ma_mask := f_pad_bit(ma_mask, ma_mask_len * 8, '0'B);
+
+	return { len := ma_mask_len, ma := ma_mask };
+}
+
+/* Configure the hopping parameters in accordance with the given record */
+private function f_TC_fh_params_set(in FHParamsTrx fhp,
+				    uint8_t bts_nr := 0,
+				    uint8_t trx_nr := 0)
+runs on test_CT {
+	/* Enter the configuration node for the given BTS/TRX numbers */
+	f_vty_enter_cfg_trx(BSCVTY, bts_nr, trx_nr);
+
+	for (var integer tn := 0; tn < lengthof(fhp); tn := tn + 1) {
+		f_vty_transceive(BSCVTY, "timeslot " & int2str(tn));
+
+		if (not fhp[tn].enabled) {
+			f_vty_transceive(BSCVTY, "hopping enabled 0");
+			f_vty_transceive(BSCVTY, "exit"); /* go back */
+			continue;
+		}
+
+		/* Configure HSN / MAIO values */
+		f_vty_transceive(BSCVTY, "hopping sequence-number " & int2str(fhp[tn].hsn));
+		f_vty_transceive(BSCVTY, "hopping maio " & int2str(fhp[tn].maio));
+
+		/* Configure the Mobile Allocation (hopping channels) */
+		for (var integer i := 0; i < lengthof(fhp[tn].ma); i := i + 1) {
+			f_vty_transceive(BSCVTY, "hopping arfcn add " & int2str(fhp[tn].ma[i]));
+		}
+
+		f_vty_transceive(BSCVTY, "hopping enabled 1");
+		f_vty_transceive(BSCVTY, "exit"); /* go back */
+	}
+
+	f_vty_transceive(BSCVTY, "end");
+}
+
+/* Disable frequency hopping on all timeslots */
+private function f_TC_fh_params_unset(in FHParamsTrx fhp,
+				      uint8_t bts_nr := 0,
+				      uint8_t trx_nr := 0)
+runs on test_CT {
+	/* Enter the configuration node for the given BTS/TRX numbers */
+	f_vty_enter_cfg_trx(BSCVTY, bts_nr, trx_nr);
+
+	for (var integer tn := 0; tn < lengthof(fhp); tn := tn + 1) {
+		f_vty_transceive(BSCVTY, "timeslot " & int2str(tn));
+
+		/* Delete all ARFCNs from the Mobile Allocation (if any) */
+		for (var integer i := 0; i < lengthof(fhp[tn].ma); i := i + 1) {
+			f_vty_transceive(BSCVTY, "hopping arfcn del " & int2str(fhp[tn].ma[i]));
+		}
+
+		f_vty_transceive(BSCVTY, "hopping enabled 0");
+		f_vty_transceive(BSCVTY, "exit"); /* go back */
+	}
+
+	f_vty_transceive(BSCVTY, "end");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+}
+
+/* Verify presence and correctness of the hopping parameters (HSN, MAIO)
+ * in the Channel Identification IE of the RSL CHANnel ACTIVation message. */
+testcase TC_fh_params_chan_activ() runs on test_CT {
+	var FHParamsTrx fhp := f_TC_fh_params_gen();
+	var RSL_Message rsl_msg;
+	var RSL_IE_Body ie;
+
+	f_init_vty();
+
+	f_TC_fh_params_set(fhp); /* Enable frequency hopping */
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1);
+
+	/* CS domain: 3 (SDCCH/4+CBCH) + 4 (TCH/F) + 2 (TCH/H) channels available */
+	for (var integer i := 0; i < 9; i := i + 1) {
+		f_ipa_tx(0, ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
+		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+		/* Make sure that Channel Identification IE is present */
+		if (not f_rsl_find_ie(rsl_msg, RSL_IE_CHAN_IDENT, ie)) {
+			setverdict(fail, "RSL Channel Identification IE is absent");
+			continue;
+		}
+
+		/* Make sure that hopping parameters (HSN/MAIO) match */
+		f_TC_fh_params_match_chan_desc(fhp, ie.chan_ident.ch_desc.v);
+
+		/* "Mobile Allocation shall be included but empty" - let's check this */
+		if (ie.chan_ident.ma.v.len != 0) {
+			setverdict(fail, "Mobile Allocation IE is not empty: ",
+				   ie.chan_ident.ma, ", despite it shall be");
+			continue;
+		}
+	}
+
+	/* Disable frequency hopping */
+	f_TC_fh_params_unset(fhp);
+
+	setverdict(pass);
+}
+
+/* Verify the hopping parameters (HSN, MAIO, MA) in (RR) Immediate Assignment */
+testcase TC_fh_params_imm_ass() runs on test_CT {
+	var FHParamsTrx fhp := f_TC_fh_params_gen();
+	var RSL_Message rsl_msg;
+	var RSL_IE_Body ie;
+
+	f_init_vty();
+
+	f_TC_fh_params_set(fhp); /* Enable frequency hopping */
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1);
+
+	/* CS domain: 3 (SDCCH/4+CBCH) + 4 (TCH/F) + 2 (TCH/H) channels available */
+	for (var integer i := 0; i < 9; i := i + 1) {
+		f_ipa_tx(0, ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
+		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
+		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeC(RSL_MT_IMMEDIATE_ASSIGN_CMD));
+
+		/* Make sure that Full Immediate Assign Info IE is present */
+		if (not f_rsl_find_ie(rsl_msg, RSL_IE_FULL_IMM_ASS_INFO, ie)) {
+			setverdict(fail, "RSL Full Immediate Assign Info IE is absent");
+			continue;
+		}
+
+		/* Decode the actual Immediate Assignment message */
+		var GsmRrMessage rr_msg := dec_GsmRrMessage(ie.full_imm_ass_info.payload);
+		if (not match(rr_msg.header, t_RrHeader(IMMEDIATE_ASSIGNMENT, ?))) {
+			setverdict(fail, "Failed to match Immediate Assignment: ", rr_msg);
+			continue;
+		}
+
+		/* Make sure that hopping parameters (HSN/MAIO) match */
+		f_TC_fh_params_match_chan_desc(fhp, rr_msg.payload.imm_ass.chan_desc);
+
+		/* Make sure that the Mobile Allocation IE matches */
+		f_TC_fh_params_match_ma(fhp, rr_msg.payload.imm_ass.chan_desc.chan_nr.tn,
+					rr_msg.payload.imm_ass.mobile_allocation);
+	}
+
+	/* Disable frequency hopping */
+	f_TC_fh_params_unset(fhp);
 
 	setverdict(pass);
 }
@@ -7029,6 +7300,9 @@ control {
 	execute( TC_assignment_emerg_setup_deny_bts() );
 	execute( TC_emerg_premption() );
 
+	/* Frequency hopping parameters handling */
+	execute( TC_fh_params_chan_activ() );
+	execute( TC_fh_params_imm_ass() );
 }
 
 }
