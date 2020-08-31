@@ -9,7 +9,7 @@ FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
-FILES="MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn"
+FILES="MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn MobileL3_RRM_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
