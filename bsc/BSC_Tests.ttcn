@@ -7072,6 +7072,85 @@ testcase TC_fh_params_imm_ass() runs on test_CT {
 	setverdict(pass);
 }
 
+/* Verify the hopping parameters (HSN, MAIO, MA) in (RR) Assignment Command */
+testcase TC_fh_params_assignment_cmd() runs on test_CT {
+	var FHParamsTrx fhp := f_TC_fh_params_gen();
+	var RSL_Message rsl_msg;
+	var RSL_IE_Body ie;
+
+	f_init_vty();
+
+	f_TC_fh_params_set(fhp); /* Enable frequency hopping */
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1);
+
+	/* HACK: work around "Couldn't find Expect for CRCX" */
+	vc_MGCP.stop;
+
+	var template PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := ts_BSSMAP_IE_CodecList({ts_CodecFR});
+
+	/* CS domain (TCH): 4 (TCH/F) + 2 (TCH/H) channels available
+	 * NOTE: only 3 SDCCH/4 channels are available on CCCH+SDCCH4+CBCH */
+	for (var integer i := 0; i < 3; i := i + 1) {
+		/* Establish a dedicated channel, so we can trigger (late) TCH assignment */
+		var DchanTuple dt := f_est_dchan(f_rnd_ra_cs(), 23, f_rnd_octstring(16));
+
+		/* Send a BSSMAP Assignment Command, expect CHANnel ACTIVation */
+		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ass_cmd));
+		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+		/* ACKnowledge CHANnel ACTIVation, expect RSL DATA REQuest */
+		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
+		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
+
+		/* Make sure that L3 Information IE is present */
+		if (not f_rsl_find_ie(rsl_msg, RSL_IE_L3_INFO, ie)) {
+			setverdict(fail, "RSL L3 Information IE is absent");
+			continue;
+		}
+
+		/* Decode the L3 message and make sure it is (RR) Assignment Command */
+		var GsmRrL3Message l3_msg := dec_GsmRrL3Message(ie.l3_info.payload);
+		if (not match(l3_msg.header, t_RrL3Header(ASSIGNMENT_COMMAND))) {
+			setverdict(fail, "Failed to match Assignment Command: ", l3_msg);
+			continue;
+		}
+
+		/* Make sure that hopping parameters (HSN/MAIO) match */
+		var ChannelDescription chan_desc := l3_msg.payload.ass_cmd.chan_desc;
+		f_TC_fh_params_match_chan_desc(fhp, chan_desc);
+
+		/* Make sure that Cell Channel Description IE is present if FH is enabled */
+		if (chan_desc.h and not ispresent(l3_msg.payload.ass_cmd.cell_chan_desc)) {
+			setverdict(fail, "FH enabled, but Mobile Allocation IE is absent");
+			continue;
+		}
+
+		/* Make sure that the Mobile Allocation IE matches (if present) */
+		var boolean ma_present := ispresent(l3_msg.payload.ass_cmd.mobile_allocation);
+		if (chan_desc.h and ma_present) {
+			f_TC_fh_params_match_ma(fhp, chan_desc.chan_nr.tn,
+						l3_msg.payload.ass_cmd.mobile_allocation.v);
+		} else if (chan_desc.h and not ma_present) {
+			setverdict(fail, "FH enabled, but Mobile Allocation IE is absent");
+			continue;
+		} else if (not chan_desc.h and ma_present) {
+			setverdict(fail, "FH disabled, but Mobile Allocation IE is present");
+			continue;
+		}
+	}
+
+	/* Give the IUT some time to release all channels */
+	f_sleep(3.0);
+
+	/* Disable frequency hopping */
+	f_TC_fh_params_unset(fhp);
+
+	setverdict(pass);
+}
+
 /* Dyn PDCH todo:
    * activate OSMO as TCH/F
    * activate OSMO as TCH/H
@@ -7303,6 +7382,7 @@ control {
 	/* Frequency hopping parameters handling */
 	execute( TC_fh_params_chan_activ() );
 	execute( TC_fh_params_imm_ass() );
+	execute( TC_fh_params_assignment_cmd() );
 }
 
 }
