@@ -7150,6 +7150,106 @@ testcase TC_fh_params_assignment_cmd() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Verify the hopping parameters (HSN, MAIO, MA) in (RR) Handover Command */
+private function f_TC_fh_params_handover_cmd(in FHParamsTrx fhp)
+runs on test_CT {
+	var RSL_Message rsl_msg;
+	var RSL_IE_Body ie;
+	var DchanTuple dt;
+
+	/* Establish a dedicated channel, so we can trigger handover */
+	dt := f_est_dchan(f_rnd_ra_cs(), 23, f_rnd_octstring(16));
+
+	/* Trigger handover from BTS0 to BTS1 */
+	f_bts_0_cfg(BSCVTY, { "neighbor bts 1" });
+	f_vty_handover(BSCVTY, 0, 0, dt.rsl_chan_nr, 1);
+
+	/* Expect RSL CHANnel ACTIVation on BTS1/TRX0/TS1 */
+	rsl_msg := f_exp_ipa_rx(1, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+	/* ACKnowledge channel activation and expect (RR) Handover Command */
+	f_ipa_tx(1, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
+
+	/* Make sure that L3 Information IE is present */
+	if (not f_rsl_find_ie(rsl_msg, RSL_IE_L3_INFO, ie)) {
+		setverdict(fail, "RSL L3 Information IE is absent");
+		return;
+	}
+
+	/* Decode the L3 message and make sure it is (RR) Handover Command */
+	var GsmRrL3Message l3_msg := dec_GsmRrL3Message(ie.l3_info.payload);
+	if (not match(l3_msg.header, t_RrL3Header(HANDOVER_COMMAND))) {
+		setverdict(fail, "Failed to match Handover Command: ", l3_msg);
+		return;
+	}
+
+	/* Make sure that we've got SDCCH/8 on TS1 (expected to be hopping) */
+	var ChannelDescription chan_desc := l3_msg.payload.ho_cmd.chan_desc;
+	if (not match(chan_desc.chan_nr, t_RslChanNr_SDCCH8(1, ?))) {
+		setverdict(fail, "Unexpected channel number: ", chan_desc.chan_nr);
+		return;
+	}
+
+	/* Make sure that hopping parameters (HSN/MAIO) match */
+	f_TC_fh_params_match_chan_desc(fhp, chan_desc);
+
+	/* Make sure that Cell Channel Description IE is present */
+	if (not ispresent(l3_msg.payload.ho_cmd.cell_chan_desc)) {
+		setverdict(fail, "FH enabled, but Cell Channel Description IE is absent");
+		return;
+	}
+
+	/* Make sure that the Mobile Allocation (after time) IE is present and matches */
+	var boolean ma_present := ispresent(l3_msg.payload.ho_cmd.mobile_allocation);
+	if (ma_present) {
+		f_TC_fh_params_match_ma(fhp, chan_desc.chan_nr.tn,
+					l3_msg.payload.ho_cmd.mobile_allocation.v);
+	} else {
+		setverdict(fail, "FH enabled, but Mobile Allocation IE is absent");
+		return;
+	}
+}
+testcase TC_fh_params_handover_cmd() runs on test_CT {
+	var FHParamsTrx fhp := f_TC_fh_params_gen();
+
+	f_init_vty();
+
+	/* (Re)configure TS0 as BCCH and TS1 as SDCCH8 on BTS1/TRX0 */
+	f_vty_enter_cfg_trx(BSCVTY, bts := 1, trx := 0);
+
+	f_vty_transceive(BSCVTY, "timeslot 0");
+	f_vty_transceive(BSCVTY, "phys_chan_config ccch");
+	f_vty_transceive(BSCVTY, "exit"); /* go back */
+
+	f_vty_transceive(BSCVTY, "timeslot 1");
+	f_vty_transceive(BSCVTY, "phys_chan_config sdcch8");
+	f_vty_transceive(BSCVTY, "end"); /* we're done */
+
+	f_TC_fh_params_set(fhp, 1); /* Enable frequency hopping on BTS1 */
+	f_vty_transceive(BSCVTY, "drop bts connection 1 oml");
+
+	f_init(2);
+
+	f_TC_fh_params_handover_cmd(fhp);
+
+	/* Disable frequency hopping on BTS1 */
+	f_TC_fh_params_unset(fhp, 1);
+
+	/* (Re)configure TS0 as CCCH+SDCCH4+CBCH and TS1 as TCH/F */
+	f_vty_enter_cfg_trx(BSCVTY, bts := 1, trx := 0);
+
+	f_vty_transceive(BSCVTY, "timeslot 0");
+	f_vty_transceive(BSCVTY, "phys_chan_config ccch+sdcch4+cbch");
+	f_vty_transceive(BSCVTY, "exit"); /* go back */
+
+	f_vty_transceive(BSCVTY, "timeslot 1");
+	f_vty_transceive(BSCVTY, "phys_chan_config tch/f");
+	f_vty_transceive(BSCVTY, "end"); /* we're done */
+
+	f_shutdown_helper();
+}
+
 /* Verify the hopping parameters in System Information Type 4 */
 testcase TC_fh_params_si4_cbch() runs on test_CT {
 	var FHParamsTrx fhp := f_TC_fh_params_gen(tr_tn := 1);
@@ -7461,6 +7561,7 @@ control {
 	execute( TC_fh_params_chan_activ() );
 	execute( TC_fh_params_imm_ass() );
 	execute( TC_fh_params_assignment_cmd() );
+	execute( TC_fh_params_handover_cmd() );
 	execute( TC_fh_params_si4_cbch() );
 }
 
