@@ -92,8 +92,7 @@ FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 FILES+="RAN_Emulation.ttcnpp RAN_Adapter.ttcnpp SCCP_Templates.ttcn "
 # IPA_Emulation + dependencies
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn GSUP_Emulation.ttcn "
-FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn
-GTP_Templates.ttcn IPCP_Types.ttcn "
+FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn IPCP_Types.ttcn RAW_NS.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
