@@ -1,0 +1,480 @@
+module GBProxy_Tests {
+
+/* Osmocom GBProxy test suite in TTCN-3
+ * (C) 2020 sysmocom - s.f.m.c. GmbH
+ * All rights reserved.
+ *
+ * Author: Daniel Willmann <dwillmann@sysmocom.de>
+
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from Native_Functions all;
+import from NS_Types all;
+import from NS_Emulation all;
+import from BSSGP_Types all;
+import from BSSGP_Emulation all;
+import from SCCPasp_Types all;
+import from Osmocom_Gb_Types all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_GMM_SM_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
+import from L3_Common all;
+
+import from TELNETasp_PortType all;
+import from Osmocom_VTY_Functions all;
+
+import from LLC_Types all;
+import from LLC_Templates all;
+
+import from GSM_RR_Types all;
+
+modulepar {
+	/* IP/port on which we run our internal GSUP/HLR emulation */
+	NSConfigurations_SGSN mp_nsconfig_sgsn := {
+		{
+			provider := {
+				ip := {
+					address_family := AF_INET,
+					local_udp_port := 7777,
+					local_ip := "127.0.0.1",
+					remote_udp_port := 23000,
+					remote_ip := "127.0.0.1"
+				}
+			},
+			nsvci := 101,
+			nsei := 101,
+			role_sgsn := true,
+			handle_sns := true
+		}
+	};
+	NSConfigurations_PCU mp_nsconfig_pcu := {
+		{
+			provider := {
+				ip := {
+					address_family := AF_INET,
+					local_udp_port := 21010,
+					local_ip := "127.0.0.1",
+					remote_udp_port := 23000,
+					remote_ip := "127.0.0.1"
+				}
+			},
+			nsvci := 97,
+			nsei := 96,
+			role_sgsn := false,
+			handle_sns := false
+		},
+		{
+			provider := {
+				ip := {
+					address_family := AF_INET,
+					local_udp_port := 21011,
+					local_ip := "127.0.0.1",
+					remote_udp_port := 23000,
+					remote_ip := "127.0.0.1"
+				}
+			},
+			nsvci := 98,
+			nsei := 97,
+			role_sgsn := false,
+			handle_sns := false
+		},
+		{
+			provider := {
+				ip := {
+					address_family := AF_INET,
+					local_udp_port := 21012,
+					local_ip := "127.0.0.1",
+					remote_udp_port := 23000,
+					remote_ip := "127.0.0.1"
+				}
+			},
+			nsvci := 99,
+			nsei := 98,
+			role_sgsn := false,
+			handle_sns := false
+		}
+	};
+};
+
+const integer NUM_BVC_PER_NSE := 3;
+type record GbInstance {
+	NS_CT vc_NS,
+	BSSGP_CT vc_BSSGP,
+	BSSGP_BVC_CT vc_BSSGP_BVC[NUM_BVC_PER_NSE],
+	BssgpConfig cfg
+};
+
+const integer NUM_PCU := 3;
+type record length(NUM_PCU) of GbInstance GbInstances_PCU;
+type record length(NUM_PCU) of NSConfiguration NSConfigurations_PCU;
+type record length(NUM_PCU) of BssgpCellId BssgpCellIds;
+
+const integer NUM_SGSN := 1;
+type record length(NUM_SGSN) of GbInstance GbInstances_SGSN;
+type record length(NUM_SGSN) of NSConfiguration NSConfigurations_SGSN;
+
+type component test_CT {
+	var GbInstances_PCU g_pcu;
+	var GbInstances_SGSN g_sgsn;
+
+	port BSSGP_CT_PROC_PT PROC;
+
+	port TELNETasp_PT GBPVTY;
+
+	var boolean g_initialized := false;
+	var boolean g_use_echo := false;
+};
+
+type component BSSGP_ConnHdlr {
+	port BSSGP_PT PCU[NUM_PCU];
+	port BSSGP_PT PCU_SIG[NUM_PCU];
+	port BSSGP_PROC_PT PCU_PROC[NUM_PCU];
+	port BSSGP_PT SGSN[NUM_SGSN];
+	port BSSGP_PT SGSN_SIG[NUM_SGSN];
+	port BSSGP_PROC_PT SGSN_PROC[NUM_SGSN];
+
+	var BSSGP_ConnHdlrPars g_pars;
+	timer g_Tguard;
+	var LLC_Entities llc;
+}
+
+type record SGSN_ConnHdlrNetworkPars {
+	boolean expect_ptmsi,
+	boolean expect_auth,
+	boolean expect_ciph
+};
+
+type record BSSGP_ConnHdlrPars {
+	/* IMEI of the simulated ME */
+	hexstring imei,
+	/* IMSI of the simulated MS */
+	hexstring imsi,
+	/* MSISDN of the simulated MS (probably unused) */
+	hexstring msisdn,
+	/* P-TMSI allocated to the simulated MS */
+	OCT4 p_tmsi optional,
+	OCT3 p_tmsi_sig optional,
+	/* TLLI of the simulated MS */
+	OCT4 tlli,
+	OCT4 tlli_old optional,
+	RoutingAreaIdentificationV ra optional,
+	BssgpCellIds bssgp_cell_id,
+	float t_guard
+};
+
+private function f_cellid_to_RAI(in BssgpCellId cell_id) return RoutingAreaIdentificationV {
+	/* mcc_mnc is encoded as of 24.008 10.5.5.15 */
+	var BcdMccMnc mcc_mnc := cell_id.ra_id.lai.mcc_mnc;
+
+        var RoutingAreaIdentificationV ret := {
+                mccDigit1 := mcc_mnc[0],
+                mccDigit2 := mcc_mnc[1],
+                mccDigit3 := mcc_mnc[2],
+                mncDigit3 := mcc_mnc[3],
+                mncDigit1 := mcc_mnc[4],
+                mncDigit2 := mcc_mnc[5],
+                lac := int2oct(cell_id.ra_id.lai.lac, 16),
+                rac := int2oct(cell_id.ra_id.rac, 8)
+        }
+        return ret;
+};
+
+private function f_init_gb_pcu(inout GbInstance gb, charstring id, integer offset) runs on test_CT {
+	gb.vc_NS := NS_CT.create(id & "-NS(PCU)" & int2str(offset));
+	gb.vc_BSSGP := BSSGP_CT.create(id & "-BSSGP(PCU)" & int2str(offset));
+	/* connect lower end of BSSGP emulation with NS upper port */
+	connect(gb.vc_BSSGP:BSCP, gb.vc_NS:NS_SP);
+
+	gb.vc_NS.start(NSStart(mp_nsconfig_pcu[offset]));
+	gb.vc_BSSGP.start(BssgpStart(gb.cfg, id));
+
+	for (var integer i := 0; i < lengthof(gb.cfg.bvc); i := i + 1) {
+		connect(self:PROC, gb.vc_BSSGP:PROC);
+		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
+		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+	}
+}
+
+private function f_init_gb_sgsn(inout GbInstance gb, charstring id, integer offset) runs on test_CT {
+	gb.vc_NS := NS_CT.create(id & "-NS(SGSN)" & int2str(offset));
+	gb.vc_BSSGP := BSSGP_CT.create(id & "-BSSGP(SGSN)" & int2str(offset));
+	/* connect lower end of BSSGP emulation with NS upper port */
+	connect(gb.vc_BSSGP:BSCP, gb.vc_NS:NS_SP);
+
+	gb.vc_NS.start(NSStart(mp_nsconfig_sgsn[offset]));
+	gb.vc_BSSGP.start(BssgpStart(gb.cfg, id));
+
+	for (var integer i := 0; i < lengthof(gb.cfg.bvc); i := i + 1) {
+		connect(self:PROC, gb.vc_BSSGP:PROC);
+		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
+		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+	}
+}
+
+
+private function f_init_vty() runs on test_CT {
+	map(self:GBPVTY, system:GBPVTY);
+	f_vty_set_prompts(GBPVTY);
+	f_vty_transceive(GBPVTY, "enable");
+}
+
+/* mcc_mnc is 24.008 10.5.5.15 encoded. 262 42 */
+function f_init(BcdMccMnc mcc_mnc := '262F42'H) runs on test_CT {
+	var integer i;
+
+	if (g_initialized == true) {
+		return;
+	}
+	g_initialized := true;
+	g_pcu[0].cfg := {
+		nsei := 96,
+		sgsn_role := false,
+		bvc := { {
+			bvci := 196,
+			cell_id := {
+				ra_id := {
+					lai := {
+						mcc_mnc := mcc_mnc, lac := 13135},
+						rac := 0
+					},
+				cell_id := 20960
+			},
+			depth := BSSGP_DECODE_DEPTH_BSSGP
+		} }
+	};
+	g_pcu[1].cfg := {
+		nsei := 97,
+		sgsn_role := false,
+		bvc := { {
+			bvci := 210,
+			cell_id := {
+				ra_id := {
+					lai := {
+						mcc_mnc := mcc_mnc, lac := 13200},
+						rac := 0
+					},
+				cell_id := 20961
+			},
+			depth := BSSGP_DECODE_DEPTH_BSSGP
+		} }
+	};
+	g_pcu[2].cfg := {
+		nsei := 98,
+		sgsn_role := false,
+		bvc := { {
+			bvci := 220,
+			cell_id := {
+				ra_id := {
+					lai := {
+						mcc_mnc := mcc_mnc, lac := 13300},
+						rac := 0
+					},
+				cell_id := 20962
+			},
+			depth := BSSGP_DECODE_DEPTH_BSSGP
+		} }
+	};
+
+	g_sgsn[0].cfg := {
+		nsei := 101,
+		sgsn_role := true,
+		bvc := {
+			{
+				bvci := 196,
+				cell_id := {
+					ra_id := {
+						lai := {
+							mcc_mnc := mcc_mnc, lac := 13135},
+							rac := 0
+						},
+					cell_id := 20960
+				},
+				depth := BSSGP_DECODE_DEPTH_BSSGP
+			},
+			{
+				bvci := 210,
+				cell_id := {
+					ra_id := {
+						lai := {
+							mcc_mnc := mcc_mnc, lac := 13200},
+							rac := 0
+						},
+					cell_id := 20961
+				},
+				depth := BSSGP_DECODE_DEPTH_BSSGP
+			},
+			{
+				bvci := 220,
+				cell_id := {
+					ra_id := {
+						lai := {
+							mcc_mnc := mcc_mnc, lac := 13300},
+							rac := 0
+						},
+					cell_id := 20962
+				},
+				depth := BSSGP_DECODE_DEPTH_BSSGP
+			}
+		}
+	};
+
+	f_init_vty();
+	f_init_gb_sgsn(g_sgsn[0], "GbProxy_Test-SGSN0", 0);
+	f_sleep(4.0);
+	f_init_gb_pcu(g_pcu[0], "GbProxy_Test-PCU0", 0);
+	f_init_gb_pcu(g_pcu[1], "GbProxy_Test-PCU1", 1);
+	f_init_gb_pcu(g_pcu[2], "GbProxy_Test-PCU2", 2);
+}
+
+function f_cleanup() runs on test_CT {
+	self.stop;
+}
+
+type function void_fn(charstring id) runs on BSSGP_ConnHdlr;
+
+/* helper function to create, connect and start a BSSGP_ConnHdlr component */
+function f_start_handler(void_fn fn, charstring id, GbInstances_PCU pcu, GbInstances_SGSN sgsn, integer imsi_suffix,
+			 float t_guard := 30.0)
+runs on test_CT return BSSGP_ConnHdlr {
+	var BSSGP_ConnHdlr vc_conn;
+
+	var BSSGP_ConnHdlrPars pars := {
+		imei := f_gen_imei(imsi_suffix),
+		imsi := f_gen_imsi(imsi_suffix),
+		msisdn := f_gen_msisdn(imsi_suffix),
+		p_tmsi := omit,
+		p_tmsi_sig := omit,
+		tlli := f_gprs_tlli_random(),
+		tlli_old := omit,
+		ra := omit,
+		bssgp_cell_id := { pcu[0].cfg.bvc[0].cell_id, pcu[1].cfg.bvc[0].cell_id, pcu[2].cfg.bvc[0].cell_id },
+		t_guard := t_guard
+	};
+
+	vc_conn := BSSGP_ConnHdlr.create(id);
+	// PDU side
+	connect(vc_conn:PCU[0], pcu[0].vc_BSSGP_BVC[0]:BSSGP_SP);
+	connect(vc_conn:PCU_SIG[0], pcu[0].vc_BSSGP_BVC[0]:BSSGP_SP_SIG);
+	connect(vc_conn:PCU_PROC[0], pcu[0].vc_BSSGP_BVC[0]:BSSGP_PROC);
+	connect(vc_conn:PCU[1], pcu[1].vc_BSSGP_BVC[0]:BSSGP_SP);
+	connect(vc_conn:PCU_SIG[1], pcu[1].vc_BSSGP_BVC[0]:BSSGP_SP_SIG);
+	connect(vc_conn:PCU_PROC[1], pcu[1].vc_BSSGP_BVC[0]:BSSGP_PROC);
+	connect(vc_conn:PCU[2], pcu[2].vc_BSSGP_BVC[0]:BSSGP_SP);
+	connect(vc_conn:PCU_SIG[2], pcu[2].vc_BSSGP_BVC[0]:BSSGP_SP_SIG);
+	connect(vc_conn:PCU_PROC[2], pcu[2].vc_BSSGP_BVC[0]:BSSGP_PROC);
+	// SGSN side
+	connect(vc_conn:SGSN[0], sgsn[0].vc_BSSGP_BVC[0]:BSSGP_SP);
+	connect(vc_conn:SGSN_SIG[0], sgsn[0].vc_BSSGP_BVC[0]:BSSGP_SP_SIG);
+	connect(vc_conn:SGSN_PROC[0], sgsn[0].vc_BSSGP_BVC[0]:BSSGP_PROC);
+
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+private altstep as_Tguard() runs on BSSGP_ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		mtc.stop;
+	}
+}
+
+/* first function called in every ConnHdlr */
+private function f_handler_init(void_fn fn, charstring id, BSSGP_ConnHdlrPars pars)
+runs on BSSGP_ConnHdlr {
+	/* do some common stuff like setting up g_pars */
+	g_pars := pars;
+
+	llc := f_llc_create(false);
+
+
+	g_Tguard.start(pars.t_guard);
+	activate(as_Tguard());
+
+	/* call the user-supplied test case function */
+	fn.apply(id);
+}
+
+/* TODO:
+   * Detach without Attach
+   * SM procedures without attach / RAU
+   * ATTACH / RAU
+   ** with / without authentication
+   ** with / without P-TMSI allocation
+   * re-transmissions of LLC frames
+   * PDP Context activation
+   ** with different GGSN config in SGSN VTY
+   ** with different PDP context type (v4/v6/v46)
+   ** timeout from GGSN
+   ** multiple / secondary PDP context
+ */
+
+private function f_TC_BVC_bringup(charstring id) runs on BSSGP_ConnHdlr {
+	f_sleep(5.0);
+	setverdict(pass);
+}
+
+testcase TC_BVC_bringup() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_BVC_bringup), testcasename(), g_pcu, g_sgsn, 51);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+friend function f_bssgp_suspend(integer ran_idx := 0) runs on BSSGP_ConnHdlr return OCT1 {
+	timer T := 5.0;
+	var PDU_BSSGP rx_pdu;
+	PCU_SIG[ran_idx].send(ts_BSSGP_SUSPEND(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id));
+	T.start;
+	alt {
+	[] PCU_SIG[ran_idx].receive(tr_BSSGP_SUSPEND_ACK(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id, ?)) -> value rx_pdu {
+		return rx_pdu.pDU_BSSGP_SUSPEND_ACK.suspend_Reference_Number.suspend_Reference_Number_value;
+		}
+	[] PCU_SIG[ran_idx].receive(tr_BSSGP_SUSPEND_NACK(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id, ?)) -> value rx_pdu {
+		setverdict(fail, "SUSPEND-NACK in response to SUSPEND for TLLI ", g_pars.tlli);
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "No SUSPEND-ACK in response to SUSPEND for TLLI ", g_pars.tlli);
+		mtc.stop;
+		}
+	}
+	return '00'O;
+}
+
+friend function f_bssgp_resume(OCT1 susp_ref, integer ran_idx := 0) runs on BSSGP_ConnHdlr {
+	timer T := 5.0;
+	PCU_SIG[ran_idx].send(ts_BSSGP_RESUME(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id, susp_ref));
+	T.start;
+	alt {
+	[] PCU_SIG[ran_idx].receive(tr_BSSGP_RESUME_ACK(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id));
+	[] PCU_SIG[ran_idx].receive(tr_BSSGP_RESUME_NACK(g_pars.tlli, g_pars.bssgp_cell_id[ran_idx].ra_id,
+?)) {
+		setverdict(fail, "RESUME-NACK in response to RESUME for TLLI ", g_pars.tlli);
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "No RESUME-ACK in response to SUSPEND for TLLI ", g_pars.tlli);
+		mtc.stop;
+		}
+	}
+}
+
+
+control {
+	execute( TC_BVC_bringup() );
+}
+
+
+}
