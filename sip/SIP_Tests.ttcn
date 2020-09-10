@@ -12,6 +12,8 @@ module SIP_Tests {
 
 import from General_Types all;
 import from Osmocom_Types all;
+import from Native_Functions all;
+import from Misc_Helpers all;
 
 import from Osmocom_CTRL_Functions all;
 import from Osmocom_CTRL_Types all;
@@ -59,8 +61,12 @@ type record CallPars {
 	charstring called,
 
 	uint32_t mncc_call_id optional,
+	CallParsComputed comp optional,
 
-	CallParsComputed comp optional
+	charstring sip_rtp_addr,
+	uint16_t sip_rtp_port,
+	charstring cn_rtp_addr,
+	uint16_t cn_rtp_port
 }
 
 type record CallParsComputed {
@@ -75,8 +81,13 @@ private template (value) CallPars t_CallPars(boolean is_mo) := {
 	is_mo := is_mo,
 	calling := "12345",
 	called := "98766",
+
 	mncc_call_id := omit,
-	comp := omit
+	comp := omit,
+	sip_rtp_addr := "1.2.3.4",
+	sip_rtp_port := 1234,
+	cn_rtp_addr := "5.6.7.8",
+	cn_rtp_port := 5678
 }
 
 private function f_CallPars_compute(inout CallPars cp) {
@@ -93,6 +104,22 @@ private function f_CallPars_compute(inout CallPars cp) {
 	cp.comp.sip_body := "";
 }
 
+private function f_mgcp_addr2addrtype(charstring addr) return charstring {
+	for (var integer i := 0; i < lengthof(addr); i := i + 1) {
+		if (addr[i] == ":") {
+			return "IP6";
+		}
+	}
+	return "IP4";
+}
+
+private function f_addrstr2addr(charstring addr) return octetstring {
+	if (f_addr_is_ipv6(addr)) {
+		return f_inet6_addr(addr);
+	} else {
+		return f_inet_addr(addr);
+	}
+}
 
 function f_init_mncc(charstring id) runs on test_CT {
 	id := id & "-MNCC";
@@ -166,6 +193,7 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	var template SipAddr sip_addr_gsm := tr_SipAddr_from_val(cp.comp.sip_url_gsm);
 	var template SipAddr sip_addr_ext := tr_SipAddr_from_val(cp.comp.sip_url_ext);
 	var PDU_SIP_Request sip_req;
+	var PDU_SIP_Response sip_resp;
 	var MNCC_PDU mncc;
 
 	/* Ask MNCC_Emulation to "expect" a call to the given called number */
@@ -186,7 +214,11 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	MNCC.send(ts_MNCC_CALL_CONF_ind(cp.mncc_call_id));
 	/* MSC <- OSC: OSC asks MSC to create RTP socket */
 	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id));
-	MNCC.send(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
+	mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
+	mncc.u.rtp.is_ipv6 := f_addr_is_ipv6(cp.cn_rtp_addr);
+	mncc.u.rtp.ip := f_addrstr2addr(cp.cn_rtp_addr);
+	mncc.u.rtp.rtp_port := cp.cn_rtp_port;
+	MNCC.send(mncc);
 
 	/* MSC -> OSC: After MS is ringing and sent CC ALERTING */
 	MNCC.send(ts_MNCC_ALERT_ind(cp.mncc_call_id));
@@ -200,10 +232,15 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	SIP.clear;
 	interleave {
 	/* MSC <- OSC: OSC asks MSC to connect its RTP stream to remote end */
-	[] MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id)) {}
+	[] MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id, f_addrstr2addr(cp.sip_rtp_addr), cp.sip_rtp_port)) {}
 	/* OSC -> SIP: OSC confirms call establishment to SIP side */
 	[] SIP.receive(tr_SIP_Response(cp.comp.sip_call_id, sip_addr_ext, sip_addr_gsm, ?,
-					"INVITE", 200, ?, "OK", ?)) {}
+					"INVITE", 200, ?, "OK", ?)) -> value sip_resp {
+						if (not match(sip_resp.messageBody, pattern "*" & cp.cn_rtp_addr & "*")) {
+							setverdict(fail, "wrong ip addr sent in SIP SDP, not containing ", cp.cn_rtp_addr);
+							mtc.stop;
+						}
+					}
 	}
 	/* OSC <- SIP: SIP world acknowledges "200 OK" */
 	SIP.send(ts_SIP_ACK(cp.comp.sip_call_id, cp.comp.sip_url_ext, cp.comp.sip_url_gsm,
@@ -229,7 +266,10 @@ function f_establish_mo(inout CallPars cp) runs on ConnHdlr {
 	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id)) {
 		var MNCC_PDU mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
 		mncc.u.rtp.payload_msg_type := oct2int('0300'O);
-		MNCC.send(mncc);	/* FIXME: port/ip */
+		mncc.u.rtp.is_ipv6 := f_addr_is_ipv6(cp.cn_rtp_addr);
+		mncc.u.rtp.ip := f_addrstr2addr(cp.cn_rtp_addr);
+		mncc.u.rtp.rtp_port := cp.cn_rtp_port;
+		MNCC.send(mncc);
 		}
 	/* OSC -> SIP: Send INVITE with GSM side IP/Port in SDP */
 	SIP.receive(tr_SIP_INVITE(?, sip_addr_gsm, sip_addr_ext, ?, ?)) -> value sip_req {
@@ -304,9 +344,12 @@ function f_release_sip(inout CallPars cp) runs on ConnHdlr {
 
 /* Successful MT Call, which is subsequently released by GSM side */
 private function f_TC_mt_success_rel_gsm(charstring id) runs on ConnHdlr {
-	var CallPars cp := valueof(t_CallPars(false));
+	var CallPars cp := g_pars.g_cp;
 	f_CallPars_compute(cp);
-	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+			    f_mgcp_addr2addrtype(cp.sip_rtp_addr) & " " & cp.sip_rtp_addr &
+			    "\r\nt=0 0\r\nm=audio " & int2str(cp.sip_rtp_port) &
+			    " RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 	f_sleep(3.0)
 
 	f_establish_mt(cp);
@@ -320,6 +363,18 @@ testcase TC_mt_success_rel_gsm() runs on test_CT {
 	var ConnHdlr vc_conn;
 	f_init();
 	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(false));
+	vc_conn := f_start_handler(refers(f_TC_mt_success_rel_gsm), pars);
+	vc_conn.done;
+}
+testcase TC_mt_success_rel_gsm_ipv6() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(false));
+	pars.g_cp.sip_rtp_addr := "::1";
+	pars.g_cp.cn_rtp_addr := "::2";
 	vc_conn := f_start_handler(refers(f_TC_mt_success_rel_gsm), pars);
 	vc_conn.done;
 }
@@ -328,7 +383,10 @@ testcase TC_mt_success_rel_gsm() runs on test_CT {
 private function f_TC_mt_success_rel_sip(charstring id) runs on ConnHdlr {
 	var CallPars cp := valueof(t_CallPars(false));
 	f_CallPars_compute(cp);
-	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+			    f_mgcp_addr2addrtype(cp.sip_rtp_addr) & " " & cp.sip_rtp_addr &
+			    "\r\nt=0 0\r\nm=audio " & int2str(cp.sip_rtp_port) &
+			    " RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 	f_sleep(3.0)
 
 	f_establish_mt(cp);
@@ -349,9 +407,12 @@ testcase TC_mt_success_rel_sip() runs on test_CT {
 
 /* Successful MO Call, which is subsequently released by GSM side */
 private function f_TC_mo_success_rel_gsm(charstring id) runs on ConnHdlr {
-	var CallPars cp := valueof(t_CallPars(true));
+	var CallPars cp := g_pars.g_cp;
 	f_CallPars_compute(cp);
-	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+			    f_mgcp_addr2addrtype(cp.sip_rtp_addr) & " " & cp.sip_rtp_addr &
+			    "\r\nt=0 0\r\nm=audio " & int2str(cp.sip_rtp_port) &
+			    " RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 	f_sleep(3.0)
 
 	f_establish_mo(cp);
@@ -365,6 +426,18 @@ testcase TC_mo_success_rel_gsm() runs on test_CT {
 	var ConnHdlr vc_conn;
 	f_init();
 	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(true));
+	vc_conn := f_start_handler(refers(f_TC_mo_success_rel_gsm), pars);
+	vc_conn.done;
+}
+testcase TC_mo_success_rel_gsm_ipv6() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(true));
+	pars.g_cp.sip_rtp_addr := "::1";
+	pars.g_cp.cn_rtp_addr := "::2";
 	vc_conn := f_start_handler(refers(f_TC_mo_success_rel_gsm), pars);
 	vc_conn.done;
 }
@@ -373,7 +446,10 @@ testcase TC_mo_success_rel_gsm() runs on test_CT {
 private function f_TC_mo_success_rel_sip(charstring id) runs on ConnHdlr {
 	var CallPars cp := valueof(t_CallPars(true));
 	f_CallPars_compute(cp);
-	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+			    f_mgcp_addr2addrtype(cp.sip_rtp_addr) & " " & cp.sip_rtp_addr &
+			    "\r\nt=0 0\r\nm=audio " & int2str(cp.sip_rtp_port) &
+			    " RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 	f_sleep(3.0)
 
 	f_establish_mo(cp);
@@ -395,7 +471,10 @@ testcase TC_mo_success_rel_sip() runs on test_CT {
 private function f_TC_mo_setup_disc_late_rtp(charstring id) runs on ConnHdlr {
 	var CallPars cp := valueof(t_CallPars(true));
 	f_CallPars_compute(cp);
-	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 0.0.0.0\r\ns=GSM Call\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	cp.comp.sip_body := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+			    f_mgcp_addr2addrtype(cp.sip_rtp_addr) & " " & cp.sip_rtp_addr &
+			    "\r\nt=0 0\r\nm=audio " & int2str(cp.sip_rtp_port) &
+			    " RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 	f_sleep(3.0);
 
 	var MNCC_number dst := valueof(ts_MNCC_number(cp.called, GSM48_TON_UNKNOWN));
@@ -415,7 +494,10 @@ private function f_TC_mo_setup_disc_late_rtp(charstring id) runs on ConnHdlr {
 	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id)) {
 		var MNCC_PDU mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
 		mncc.u.rtp.payload_msg_type := oct2int('0300'O);
-		MNCC.send(mncc);	/* FIXME: port/ip */
+		mncc.u.rtp.is_ipv6 := f_addr_is_ipv6(cp.cn_rtp_addr);
+		mncc.u.rtp.ip := f_addrstr2addr(cp.cn_rtp_addr);
+		mncc.u.rtp.rtp_port := cp.cn_rtp_port;
+		MNCC.send(mncc);
 		}
 
 	/* OSC -> SIP: We should never receive INVITE */
@@ -441,8 +523,10 @@ testcase TC_mo_setup_disc_late_rtp() runs on test_CT {
 
 control {
 	execute( TC_mt_success_rel_gsm() );
+	execute( TC_mt_success_rel_gsm_ipv6() );
 	execute( TC_mt_success_rel_sip() );
 	execute( TC_mo_success_rel_gsm() );
+	execute( TC_mo_success_rel_gsm_ipv6() );
 	execute( TC_mo_success_rel_sip() );
 	execute( TC_mo_setup_disc_late_rtp() );
 }
