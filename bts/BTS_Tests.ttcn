@@ -237,6 +237,17 @@ private function f_init_rsl(charstring id) runs on test_CT {
 	}
 }
 
+friend type record FreqHopPars {
+	/* Whether frequency hopping is in use */
+	boolean enabled,
+	/* Mobile Allocation Index Offset / Hopping Sequence Number */
+	MaioHsn maio_hsn,
+	/* MA bitmap to be indicated in RR Immediate Assignment */
+	MobileAllocationLV ma_map,
+	/* The actual Mobile Allocation (ARFCN list) to be used */
+	L1ctlMA ma
+};
+
 type record ConnHdlrPars {
 	RslChannelNr chan_nr,
 	RSL_IE_ChannelMode chan_mode,
@@ -246,13 +257,9 @@ type record ConnHdlrPars {
 	RSL_IE_EncryptionInfo encr optional,
 	BtsBand bts0_band optional,
 
-	/* Frequency hopping parameters (disabled if absent) */
-	MaioHsn maio_hsn optional,
-	/* MA bitmap to be indicated in RR Immediate Assignment */
-	MobileAllocationLV ma_map,
-	/* The actual Mobile Allocation (ARFCN list) to be used */
-	L1ctlMA ma
-}
+	/* Frequency hopping parameters */
+	FreqHopPars fhp
+};
 
 /* Test-specific parameters */
 private type union TestSpecUnion {
@@ -529,36 +536,40 @@ private type record FreqHopGroupItem {
 	uint6_t			maio
 };
 
-friend function f_resolve_fh_params(inout ConnHdlrPars pars, uint8_t trx_nr := 0)
+friend function f_resolve_fh_params(inout FreqHopPars fhp, uint8_t tn,
+				    uint8_t trx_nr := 0)
 {
-	var FreqHopGroups groups := mp_fh_config[pars.chan_nr.tn];
+	var FreqHopGroups groups := mp_fh_config[tn];
 	var integer i, j;
+
+	fhp.enabled := false;
 
 	for (i := 0; i < lengthof(groups); i := i + 1) {
 		var FreqHopGroup g := groups[i];
 		for (j := 0; j < lengthof(g.trx_maio); j := j + 1) {
 			var FreqHopGroupItem gi := g.trx_maio[j];
 			if (gi.trx_nr == trx_nr) {
-				pars.maio_hsn := valueof(ts_HsnMaio(g.hsn, gi.maio));
-				pars.ma := { }; /* to be composed below */
+				fhp.maio_hsn.maio := gi.maio;
+				fhp.maio_hsn.hsn := g.hsn;
+				fhp.enabled := true;
 				break;
 			}
 		}
 
-		if (ispresent(pars.maio_hsn)) {
+		if (fhp.enabled) {
 			/* Prepare the Mobile Allocation bitmask (length & padding) */
-			pars.ma_map.len := (mp_transceiver_num + 8 - 1) / 8; /* in bytes */
-			pars.ma_map.ma := f_pad_bit('0'B, pars.ma_map.len * 8, '0'B);
+			fhp.ma_map.len := (mp_transceiver_num + 8 - 1) / 8; /* in bytes */
+			fhp.ma_map.ma := f_pad_bit('0'B, fhp.ma_map.len * 8, '0'B);
+			fhp.ma := { }; /* to be composed below */
 
 			/* Compose the actual Mobile Allocation and the bitmask */
 			for (j := 0; j < lengthof(g.trx_maio); j := j + 1) {
 				var FreqHopGroupItem gi := g.trx_maio[j];
-				pars.ma := pars.ma & { l1ctl_ma_def[gi.trx_nr] };
-				pars.ma_map.ma[gi.trx_nr] := '1'B;
+				fhp.ma := fhp.ma & { l1ctl_ma_def[gi.trx_nr] };
+				fhp.ma_map.ma[gi.trx_nr] := '1'B;
 			}
 
-			log("Freq. hopping parameters: maio_hsn := ", pars.maio_hsn,
-			    ", ma := ", pars.ma, ", ma_map := ", pars.ma_map);
+			log("Freq. hopping parameters: ", fhp);
 			break; /* We're done */
 		}
 	}
@@ -591,7 +602,7 @@ runs on test_CT return ConnHdlr {
 
 	/* Obtain frequency hopping parameters for a given timeslot */
 	if (mp_freq_hop_enabled and mp_transceiver_num > 1) {
-		f_resolve_fh_params(pars);
+		f_resolve_fh_params(pars.fhp, pars.chan_nr.tn);
 	}
 
 	vc_conn.start(f_handler_init(fn, id, pars));
@@ -700,7 +711,6 @@ private const L1ctlMA l1ctl_ma_def := { { false, mp_trx0_arfcn }, { false, mp_tr
 
 friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 					template RSL_IE_ChannelMode chan_mode,
-					template (omit) MaioHsn maio_hsn := omit,
 					float t_guard := 20.0) := {
 	chan_nr := valueof(chan_nr),
 	chan_mode := valueof(chan_mode),
@@ -726,9 +736,12 @@ friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 	spec := omit,
 	encr := omit,
 	bts0_band := omit,
-	maio_hsn := maio_hsn,
-	ma_map := c_MA_null,
-	ma := l1ctl_ma_def
+	fhp := {
+		enabled := false,
+		maio_hsn := ts_HsnMaio(0, 0),
+		ma_map := c_MA_null,
+		ma := l1ctl_ma_def
+	}
 }
 
 /***********************************************************************
@@ -2002,16 +2015,16 @@ private function f_rach_req_wait_chan_rqd(integer ra) runs on ConnHdlr return Gs
 
 /* Tune to a dedicated channel: L1CTL only */
 private function f_l1ctl_est_dchan(L1CTL_PT pt, ConnHdlrPars pars) {
-	if (not ispresent(pars.maio_hsn)) {
+	if (not pars.fhp.enabled) {
 		pt.send(ts_L1CTL_DM_EST_REQ_H0(pars.chan_nr,
 						7 /* TODO: mp_tsc */,
 						mp_trx0_arfcn));
 	} else {
 		pt.send(ts_L1CTL_DM_EST_REQ_H1(pars.chan_nr,
 						7 /* TODO: mp_tsc */,
-						pars.maio_hsn.hsn,
-						pars.maio_hsn.maio,
-						pars.ma));
+						pars.fhp.maio_hsn.hsn,
+						pars.fhp.maio_hsn.maio,
+						pars.fhp.ma));
 	}
 }
 
@@ -2029,14 +2042,14 @@ private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies 
 	f_rsl_chan_act(g_pars.chan_mode, encr_enable, more_ies);
 
 	/* Craft channel description (with or without frequency hopping parameters) */
-	if (ispresent(g_pars.maio_hsn)) {
-		ch_desc := valueof(ts_ChanDescH1(g_pars.chan_nr, g_pars.maio_hsn));
+	if (g_pars.fhp.enabled) {
+		ch_desc := valueof(ts_ChanDescH1(g_pars.chan_nr, g_pars.fhp.maio_hsn));
 	} else {
 		ch_desc := valueof(ts_ChanDescH0(g_pars.chan_nr, mp_trx0_arfcn));
 	}
 
 	/* Send IMM.ASS via CCHAN */
-	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.ma_map));
+	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.fhp.ma_map));
 	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
 
 	/* receive IMM.ASS on MS side */
@@ -2049,7 +2062,7 @@ private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies 
 	}
 
 	/* enable dedicated mode */
-	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um, ma := g_pars.ma);
+	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um, ma := g_pars.fhp.ma);
 	/* enable encryption, if requested */
 	if (encr_enable) {
 		var uint8_t alg_id := f_alg_id_to_l1ctl(g_pars.encr.alg_id);
@@ -4661,7 +4674,7 @@ testcase TC_pcu_ptcch() runs on test_CT {
 	/* Tune trxcon to that PDCH channel */
 	var ConnHdlrPars pars := valueof(t_Pars(ts_RslChanNr_PDCH(7), ts_RSL_ChanMode_SIGN));
 	if (mp_freq_hop_enabled and mp_transceiver_num > 1)
-		{ f_resolve_fh_params(pars); }
+		{ f_resolve_fh_params(pars.fhp, pars.chan_nr.tn); }
 	f_l1ctl_est_dchan(L1CTL, pars);
 
 	/* Verify PTCCH/U: send several access bursts, make sure they're received */
@@ -4925,7 +4938,7 @@ testcase TC_pcu_data_ind_lqual_cb() runs on test_CT {
 	/* Tune trxcon to that PDCH channel on TS7 */
 	var ConnHdlrPars pars := valueof(t_Pars(ts_RslChanNr_PDCH(7), ts_RSL_ChanMode_SIGN));
 	if (mp_freq_hop_enabled and mp_transceiver_num > 1)
-		{ f_resolve_fh_params(pars); }
+		{ f_resolve_fh_params(pars.fhp, pars.chan_nr.tn); }
 	f_l1ctl_est_dchan(L1CTL, pars);
 
 	/* C/I in centiBels, test range: -256 .. +1280, step 128 */
@@ -5395,7 +5408,7 @@ testcase TC_pcu_socket_verify_info_ind() runs on test_CT {
 /* Verify hopping parameters in the INFO.ind message (version >= 10) */
 testcase TC_pcu_info_ind_fh_params() runs on test_CT {
 	var PCUIF_info_ind info_ind;
-	var ConnHdlrPars pars;
+	var FreqHopPars fhp;
 
 	f_init();
 
@@ -5408,17 +5421,18 @@ testcase TC_pcu_info_ind_fh_params() runs on test_CT {
 				continue;
 			}
 
-			pars := valueof(t_Pars(t_RslChanNr_PDCH(tn), ts_RSL_ChanMode_SIGN));
 			if (mp_freq_hop_enabled and mp_transceiver_num > 1)
-				{ f_resolve_fh_params(pars); }
+				{ f_resolve_fh_params(fhp, tn); }
+			else
+				{ fhp.enabled := false; }
 
 			var template PCUIF_InfoTrxTs tr_ts;
-			if (ispresent(pars.maio_hsn)) {
+			if (fhp.enabled) {
 				tr_ts := tr_PCUIF_InfoTrxTsH1(
-						hsn := pars.maio_hsn.hsn,
-						maio := pars.maio_hsn.maio,
-						ma := f_pad_bit(pars.ma_map.ma, 64, '0'B),
-						ma_bit_len := lengthof(pars.ma_map.ma));
+						hsn := fhp.maio_hsn.hsn,
+						maio := fhp.maio_hsn.maio,
+						ma := f_pad_bit(fhp.ma_map.ma, 64, '0'B),
+						ma_bit_len := lengthof(fhp.ma_map.ma));
 			} else {
 				tr_ts := tr_PCUIF_InfoTrxTsH0;
 			}
