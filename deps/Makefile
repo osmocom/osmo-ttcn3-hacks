@@ -70,6 +70,7 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
 			titan.TestPorts.USB \
+			titan.TestPorts.AF_PACKET \
 			osmo-uecups
 
 ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
@@ -111,6 +112,7 @@ titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A-5-gd0f0ce6
 titan.ProtocolModules.SUA_commit=		R.5.A-5-gcf1137a
 titan.ProtocolModules.TCP_commit=		R.3.A-5-g39e5f45
 titan.ProtocolModules.UDP_commit=		R.4.A-5-geea8aa3
+titan.TestPorts.AF_PACKET_commit=		master
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A-6-gf4380d0
 titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
 titan.TestPorts.HTTPmsg_commit=			R.9.B-4-g9a0dfde
