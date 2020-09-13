@@ -1,5 +1,5 @@
 /* GPRS-NS Emulation in TTCN-3
- * (C) 2018 Harald Welte <laforge@gnumonks.org>
+ * (C) 2018-2020 Harald Welte <laforge@gnumonks.org>
  * contributions by sysmocom - s.f.m.c. GmbH
  * All rights reserved.
  *
@@ -13,8 +13,7 @@ module NS_Emulation {
 	import from NS_Types all;
 	import from BSSGP_Types all;
 	import from Osmocom_Gb_Types all;
-	import from NS_CodecPort all;
-	import from NS_CodecPort_CtrlFunct all;
+	import from NS_Provider_IPL4 all;
 	import from IPL4asp_Types all;
 	import from PCUIF_Types all;
 
@@ -72,8 +71,7 @@ module NS_Emulation {
 	type port NS_SP_PT message {
 		in	NsUnitdataRequest;
 		out	NsUnitdataIndication,
-			NsStatusIndication,
-			ASP_Event;
+			NsStatusIndication;
 	} with { extension "internal" };
 
 	/* port from the user point of view */
@@ -92,15 +90,12 @@ module NS_Emulation {
 
 	private function f_init() runs on NS_CT {
 		var Result res;
+
 		/* Connect the UDP socket */
-		res := f_IPL4_connect(NSCP, config.remote_ip, config.remote_udp_port, config.local_ip, config.local_udp_port, 0, { udp := {}});
-		if (not ispresent(res.connId)) {
-			setverdict(fail, "Could not connect NS UDP socket from " &
-				   config.local_ip & ":"  & int2str(config.local_udp_port) &
-				   " to " & config.remote_ip & ":" & int2str(config.remote_udp_port));
-			mtc.stop;
-		}
-		g_conn_id := res.connId;
+		vc_NSP_IP := NS_Provider_IPL4_CT.create;
+		connect(self:NSCP, vc_NSP_IP:NSE);
+		vc_NSP_IP.start(NS_Provider_IPL4.main(config));
+
 		f_change_state(NSE_S_DEAD_BLOCKED);
 		/* Send the first NS-ALIVE to test the connection */
 		if (not config.role_sgsn) {
@@ -108,16 +103,28 @@ module NS_Emulation {
 		}
 	}
 
+	type component NS_Provider_CT {
+		/* upper port, facing to NS_Emulation:NSCP */
+		port NS_PROVIDER_PT NSE;
+		/* lower layer ports (UDP/IP, Frame Relay) are added in derived components */
+	};
+
+	/* port between NS_Provider and NS_CT */
+	type port NS_PROVIDER_PT message {
+		inout PDU_NS;
+	} with { extension "internal" };
+
 	type component NS_CT {
 		/* UDP port towards the bottom (IUT) */
-		port NS_CODEC_PT NSCP;
+		port NS_PROVIDER_PT NSCP;
+		var NS_Provider_IPL4_CT vc_NSP_IP;
+
 		/* NS-User SAP towards the user */
 		port NS_SP_PT NS_SP;
 
 		var NSConfiguration config;
 
 		var NseState		g_state := NSE_S_DEAD_BLOCKED;
-		var ConnectionId	g_conn_id := -1;
 
 		timer Tns_alive := 3.0;
 		timer Tns_test := 10.0;
@@ -144,32 +151,32 @@ module NS_Emulation {
 	}
 
 	private function f_sendReset() runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, ts_NS_RESET(NS_CAUSE_OM_INTERVENTION, config.nsvci, config.nsei)));
+		NSCP.send(ts_NS_RESET(NS_CAUSE_OM_INTERVENTION, config.nsvci, config.nsei));
 		g_state := NSE_S_WAIT_RESET;
 	}
 
 	private function f_sendAlive() runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, t_NS_ALIVE));
+		NSCP.send(t_NS_ALIVE);
 		Tns_alive.start;
 	}
 
 	private function f_sendUnblock() runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, t_NS_UNBLOCK));
+		NSCP.send(t_NS_UNBLOCK);
 		Tns_block.start;
 	}
 
 	private function f_sendBlock(NsCause cause) runs on NS_CT {
-		NSCP.send(t_NS_Send(g_conn_id, ts_NS_BLOCK(cause, config.nsvci)));
+		NSCP.send(ts_NS_BLOCK(cause, config.nsvci));
 		Tns_block.start;
 	}
 
 	altstep as_allstate() runs on NS_CT {
-		var NS_RecvFrom rf;
+		var PDU_NS rf;
 		var ASP_Event evt;
 
 		/* transition to DEAD if t_alive times out */
 		[Tns_alive.running] Tns_alive.timeout {
-			log("Tns-alive expired: changing to DEAD_BLOCKED + starting Tns-test");
+			log("Tns-aeive expired: changing to DEAD_BLOCKED + starting Tns-test");
 			f_change_state(NSE_S_DEAD_BLOCKED);
 			Tns_test.start;
 		}
@@ -180,31 +187,31 @@ module NS_Emulation {
 		}
 
 		/* Stop t_alive when receiving ALIVE-ACK */
-		[] NSCP.receive(t_NS_RecvFrom(t_NS_ALIVE_ACK)) {
+		[] NSCP.receive(t_NS_ALIVE_ACK) {
 			log("NS-ALIVE-ACK received: stopping Tns-alive; starting Tns-test");
 			Tns_alive.stop;
 			Tns_test.start;
 		}
 
 		/* respond to NS-ALIVE with NS-ALIVE-ACK */
-		[] NSCP.receive(t_NS_RecvFrom(t_NS_ALIVE)) {
-			NSCP.send(t_NS_Send(g_conn_id, t_NS_ALIVE_ACK));
+		[] NSCP.receive(t_NS_ALIVE) {
+			NSCP.send(t_NS_ALIVE_ACK);
 		}
 
 		/* Respond to BLOCK for wrong NSVCI */
-		[] NSCP.receive(t_NS_RecvFrom(tr_NS_BLOCK(?, ?))) -> value rf {
+		[] NSCP.receive(tr_NS_BLOCK(?, ?)) -> value rf {
 			log("Rx NS-BLOCK for unknown NSVCI");
 			/* FIXME */
 		}
 
 		/* Respond to RESET with correct NSEI/NSVCI */
-		[] NSCP.receive(t_NS_RecvFrom(tr_NS_RESET(?, config.nsvci, config.nsei))) -> value rf {
+		[] NSCP.receive(tr_NS_RESET(?, config.nsvci, config.nsei)) -> value rf {
 			f_change_state(NSE_S_ALIVE_BLOCKED);
-			NSCP.send(t_NS_Send(g_conn_id, ts_NS_RESET_ACK(config.nsvci, config.nsei)));
+			NSCP.send(ts_NS_RESET_ACK(config.nsvci, config.nsei));
 		}
 
 		/* Respond to RESET with wrong NSEI/NSVCI */
-		[] NSCP.receive(t_NS_RecvFrom(tr_NS_RESET(?, ?, ?))) -> value rf {
+		[] NSCP.receive(tr_NS_RESET(?, ?, ?)) -> value rf {
 			log("Rx NS-RESET for unknown NSEI/NSVCI");
 			/* FIXME */
 		}
@@ -212,49 +219,47 @@ module NS_Emulation {
 		[config.role_sgsn and config.handle_sns] as_sns_sgsn();
 
 		/* default case of handling unknown PDUs */
-		[] NSCP.receive(t_NS_RecvFrom(?)) -> value rf {
-			log("Rx Unexpected NS PDU ", rf.msg," in state ", g_state);
-			NSCP.send(t_NS_Send(g_conn_id, ts_NS_STATUS(NS_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, rf.msg)));
+		[] NSCP.receive(PDU_NS: ?) -> value rf {
+			log("Rx Unexpected NS PDU ", rf," in state ", g_state);
+			NSCP.send(ts_NS_STATUS(NS_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, rf));
 		}
-		/* Forwarding of ASP_Evet to user */
-		[] NSCP.receive(ASP_Event:?) -> value evt { NS_SP.send(evt); }
 	}
 
 	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
 	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
 	altstep as_sns_sgsn() runs on NS_CT {
-		var NS_RecvFrom rf;
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_SIZE(config.nsei))) -> value rf {
+		var PDU_NS rf;
+		[] NSCP.receive(tr_SNS_SIZE(config.nsei)) -> value rf {
 			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_SIZE_ACK(config.nsei, omit)));
+			NSCP.send(ts_SNS_SIZE_ACK(config.nsei, omit));
 		}
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_SIZE(?))) {
+		[] NSCP.receive(tr_SNS_SIZE(?)) {
 			setverdict(fail, "SNS-SIZE from unexpected NSEI");
 			self.stop;
 		}
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, true,
-				    {tr_SNS_IPv4(config.remote_ip, config.remote_udp_port)}))) -> value rf {
+		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, true,
+				    {tr_SNS_IPv4(config.remote_ip, config.remote_udp_port)})) -> value rf {
 			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_CONFIG_ACK(config.nsei, omit)));
+			NSCP.send(ts_SNS_CONFIG_ACK(config.nsei, omit));
 			/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
 			var IP4_Elements v4 := { valueof(ts_SNS_IPv4(config.local_ip, config.local_udp_port)) };
-			NSCP.send(t_NS_Send(g_conn_id, ts_SNS_CONFIG(config.nsei, true, v4)));
+			NSCP.send(ts_SNS_CONFIG(config.nsei, true, v4));
 			alt {
-			[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG_ACK(config.nsei, omit))) {
+			[] NSCP.receive(tr_SNS_CONFIG_ACK(config.nsei, omit)) {
 				/* success */
 				}
-			[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG_ACK(config.nsei, ?))) {
+			[] NSCP.receive(tr_SNS_CONFIG_ACK(config.nsei, ?)) {
 				setverdict(fail, "Unexpected SNS-CONFIG-NACK");
 				self.stop;
 				}
 			}
 		}
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, false, ?))) { /* ignore */}
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(config.nsei, true, ?))) {
+		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, false, ?)) { /* ignore */}
+		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, true, ?)) {
 			setverdict(fail, "Unexpected SNS-CONFIG content");
 			self.stop;
 		}
-		[] NSCP.receive(t_NS_RecvFrom(tr_SNS_CONFIG(?, ?, ?))) {
+		[] NSCP.receive(tr_SNS_CONFIG(?, ?, ?)) {
 			setverdict(fail, "SNS-CONFIG from unexpected NSEI");
 			self.stop;
 		}
@@ -262,7 +267,7 @@ module NS_Emulation {
 
 	private function f_ScanEvents() runs on NS_CT {
 		var NsUnitdataRequest ud_req;
-		var NS_RecvFrom rf;
+		var PDU_NS rf;
 		var default d;
 
 		d := activate(as_allstate());
@@ -274,7 +279,7 @@ module NS_Emulation {
 			}
 		} else if (g_state == NSE_S_WAIT_RESET) {
 			alt {
-				[] NSCP.receive(t_NS_RecvFrom(tr_NS_RESET_ACK(config.nsvci, config.nsei))) -> value rf {
+				[] NSCP.receive(tr_NS_RESET_ACK(config.nsvci, config.nsei)) -> value rf {
 					f_change_state(NSE_S_ALIVE_BLOCKED);
 					f_sendAlive();
 					f_sendUnblock();
@@ -283,16 +288,16 @@ module NS_Emulation {
 		} else if (g_state == NSE_S_ALIVE_BLOCKED) {
 			alt {
 				/* bogus block, just respond with ACK */
-				[] NSCP.receive(t_NS_RecvFrom(tr_NS_BLOCK(?, config.nsvci))) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, ts_NS_BLOCK_ACK(config.nsvci)));
+				[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
+					NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
 				}
 				/* Respond to UNBLOCK with UNBLOCK-ACK + change state */
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, t_NS_UNBLOCK_ACK));
+				[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
+					NSCP.send(t_NS_UNBLOCK_ACK);
 					Tns_block.stop;
 					f_change_state(NSE_S_ALIVE_UNBLOCKED);
 				}
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK_ACK)) -> value rf {
+				[] NSCP.receive(t_NS_UNBLOCK_ACK) -> value rf {
 					Tns_block.stop;
 					f_change_state(NSE_S_ALIVE_UNBLOCKED);
 				}
@@ -304,33 +309,33 @@ module NS_Emulation {
 		} else if (g_state == NSE_S_ALIVE_UNBLOCKED) {
 			alt {
 				/* bogus unblock, just respond with ACK */
-				[] NSCP.receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, t_NS_UNBLOCK_ACK));
+				[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
+					NSCP.send(t_NS_UNBLOCK_ACK);
 				}
 				/* Respond to BLOCK with BLOCK-ACK + change state */
-				[] NSCP.receive(t_NS_RecvFrom(tr_NS_BLOCK(?, config.nsvci))) -> value rf {
-					NSCP.send(t_NS_Send(g_conn_id, ts_NS_BLOCK_ACK(config.nsvci)));
+				[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
+					NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
 					Tns_block.stop;
 					f_change_state(NSE_S_ALIVE_BLOCKED);
 				}
-				[] NSCP.receive(t_NS_RecvFrom(tr_NS_BLOCK_ACK(config.nsvci))) -> value rf {
+				[] NSCP.receive(tr_NS_BLOCK_ACK(config.nsvci)) -> value rf {
 					Tns_block.stop;
 				}
 				/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
-				[] NSCP.receive(t_NS_RecvFrom(tr_NS_UNITDATA(?, ?, ?))) -> value rf {
+				[] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
 					NS_SP.send(t_NsUdInd(config.nsei,
-							     oct2int(rf.msg.pDU_NS_Unitdata.bVCI),
-							     rf.msg.pDU_NS_Unitdata.nS_SDU));
+							     oct2int(rf.pDU_NS_Unitdata.bVCI),
+							     rf.pDU_NS_Unitdata.nS_SDU));
 				}
 				/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
 				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, ?, omit)) -> value ud_req {
 					/* using raw octetstring PDU */
-					NSCP.send(t_NS_Send(g_conn_id, ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu)));
+					NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
 				}
 				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, omit, ?)) -> value ud_req {
 					/* using decoded BSSGP PDU that we need to encode first */
 					var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
-					NSCP.send(t_NS_Send(g_conn_id, ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc)));
+					NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
 				}
 			}
 		}
