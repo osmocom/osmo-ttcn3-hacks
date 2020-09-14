@@ -203,7 +203,7 @@ module NS_Emulation {
 		Tns_block.start;
 	}
 
-	altstep as_allstate() runs on NS_CT {
+	private altstep as_allstate() runs on NS_CT {
 		var PDU_NS rf;
 		var ASP_Event evt;
 
@@ -266,7 +266,7 @@ module NS_Emulation {
 
 	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
 	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
-	altstep as_sns_sgsn() runs on NS_CT {
+	private altstep as_sns_sgsn() runs on NS_CT {
 		var PDU_NS rf;
 		[] NSCP.receive(tr_SNS_SIZE(config.nsei)) -> value rf {
 			/* blindly acknowledge whatever the PCU sends */
@@ -305,82 +305,80 @@ module NS_Emulation {
 		}
 	}
 
-	private function f_ScanEvents() runs on NS_CT {
+	private altstep as_alive_blocked() runs on NS_CT {
+		var PDU_NS rf;
+		/* bogus block, just respond with ACK */
+		[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
+			NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
+		}
+		/* Respond to UNBLOCK with UNBLOCK-ACK + change state */
+		[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
+			NSCP.send(t_NS_UNBLOCK_ACK);
+			Tns_block.stop;
+			f_change_state(NSE_S_ALIVE_UNBLOCKED);
+		}
+		[] NSCP.receive(t_NS_UNBLOCK_ACK) -> value rf {
+			Tns_block.stop;
+			f_change_state(NSE_S_ALIVE_UNBLOCKED);
+		}
+		[] Tns_block.timeout {
+			/* repeat unblock transmission */
+			f_sendUnblock();
+		}
+	}
+
+	private altstep as_alive_unblocked() runs on NS_CT {
 		var NsUnitdataRequest ud_req;
 		var PDU_NS rf;
-		var default d;
+		/* bogus unblock, just respond with ACK */
+		[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
+			NSCP.send(t_NS_UNBLOCK_ACK);
+		}
+		/* Respond to BLOCK with BLOCK-ACK + change state */
+		[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
+			NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
+			Tns_block.stop;
+			f_change_state(NSE_S_ALIVE_BLOCKED);
+		}
+		[] NSCP.receive(tr_NS_BLOCK_ACK(config.nsvci)) -> value rf {
+			Tns_block.stop;
+		}
+		/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
+		[] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
+			NS_SP.send(t_NsUdInd(config.nsei,
+					     oct2int(rf.pDU_NS_Unitdata.bVCI),
+					     rf.pDU_NS_Unitdata.nS_SDU));
+		}
+		/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
+		[] NS_SP.receive(t_NsUdReq(config.nsei, ?, ?, omit)) -> value ud_req {
+			/* using raw octetstring PDU */
+			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
+		}
+		[] NS_SP.receive(t_NsUdReq(config.nsei, ?, omit, ?)) -> value ud_req {
+			/* using decoded BSSGP PDU that we need to encode first */
+			var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
+			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
+		}
+	}
 
-		d := activate(as_allstate());
+	private altstep as_wait_reset() runs on NS_CT {
+		var PDU_NS rf;
+		[] NSCP.receive(tr_NS_RESET_ACK(config.nsvci, config.nsei)) -> value rf {
+			f_change_state(NSE_S_ALIVE_BLOCKED);
+			f_sendAlive();
+			f_sendUnblock();
+		}
+	}
 
+	private function f_ScanEvents() runs on NS_CT {
+		var PDU_NS rf;
 		while (true) {
-		if (g_state == NSE_S_DEAD_BLOCKED) {
 			alt {
-				[false] any timer.timeout {}
-			}
-		} else if (g_state == NSE_S_WAIT_RESET) {
-			alt {
-				[] NSCP.receive(tr_NS_RESET_ACK(config.nsvci, config.nsei)) -> value rf {
-					f_change_state(NSE_S_ALIVE_BLOCKED);
-					f_sendAlive();
-					f_sendUnblock();
-				}
-			}
-		} else if (g_state == NSE_S_ALIVE_BLOCKED) {
-			alt {
-				/* bogus block, just respond with ACK */
-				[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
-					NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
-				}
-				/* Respond to UNBLOCK with UNBLOCK-ACK + change state */
-				[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
-					NSCP.send(t_NS_UNBLOCK_ACK);
-					Tns_block.stop;
-					f_change_state(NSE_S_ALIVE_UNBLOCKED);
-				}
-				[] NSCP.receive(t_NS_UNBLOCK_ACK) -> value rf {
-					Tns_block.stop;
-					f_change_state(NSE_S_ALIVE_UNBLOCKED);
-				}
-				[] Tns_block.timeout {
-					/* repeat unblock transmission */
-					f_sendUnblock();
-				}
-			}
-		} else if (g_state == NSE_S_ALIVE_UNBLOCKED) {
-			alt {
-				/* bogus unblock, just respond with ACK */
-				[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
-					NSCP.send(t_NS_UNBLOCK_ACK);
-				}
-				/* Respond to BLOCK with BLOCK-ACK + change state */
-				[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
-					NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
-					Tns_block.stop;
-					f_change_state(NSE_S_ALIVE_BLOCKED);
-				}
-				[] NSCP.receive(tr_NS_BLOCK_ACK(config.nsvci)) -> value rf {
-					Tns_block.stop;
-				}
-				/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
-				[] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
-					NS_SP.send(t_NsUdInd(config.nsei,
-							     oct2int(rf.pDU_NS_Unitdata.bVCI),
-							     rf.pDU_NS_Unitdata.nS_SDU));
-				}
-				/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
-				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, ?, omit)) -> value ud_req {
-					/* using raw octetstring PDU */
-					NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
-				}
-				[] NS_SP.receive(t_NsUdReq(config.nsei, ?, omit, ?)) -> value ud_req {
-					/* using decoded BSSGP PDU that we need to encode first */
-					var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
-					NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
-				}
+			[g_state == NSE_S_WAIT_RESET] as_wait_reset();
+			[g_state == NSE_S_ALIVE_BLOCKED] as_alive_blocked();
+			[g_state == NSE_S_ALIVE_UNBLOCKED] as_alive_unblocked();
+			[] as_allstate();
 			}
 		}
-
-		} /* while */
-		//deactivate(d);
 	}
 }
