@@ -42,7 +42,10 @@ import from TELNETasp_PortType all;
 
 modulepar {
 	charstring mp_cbc_ip := "0.0.0.0";
+	charstring mp_cbc_ip6 := "::";
 	integer mp_cbc_port := 48049;
+	charstring mp_bsc_cbsp_ip := "127.0.0.1";
+	charstring mp_bsc_cbsp_ip6 := "::1";
 	integer mp_bsc_cbsp_port := 48050;
 
 	/* BTS 0: 001-01-1-0 with CBCH
@@ -54,6 +57,28 @@ modulepar {
 	GsmCgiAbstract mp_cgi_bts2 := { '001'H, '01'H, 2, 1 };
 	GsmCgiAbstract mp_cgi_bts3 := { '001'H, '01'H, 2, 3 };
 }
+
+type record CBSP_Pars {
+	boolean tcp_client,
+	charstring local_ip,
+	integer local_port,
+	charstring remote_ip,
+	integer remote_port,
+	uint16_t cbsp_msg_id optional, /*server mode only */
+	uint16_t cbsp_ser_no optional  /*server mode only */
+};
+
+private template (value) CBSP_Pars ts_CBSP_Pars_default(boolean tcp_client := true,
+							template (omit) uint16_t cbsp_msg_id := omit,
+							template (omit) uint16_t cbsp_ser_no := omit) := {
+	tcp_client := tcp_client,
+	local_ip := mp_cbc_ip,
+	local_port := mp_cbc_port,
+	remote_ip := mp_bsc_cbsp_ip,
+	remote_port := mp_bsc_cbsp_port,
+	cbsp_msg_id := cbsp_msg_id,
+	cbsp_ser_no := cbsp_ser_no
+};
 
 private type record GsmCgiAbstract {
 	GsmMcc mcc,
@@ -71,6 +96,7 @@ private template (value) OCT2 bssmap_lac(GsmCgiAbstract cgi) := ts_BSSMAP_CI_LAC
 private template (value) OCT2 bssmap_ci(GsmCgiAbstract cgi) := ts_BSSMAP_CI_CI(cgi.ci);
 
 type component cbsp_test_CT extends test_CT, CBSP_Adapter_CT {
+	var CBSP_Pars g_pars;
 	var uint16_t g_cbsp_msg_id := 0;
 	var uint16_t g_cbsp_ser_no := 0;
 }
@@ -105,12 +131,29 @@ var ASP_RSL_Unitdata rx;
 	}
 }
 
-private function f_vty_set_cbsp_mode(TELNETasp_PT pt, charstring mode) {
-	f_vty_enter_config(pt);
-	f_vty_transceive(pt, "cbc");
-	f_vty_transceive(pt, "mode " & mode);
-	f_vty_transceive(pt, "exit");
-	f_vty_transceive(pt, "exit");
+private function f_vty_configure_cbsp() runs on cbsp_test_CT {
+	f_vty_enter_config(BSCVTY);
+	f_vty_transceive(BSCVTY, "cbc");
+	/* Move to disabled in order to force socker recreating later */
+	f_vty_transceive(BSCVTY, "mode disabled");
+
+	/* Configure IP addresses */
+
+	if (g_pars.tcp_client) {
+		f_vty_transceive(BSCVTY, "server");
+		f_vty_transceive(BSCVTY, "local-ip " & g_pars.remote_ip);
+		f_vty_transceive(BSCVTY, "exit");
+		f_vty_transceive(BSCVTY, "mode server");
+	} else {
+		f_vty_transceive(BSCVTY, "client");
+		f_vty_transceive(BSCVTY, "local-ip " & g_pars.remote_ip);
+		f_vty_transceive(BSCVTY, "remote-ip " & g_pars.local_ip);
+		f_vty_transceive(BSCVTY, "exit");
+		f_vty_transceive(BSCVTY, "mode client");
+	}
+
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
 }
 
 private function f_init(float guard_timeout := 30.0) runs on cbsp_test_CT {
@@ -119,24 +162,27 @@ private function f_init(float guard_timeout := 30.0) runs on cbsp_test_CT {
 			    tr_RSL_NO_BCCH_INFO, tr_RSL_NO_SACCH_FILL,
 			    tr_RSL_MsgTypeD(?))));
 	activate(as_FailRSL());
+
+	f_vty_configure_cbsp();
+
+	if (g_pars.tcp_client) {
+		f_cbsp_init_client();
+	} else {
+		f_cbsp_init_server();
+	}
+
 }
 private function f_cbsp_init_client() runs on cbsp_test_CT {
-	f_init();
-	f_vty_set_cbsp_mode(BSCVTY, "server");
-	CBSP_Adapter.f_connect(mp_bsc_ip, mp_bsc_cbsp_port, "", -1);
+	CBSP_Adapter.f_connect(g_pars.remote_ip, g_pars.remote_port, g_pars.local_ip, 0);
 	CBSP[0].receive(tr_CBSP_Recv(?, tr_CBSP_RESTART(?, CBSP_BC_MSGT_CBS, ?)));
 	setverdict(pass);
 }
 
-private function f_cbsp_init_server(uint16_t cbsp_msg_id, uint16_t cbsp_ser_no, float guard_timeout := 30.0) runs on cbsp_test_CT {
+private function f_cbsp_init_server(float guard_timeout := 30.0) runs on cbsp_test_CT {
 	var ASP_Event asp_evt;
 	timer T := 10.0;
 
-	f_init(guard_timeout := guard_timeout);
-
-	f_vty_set_cbsp_mode(BSCVTY, "client");
-
-	CBSP_Adapter.f_bind(mp_cbc_ip, mp_cbc_port);
+	CBSP_Adapter.f_bind(g_pars.local_ip, g_pars.local_port);
 
 	T.start;
 	alt {
@@ -150,8 +196,8 @@ private function f_cbsp_init_server(uint16_t cbsp_msg_id, uint16_t cbsp_ser_no, 
 	}
 	f_expect_cbsp_restart();
 
-	g_cbsp_msg_id := cbsp_msg_id;
-	g_cbsp_ser_no := cbsp_ser_no;
+	g_cbsp_msg_id := g_pars.cbsp_msg_id;
+	g_cbsp_ser_no := g_pars.cbsp_ser_no;
 	log("g_cbsp_msg_id=", g_cbsp_msg_id, "  g_cbsp_ser_no=", g_cbsp_ser_no);
 
 	f_cbsp_reset_bss(0);
@@ -391,22 +437,42 @@ return template (present) RSL_Message
  * Test Cases
  ***********************************************************************/
 
-/* Test if BSC (server) accepts connections from CBC (client) */
+/* Test if BSC (server) accepts connections from CBC (client, IPv4) */
 testcase TC_cbsp_bsc_server() runs on cbsp_test_CT {
-	f_cbsp_init_client();
+	g_pars := valueof(ts_CBSP_Pars_default(tcp_client := true));
+	f_init();
 	setverdict(pass);
 }
 
-/* Test if BSC (client) is connecting to CBC (server) */
+/* Test if BSC (server) accepts connections from CBC (client, IPv6) */
+testcase TC_cbsp_bsc_server_ipv6() runs on cbsp_test_CT {
+	g_pars := valueof(ts_CBSP_Pars_default(tcp_client := true));
+	g_pars.local_ip := mp_cbc_ip6;
+	g_pars.remote_ip := mp_bsc_cbsp_ip6;
+	f_init();
+	setverdict(pass);
+}
+
+/* Test if BSC (client) is connecting to CBC (server, IPv4) */
 testcase TC_cbsp_bsc_client() runs on cbsp_test_CT {
-	f_cbsp_init_server(0, 0);
+	g_pars := valueof(ts_CBSP_Pars_default(false, 0, 0));
+	f_init();
+	setverdict(pass);
+}
+
+/* Test if BSC (client) is connecting to CBC (server, IPv6) */
+testcase TC_cbsp_bsc_client_ipv6() runs on cbsp_test_CT {
+	g_pars := valueof(ts_CBSP_Pars_default(false, 0, 0));
+	g_pars.local_ip := mp_cbc_ip6;
+	g_pars.remote_ip := mp_bsc_cbsp_ip6;
+	f_init();
 	setverdict(pass);
 }
 
 /* Test if a BSS-global RESET is executed successfully */
 testcase TC_cbsp_reset_bss() runs on cbsp_test_CT {
-	f_cbsp_init_server(0, 0);
-
+	g_pars := valueof(ts_CBSP_Pars_default(false, 0, 0));
+	f_init();
 	f_cbsp_reset_bss(0);
 	setverdict(pass);
 }
@@ -414,7 +480,8 @@ testcase TC_cbsp_reset_bss() runs on cbsp_test_CT {
 testcase TC_cbsp_write() runs on cbsp_test_CT {
 	var template (value) CBSP_PDU tx;
 	var CBSP_IEs pages := {f_gen_page()};
-	f_cbsp_init_server(0, 0);
+	g_pars := valueof(ts_CBSP_Pars_default(false, 0, 0));
+	f_init();
 
 	tx := ts_CBSP_WRITE_CBS(msg_id:=23,  new_ser_nr:=42, cell_list:=ts_BSSMAP_CIL_BSS,
 				channel_ind:=0, category:=CBSP_CATEG_NORMAL,
@@ -446,7 +513,8 @@ function f_tc_cbsp_write_bss(integer payload_len := -1, template (present) integ
 	f_g_cbsp_next_msg_id_ser_no();
 }
 testcase TC_cbsp_write_bss() runs on cbsp_test_CT {
-	f_cbsp_init_server(1001, 1501, guard_timeout := 60.0);
+	g_pars := valueof(ts_CBSP_Pars_default(false, 1001, 1501));
+	f_init(guard_timeout := 60.0);
 	/* In the SMSCB message, there is a head followed by payload,
 	 * and the resulting data is segmented in blocks of 22 octets (<= 4 blocks).
 	 *
@@ -475,8 +543,10 @@ testcase TC_cbsp_write_bss() runs on cbsp_test_CT {
 testcase TC_cbsp_write_bts_cgi() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 2001, 2501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
-	f_cbsp_init_server(2001, 2501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=cell_list, fail_list:=omit);
 	var template (present) RSL_Message tr := f_page2rsl(pages[0], g_cbsp_msg_id, g_cbsp_ser_no);
@@ -488,8 +558,10 @@ testcase TC_cbsp_write_bts_cgi() runs on cbsp_test_CT {
 testcase TC_cbsp_write_bts_no_cbch() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 3001, 3501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts3)});
-	f_cbsp_init_server(3001, 3501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=omit, fail_list:={?});
 	f_sleep(5.0);
@@ -499,8 +571,10 @@ testcase TC_cbsp_write_bts_no_cbch() runs on cbsp_test_CT {
 testcase TC_cbsp_write_unknown_bts() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 4001, 4501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_CGI({ts_BSSMAP_CI_CGI(mp_cgi_bts0.mcc, mp_cgi_bts1.mnc, 22222, 33333)});
-	f_cbsp_init_server(4001, 4501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=omit, fail_list:={?});
 	f_sleep(5.0);
@@ -510,8 +584,10 @@ testcase TC_cbsp_write_unknown_bts() runs on cbsp_test_CT {
 testcase TC_cbsp_write_lac_ci() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 5001, 5501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(5001, 5501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=?, fail_list:=omit);
 	IPA_RSL[0].receive(tr_ASP_RSL_UD(f_page2rsl(pages[0], g_cbsp_msg_id, g_cbsp_ser_no)));
@@ -522,8 +598,10 @@ testcase TC_cbsp_write_lac_ci() runs on cbsp_test_CT {
 testcase TC_cbsp_write_ci() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 6001, 6501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_CI({bssmap_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(6001, 6501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=?, fail_list:=omit);
 	IPA_RSL[0].receive(tr_ASP_RSL_UD(f_page2rsl(pages[0], g_cbsp_msg_id, g_cbsp_ser_no)));
@@ -534,12 +612,14 @@ testcase TC_cbsp_write_ci() runs on cbsp_test_CT {
 testcase TC_cbsp_write_lai() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 7001, 7501));
+	f_init();
+
 	/* bts0 and bts1 have the same LAI (only differ in cell identity).
 	 * bts2 and bts3 also have the same LAI, but only bts2 has a CBCH.
 	 * Target only bts2.
 	 */
 	cell_list := ts_BSSMAP_CIL_LAI({bssmap_lai(mp_cgi_bts2)});
-	f_cbsp_init_server(7001, 7501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=?, fail_list:=omit);
 	IPA_RSL[2].receive(tr_ASP_RSL_UD(f_page2rsl(pages[0], g_cbsp_msg_id, g_cbsp_ser_no)));
@@ -550,8 +630,10 @@ testcase TC_cbsp_write_lai() runs on cbsp_test_CT {
 testcase TC_cbsp_write_lac() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 8001, 8501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC({bssmap_lac(mp_cgi_bts0)});
-	f_cbsp_init_server(8001, 8501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages,
 		     success_list:=?, fail_list:=omit);
 	var template (present) RSL_Message tr := f_page2rsl(pages[0], g_cbsp_msg_id, g_cbsp_ser_no);
@@ -566,8 +648,10 @@ testcase TC_cbsp_write_lac() runs on cbsp_test_CT {
 testcase TC_cbsp_write_then_replace() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 9001, 9501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(9001, 9501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, num_bcast_req:=10, content:=pages,
 		     success_list:=?, fail_list:=omit);
 
@@ -588,8 +672,10 @@ testcase TC_cbsp_write_then_replace() runs on cbsp_test_CT {
 testcase TC_cbsp_replace_nonexist() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 10001, 10501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(10001, 10501);
 	f_cbsp_replace(10, 10023, 10042, cell_list, content:=pages,
 		       success_list:=omit, fail_list:=?);
 }
@@ -599,8 +685,10 @@ testcase TC_cbsp_write_too_many() runs on cbsp_test_CT {
 	/* repeating three pages at an interval of 1 is impossible */
 	var CBSP_IEs pages := {f_gen_page(), f_gen_page(), f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 11001, 11501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(11001, 11501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, rep_period:=1, content:=pages,
 		     success_list:=omit, fail_list:=?);
 }
@@ -609,16 +697,20 @@ testcase TC_cbsp_write_too_many() runs on cbsp_test_CT {
 testcase TC_cbsp_kill_nonexist() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 12001, 12501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(12001, 12501);
 	f_cbsp_kill(g_cbsp_msg_id, g_cbsp_ser_no, 0, cell_list, success_list:=omit, fail_list:=?);
 }
 /* Write a message, then kill it */
 testcase TC_cbsp_write_then_kill() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 13001, 13501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(13001, 13501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages, success_list:=?, fail_list:=omit);
 	f_cbsp_kill(g_cbsp_msg_id, g_cbsp_ser_no, 0, cell_list, success_list:=?, fail_list:=omit);
 }
@@ -627,8 +719,10 @@ testcase TC_cbsp_write_then_kill() runs on cbsp_test_CT {
 testcase TC_cbsp_write_then_reset() runs on cbsp_test_CT {
 	var CBSP_IEs pages := {f_gen_page()};
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
+	g_pars := valueof(ts_CBSP_Pars_default(false, 14001, 14501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_LAC_CI({bssmap_lac_ci(mp_cgi_bts0)});
-	f_cbsp_init_server(14001, 14501);
 	f_cbsp_write(g_cbsp_msg_id, g_cbsp_ser_no, cell_list, content:=pages, success_list:=?, fail_list:=omit);
 	f_cbsp_reset_bss(0);
 }
@@ -647,8 +741,10 @@ testcase TC_cbsp_emerg_write_bts_cgi_dchan() runs on cbsp_test_CT {
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
 	var ASP_RSL_Unitdata rx_rsl_ud;
 
+	g_pars := valueof(ts_CBSP_Pars_default(false, 15001, 15501));
+	f_init();
+
 	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
-	f_cbsp_init_server(15001, 15501);
 
 	/* first establish a dedicated channel */
 	var DchanTuple dt := f_est_dchan('23'O, 23, '00010203040506'O);
@@ -689,9 +785,10 @@ testcase TC_cbsp_emerg_write_bts_cgi_cchan() runs on cbsp_test_CT {
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
 	var ASP_RSL_Unitdata rx_rsl_ud;
 
-	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
-	f_cbsp_init_server(16001, 16501);
+	g_pars := valueof(ts_CBSP_Pars_default(false, 16001, 16501));
+	f_init();
 
+	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
 	f_cbsp_write_emerg(g_cbsp_msg_id, g_cbsp_ser_no, cell_list);
 	var template (present) octetstring tr_apdu := f_gen_etws_pn(g_cbsp_ser_no, g_cbsp_msg_id);
 	timer T := 5.0;
@@ -718,9 +815,10 @@ testcase TC_cbsp_emerg_write_bts_cgi_cchan_disable() runs on cbsp_test_CT {
 	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list;
 	var ASP_RSL_Unitdata rx_rsl_ud;
 
-	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
-	f_cbsp_init_server(17001, 17501);
+	g_pars := valueof(ts_CBSP_Pars_default(false, 17001, 17501));
+	f_init();
 
+	cell_list := ts_BSSMAP_CIL_CGI({bssmap_cgi(mp_cgi_bts0)});
 	f_cbsp_write_emerg(g_cbsp_msg_id, g_cbsp_ser_no, cell_list);
 
 	/* first expect the PN to be enabled */
@@ -764,7 +862,9 @@ testcase TC_cbsp_emerg_write_bts_cgi_cchan_disable() runs on cbsp_test_CT {
 
 control {
 	execute( TC_cbsp_bsc_server() );
+	execute( TC_cbsp_bsc_server_ipv6() );
 	execute( TC_cbsp_bsc_client() );
+	execute( TC_cbsp_bsc_client_ipv6() );
 	execute( TC_cbsp_reset_bss() );
 
 	/* test various different types of Cell Identities */
