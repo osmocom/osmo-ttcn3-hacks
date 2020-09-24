@@ -53,7 +53,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Fu
 FILES+="NS_Provider_IPL4.ttcn NS_Emulation.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
-FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
+FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn RAW_NS.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
