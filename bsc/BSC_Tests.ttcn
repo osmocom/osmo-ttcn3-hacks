@@ -30,6 +30,8 @@ import from BSSAP_Types all;
 import from RAN_Adapter all;
 import from BSSAP_LE_Adapter all;
 import from BSSAP_LE_CodecPort all;
+import from BSSAP_LE_Types all;
+import from BSSLAP_Types all;
 import from BSSAP_CodecPort all;
 import from BSSMAP_Templates all;
 import from IPA_Emulation all;
@@ -63,6 +65,7 @@ import from GSM_RR_Types all;
 
 import from SCCP_Templates all;
 import from BSSMAP_Templates all;
+import from BSSMAP_LE_Templates all;
 
 import from SCCPasp_Types all;
 
@@ -6189,6 +6192,22 @@ function f_tmsi_nri(integer nri_v, octetstring base_tmsi := '42000023'O, integer
 template MobileIdentityLV ts_MI_TMSI_NRI_LV(integer nri_v, integer nri_bitlen := 10) :=
 	ts_MI_TMSI_LV(tmsi := f_tmsi_nri(nri_v, nri_bitlen := nri_bitlen));
 
+private function f_expect_lchan_rel(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
+	interleave {
+	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {
+			f_logp(BSCVTY, "Got RSL RR Release");
+		}
+	[] rsl.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {
+			f_logp(BSCVTY, "Got RSL Deact SACCH");
+		}
+	[] rsl.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			f_logp(BSCVTY, "Got RSL RF Chan Rel, sending Rel Ack");
+			rsl.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+			break;
+		}
+	}
+}
+
 private function f_perform_clear(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
 	f_logp(BSCVTY, "MSC instructs BSC to clear channel");
 	BSSAP.send(ts_BSSMAP_ClearCommand(0));
@@ -7594,6 +7613,521 @@ testcase TC_fh_params_si4_cbch() runs on test_CT {
 	f_shutdown_helper();
 }
 
+template (value) PDU_BSSAP_LE ts_BSSMAP_LE_BSSLAP(template (value) BSSLAP_PDU bsslap)
+	:= ts_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, data := enc_BSSLAP_PDU(valueof(bsslap)));
+
+private function f_match_bsslap(PDU_BSSAP_LE got_bsslap_msg,
+				template (present) BSSLAP_PDU expect_bsslap)
+{
+	var BSSLAP_PDU bsslap := dec_BSSLAP_PDU(got_bsslap_msg.pdu.bssmap.co_info.bsslap_apdu.data);
+	if (not match(bsslap, expect_bsslap)) {
+		log("EXPECTING BSSLAP: ", expect_bsslap);
+		log("GOT BSSLAP: ", bsslap);
+		setverdict(fail, "BSSLAP is not as expected");
+		mtc.stop;
+	}
+	setverdict(pass);
+}
+
+/* GAD: this is an Ellipsoid point with uncertainty circle, encoded as in 3GPP TS 23.032 §7.3.2. */
+const octetstring gad_ell_point_unc_circle := '10b0646d0d5f6627'O;
+
+private function f_expect_bsslap(template (present) BSSLAP_PDU expect_rx_bsslap) runs on MSC_ConnHdlr {
+	var PDU_BSSAP_LE rx_bsslap;
+	BSSAP_LE.receive(tr_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, ?)) -> value(rx_bsslap);
+	f_match_bsslap(rx_bsslap, expect_rx_bsslap);
+}
+
+/* With an active lchan, start BSSMAP Perform Location Request on A interface, starting BSSMAP-LE Perform Location
+ * Request on Lb interface. Either with or without the SMLC doing a BSSLAP TA Request. */
+private function f_lcs_loc_req_for_active_ms(boolean do_ta_request := false) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_establish_fully(omit, omit);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	if (not do_ta_request) {
+		/* verify TA Layer 3 in APDU. First the APDU type (BSSLAP), then the BSSLAP data contents. */
+		var template BSSMAP_LE_IE_APDU expect_apdu := tr_BSSMAP_LE_APDU(BSSMAP_LE_PROT_BSSLAP, ?);
+		if (not match(plr.pdu.bssmap.perf_loc_req.bsslap_apdu, expect_apdu)) {
+			log("EXPECTING BSSMAP-LE APDU IE ", expect_apdu);
+			log("GOT BSSMAP-LE APDU IE ", plr.pdu.bssmap.perf_loc_req.bsslap_apdu);
+			setverdict(fail, "BSSMAP-LE APDU IE is not as expected");
+			mtc.stop;
+		}
+		var template BSSLAP_PDU expect_ta_layer3 := tr_BSSLAP_TA_Layer3(tr_BSSLAP_IE_TA(0));
+		var BSSLAP_PDU bsslap := dec_BSSLAP_PDU(plr.pdu.bssmap.perf_loc_req.bsslap_apdu.data);
+		if (not match(bsslap, expect_ta_layer3)) {
+			log("EXPECTING BSSLAP TA Layer 3: ", expect_ta_layer3);
+			log("GOT BSSLAP: ", bsslap);
+			setverdict(fail, "BSSLAP is not as expected");
+			mtc.stop;
+		}
+		/* OsmoBSC directly sent the TA as BSSLAP APDU in the BSSMAP-LE Perform Location Request to the SMLC. The SMLC
+		 * has no need to request the TA from the BSC and directly responds. */
+	} else {
+		/* SMLC wants to ask the TA from the BSC explicitly in a BSSLAP TA Request message */
+		BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Req));
+		f_expect_bsslap(tr_BSSLAP_TA_Resp(?, ?));
+	}
+
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	/* The LCS was using an active A-interface conn. It should still remain active after this. */
+	f_mo_l3_transceive();
+
+	f_perform_clear(RSL);
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+
+/* With an active lchan, start BSSMAP Perform Location Request on A interface, starting BSSMAP-LE Perform Location
+ * Request on Lb interface.  Without the SMLC doing a BSSLAP TA Request. */
+private function f_tc_lcs_loc_req_for_active_ms(charstring id) runs on MSC_ConnHdlr {
+	f_lcs_loc_req_for_active_ms(false);
+}
+testcase TC_lcs_loc_req_for_active_ms() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_active_ms), pars);
+	vc_conn.done;
+}
+
+/* With an active lchan, start BSSMAP Perform Location Request on A interface, starting BSSMAP-LE Perform Location
+ * Request on Lb interface.  With the SMLC doing a BSSLAP TA Request. */
+private function f_tc_lcs_loc_req_for_active_ms_ta_req(charstring id) runs on MSC_ConnHdlr {
+	f_lcs_loc_req_for_active_ms(true);
+}
+testcase TC_lcs_loc_req_for_active_ms_ta_req() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_active_ms_ta_req), pars);
+	vc_conn.done;
+}
+
+/* Clear the A-interface conn only, without doing anything on Abis. Useful for LCS, for cases where there is only an A
+ * conn without an active lchan. */
+private function f_clear_A_conn() runs on MSC_ConnHdlr
+{
+	var BssmapCause cause := 0;
+	BSSAP.send(ts_BSSMAP_ClearCommand(cause));
+	BSSAP.receive(tr_BSSMAP_ClearComplete);
+	BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+
+	timer no_more_bssap := 5.0;
+	no_more_bssap.start;
+	alt {
+	[] no_more_bssap.timeout { break; }
+	[] BSSAP.receive(tr_BSSAP_BSSMAP) {
+		setverdict(fail, "Expected no more BSSAP after Clear Complete");
+		mtc.stop;
+	}
+	}
+	setverdict(pass);
+}
+
+/* Verify that the A-interface connection is still working, and then clear it, without doing anything on Abis.  Useful
+ * for LCS, for cases where there is only an A conn without an active lchan. */
+private function f_verify_active_A_conn_and_clear() runs on MSC_ConnHdlr
+{
+	f_logp(BSCVTY, "f_verify_active_A_conn_and_clear: test A link, then clear");
+
+	/* When an lchan is active, we can send some L3 data from the BTS side and verify that it shows up on the other
+	 * side towards the MSC. When there is no lchan, this is not possible. To probe whether the A-interface
+	 * connection is still up, we need something that echos back on the A-interface. Another LCS request! */
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?));
+
+	/* Right, the Perform Location Request showed up on Lb, now we can clear the A conn. */
+	f_clear_A_conn();
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocAbort(BSSMAP_LE_LCS_CAUSE_REQUEST_ABORTED));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+}
+
+/* With *no* active lchan, start BSSMAP Perform Location Request on A interface, starting BSSMAP-LE Perform Location
+ * Request on Lb interface. BSC will Page for the subscriber as soon as we (virtual SMLC) request the TA via BSSLAP.
+ */
+private function f_tc_lcs_loc_req_for_idle_ms(charstring id) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	/* Register to receive the Paging Command */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	g_chan_nr := new_chan_nr;
+	f_rslem_register(0, g_chan_nr);
+
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
+				     valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+										ts_CellId_CGI('001'H, '01'H, 1, 0)))));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	/* SMLC wants to ask the TA from the BSC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Req));
+
+	/* OsmoBSC needs to Page */
+	RSL.receive(tr_RSL_PAGING_CMD(tr_MI_IMSI(g_pars.imsi)));
+	f_logp(BSCVTY, "got Paging Command");
+
+	/* MS requests channel. Since the Paging was for LCS, the Paging Response does not trigger a Complete Layer 3 to
+	 * the MSC, and releases the lchan directly. */
+	f_perform_compl_l3(RSL, ts_PAG_RESP(valueof(ts_MI_IMSI_LV(g_pars.imsi))), do_clear := false, expect_bssmap_l3 := false);
+	f_expect_lchan_rel(RSL);
+
+	/* From the Paging Response, the TA is now known to the BSC, and it responds to the SMLC. */
+
+	f_expect_bsslap(tr_BSSLAP_TA_Resp(?, ?));
+
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	/* The lchan is gone, the A-interface conn was created for the LCS only.
+	 * Still it is clearly the MSC's job to decide whether to tear down the conn or not. */
+	f_verify_active_A_conn_and_clear();
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_lcs_loc_req_for_idle_ms() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_idle_ms), pars);
+	vc_conn.done;
+}
+
+/* With no active lchan, start BSSMAP Perform Location Request on A interface, but omit IMSI; expect failure response.
+ */
+private function f_tc_lcs_loc_req_no_subscriber(charstring id) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	/* provoke an abort by omitting both IMSI and IMEI */
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
+				valueof(ts_BSSMAP_Perform_Location_Request(omit,
+					ts_CellId_CGI('262'H, '42'H, 23, 42)))));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	/* BSC tells MSC about failure */
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(
+			locationEstimate := omit, positioningData := omit,
+			lCS_Cause := tr_BSSMAP_LcsCause(BSSMAP_LCS_CAUSE_DATA_MISSING_IN_REQ)));
+
+	/* There is no lchan. Still the MSC's job to decide whether to tear down the conn or not. */
+	f_verify_active_A_conn_and_clear();
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_lcs_loc_req_no_subscriber() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_no_subscriber), pars);
+	vc_conn.done;
+}
+
+/* With an active lchan, start a Perform Location Request on the A-interface, but virtual SMLC does not answer with
+ * BSSMAP-LE Perform Location Response (before or after sending a BSSLAP TA Request) */
+private function f_lcs_loc_req_for_active_ms_le_timeout(boolean do_ta) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_establish_fully(omit, omit);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	if (do_ta) {
+		/* SMLC wants to ask the TA from the BSC explicitly in a BSSLAP TA Request message */
+		BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Req));
+		f_expect_bsslap(tr_BSSLAP_TA_Resp(?, ?));
+	}
+
+	/* SMLC fails to respond, BSC runs into timeout */
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocAbort(BSSMAP_LE_LCS_CAUSE_SYSTEM_FAILURE));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(
+			locationEstimate := omit, positioningData := omit,
+			lCS_Cause := tr_BSSMAP_LcsCause(BSSMAP_LCS_CAUSE_SYSTEM_FAILURE)));
+
+	/* There is no lchan. Still the MSC's job to decide whether to tear down the conn or not. */
+	f_verify_active_A_conn_and_clear();
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+
+/* With an active lchan, start a Perform Location Request on the A-interface, but virtual SMLC does not answer with
+ * BSSMAP-LE Perform Location Response, without sending a BSSLAP TA Request. */
+private function f_tc_lcs_loc_req_for_active_ms_le_timeout(charstring id) runs on MSC_ConnHdlr {
+	f_lcs_loc_req_for_active_ms_le_timeout(false);
+}
+
+testcase TC_lcs_loc_req_for_active_ms_le_timeout() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_active_ms_le_timeout), pars);
+	vc_conn.done;
+}
+
+/* With an active lchan, start a Perform Location Request on the A-interface, but virtual SMLC does not answer with
+ * BSSMAP-LE Perform Location Response, after sending a BSSLAP TA Request. */
+private function f_tc_lcs_loc_req_for_active_ms_le_timeout2(charstring id) runs on MSC_ConnHdlr {
+	f_lcs_loc_req_for_active_ms_le_timeout(true);
+}
+
+testcase TC_lcs_loc_req_for_active_ms_le_timeout2() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_active_ms_le_timeout2), pars);
+	vc_conn.done;
+}
+
+/* With *no* active lchan, start a Perform Location Request, expecting that the MS will be Paged. */
+private function f_tc_lcs_loc_req_for_idle_ms_no_pag_resp(charstring id) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	/* Register to receive the Paging Command */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	g_chan_nr := new_chan_nr;
+	f_rslem_register(0, g_chan_nr);
+
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
+				     valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+										ts_CellId_CGI('001'H, '01'H, 1, 0)))));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	/* SMLC wants to ask the TA from the BSC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Req));
+
+	/* OsmoBSC needs to Page */
+	var PDU_BSSAP_LE rx_bsslap;
+	alt {
+	[] RSL.receive(tr_RSL_PAGING_CMD(tr_MI_IMSI(g_pars.imsi))) {
+		f_logp(BSCVTY, "got Paging Command");
+		repeat;
+	}
+	[] BSSAP_LE.receive(tr_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, ?)) -> value(rx_bsslap) {
+		/* MS does not respond to Paging, TA Req runs into timeout. */
+		f_match_bsslap(rx_bsslap, tr_BSSLAP_Abort(?));
+	}
+	}
+
+	/* SMLC responds with failure */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(omit, BSSMAP_LE_LCS_CAUSE_REQUEST_ABORTED));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+
+	/* BSC tells MSC about failure */
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(
+			locationEstimate := omit, positioningData := omit,
+			lCS_Cause := tr_BSSMAP_LcsCause(BSSMAP_LCS_CAUSE_REQUEST_ABORTED)));
+
+	/* There is no lchan. Still the MSC's job to decide whether to tear down the conn or not. */
+	f_verify_active_A_conn_and_clear();
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_lcs_loc_req_for_idle_ms_no_pag_resp() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_idle_ms_no_pag_resp), pars);
+	vc_conn.done;
+}
+
+/* During an ongoing Location Request, the MS sends a CM Service Request. Expect the same A-conn to be re-used / taken
+ * over. */
+private function f_tc_cm_service_during_lcs_loc_req(charstring id) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	/* Register to receive the Paging Command */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	g_chan_nr := new_chan_nr;
+	f_rslem_register(0, g_chan_nr);
+
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
+				     valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+										ts_CellId_CGI('001'H, '01'H, 1, 0)))));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	/* As the A-interface conn was established for LCS, the MS coincidentally decides to issue a CM Service Request
+	 * and establish Layer 3. It should use the existing A-interface conn. */
+	f_perform_compl_l3(RSL, valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV(g_pars.imsi)))),
+			do_clear := false, expect_bssmap_l3 := true);
+
+	/* SMLC wants to ask the TA from the BSC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Req));
+
+	/* OsmoBSC already has an lchan, no need to Page, just returns the TA */
+	f_expect_bsslap(tr_BSSLAP_TA_Resp(?, ?));
+
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	/* The lchan should still exist, it was from a CM Service Request. */
+	f_mo_l3_transceive();
+
+	f_perform_clear(RSL);
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_cm_service_during_lcs_loc_req() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_cm_service_during_lcs_loc_req), pars);
+	vc_conn.done;
+}
+
+/* During an ongoing Perform Location Request, do a Handover, an expect a BSSLAP Reset message from the BSC to indicate
+ * the new lchan after handover. */
+private function f_tc_ho_during_lcs_loc_req(charstring id) runs on MSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_establish_fully(omit, omit);
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+
+	var PDU_BSSAP_LE plr;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?)) -> value(plr);
+
+	/* SMLC ponders the Location Request, in the meantime the BSC decides to handover */
+	f_bts_0_cfg(BSCVTY, {"neighbor bts 1"});
+
+	var HandoverState hs := {
+		rr_ho_cmpl_seen := false,
+		handover_done := false,
+		old_chan_nr := -
+	};
+	/* issue hand-over command on VTY */
+	f_vty_handover(BSCVTY, 0, 0, g_chan_nr, 1);
+	/* temporarily suspend DChan processing on BTS1 to avoid race with RSLEM_register */
+	f_rslem_suspend(RSL1_PROC);
+
+	/* From the MGW perspective, a handover is is characterized by
+	 * performing one MDCX operation with the MGW. So we expect to see
+	 * one more MDCX during handover. */
+	g_media.mgcp_conn[0].mdcx_seen_exp := g_media.mgcp_conn[0].crcx_seen_exp + 1;
+
+	alt {
+	[] as_handover(hs);
+	}
+
+	var PDU_BSSAP_LE rx_bsslap;
+
+	interleave {
+	/* Expect the BSC to inform the MSC about the handover */
+	[] BSSAP.receive(tr_BSSMAP_HandoverPerformed);
+
+	/* Expect the BSC to inform the SMLC about the handover */
+	[] BSSAP_LE.receive(tr_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, ?)) -> value(rx_bsslap) {
+		f_match_bsslap(rx_bsslap, tr_BSSLAP_Reset(BSSLAP_CAUSE_INTRA_BSS_HO));
+	}
+	}
+
+	/* SMLC now responds with geo information data. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	/* lchan still active */
+	f_mo_l3_transceive(RSL1);
+
+	/* MSC decides it is done now. */
+	f_perform_clear(RSL1);
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_ho_during_lcs_loc_req() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(2, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_tc_ho_during_lcs_loc_req), pars);
+	vc_conn.done;
+}
+
 /* Dyn PDCH todo:
    * activate OSMO as TCH/F
    * activate OSMO as TCH/H
@@ -7837,6 +8371,18 @@ control {
 	execute( TC_fh_params_assignment_cmd() );
 	execute( TC_fh_params_handover_cmd() );
 	execute( TC_fh_params_si4_cbch() );
+
+	if (mp_enable_lcs_tests) {
+		execute( TC_lcs_loc_req_for_active_ms() );
+		execute( TC_lcs_loc_req_for_active_ms_ta_req() );
+		execute( TC_lcs_loc_req_for_idle_ms() );
+		execute( TC_lcs_loc_req_no_subscriber() );
+		execute( TC_lcs_loc_req_for_active_ms_le_timeout() );
+		execute( TC_lcs_loc_req_for_active_ms_le_timeout2() );
+		execute( TC_lcs_loc_req_for_idle_ms_no_pag_resp() );
+		execute( TC_cm_service_during_lcs_loc_req() );
+		execute( TC_ho_during_lcs_loc_req() );
+	}
 }
 
 }
