@@ -1,0 +1,503 @@
+module SMLC_Tests {
+
+/* Integration Tests for OsmoSMLC
+ * (C) 2020 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoSMLC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ *
+ * There are test cases that run in so-called 'handler mode' and test cases
+ * that run directly on top of the BSSAP and RSL CodecPorts.  The "handler mode"
+ * tests abstract the multiplexing/demultiplexing of multiple SCCP connections
+ * and/or RSL channels and are hence suitable for higher-level test cases, while
+ * the "raw" tests directly on top of the CodecPorts are more suitable for lower-
+ * level testing.
+ */
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from BSSAP_LE_Adapter all;
+import from BSSAP_LE_CodecPort all;
+import from BSSAP_LE_Types all;
+import from BSSAP_LE_Emulation all;
+import from BSSMAP_LE_Templates all;
+import from BSSLAP_Types all;
+
+import from BSSAP_Types all;
+import from BSSMAP_Templates all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from SCCP_Templates all;
+
+import from SCCPasp_Types all;
+
+import from BSC_ConnectionHandler all;
+
+const integer NUM_BSC := 1;
+
+/* Default list of counters for 'smlc' */
+const CounterNameVals counternames_bsc := {
+	{ "foo:bar", 0 }
+};
+
+type component test_CT extends CTRL_Adapter_CT {
+	var BSSAP_LE_Adapter g_bssap_le[NUM_BSC];
+	port BSSAP_LE_CODEC_PT BSSAP_LE;
+
+	port TELNETasp_PT SMLCVTY;
+
+	/* are we initialized yet */
+	var boolean g_initialized := false;
+
+	/*Configure T(tias) over VTY, seconds */
+	var integer g_smlc_sccp_timer_ias :=  7 * 60;
+	/*Configure T(tiar) over VTY, seconds */
+	var integer g_smlc_sccp_timer_iar := 15 * 60;
+
+	/* global test case guard timer (actual timeout value is set in f_init()) */
+	timer T_guard := 30.0;
+
+	var CounterNameValsList g_ctr_smlc;
+	var CounterNameValsList g_ctr_bsc;
+
+}
+
+type record of BSSAP_LE_Configuration BSSAP_LE_Configurations;
+
+modulepar {
+	/* IP address at which the SMLC can be reached */
+	charstring mp_smlc_ip := "127.0.0.1";
+	/* port number to which to establish the IPA CTRL connection */
+	integer mp_smlc_ctrl_port := 4272;
+	/* IP address at which the test binds */
+	charstring mp_test_ip := "127.0.0.1";
+
+	BSSAP_LE_Configurations mp_bssap_le_cfg := {
+		{
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23908, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 187,	/* 0.23.3 first BSC emulation */
+			own_ssn := 250, /* BSC side SSN */
+			peer_pc := 190, /* 0.23.6 osmo-smlc */
+			peer_ssn := 252,	/* SMLC side SSN */
+			sio := '83'O,
+			rctx := 1
+		}
+	};
+}
+
+private function f_gen_test_hdlr_pars(integer bssap_le_idx := 0) return TestHdlrParams {
+
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	return pars;
+}
+
+/* Convenience functions for rate counters using g_ctr_bsc. */
+
+private function f_ctrs_smlc_init(integer bscs_count := NUM_BSC, CounterNameVals counternames := counternames_bsc) runs on test_CT {
+	g_ctr_bsc := f_counter_name_vals_get_n(IPA_CTRL, "bsc", bscs_count, counternames);
+	log("initial msc rate counters: ", g_ctr_bsc);
+}
+
+private function f_ctrs_smlc_add(integer msc_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_bsc, msc_nr, countername, val);
+}
+
+/*  f_ctrs_smlc_init();
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_do_other(on_msc := 1);
+ *  f_ctrs_smlc_add(0, "thing", 2);
+ *  f_ctrs_smlc_add(1, "other");
+ *  f_ctrs_smlc_verify();
+ */
+private function f_ctrs_smlc_verify() runs on test_CT {
+	log("verifying msc rate counters: ", g_ctr_bsc);
+	f_counter_name_vals_expect_n(IPA_CTRL, "bsc", g_ctr_bsc);
+}
+
+/* convenience: f_ctrs_smlc_add() and f_ctrs_smlc_verify() in one call.
+ *  f_ctrs_smlc_init();
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_ctrs_smlc_expect(0, "thing", 3);
+ */
+private function f_ctrs_smlc_expect(integer msc_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_smlc_add(msc_nr, countername, val);
+	f_ctrs_smlc_verify();
+}
+
+private function f_shutdown_helper() runs on test_CT {
+	all component.stop;
+	setverdict(pass);
+	mtc.stop;
+}
+
+/* global altstep for global guard timer */
+altstep as_Tguard() runs on test_CT {
+	[] T_guard.timeout {
+			setverdict(fail, "Timeout of T_guard");
+			mtc.stop;
+		}
+}
+
+private function f_logp(TELNETasp_PT pt, charstring log_msg)
+{
+	// log on TTCN3 log output
+	log(log_msg);
+	// log in stderr log
+	f_vty_transceive(pt, "logp lglobal notice TTCN3 f_logp(): " & log_msg);
+}
+
+/* global initialization function
+ * \param nr_bts Number of BTSs we should start/bring up
+ * \param handler_mode Start an RSL_Emulation_CT component (true) or not (false).
+ * \param nr_msc Number of virtual MSCs to bring up to connect to osmo-bsc.
+ */
+function f_init(integer nr_bsc := NUM_BSC, float guard_timeout := 30.0) runs on test_CT {
+	var integer bssap_le_idx;
+
+	if (g_initialized) {
+		return;
+	}
+	g_initialized := true;
+
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	f_init_vty("VirtBSC");
+
+	for (bssap_le_idx := 0; bssap_le_idx < nr_bsc; bssap_le_idx := bssap_le_idx+1) {
+		f_bssap_le_adapter_init(g_bssap_le[bssap_le_idx], mp_bssap_le_cfg[bssap_le_idx], "VirtBSC", BSC_BssapLeOps);
+		f_bssap_le_adapter_start(g_bssap_le[bssap_le_idx]);
+	}
+}
+
+function f_init_vty(charstring id := "foo") runs on test_CT {
+	if (SMLCVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:SMLCVTY, system:SMLCVTY);
+	f_vty_set_prompts(SMLCVTY);
+	f_vty_transceive(SMLCVTY, "enable");
+	f_cs7_inst_0_cfg(SMLCVTY, {"sccp-timer ias " & int2str(g_smlc_sccp_timer_ias),
+			  "sccp-timer iar " & int2str(g_smlc_sccp_timer_iar)});
+}
+
+type function void_fn(charstring id) runs on BSC_ConnHdlr;
+
+private function f_connect_handler(inout BSC_ConnHdlr vc_conn, integer bssap_le_idx := 0) runs on test_CT {
+	connect(vc_conn:BSSAP_LE, g_bssap_le[bssap_le_idx].vc_BSSAP_LE:CLIENT);
+	connect(vc_conn:BSSAP_LE_PROC, g_bssap_le[bssap_le_idx].vc_BSSAP_LE:PROC);
+}
+
+function f_start_handler(void_fn fn, template (omit) TestHdlrParams pars := omit)
+runs on test_CT return BSC_ConnHdlr {
+	var charstring id := testcasename();
+	var BSC_ConnHdlr vc_conn;
+	var integer bssap_le_idx := 0;
+	if (isvalue(pars)) {
+		bssap_le_idx := valueof(pars).bssap_le_idx;
+	}
+	vc_conn := BSC_ConnHdlr.create(id);
+	f_connect_handler(vc_conn, bssap_le_idx);
+	/* Emit a marker to appear in the SUT's own logging output */
+	f_logp(SMLCVTY, testcasename() & "() start");
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+private function f_handler_init(void_fn fn, charstring id, template (omit) TestHdlrParams pars := omit)
+runs on BSC_ConnHdlr {
+	if (isvalue(pars)) {
+		g_pars := valueof(pars);
+	}
+	fn.apply(id);
+}
+
+type record of charstring Commands;
+
+private function f_cs7_inst_0_cfg(TELNETasp_PT pt, Commands cmds := {})
+{
+	f_vty_enter_cfg_cs7_inst(pt, 0);
+	for (var integer i := 0; i < sizeof(cmds); i := i+1) {
+		f_vty_transceive(pt, cmds[i]);
+	}
+	f_vty_transceive(pt, "end");
+}
+
+template (value) PDU_BSSAP_LE ts_BSSMAP_LE_BSSLAP(template (value) BSSLAP_PDU bsslap)
+	:= ts_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, data := enc_BSSLAP_PDU(valueof(bsslap)));
+
+template PDU_BSSAP_LE tr_BSSMAP_LE_BSSLAP(template BSSLAP_PDU bsslap)
+	:= tr_BSSMAP_LE_ConnInfo(BSSMAP_LE_PROT_BSSLAP, data := enc_BSSLAP_PDU(valueof(bsslap)));
+
+/* BSC sends Perform Location Request that already contains a TA Layer 3 BSSLAP APDU */
+private function f_tc_smlc_location_request_with_ta_l3(charstring id) runs on BSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_BscConnHdlr_init();
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	var uint16_t cell_id := 42;
+	var BSSMAP_IE_CellIdentifier cell_ident := valueof(ts_CellID_LAC_CI(23, cell_id));
+
+	BSSAP_LE.send(ts_BSSAP_LE_Conn_Req(g_pars.sccp_addr_smlc, g_pars.sccp_addr_bsc,
+			valueof(ts_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, cell_ident, g_pars.imsi,
+					enc_BSSLAP_PDU(valueof(ts_BSSLAP_TA_Layer3(23)))))));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_CONF_IND);
+
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	/* TODO: implement GAD coding in ttcn */
+	/* Expecting geo:
+	 * 0001 .... = Location estimate: Ellipsoid point with uncertainty Circle (1)
+	 * 0... .... = Sign of latitude: North (0)
+	 * .010 0001 0000 1001 1100 1001 = Degrees of latitude: 2165193 (23.23000 degrees)
+	 * 0001 1110 0010 1010 0101 0011 = Degrees of longitude: 1976915 (42.42000 degrees)
+	 * .100 1010 = Uncertainty code: 74 (11552.7 m)
+	 * [Location OSM URI: https://www.openstreetmap.org/?mlat=23.23000&mlon=42.42000&zoom=12]
+	 */
+	var octetstring geo := '102109C91E2A534A'O;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocResp(geo, omit));
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_smlc_location_request_with_ta_l3() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init();
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_with_ta_l3), pars);
+	vc_conn.done;
+}
+
+/* BSC sends Perform Location Request without BSSLAP APDU, SMLC needs to request TA */
+private function f_tc_smlc_location_request_without_ta_l3(charstring id) runs on BSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_BscConnHdlr_init();
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	var uint16_t cell_id := 42;
+	var BSSMAP_IE_CellIdentifier cell_ident := valueof(ts_CellID_LAC_CI(23, cell_id));
+
+	BSSAP_LE.send(ts_BSSAP_LE_Conn_Req(g_pars.sccp_addr_smlc, g_pars.sccp_addr_bsc,
+			valueof(ts_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, cell_ident, g_pars.imsi))));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_CONF_IND);
+
+	/* SMLC wants to ask the TA from the SMLC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.receive(tr_BSSMAP_LE_BSSLAP(tr_BSSLAP_TA_Req));
+
+	/* BSC figures out the TA and sends it back to the SMLC */
+
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_TA_Resp(cell_id, 23)));
+
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	/* TODO: implement GAD coding in ttcn */
+	/* Expecting geo:
+	 * 0001 .... = Location estimate: Ellipsoid point with uncertainty Circle (1)
+	 * 0... .... = Sign of latitude: North (0)
+	 * .010 0001 0000 1001 1100 1001 = Degrees of latitude: 2165193 (23.23000 degrees)
+	 * 0001 1110 0010 1010 0101 0011 = Degrees of longitude: 1976915 (42.42000 degrees)
+	 * .100 1010 = Uncertainty code: 74 (11552.7 m)
+	 * [Location OSM URI: https://www.openstreetmap.org/?mlat=23.23000&mlon=42.42000&zoom=12]
+	 */
+	var octetstring geo := '102109C91E2A534A'O;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocResp(geo, omit));
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_smlc_location_request_without_ta_l3() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1);
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_without_ta_l3), pars);
+	vc_conn.done;
+}
+
+/* BSC sends Perform Location Request, halfway the BSC indicates handover via BSSLAP Reset */
+private function f_tc_smlc_location_request_bsslap_reset(charstring id) runs on BSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_BscConnHdlr_init();
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	var uint16_t cell_id := 1;
+	var BSSMAP_IE_CellIdentifier cell_ident := valueof(ts_CellID_LAC_CI(1, cell_id));
+
+	BSSAP_LE.send(ts_BSSAP_LE_Conn_Req(g_pars.sccp_addr_smlc, g_pars.sccp_addr_bsc,
+			valueof(ts_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, cell_ident, g_pars.imsi))));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_CONF_IND);
+
+	/* SMLC wants to ask the TA from the SMLC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.receive(tr_BSSMAP_LE_BSSLAP(tr_BSSLAP_TA_Req));
+
+	/* BSC reports a Handover via a BSSLAP Reset */
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_Reset(17, 42,
+		valueof(ts_BSSLAP_IE_ChanDesc),
+		BSSLAP_CAUSE_INTRA_BSS_HO)));
+
+	/* SMLC got the TA from the BSC via BSSLAP Reset, now responds with geo information data. */
+	/* TODO: implement GAD coding in ttcn */
+	/* Expecting geo:
+	 * 0001 .... = Location estimate: Ellipsoid point with uncertainty Circle (1)
+	 * 0... .... = Sign of latitude: North (0)
+	 * .000 1011 0011 1000 1011 0100 = Degrees of latitude: 735412 (7.89012 degrees)
+	 * 0000 0110 0101 0100 0110 1011 = Degrees of longitude: 414827 (8.90122 degrees)
+	 * .101 0001 = Uncertainty code: 81 (22522.4 m)
+	 * [Location OSM URI: https://www.openstreetmap.org/?mlat=7.89012&mlon=8.90122&zoom=12]
+	 */
+	var octetstring geo := '100B38B406546B51'O;
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocResp(geo, omit));
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_smlc_location_request_bsslap_reset() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1);
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_bsslap_reset), pars);
+	vc_conn.done;
+}
+
+/* BSC sends Perform Location Request, halfway the BSC aborts the request because of inter-BSC HO */
+private function f_tc_smlc_location_request_abort(charstring id) runs on BSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_BscConnHdlr_init();
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	var uint16_t cell_id := 42;
+	var BSSMAP_IE_CellIdentifier cell_ident := valueof(ts_CellID_LAC_CI(23, cell_id));
+
+	BSSAP_LE.send(ts_BSSAP_LE_Conn_Req(g_pars.sccp_addr_smlc, g_pars.sccp_addr_bsc,
+			valueof(ts_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, cell_ident, g_pars.imsi))));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_CONF_IND);
+
+	/* SMLC wants to ask the TA from the SMLC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.receive(tr_BSSMAP_LE_BSSLAP(tr_BSSLAP_TA_Req));
+
+	/* BSC aborts */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocAbort(BSSMAP_LE_LCS_CAUSE_INTER_BSC_HO));
+
+	var PDU_BSSAP_LE bssap_le;
+	timer nothing := 7.0;
+	nothing.start;
+	alt {
+		[] BSSAP_LE.receive(tr_BSSAP_LE_BSSMAP) -> value(bssap_le) {
+			log("unexpected bssap_le: ", bssap_le);
+			setverdict(fail, "No more messages expected from SMLC");
+			mtc.stop;
+		}
+		[] nothing.timeout {
+			setverdict(pass);
+			break;
+		}
+	}
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_smlc_location_request_abort() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1);
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_abort), pars);
+	vc_conn.done;
+}
+
+/* BSC sends Perform Location Request, SMLC asks for TA, halfway the BSC aborts the TA request */
+private function f_tc_smlc_location_request_bsslap_abort(charstring id) runs on BSC_ConnHdlr {
+	f_sleep(1.0);
+
+	f_BscConnHdlr_init();
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+
+	var uint16_t cell_id := 42;
+	var BSSMAP_IE_CellIdentifier cell_ident := valueof(ts_CellID_LAC_CI(23, cell_id));
+
+	BSSAP_LE.send(ts_BSSAP_LE_Conn_Req(g_pars.sccp_addr_smlc, g_pars.sccp_addr_bsc,
+			valueof(ts_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, cell_ident, g_pars.imsi))));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_CONF_IND);
+
+	/* SMLC wants to ask the TA from the SMLC explicitly in a BSSLAP TA Request message */
+	BSSAP_LE.receive(tr_BSSMAP_LE_BSSLAP(tr_BSSLAP_TA_Req));
+
+	/* BSC aborts the TA Request */
+	BSSAP_LE.send(ts_BSSMAP_LE_BSSLAP(ts_BSSLAP_Abort(BSSLAP_CAUSE_SUPERV_TIMER_EXPIRED)));
+
+	/* Expect response without location, just an LCS Cause indicating abort */
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocResp(omit, BSSMAP_LE_LCS_CAUSE_REQUEST_ABORTED));
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_smlc_location_request_bsslap_abort() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1);
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_bsslap_abort), pars);
+	vc_conn.done;
+}
+
+control {
+if (true) {
+	execute( TC_smlc_location_request_without_ta_l3() );
+} else {
+	execute( TC_smlc_location_request_with_ta_l3() );
+	execute( TC_smlc_location_request_without_ta_l3() );
+	execute( TC_smlc_location_request_bsslap_reset() );
+	execute( TC_smlc_location_request_bsslap_abort() );
+	execute( TC_smlc_location_request_abort() );
+}
+}
+
+}
