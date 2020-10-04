@@ -6,4 +6,4 @@ export CPPFLAGS_TTCN3=""
 
 ../regen-makefile.sh MME_Tests.ttcn $FILES
 
-sed -i -e 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lfftranscode -lgnutls/' Makefile
+sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode/' Makefile

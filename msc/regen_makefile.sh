@@ -6,4 +6,4 @@ export CPPFLAGS_TTCN3="-DIPA_EMULATION_MGCP -DIPA_EMULATION_CTRL -DIPA_EMULATION
 
 ../regen-makefile.sh MSC_Tests.ttcn $FILES
 
-sed -i -e 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lfftranscode/' Makefile
+sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode/' Makefile
