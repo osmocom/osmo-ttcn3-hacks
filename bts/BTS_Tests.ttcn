@@ -106,6 +106,7 @@ modulepar {
 	integer mp_ms_actual_ta_exp := 0;
 	integer mp_timing_offset_256syms_exp := 512;
 	integer mp_uplink_power_target := -75;
+	integer mp_uplink_power_hysteresis := 8; /* -83 .. -67 */
 	/* Time to wait for RSL conn from BTS during startup of test */
 	float mp_ipa_up_timeout := 15.0;
 	float mp_ipa_up_delay := 0.0;
@@ -6922,6 +6923,19 @@ runs on ConnHdlr return octetstring {
 	return f_TC_ms_pwr_ctrl_cb_def(l1h, num_blocks);
 }
 
+private function f_TC_ms_pwr_ctrl_cb_rssi_pwm(inout SacchL1Header l1h, integer num_blocks)
+runs on ConnHdlr return octetstring {
+	/* UL RSSI oscillation driven by SACCH block number */
+	if (num_blocks rem 2 == 0) {
+		f_trxc_fake_rssi(-100);
+	} else {
+		f_trxc_fake_rssi(-50);
+	}
+
+	/* Make sure that MS power level remains constant */
+	return f_TC_ms_pwr_ctrl_cb_const(l1h, num_blocks);
+}
+
 /* Make sure that MS power level remains constant when 'rx-current' equals 'rx-target' */
 private function f_TC_ms_pwr_ctrl_constant(charstring id)
 runs on ConnHdlr {
@@ -6971,6 +6985,66 @@ testcase TC_ms_pwr_ctrl_constant() runs on test_CT {
 		log(testcasename(), ": starting on ", pars.chan_nr);
 
 		vc_conn := f_start_handler(refers(f_TC_ms_pwr_ctrl_constant),
+					   pars, trxc_comp := true);
+		vc_conn.done;
+	}
+
+	/* No need to reset Uplink power parameters - the IUT restarts anyway */
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Test Exponentially Weighted Moving Average (EWMA) power filtering */
+private function f_TC_ms_pwr_ctrl_pf_ewma(charstring id)
+runs on ConnHdlr {
+	var integer num_blocks := 16;
+	timer T := int2float(num_blocks);
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* These IEs are needed for autonomous MS power control */
+	var template (value) RSL_IE_List ies := {
+		t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{
+			 ms_power := ts_RSL_IE_MS_Power(g_pars.l1_pars.ms_power_level)
+		}),
+		t_RSL_IE(RSL_IE_MS_POWER_PARAM, RSL_IE_Body:{
+			 ms_power_params := ts_RSL_IE_MS_Power_Parameters(''O)
+		})
+	};
+
+	/* Ensure that 'rx-current' equals 'rx-target' */
+	f_trxc_fake_rssi(mp_uplink_power_target);
+
+	/* Establish a dedicated channel */
+	f_est_dchan(more_ies := valueof(ies));
+
+	L1CTL.clear;
+	T.start;
+	alt {
+	[] as_TC_ms_pwr_ctrl(refers(f_TC_ms_pwr_ctrl_cb_rssi_pwm), num_blocks);
+	[] T.timeout {
+		setverdict(fail, "Not all SACCH blocks were processed in time, ",
+				 num_blocks, " were not handled");
+		}
+	}
+}
+testcase TC_ms_pwr_ctrl_pf_ewma() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+
+	f_init();
+
+	/* Explicitly configure EWMA filtering with 80% smoothing (alpha = 0.2) */
+	f_vty_config(BTSVTY, "bts 0", "uplink-power-filtering algo ewma beta 80");
+	/* Explicitly configure the Uplink power range (target and delte) */
+	f_vty_config(BTSVTY, "bts 0", "uplink-power-target " & int2str(mp_uplink_power_target)
+					    & " hysteresis " & int2str(mp_uplink_power_hysteresis));
+
+	for (var integer i := 0; i < sizeof(g_AllChanTypes); i := i + 1) {
+		pars := valueof(t_Pars(g_AllChanTypes[i], ts_RSL_ChanMode_SIGN));
+		log(testcasename(), ": starting on ", pars.chan_nr);
+
+		vc_conn := f_start_handler(refers(f_TC_ms_pwr_ctrl_pf_ewma),
 					   pars, trxc_comp := true);
 		vc_conn.done;
 	}
@@ -7164,6 +7238,7 @@ control {
 	execute( TC_chopped_ipa_payload() );
 
 	execute( TC_ms_pwr_ctrl_constant() );
+	execute( TC_ms_pwr_ctrl_pf_ewma() );
 }
 
 
