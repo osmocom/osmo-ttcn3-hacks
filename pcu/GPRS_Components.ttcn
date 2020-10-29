@@ -29,6 +29,11 @@ import from PCUIF_Types all;
 import from PCUIF_Components all;
 import from Native_Functions all;
 
+modulepar {
+	/* ARFCN of 1st TRX. Subsequent TRX are allocated incrementing ARFCNs. Nth TRX => base_arfcn + N-1 */
+	GsmArfcn mp_base_arfcn := 871;
+};
+
 type record TsTrxBtsNum {
 	uint3_t		ts_nr,
 	uint3_t		trx_nr,
@@ -64,7 +69,7 @@ type record DlTbf {
 	GsmRrMessage		rr_imm_ass optional,
 	PacketDlAssignChan	ass optional,
 	uint5_t			tfi,
-	GsmArfcn		arfcn,
+	GsmArfcn		arfcn optional,
 	BIT8                    ts_mask,
 	AckNackDescription	acknack_desc
 };
@@ -79,7 +84,7 @@ type record UlTbf {
 	GsmRrMessage		rr_imm_ass optional,
 	PacketUlAssignChan	ass optional,
 	uint5_t			tfi,
-	GsmArfcn		arfcn,
+	GsmArfcn		arfcn optional,
 	BIT8                    ts_mask,
 	uint3_t			usf[8],
 	boolean			is_egprs,
@@ -124,7 +129,7 @@ template (value) DlTbf t_DlTbf_def := {
 	rr_imm_ass := omit,
 	ass := omit,
 	tfi := 0,
-	arfcn := 0,
+	arfcn := omit,
 	ts_mask := '00000000'B,
 	acknack_desc := t_AckNackDescription_init
 };
@@ -133,7 +138,7 @@ template (value) UlTbf t_UlTbf_def := {
 	rr_imm_ass := omit,
 	ass := omit,
 	tfi := 0,
-	arfcn := 0,
+	arfcn := omit,
 	ts_mask := '00000000'B,
 	usf := { USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED },
 	is_egprs := false,
@@ -197,6 +202,18 @@ runs on MS_BTS_IFACE_CT {
 	/* Shutdown the others and MTC */
 	all component.stop;
 	mtc.stop;
+}
+
+function f_arfcn2trxnr(GsmArfcn arfcn) runs on MS_BTS_IFACE_CT return uint3_t {
+	if (arfcn < mp_base_arfcn) {
+		setverdict(fail, "Unable to find TRX NR for arfcn ", arfcn);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	return arfcn - mp_base_arfcn;
+}
+
+function f_trxnr2arfcn(uint3_t trx_nr) return GsmArfcn {
+	return mp_base_arfcn + trx_nr;
 }
 
 function f_ultbf_new_from_rr_imm_ass(in GsmRrMessage rr_imm_ass)
@@ -352,10 +369,61 @@ runs on MS_BTS_IFACE_CT return DlTbf {
 	return dl_tbf;
 }
 
+function f_ms_tx_TsTrxBtsNum(inout GprsMS ms)
+runs on MS_BTS_IFACE_CT return TsTrxBtsNum {
+	var uint3_t ts_nr := f_ultbf_next_ts(ms.ul_tbf);
+
+	var uint3_t trx_nr;
+	if (ispresent(ms.ul_tbf.arfcn)) {
+		trx_nr := f_arfcn2trxnr(ms.ul_tbf.arfcn);
+	} else {
+		/* FIXME: implement search by hsn+maio+ma when freq hopping is enabled */
+		setverdict(fail, "Asked for trx_nr but arfcn not available in ms.ul_tbf!");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	return valueof(ts_TsTrxBtsNum(ts_nr, trx_nr));
+}
+
+function f_dltbf_num_slots(DlTbf dl_tbf)
+runs on MS_BTS_IFACE_CT return integer  {
+	var integer n := 0;
+	for (var integer i := 0; i < lengthof(dl_tbf.ts_mask); i := i + 1) {
+		if (dl_tbf.ts_mask[i] == '1'B) {
+			n := n + 1;
+		}
+	}
+	return n;
+}
+
 function f_ultbf_inc_bsn(inout UlTbf ul_tbf)
 runs on MS_BTS_IFACE_CT {
 	ul_tbf.bsn := ul_tbf.bsn + 1;
 	ul_tbf.bsn := ul_tbf.bsn mod 128; /* FIXME: EGPRS SNS: 2048 */
+}
+
+function f_ultbf_next_ts(UlTbf ul_tbf)
+runs on MS_BTS_IFACE_CT return uint3_t {
+	/* FIXME: in the future we probably want to store last used internally
+	/* and continue from there */
+	for (var integer i := 0; i < lengthof(ul_tbf.ts_mask); i := i + 1) {
+		if (ul_tbf.ts_mask[i] == '1'B) {
+			return i;
+		}
+	}
+	setverdict(fail, "No TS available for tx!");
+	f_shutdown(__BFILE__, __LINE__);
+	return 0;
+}
+
+function f_ultbf_num_slots(UlTbf ul_tbf)
+runs on MS_BTS_IFACE_CT return integer  {
+	var integer n := 0;
+	for (var integer i := 0; i < lengthof(ul_tbf.ts_mask); i := i + 1) {
+		if (ul_tbf.ts_mask[i] == '1'B) {
+			n := n + 1;
+		}
+	}
+	return n;
 }
 
 function f_ms_use_ra(inout GprsMS ms, uint16_t ra, uint8_t ra_is_11bit := 0)
@@ -666,7 +734,7 @@ runs on MS_BTS_IFACE_CT return GsmRrMessage {
 	BTS.send(ts_PCUIF_RACH_IND(nr.bts_nr, nr.trx_nr, ts_nr := 0,
 				   ra := ra, is_11bit := is_11bit,
 				   burst_type := burst_type,
-				   fn := fn, arfcn := 871,
+				   fn := fn, arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
 				   qta := ta * 4));
 
 	/* 3GPP TS 44.018, table 9.1.8.1, note 2b: Request Reference shall be set to 127
@@ -685,7 +753,8 @@ runs on MS_BTS_IFACE_CT {
 	var template RAW_PCU_EventParam ev_param := {tdma_fn := ? };
 	BTS.send(ts_PCUIF_DATA_IND(nr.bts_nr, nr.trx_nr, nr.ts_nr, nr.blk_nr,
 				   sapi := PCU_IF_SAPI_PDTCH, data := data,
-				   fn := fn, arfcn := 871, lqual_cb := lqual_cb));
+				   fn := fn, arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				   lqual_cb := lqual_cb));
 	if (fn != 0) {
 		ev_param := {tdma_fn := fn };
 	}
@@ -698,7 +767,7 @@ function f_pcuif_rx_data_req(out PCUIF_Message pcu_msg,
 runs on MS_BTS_IFACE_CT {
 	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
 				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-				  arfcn := 871, block_nr := nr.blk_nr));
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)), block_nr := nr.blk_nr));
 	BTS.receive(tr_PCUIF_DATA_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
 				      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
 }
