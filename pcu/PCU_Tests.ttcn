@@ -267,6 +267,47 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
+private function f_ms_establish_ul_tbf_2phase_access(inout GprsMS ms,
+						     template (omit) RlcmacUlCtrlMsg pkt_res_req := omit)
+runs on RAW_PCU_Test_CT return PollFnCtx {
+	var PollFnCtx pollctx;
+
+	/* Single block (two phase) packet access */
+	var uint16_t ra := bit2int(chan_req_sb);
+	if (g_force_two_phase_access) {
+		/* If 2phase access is enforced by the network, then let's
+		 * request a One phase packet access, we'll receive a single block
+		 * anyway
+		 */
+		 ra := bit2int(chan_req_def);
+	}
+
+	/* Establish an Uplink TBF */
+	f_ms_use_ra(ms, ra, ra_is_11bit := 0);
+	f_ms_establish_ul_tbf(ms);
+
+	/* Make sure we've got an Uplink TBF assignment */
+	if (not match(ms.ul_tbf.ass.ccch, tr_PacketUlSglAssign)) {
+		setverdict(fail, "Wrong Packet Uplink Assignment received: ", ms.ul_tbf.ass.ccch, " vs exp: ", tr_PacketUlSglAssign);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Send PACKET RESOURCE REQUEST
+	 * (see 3GPP TS 04.60 "7.1.3.1 Initiation of the Packet resource request procedure")
+	 */
+	if (istemplatekind(pkt_res_req, "omit")) {
+		pkt_res_req := ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, omit);
+	}
+
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(pkt_res_req), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+	/* Store 1st UlTBF context before receiving next one, will will
+	 * overwrite the TS allocation on MS with info from new UL TBF:
+	 */
+	pollctx.tstrxbts := f_ms_tx_TsTrxBtsNum(ms);
+	f_ms_rx_pkt_ass_pacch(ms, pollctx.fn, tr_RLCMAC_UL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
+	return pollctx;
+}
+
 testcase TC_pcuif_suspend() runs on RAW_PCU_Test_CT {
 	var octetstring ra_id := enc_RoutingAreaIdentification(mp_gb_cfg.bvc[0].cell_id.ra_id);
 	var GprsTlli tlli := 'FFFFFFFF'O;
@@ -1156,19 +1197,11 @@ private function f_TC_mo_ping_pong_2phase_access(template (value) MSRadioAccessC
 runs on RAW_PCU_Test_CT {
 	var RlcmacDlBlock dl_block;
 	var octetstring data := f_rnd_octstring(10);
+	var PollFnCtx pollctx;
 	var uint32_t sched_fn;
 	var uint32_t dl_fn;
 	var uint32_t unused_fn;
 	var GprsMS ms;
-
-	/* Single block (two phase) packet access */
-	var uint16_t ra := bit2int(chan_req_sb);
-	if (g_force_two_phase_access) {
-		/* If 2phase access is enforced by the network, then let's
-		   request a One phase packet access, we'll receive a single block
-		   anyway */
-		   ra := bit2int(chan_req_def);
-	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1183,21 +1216,9 @@ runs on RAW_PCU_Test_CT {
 	f_bssgp_establish();
 	f_bssgp_client_llgmm_assign('FFFFFFFF'O, ms.tlli);
 
-	/* Establish an Uplink TBF */
-	f_ms_use_ra(ms, ra, ra_is_11bit := 0);
-	f_ms_establish_ul_tbf(ms);
+	/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
 
-	/* Make sure we've got an Uplink TBF assignment */
-	if (not match(ms.ul_tbf.ass.ccch, tr_PacketUlSglAssign)) {
-		setverdict(fail, "Wrong Packet Uplink Assignment received: ", ms.ul_tbf.ass.ccch, " vs exp: ", tr_PacketUlSglAssign);
-		f_shutdown(__BFILE__, __LINE__);
-	}
-
-	/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS
-	 * (see 3GPP TS 04.60 "7.1.3.1 Initiation of the Packet resource request procedure")
-	 */
-	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap)), 0);
-	f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_UL_PACKET_ASS);
 	if (not match(ms.ul_tbf.tx_cs_mcs, exp_ul_cs_mcs)) {
 		setverdict(fail, "Wrong CS_MCS ", ms.ul_tbf.tx_cs_mcs, " received vs exp ", exp_ul_cs_mcs);
 		f_shutdown(__BFILE__, __LINE__);
@@ -1208,7 +1229,7 @@ runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_data_block_multi(ms, 1, with_tlli := true);  /* TODO: send using cs_mcs */
 
 	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
-	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
 
 	/* UL block should be received in SGSN */
 	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
@@ -1713,6 +1734,55 @@ testcase TC_dl_multislot_tbf_ms_class_from_sgsn() runs on RAW_PCU_Test_CT {
 	dl_block := f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_DL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
 	if (f_dltbf_num_slots(ms.dl_tbf) != 8) {
 		setverdict(fail, "Expected 8 PDCH slots allocated but got ", f_dltbf_num_slots(ms.dl_tbf));
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+testcase TC_dl_multislot_tbf_ms_class_from_2phase() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var PollFnCtx pollctx;
+	var uint32_t sched_fn;
+	var GprsMS ms;
+
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '10010'B, /* MS class 18, supports 8 DL and 8 UL */
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Only 1 TRX with 8 PDCH */
+	f_PCUIF_ver_INFO_PDCHMask_set(info_ind, '11111111'B, 0);
+	f_PCUIF_ver_INFO_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST to notify the MultiSlot Class */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+	dl_block := f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_DL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
+	if (f_dltbf_num_slots(ms.dl_tbf) != 8) {
+		setverdict(fail, "Expected 8 PDCH slot allocated but got ", f_dltbf_num_slots(ms.dl_tbf));
 		f_shutdown(__BFILE__, __LINE__);
 	}
 	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn, nr := f_ms_tx_TsTrxBtsNum(ms));
@@ -2807,6 +2877,7 @@ control {
 		execute( TC_pcuif_fh_pkt_ass_dl() );
 		execute( TC_multitrx_multims_alloc() );
 		execute( TC_dl_multislot_tbf_ms_class_from_sgsn() );
+		execute( TC_dl_multislot_tbf_ms_class_from_2phase() );
 	}
 
 	execute( TC_pcuif_info_ind_subsequent() );
