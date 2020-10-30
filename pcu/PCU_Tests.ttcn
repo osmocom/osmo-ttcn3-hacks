@@ -2535,6 +2535,166 @@ testcase TC_multitrx_multims_alloc() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+private function f_TC_paging_cs_multi_ms(template (value) TsTrxBtsNum nr,
+					 boolean exp_imsi, boolean exp_tmsi)
+runs on RAW_PCU_Test_CT {
+	var bitstring mask := f_pad_bit(''B, lengthof(g_ms), '0'B);
+	var integer pending := lengthof(g_ms);
+	var RlcmacDlBlock dl_block;
+	var boolean f1, f2;
+
+	while (pending > 0) {
+		var uint32_t poll_fn;
+
+		/* Obtain a Downlink block and make sure it is a paging request */
+		f_rx_rlcmac_dl_block(dl_block, poll_fn, nr := nr);
+		if (not match(dl_block, tr_RLCMAC_PACKET_PAG_REQ)) {
+			setverdict(fail, "Rx unexpected DL block: ", dl_block);
+			break;
+		}
+
+		/* This should not happen in general, but who knows... */
+		var PacketPagingReq req := dl_block.ctrl.payload.u.paging;
+		if (not ispresent(req.repeated_pageinfo)) {
+			setverdict(fail, "Repeated Page Info IE is absent?!?");
+			break;
+		}
+
+		/* A single message may contain several MIs depending on their type */
+		for (var integer i := 0; i < lengthof(g_ms); i := i + 1) {
+			f1 := exp_imsi and f_pkt_paging_match_imsi(req, g_ms[i].imsi,
+								   ps_domain := false);
+			f2 := exp_tmsi and f_pkt_paging_match_tmsi(req, oct2int(g_ms[i].tlli),
+								   ps_domain := false);
+			if (not f1 and not f2)
+				{ continue; }
+
+			/* Detect duplicate MIs */
+			if (mask[i] == '1'B) {
+				setverdict(fail, "MS is paged twice: ", g_ms[i].imsi);
+				continue;
+			}
+
+			mask[i] := '1'B;
+		}
+
+		pending := pending - lengthof(req.repeated_pageinfo);
+	}
+
+	for (var integer i := 0; i < lengthof(mask); i := i + 1) {
+		if (mask[i] != '1'B) {
+			setverdict(fail, "MS was not paged at all: ", g_ms[i].imsi);
+			log("===== mask := ", mask);
+		}
+	}
+
+	/* All messages must have been received by now, expect a dummy block */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block, nr := nr);
+}
+
+private function f_TC_paging_cs_multi_ms_init(BIT8 pdch_mask)
+runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Explicitly set the given PDCH slot-mask to all transceivers */
+	f_PCUIF_ver_INFO_PDCHMask_set(info_ind, pdch_mask);
+
+	/* Allocate 56 GprsMS instances (maximum for 8 PDCH slots) */
+	f_init_gprs_ms(7 * 8);
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_multi_ms_bssgp_register();
+
+	/* Establish an Uplink TBF for each GprsMS instance */
+	f_multi_ms_establish_tbf(do_activate := true);
+}
+
+testcase TC_paging_cs_multi_ms_imsi() runs on RAW_PCU_Test_CT {
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+
+	/* Common part: send INFO.ind, establish TBFs... */
+	f_TC_paging_cs_multi_ms_init(pdch_mask := '00000001'B);
+
+	/* Enqueue multiple CS PAGING requests at a time (IMSI only) */
+	for (var integer i := 0; i < lengthof(g_ms); i := i + 1) {
+		BSSGP[0].send(ts_BSSGP_CS_PAGING_IMSI(bvci, g_ms[i].imsi));
+	}
+
+	/* FIXME: work around a race condition between PCUIF and BSSGP */
+	f_sleep(0.2); /* i.e. give the IUT some time to process everything */
+
+	/* Check what the IUT sends on PACCH, all GprsMS instances must be paged.
+	 * The IUT is expected to page on all PDCH slots of all transceivers. */
+	for (var integer trx_nr := 0; trx_nr < 8; trx_nr := trx_nr + 1) {
+		var template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum(7, trx_nr);
+		f_TC_paging_cs_multi_ms(nr, exp_imsi := true, exp_tmsi := false);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+testcase TC_paging_cs_multi_ms_tmsi() runs on RAW_PCU_Test_CT {
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+
+	/* Common part: send INFO.ind, establish TBFs... */
+	f_TC_paging_cs_multi_ms_init(pdch_mask := '00000001'B);
+
+	/* Enqueue multiple CS PAGING requests at a time (P-TMSI only) */
+	for (var integer i := 0; i < lengthof(g_ms); i := i + 1) {
+		var GsmTmsi tmsi := oct2int(g_ms[i].tlli); /* P-TMSI == TLLI */
+		BSSGP[0].send(ts_BSSGP_CS_PAGING_PTMSI(bvci, g_ms[i].imsi, tmsi));
+	}
+
+	/* FIXME: work around a race condition between PCUIF and BSSGP */
+	f_sleep(0.2); /* i.e. give the IUT some time to process everything */
+
+	/* Check what the IUT sends on PACCH, all GprsMS instances must be paged.
+	 * The IUT is expected to page on all PDCH slots of all transceivers. */
+	for (var integer trx_nr := 0; trx_nr < 8; trx_nr := trx_nr + 1) {
+		var template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum(7, trx_nr);
+		f_TC_paging_cs_multi_ms(nr, exp_imsi := false, exp_tmsi := true);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+testcase TC_paging_cs_multi_ms_imsi_tmsi() runs on RAW_PCU_Test_CT {
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+
+	/* Common part: send INFO.ind, establish TBFs... */
+	f_TC_paging_cs_multi_ms_init(pdch_mask := '00000001'B);
+
+	/* Enqueue multiple CS PAGING requests at a time (IMSI & P-TMSI) */
+	for (var integer i := 0; i < lengthof(g_ms); i := i + 1) {
+		var GsmTmsi tmsi := oct2int(g_ms[i].tlli); /* P-TMSI == TLLI */
+		if (i mod 3 == 0) { /* One PDU fits: 1 IMSI and 2 P-TMSI MIs */
+			BSSGP[0].send(ts_BSSGP_CS_PAGING_PTMSI(bvci, g_ms[i].imsi, tmsi));
+		} else {
+			BSSGP[0].send(ts_BSSGP_CS_PAGING_IMSI(bvci, g_ms[i].imsi));
+		}
+	}
+
+	/* FIXME: work around a race condition between PCUIF and BSSGP */
+	f_sleep(0.2); /* i.e. give the IUT some time to process everything */
+
+	/* Check what the IUT sends on PACCH, all GprsMS instances must be paged.
+	 * The IUT is expected to page on all PDCH slots of all transceivers. */
+	for (var integer trx_nr := 0; trx_nr < 8; trx_nr := trx_nr + 1) {
+		var template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum(7, trx_nr);
+		f_TC_paging_cs_multi_ms(nr, exp_imsi := true, exp_tmsi := true);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_ta_ptcch_idle() );
@@ -2565,6 +2725,9 @@ control {
 	execute( TC_paging_ps_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_ps_from_sgsn_sign() );
 	execute( TC_paging_ps_from_sgsn_ptp() );
+	execute( TC_paging_cs_multi_ms_imsi_tmsi() );
+	execute( TC_paging_cs_multi_ms_imsi() );
+	execute( TC_paging_cs_multi_ms_tmsi() );
 	execute( TC_bssgp_dl_unitdata_with_valid_imsi() );
 	execute( TC_bssgp_dl_unitdata_with_invalid_imsi() );
 
