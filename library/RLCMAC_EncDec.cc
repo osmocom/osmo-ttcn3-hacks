@@ -450,6 +450,8 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 	TTCN_Buffer ttcn_buffer(stream);
 	int num_llc_blocks = 0;
 
+	ret_val.cs() = payload_len_2_coding_scheme(stream.lengthof());
+
 	/* use automatic/generated decoder for header */
 	ret_val.mac__hdr().decode(DlMacDataHeader_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
 
@@ -541,7 +543,7 @@ EgprsDlMacDataHeader dec__EgprsDlMacDataHeader_type3(const OCTETSTRING& stream)
 }
 
 static
-RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream, CodingScheme::enum_type mcs)
+RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream)
 {
 	RlcmacDlEgprsDataBlock ret_val;
 	TTCN_Buffer ttcn_buffer(stream);
@@ -551,7 +553,8 @@ RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream, Co
 	unsigned int num_calls;
 	const uint8_t *ti_e;
 
-	switch (mcs) {
+	ret_val.mcs() = payload_len_2_coding_scheme(stream.lengthof());
+	switch (ret_val.mcs()) {
 	case CodingScheme::MCS__0:
 	case CodingScheme::MCS__1:
 	case CodingScheme::MCS__2:
@@ -569,7 +572,7 @@ RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream, Co
 		ret_val.mac__hdr() = dec__EgprsDlMacDataHeader_type1(stream);
 		break;
 	}
-	setup_rlc_mac_priv(mcs, ret_val.mac__hdr().header__type(), false,
+	setup_rlc_mac_priv(ret_val.mcs(), ret_val.mac__hdr().header__type(), false,
 			   &num_calls, &data_block_bits, data_block_offsets);
 	get_egprs_data_block(ttcn_buffer, data_block_offsets[0], data_block_bits, aligned_buffer);
 
@@ -611,10 +614,10 @@ RlcmacDlBlock dec__RlcmacDlBlock(const OCTETSTRING& stream)
 {
 	RlcmacDlBlock ret_val;
 	size_t stream_len = stream.lengthof();
-	CodingScheme::enum_type mcs = payload_len_2_coding_scheme(stream_len);
+	CodingScheme::enum_type cs_mcs = payload_len_2_coding_scheme(stream_len);
 	unsigned char pt;
 
-	switch (mcs) {
+	switch (cs_mcs) {
 	case CodingScheme::CS__1:
 	case CodingScheme::CS__2:
 	case CodingScheme::CS__3:
@@ -635,7 +638,7 @@ RlcmacDlBlock dec__RlcmacDlBlock(const OCTETSTRING& stream)
 	case CodingScheme::MCS__7:
 	case CodingScheme::MCS__8:
 	case CodingScheme::MCS__9:
-		ret_val.data__egprs() = dec__RlcmacDlEgprsDataBlock(stream, mcs);
+		ret_val.data__egprs() = dec__RlcmacDlEgprsDataBlock(stream);
 		break;
 	}
 	return ret_val;
@@ -654,6 +657,8 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 				"dec_RlcmacUlDataBlock(): Stream before decoding: ");
 	stream.log();
 	TTCN_Logger::end_event();
+
+	ret_val.cs() = payload_len_2_coding_scheme(stream.lengthof());
 
 	/* use automatic/generated decoder for header */
 	ret_val.mac__hdr().decode(UlMacDataHeader_descr_, ttcn_buffer, TTCN_EncDec::CT_RAW);
@@ -792,7 +797,7 @@ EgprsUlMacDataHeader dec__EgprsUlMacDataHeader_type3(const OCTETSTRING& stream)
 	return ret_val;
 }
 
-RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream, CodingScheme::enum_type mcs)
+RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream)
 {
 	RlcmacUlEgprsDataBlock ret_val;
 	TTCN_Buffer ttcn_buffer(stream);
@@ -802,7 +807,8 @@ RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream, Co
 	unsigned int num_calls;
 	const uint8_t *ti_e;
 
-	switch (mcs) {
+	ret_val.mcs() = payload_len_2_coding_scheme(stream.lengthof());
+	switch (ret_val.mcs()) {
 	case CodingScheme::MCS__1:
 	case CodingScheme::MCS__2:
 	case CodingScheme::MCS__3:
@@ -819,7 +825,7 @@ RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream, Co
 		ret_val.mac__hdr() = dec__EgprsUlMacDataHeader_type1(stream);
 		break;
 	}
-	setup_rlc_mac_priv(mcs, ret_val.mac__hdr().header__type(), true,
+	setup_rlc_mac_priv(ret_val.mcs(), ret_val.mac__hdr().header__type(), true,
 			   &num_calls, &data_block_bits, data_block_offsets);
 	get_egprs_data_block(ttcn_buffer, data_block_offsets[0], data_block_bits, aligned_buffer);
 
@@ -889,10 +895,10 @@ RlcmacUlBlock dec__RlcmacUlBlock(const OCTETSTRING& stream)
 {
 	RlcmacUlBlock ret_val;
 	size_t stream_len = stream.lengthof();
-	CodingScheme::enum_type mcs = payload_len_2_coding_scheme(stream_len);
+	CodingScheme::enum_type cs_mcs = payload_len_2_coding_scheme(stream_len);
 	unsigned char pt;
 
-	switch (mcs) {
+	switch (cs_mcs) {
 	case CodingScheme::CS__1:
 	case CodingScheme::CS__2:
 	case CodingScheme::CS__3:
@@ -912,7 +918,7 @@ RlcmacUlBlock dec__RlcmacUlBlock(const OCTETSTRING& stream)
 	case CodingScheme::MCS__7:
 	case CodingScheme::MCS__8:
 	case CodingScheme::MCS__9:
-		ret_val.data__egprs() = dec__RlcmacUlEgprsDataBlock(stream, mcs);
+		ret_val.data__egprs() = dec__RlcmacUlEgprsDataBlock(stream);
 		break;
 	}
 
