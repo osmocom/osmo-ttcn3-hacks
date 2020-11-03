@@ -4451,6 +4451,107 @@ testcase TC_ho_int() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* intra-BSC hand-over with CONNection FAILure and cause Radio Link Failure: check RR release cause */
+private function f_tc_ho_int_radio_link_failure(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	const OCT8 kc := '0001020304050607'O;
+
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(ass_cmd, exp_compl);
+	f_bts_0_cfg(BSCVTY, {"neighbor bts 1"});
+
+	var HandoverState hs := {
+		rr_ho_cmpl_seen := false,
+		handover_done := false,
+		old_chan_nr := -
+	};
+	/* issue hand-over command on VTY */
+	f_vty_handover(BSCVTY, 0, 0, g_chan_nr, 1);
+	/* temporarily suspend DChan processing on BTS1 to avoid race with RSLEM_register */
+	f_rslem_suspend(RSL1_PROC);
+
+	/* From the MGW perspective, a handover is is characterized by
+	 * performing one MDCX operation with the MGW. So we expect to see
+	 * one more MDCX during handover. */
+	g_media.mgcp_conn[0].mdcx_seen_exp := g_media.mgcp_conn[0].crcx_seen_exp + 1;
+
+	var RSL_Message rsl;
+	var PDU_ML3_NW_MS l3;
+	var RslChannelNr new_chan_nr;
+	var GsmArfcn arfcn;
+	RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		if (not ischosen(l3.msgs.rrm.handoverCommand)) {
+			setverdict(fail, "Expected handoverCommand");
+			mtc.stop;
+		}
+	}
+	f_ChDesc2RslChanNr(l3.msgs.rrm.handoverCommand.channelDescription2,
+			   new_chan_nr, arfcn);
+
+	f_rslem_register(0, new_chan_nr, RSL1_PROC);
+
+	/* resume processing of RSL DChan messages, which was temporarily suspended
+	 * before performing a hand-over */
+	f_rslem_resume(RSL1_PROC);
+	RSL1.receive(tr_RSL_IPA_CRCX(new_chan_nr));
+
+	f_sleep(1.0);
+
+	/* Handover fails because no HANDO DET appears on the new lchan,
+	 * and the old lchan reports a Radio Link Failure. */
+	RSL.send(ts_RSL_CONN_FAIL_IND(g_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+
+	var PDU_BSSAP rx_clear_request;
+	BSSAP.receive(tr_BSSMAP_ClearRequest) -> value rx_clear_request;
+	var BssmapCause cause := bit2int(rx_clear_request.pdu.bssmap.clearRequest.cause.causeValue);
+	BSSAP.send(ts_BSSMAP_ClearCommand(cause));
+
+	var RR_Cause rr_cause := GSM48_RR_CAUSE_ABNORMAL_UNSPEC;
+
+	var MgcpCommand mgcp;
+	interleave {
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE(int2oct(enum2int(rr_cause), 1)))) {}
+	[] RSL.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {}
+	[] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			RSL.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+		}
+	[] RSL1.receive(tr_RSL_DEACT_SACCH(new_chan_nr)) {}
+	[] RSL1.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			RSL1.send(ts_RSL_RF_CHAN_REL_ACK(new_chan_nr));
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearComplete) {}
+	}
+
+	f_sleep(0.5);
+	setverdict(pass);
+}
+testcase TC_ho_int_radio_link_failure() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(2, true);
+	f_sleep(1.0);
+
+	f_ctrs_bsc_and_bts_init();
+
+	vc_conn := f_start_handler(refers(f_tc_ho_int_radio_link_failure));
+	vc_conn.done;
+
+	/* from f_establish_fully() */
+	f_ctrs_bsc_and_bts_add(0, "assignment:attempted");
+	f_ctrs_bsc_and_bts_add(0, "assignment:completed");
+	/* from handover */
+	f_ctrs_bsc_and_bts_add(0, "handover:attempted");
+	f_ctrs_bsc_and_bts_add(0, "handover:stopped");
+	f_ctrs_bsc_and_bts_add(0, "intra_bsc_ho:attempted");
+	f_ctrs_bsc_and_bts_add(0, "intra_bsc_ho:stopped");
+	f_ctrs_bsc_and_bts_verify();
+	f_shutdown_helper();
+}
+
 /* Expecting MGCP to DLCX the endpoint's two connections: towards BTS and towards MSC */
 private function f_expect_dlcx_conns() runs on MSC_ConnHdlr {
 	var MgcpCommand mgcp;
@@ -8344,6 +8445,7 @@ control {
 	execute( TC_err_84_unknown_msg() );
 
 	execute( TC_ho_int() );
+	execute( TC_ho_int_radio_link_failure() );
 
 	execute( TC_ho_out_of_this_bsc() );
 	execute( TC_ho_out_fail_no_msc_response() );
