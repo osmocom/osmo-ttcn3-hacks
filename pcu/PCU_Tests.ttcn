@@ -962,6 +962,91 @@ testcase TC_dl_cs1_to_cs4() runs on RAW_PCU_Test_CT {
 	f_dl_data_exp_cs(f_rlcmac_block_int2cs_mcs(g_cs_max_dl, false));
 }
 
+/* Test the initial UL MCS set by VTY works fine */
+testcase TC_mcs_initial_ul() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var PollFnCtx pollctx;
+	var EgprsChCodingCommand last_ch_coding;
+	var uint32_t unused_fn, sched_fn;
+	var GprsMS ms;
+	var CodingScheme exp_ul_mcs;
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MultislotCap_EGPRS mscap_egprs := {
+		egprsmultislotclass := '00011'B,
+		egprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, mscap_egprs)) };
+
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Set initial UL MCS to 3 */
+	g_mcs_initial_ul := 3;
+	exp_ul_mcs := f_rlcmac_block_int2cs_mcs(g_mcs_initial_ul, true);
+	f_pcuvty_set_allowed_cs_mcs();
+	f_pcuvty_set_link_quality_ranges();
+
+	/* Take lqual (dB->cB) so that we stay in that MCS */
+	ms.lqual_cb := g_mcs_lqual_ranges[2].low * 10;
+
+	/* Send PACKET RESOURCE REQUEST to upgrade to EGPRS */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+
+	if (not match(ms.ul_tbf.tx_cs_mcs, exp_ul_mcs)) {
+		setverdict(fail, "Wrong CS_MCS ", ms.ul_tbf.tx_cs_mcs, " received vs exp ", exp_ul_mcs);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Send UL blocks, until we receive UL ACK/NACK and check we are in same initial CS: */
+	while (true) {
+		f_ms_tx_ul_data_block(ms, f_rnd_octstring(10), cv := 15);
+		f_rx_rlcmac_dl_block(dl_block, unused_fn);
+		if (match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+			continue;
+		}
+
+		if (not match(dl_block, tr_RLCMAC_UL_ACK_NACK_EGPRS(ul_tfi := ?))) {
+			setverdict(fail, "Failed to match Packet Uplink ACK / NACK:", dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+			break;
+		}
+
+		last_ch_coding := dl_block.ctrl.payload.u.ul_ack_nack.egprs.ch_coding_cmd;
+		break;
+	}
+	if (f_rlcmac_block_EgprsChCodingCommand2cs_mcs(last_ch_coding) != exp_ul_mcs) {
+		setverdict(fail, "Channel Coding does not match our expectations ", exp_ul_mcs, ": ", last_ch_coding);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Remaining UL blocks are used to make sure regardless of initial
+	 * lqual, we can go lower at any time
+	 * 0 dB, make sure we downgrade MCS */
+	ms.lqual_cb := 0;
+	/* 5 UL blocks, check we are in same initial MCS: */
+	f_ms_tx_ul_data_block_multi(ms, 5);
+	/* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, unused_fn);
+	last_ch_coding := dl_block.ctrl.payload.u.ul_ack_nack.egprs.ch_coding_cmd;
+
+	if (last_ch_coding != CH_CODING_MCS1) {
+		setverdict(fail, "Channel Coding does not match our expectations (MCS-1): ", last_ch_coding);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify PCU drops TBF after some time of inactivity. */
 testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind;
@@ -3031,6 +3116,7 @@ control {
 	execute( TC_cs_initial_dl() );
 	execute( TC_cs_max_dl() );
 	execute( TC_dl_cs1_to_cs4() );
+	execute( TC_mcs_initial_ul() );
 	execute( TC_t3169() );
 	execute( TC_t3193() );
 	execute( TC_countdown_procedure() );
