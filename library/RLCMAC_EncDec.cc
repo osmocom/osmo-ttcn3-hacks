@@ -438,6 +438,28 @@ static void put_egprs_data_block(const TTCN_Buffer& aligned_data_block_buffer, u
 	dst_ttcn_buffer.increase_length(length_bytes);
 }
 
+/* Append padding bytes and spare bits at the end of ttcn_buffer, based on requested CS */
+static void encode_trailing_padding_spb(TTCN_Buffer& ttcn_buffer, CodingScheme cs)
+{
+	uint8_t buf[256]; /* enough to fit any RLCMAC buffer*/
+	uint32_t blk_len = RLCMAC__Templates::f__rlcmac__cs__mcs2block__len(cs);
+	uint32_t blk_len_no_spb = RLCMAC__Templates::f__rlcmac__cs__mcs2block__len__no__spare__bits(cs);
+	uint32_t data_len = ttcn_buffer.get_len();
+
+	if (data_len > blk_len_no_spb) {
+		fprintf(stderr, "Buffer too large for requested CS! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+		// TODO: throw exception?
+	}
+
+	for (int i = 0; i < blk_len_no_spb - data_len; i++)
+		buf[i] = 0x2b; /* Padding bits if needed */
+	for (int i = blk_len_no_spb - data_len; i < blk_len - data_len; i++)
+		buf[i] = 0x00;  /* Spare bits if needed */
+
+	const OCTETSTRING& pad_octstr = OCTETSTRING(blk_len - data_len, buf);
+	ttcn_buffer.put_string(pad_octstr);
+}
+
 /////////////////////
 // DECODE
 /////////////////////
@@ -970,6 +992,8 @@ OCTETSTRING enc__RlcmacDlDataBlock(const RlcmacDlDataBlock& si)
 		}
 	}
 
+	encode_trailing_padding_spb(ttcn_buffer, in.cs());
+
 	ttcn_buffer.get_string(ret_val);
 	return ret_val;
 }
@@ -1039,6 +1063,8 @@ OCTETSTRING enc__RlcmacDlEgprsDataBlock(const RlcmacDlEgprsDataBlock& si)
 			ttcn_buffer.put_string(in.blocks()[i].payload());
 		}
 	}
+
+	encode_trailing_padding_spb(ttcn_buffer, in.mcs());
 
 	ttcn_buffer.get_string(ret_val);
 	return ret_val;
@@ -1132,6 +1158,8 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 			ttcn_buffer.put_string(in.blocks()[i].payload());
 		}
 	}
+
+	encode_trailing_padding_spb(ttcn_buffer, in.cs());
 
 	ttcn_buffer.get_string(ret_val);
 	return ret_val;
@@ -1319,6 +1347,8 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 	//printbuffer("before merging data block", ttcn_buffer);
 	put_egprs_data_block(aligned_buffer, data_block_offsets[0], data_block_bits, ttcn_buffer);
 	//printbuffer("after merging data block", ttcn_buffer);
+
+	encode_trailing_padding_spb(ttcn_buffer, in.mcs());
 
 	ttcn_buffer.get_string(ret_val);
 	return ret_val;

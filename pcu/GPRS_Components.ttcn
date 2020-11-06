@@ -432,6 +432,24 @@ runs on MS_BTS_IFACE_CT return integer  {
 	return n;
 }
 
+function f_ultbf_payload_fill_length(UlTbf ul_tbf, boolean tlli := false, integer li_bytes := 0)
+runs on MS_BTS_IFACE_CT return uint32_t {
+	var uint32_t blk_len := f_rlcmac_cs_mcs2block_len_no_spare_bits(ul_tbf.tx_cs_mcs);
+	var uint32_t payload_fill_len;
+
+	if (f_rlcmac_cs_mcs_is_mcs(ul_tbf.tx_cs_mcs)) {
+		payload_fill_len := blk_len - 5 - li_bytes;
+	} else {
+		/* GPRS: blk_len = 3 Header bytes + payload length. No LI byte in this case. */
+		payload_fill_len := blk_len - 3 - li_bytes;
+	}
+
+	if (tlli) {
+		payload_fill_len := payload_fill_len - 4;
+	}
+	return payload_fill_len;
+}
+
 function f_ms_use_ra(inout GprsMS ms, uint16_t ra, uint8_t ra_is_11bit := 0)
 runs on MS_BTS_IFACE_CT {
 	ms.ra_is_11bit := ra_is_11bit;
@@ -507,53 +525,57 @@ runs on MS_BTS_IFACE_CT {
 function f_ms_tx_ul_block(inout GprsMS ms, template (value) RlcmacUlBlock ul_data,
 			  uint32_t fn := 0, template (omit) CodingScheme force_cs_mcs := omit,
 			  template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
-runs on MS_BTS_IFACE_CT return integer {
+runs on MS_BTS_IFACE_CT {
 	var octetstring data;
-	var integer padding_len;
 	var CodingScheme cs_mcs;
 	var uint32_t cs_mcs_len;
 
 	/* Encode the payload of DATA.ind */
 	data := enc_RlcmacUlBlock(valueof(ul_data));
 
-	if (ispresent(force_cs_mcs)) {
-		cs_mcs := valueof(force_cs_mcs);
-	} else if (ischosen(ul_data.ctrl)) {
-		cs_mcs := CS_1; /* CTRL is always CS1 */
-	} else {
-		/* Add padding to encode payload to minimum required CS/MCS: */
-		cs_mcs := f_rlcmac_block_len_required_cs_mcs(lengthof(data), ischosen(ul_data.data_egprs));
+	if (ischosen(ul_data.ctrl)) {
+		/* Ctrl blocks are right now encoded by RAW encoder, which was
+		 * found to have some issue with final padding, so we add it
+		 * here manually. This is actually still incorrect because the
+		 * remaining bits of last octet with data are not filled with
+		 * the padding sequence, but it's good enough since anyway PCU
+		 * don't check these. */
+		data := f_pad_oct(data, f_rlcmac_cs_mcs2block_len(CS_1), '2b'O);
 	}
-
-	cs_mcs_len := f_rlcmac_cs_mcs2block_len(cs_mcs);
-	padding_len := cs_mcs_len - lengthof(data);
-	if (padding_len < 0) {
-		setverdict(fail, "Unable to encode UL block of size ", lengthof(data), " with ", cs_mcs);
-		f_shutdown(__BFILE__, __LINE__);
-	}
-	data := f_pad_oct(data, cs_mcs_len, '00'O);
-
 	/* Enqueue DATA.ind (both TDMA frame and block numbers to be patched) */
 	f_ms_tx_data_ind(ms, data, fn, nr := nr);
-	return padding_len;
 }
 
-/* FIXME: Only supports sending CS-1 so far */
 function f_ms_tx_ul_data_block(inout GprsMS ms, octetstring payload,
 			       uint4_t cv := 15, boolean with_tlli := false, uint32_t fn := 0,
 			       template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
-runs on MS_BTS_IFACE_CT return integer {
+runs on MS_BTS_IFACE_CT {
 	var template (value) RlcmacUlBlock ul_data;
-	ul_data := t_RLCMAC_UL_DATA(tfi := ms.ul_tbf.tfi,
-				    cv := cv,
-				    bsn := ms.ul_tbf.bsn,
-				    blocks := {t_RLCMAC_LLCBLOCK(payload)});
-	if (with_tlli) {
-		ul_data.data.mac_hdr.tlli_ind := true;
-		ul_data.data.tlli := ms.tlli;
+
+	if (f_rlcmac_cs_mcs_is_mcs(ms.ul_tbf.tx_cs_mcs)) {
+		ul_data := t_RLCMAC_UL_EGPRS_DATA(mcs := ms.ul_tbf.tx_cs_mcs,
+						  tfi := ms.ul_tbf.tfi,
+						  cv := cv,
+						  bsn1 := ms.ul_tbf.bsn,
+						  bsn2_offset := 0,
+						  blocks := {t_RLCMAC_LLCBLOCK_EGPRS(payload)})
+		if (with_tlli) {
+			ul_data.data_egprs.tlli_ind := true;
+			ul_data.data_egprs.tlli := ms.tlli;
+		}
+	} else {
+		ul_data := t_RLCMAC_UL_DATA(cs := ms.ul_tbf.tx_cs_mcs,
+					    tfi := ms.ul_tbf.tfi,
+					    cv := cv,
+					    bsn := ms.ul_tbf.bsn,
+					    blocks := {t_RLCMAC_LLCBLOCK(payload)});
+		if (with_tlli) {
+			ul_data.data.mac_hdr.tlli_ind := true;
+			ul_data.data.tlli := ms.tlli;
+		}
 	}
 	f_ultbf_inc_bsn(ms.ul_tbf);
-	return f_ms_tx_ul_block(ms, ul_data, fn, nr := nr);
+	f_ms_tx_ul_block(ms, ul_data, fn, nr := nr);
 }
 
 /* Send random payload for last "num_blocks" blocks in Ul TBF (ending with CV=0). */
@@ -561,17 +583,17 @@ function f_ms_tx_ul_data_block_multi(inout GprsMS ms, integer num_blocks := 1, b
 				     template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT return octetstring {
 	var octetstring total_payload := ''O;
+	var uint32_t payload_fill_len := f_ultbf_payload_fill_length(ms.ul_tbf, with_tlli, 0);
 
 	for (var integer i := 0; i < num_blocks; i := i + 1) {
-		var integer padding_len;
-		var octetstring payload := f_rnd_octstring(10);
+		var octetstring payload := f_rnd_octstring(payload_fill_len);
 		/* Prepare a new UL block (CV, random payload) */
 		var integer cv := num_blocks - i - 1;
 		if (cv > g_bs_cv_max) {
 			cv := 15;
 		}
-		padding_len := f_ms_tx_ul_data_block(ms, payload, cv := cv, with_tlli := with_tlli, nr := nr);
-		total_payload := total_payload & payload & f_pad_oct(''O, padding_len, '00'O);
+		f_ms_tx_ul_data_block(ms, payload, cv := cv, with_tlli := with_tlli, nr := nr);
+		total_payload := total_payload & payload;
 	}
 	return total_payload;
 }
