@@ -1291,7 +1291,13 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 
 
 	if (in.tlli__ind()) {
-		aligned_buffer.put_string(in.tlli());
+		/* The TLLI is encoded in little endian for EGPRS (see
+		 * TS 44.060, figure 10.3a.2.1, note 2) */
+		OCTETSTRING tlli = in.tlli();
+		aligned_buffer.put_c(tlli[3].get_octet());
+		aligned_buffer.put_c(tlli[2].get_octet());
+		aligned_buffer.put_c(tlli[1].get_octet());
+		aligned_buffer.put_c(tlli[0].get_octet());
 	}
 
 	if (in.mac__hdr().pfi__ind()) {
