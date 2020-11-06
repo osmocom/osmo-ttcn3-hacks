@@ -1140,13 +1140,48 @@ OCTETSTRING enc__RlcmacUlDataBlock(const RlcmacUlDataBlock& si)
 static
 void enc__RlcmacUlEgprsDataHeader_type1(const EgprsUlMacDataHeader& si, TTCN_Buffer& ttcn_buffer)
 {
-	fprintf(stderr, "FIXME: Not implemented! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+	struct gprs_rlc_ul_header_egprs_1 egprs1;
+
+	egprs1.r = bs2uint8(si.r__ri());
+	egprs1.si = bs2uint8(si.foi__si());
+	egprs1.cv = si.countdown();
+	egprs1.tfi_hi = si.tfi() >> 0;
+	egprs1.tfi_lo = si.tfi() >> 2;
+	egprs1.bsn1_hi = si.bsn1() >> 0;
+	egprs1.bsn1_lo = si.bsn1() >> 5;
+	egprs1.bsn2_hi = si.bsn2__offset() >> 0;
+	egprs1.bsn2_lo = si.bsn2__offset() >> 2;
+	egprs1.cps = si.cps();
+	egprs1.rsb = bs2uint8(si.rsb());
+	egprs1.pi = si.pfi__ind();
+	egprs1.spare_hi = 0;
+	egprs1.spare_lo = 0;
+	egprs1.dummy = 0;
+
+	ttcn_buffer.put_s(sizeof(egprs1), (const unsigned char *)&egprs1);
 }
 
 static
 void enc__RlcmacUlEgprsDataHeader_type2(const EgprsUlMacDataHeader& si, TTCN_Buffer& ttcn_buffer)
 {
-	fprintf(stderr, "FIXME: Not implemented! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+	struct gprs_rlc_ul_header_egprs_2 egprs2;
+
+	egprs2.r = bs2uint8(si.r__ri());
+	egprs2.si = bs2uint8(si.foi__si());
+	egprs2.cv = si.countdown();
+	egprs2.tfi_hi = si.tfi() >> 0;
+	egprs2.tfi_lo = si.tfi() >> 2;
+	egprs2.bsn1_hi = si.bsn1() >> 0;
+	egprs2.bsn1_lo = si.bsn1() >> 5;
+	egprs2.cps_hi = si.cps() >> 0;
+	egprs2.cps_lo = si.cps() >> 2;
+	egprs2.rsb = bs2uint8(si.rsb());
+	egprs2.pi = si.pfi__ind();
+	egprs2.spare_hi = 0;
+	egprs2.spare_lo = 0;
+	egprs2.dummy = 0;
+
+	ttcn_buffer.put_s(sizeof(egprs2), (const unsigned char *)&egprs2);
 }
 
 static
