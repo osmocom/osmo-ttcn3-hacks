@@ -10,6 +10,7 @@
  */
 
 module NS_Emulation {
+	import from Misc_Helpers all;
 	import from NS_Types all;
 	import from BSSGP_Types all;
 	import from Osmocom_Types all;
@@ -27,8 +28,18 @@ module NS_Emulation {
 		PDU_BSSGP	bssgp optional
 	}
 
-	template NsUnitdataRequest t_NsUdReq(template Nsei nsei, template BssgpBvci bvci, template octetstring sdu,
-					     template PDU_BSSGP bssgp) := {
+	template NsUnitdataRequest tr_NsUdReq(template Nsei nsei, template BssgpBvci bvci, template octetstring sdu,
+					      template PDU_BSSGP bssgp) := {
+		bvci := bvci,
+		nsei := nsei,
+		sdu := sdu,
+		bssgp := bssgp
+	}
+
+	template (value) NsUnitdataRequest ts_NsUdReq(template (value) Nsei nsei,
+						      template (value) BssgpBvci bvci,
+						      template (omit) octetstring sdu,
+						      template (omit) PDU_BSSGP bssgp) := {
 		bvci := bvci,
 		nsei := nsei,
 		sdu := sdu,
@@ -42,7 +53,16 @@ module NS_Emulation {
 		PDU_BSSGP	bssgp optional
 	}
 
-	template NsUnitdataIndication t_NsUdInd(Nsei nsei, BssgpBvci bvci, octetstring sdu) := {
+	template (present) NsUnitdataIndication tr_NsUdInd(template (present) Nsei nsei,
+							   template (present) BssgpBvci bvci,
+							   template octetstring sdu) := {
+		bvci := bvci,
+		nsei := nsei,
+		sdu := sdu,
+		bssgp := ?
+	}
+
+	template (value) NsUnitdataIndication ts_NsUdInd(Nsei nsei, BssgpBvci bvci, octetstring sdu) := {
 		bvci := bvci,
 		nsei := nsei,
 		sdu := sdu,
@@ -52,22 +72,33 @@ module NS_Emulation {
 	type record NsStatusIndication {
 		Nsei		nsei,
 		Nsvci		nsvci,
-		NseState	old_state,
-		NseState	new_state
+		NsvcState	old_state,
+		NsvcState	new_state
 	}
 
-	template NsStatusIndication t_NsStsInd(Nsei nsei, Nsvci nsvci, NseState old_state, NseState state) := {
+	template (present) NsStatusIndication tr_NsStsInd(template (present) Nsei nsei := ?,
+							  template (present) Nsvci nsvci := ?,
+							  template (present) NsvcState old_state := ?,
+							  template (present) NsvcState state := ?) := {
 		nsei := nsei,
 		nsvci := nsvci,
 		old_state := old_state,
 		new_state := state
 	}
 
-	type enumerated NseState {
-		NSE_S_DEAD_BLOCKED,
-		NSE_S_WAIT_RESET,
-		NSE_S_ALIVE_BLOCKED,
-		NSE_S_ALIVE_UNBLOCKED
+
+	template (value) NsStatusIndication ts_NsStsInd(Nsei nsei, Nsvci nsvci, NsvcState old_state, NsvcState state) := {
+		nsei := nsei,
+		nsvci := nsvci,
+		old_state := old_state,
+		new_state := state
+	}
+
+	type enumerated NsvcState {
+		NSVC_S_DEAD_BLOCKED,
+		NSVC_S_WAIT_RESET,
+		NSVC_S_ALIVE_BLOCKED,
+		NSVC_S_ALIVE_UNBLOCKED
 	}
 
 	/* port from our (internal) point of view */
@@ -84,31 +115,6 @@ module NS_Emulation {
 			NsUnitdataIndication;
 		out	NsUnitdataRequest;
 	} with { extension "internal" };
-
-	function NSStart(NSConfiguration init_config, charstring id := testcasename()) runs on NS_CT {
-		config := init_config;
-		f_init(id & "-NSemu");
-		f_ScanEvents();
-	}
-
-	private function f_init(charstring id) runs on NS_CT {
-		var Result res;
-
-		if (ischosen(config.provider.ip)) {
-			/* Connect the UDP socket */
-			vc_NSP_IP := NS_Provider_IPL4_CT.create(id & "-provIP");
-			connect(self:NSCP, vc_NSP_IP:NSE);
-			vc_NSP_IP.start(NS_Provider_IPL4.main(config, id));
-#ifdef NS_EMULATION_FR
-		} else if (ischosen(config.provider.fr)) {
-			vc_NSP_FR := NS_Provider_FR_CT.create(id & "-provFR");
-			connect(self:NSCP, vc_NSP_FR:NSE);
-			vc_NSP_FR.start(NS_Provider_FR.main(config, id));
-#endif
-		}
-
-		f_change_state(NSE_S_DEAD_BLOCKED);
-	}
 
 	type component NS_Provider_CT {
 		/* upper port, facing to NS_Emulation:NSCP */
@@ -129,7 +135,154 @@ module NS_Emulation {
 		inout PDU_NS, NS_Provider_Evt;
 	} with { extension "internal" };
 
+	type record NSVCConfigurationIP {
+		AddressFamily address_family,
+		PortNumber local_udp_port,
+		charstring local_ip,
+		PortNumber remote_udp_port,
+		charstring remote_ip
+	};
+	type record NSVCConfigurationFR {
+		charstring netdev,	/* HDLC net-device for AF_PACKET socket */
+		integer dlci
+	};
+	type union NSVCConfigurationP {
+		NSVCConfigurationIP ip,
+		NSVCConfigurationFR fr
+	};
+	type record NSVCConfiguration {
+		NSVCConfigurationP provider,
+		Nsvci nsvci
+	};
+	type record of NSVCConfiguration NSVCConfigurations;
+	type record NSConfiguration {
+		Nsvci nsei,
+		boolean role_sgsn,
+		boolean handle_sns,
+		NSVCConfigurations nsvc
+	}
+
+	/***********************************************************************
+	 * per NS-VCG component. Exists once per [peer of] NSE
+	 ***********************************************************************/
+
 	type component NS_CT {
+		/* NS-User SAP towards the user */
+		port NS_SP_PT NS_SP;
+
+		/* port towards the per-NSVC components */
+		port NS_PT NSVC;
+
+		/* all of the NS configuration a user passes to us */
+		var NSConfiguration g_config;
+		var charstring g_id;
+
+		/* references to the per-NSVC components */
+		var NsvcTable g_nsvcs := {};
+
+	};
+	type record NsvcTableEntry {
+		Nsvci nsvci,
+		NSVC_CT vc_conn,
+		NsvcState state
+	};
+	type record of NsvcTableEntry NsvcTable;
+
+	/* add one NSVC (component and table entry */
+	function f_nsvc_add(NSVCConfiguration nsvc_cfg) runs on NS_CT {
+		var charstring nsvc_id := g_id & "-NSVCI" & int2str(nsvc_cfg.nsvci);
+		var NsvcTableEntry te;
+
+		te.nsvci := nsvc_cfg.nsvci;
+		te.vc_conn := NSVC_CT.create(nsvc_id);
+		te.state := NSVC_S_DEAD_BLOCKED;
+
+		connect(self:NSVC, te.vc_conn:NS_SP);
+		te.vc_conn.start(NSVCStart(nsvc_cfg, g_config, nsvc_id));
+
+		g_nsvcs := g_nsvcs & { te };
+	}
+
+	function f_nsvc_find_idx(Nsvci nsvci) runs on NS_CT return integer {
+		var integer i;
+		for (i := 0; i < lengthof(g_nsvcs); i := i+1) {
+			if (g_nsvcs[i].nsvci == nsvci) {
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	function f_nsvc_find(Nsvci nsvci) runs on NS_CT return NSVC_CT {
+		var integer i := f_nsvc_find_idx(nsvci);
+		if (i < 0) {
+			return null;
+		} else {
+			return g_nsvcs[i].vc_conn;
+		}
+	}
+
+	function f_nsvc_update_state(Nsvci nsvci, NsvcState state) runs on NS_CT {
+		var integer i := f_nsvc_find_idx(nsvci);
+		if (i < 0) {
+			return;
+		}
+		g_nsvcs[i].state := state;
+	}
+
+	function NSStart(NSConfiguration init_config, charstring id := testcasename()) runs on NS_CT {
+		g_config := init_config;
+		g_id := id;
+
+		/* iterate over list of NS-VCs and start per-NSVC components */
+		for (var integer i := 0; i < lengthof(g_config.nsvc); i := i+1) {
+			var NSVCConfiguration nsvc_cfg := g_config.nsvc[i];
+			f_nsvc_add(nsvc_cfg);
+		}
+
+		while (true) {
+			alt {
+			[] as_ns_common() {}
+			}
+		}
+	}
+
+	private altstep as_ns_common() runs on NS_CT {
+		var NsStatusIndication rx_nssi;
+		var NsUnitdataIndication rx_nsudi;
+		var NsUnitdataRequest rx_nsudr;
+		/* pass from NS-VCs up to user */
+		[] NSVC.receive(tr_NsStsInd(g_config.nsei)) -> value rx_nssi {
+			f_nsvc_update_state(rx_nssi.nsvci, rx_nssi.new_state);
+			NS_SP.send(rx_nssi);
+			}
+		[] NSVC.receive(tr_NsStsInd) -> value rx_nssi {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received NsStatusInd for invalid NSEI: ", rx_nssi));
+			}
+		[] NSVC.receive(tr_NsUdInd(g_config.nsei, ?, ?)) -> value rx_nsudi {
+			NS_SP.send(rx_nsudi);
+			}
+		[] NSVC.receive(tr_NsUdInd(?, ?, ?)) -> value rx_nsudi {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received UnitDataInd for invalid NSEI: ", rx_nsudi));
+			}
+		/* from user down to NS-VC */
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, *)) -> value rx_nsudr {
+			/* FIXME: load distribution function */
+			NSVC.send(rx_nsudr) to g_nsvcs[0].vc_conn;
+			}
+		[] NS_SP.receive(tr_NsUdReq(?, ?, ?, *)) -> value rx_nsudr {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received NsUnitdataReq for invalid NSEI: ", rx_nsudr));
+			}
+	}
+
+	/***********************************************************************
+	 per-NSVC component. Exists once for each NS-VC in the NS-VCG
+	 ***********************************************************************/
+
+	type component NSVC_CT {
 		/* UDP port towards the bottom (IUT) */
 		port NS_PROVIDER_PT NSCP;
 		var NS_Provider_IPL4_CT vc_NSP_IP;
@@ -137,12 +290,15 @@ module NS_Emulation {
 		var NS_Provider_FR_CT vc_NSP_FR;
 #endif
 
-		/* NS-User SAP towards the user */
+		/* port towards the NS_CT */
 		port NS_SP_PT NS_SP;
 
-		var NSConfiguration config;
+		/* configuration passed by the user */
+		var NSVCConfiguration	g_nsvc_config;
+		/* we cannot access the NS_CT.config and hence need to copy those */
+		var NSConfiguration	g_config;
 
-		var NseState		g_state := NSE_S_DEAD_BLOCKED;
+		var NsvcState		vc_state := NSVC_S_DEAD_BLOCKED;
 
 		timer Tns_alive := 3.0;
 		timer Tns_test := 10.0;
@@ -150,65 +306,68 @@ module NS_Emulation {
 		timer Tns_reset := 10.0;
 	}
 
-	type record NSConfigurationIP {
-		AddressFamily address_family,
-		PortNumber local_udp_port,
-		charstring local_ip,
-		PortNumber remote_udp_port,
-		charstring remote_ip
-	};
-	type record NSConfigurationFR {
-		charstring netdev,	/* HDLC net-device for AF_PACKET socket */
-		integer dlci
-	};
-	type union NSConfigurationP {
-		NSConfigurationIP ip,
-		NSConfigurationFR fr
-	};
-	type record NSConfiguration {
-		NSConfigurationP provider,
-		Nsvci nsvci,
-		Nsvci nsei,
-		boolean role_sgsn,
-		boolean handle_sns
+	function NSVCStart(NSVCConfiguration init_config, NSConfiguration init_g_config, charstring id := testcasename()) runs on NSVC_CT {
+		g_nsvc_config := init_config;
+		g_config := init_g_config;
+		f_init(id & "-NSVCemu" & int2str(g_nsvc_config.nsvci));
+		f_ScanEvents();
 	}
 
-	private function f_change_state(NseState new_state) runs on NS_CT {
-		var NseState old_state := g_state;
-		g_state := new_state;
-		log("NS State Transition: ", old_state, " -> ", new_state);
-		NS_SP.send(t_NsStsInd(config.nsei, config.nsvci, old_state, new_state));
+	private function f_init(charstring id) runs on NSVC_CT {
+		var Result res;
+
+		if (ischosen(g_nsvc_config.provider.ip)) {
+			/* Connect the UDP socket */
+			vc_NSP_IP := NS_Provider_IPL4_CT.create(id & "-provIP");
+			connect(self:NSCP, vc_NSP_IP:NSE);
+			vc_NSP_IP.start(NS_Provider_IPL4.main(g_nsvc_config, g_config, id));
+#ifdef NS_EMULATION_FR
+		} else if (ischosen(g_nsvc_config.provider.fr)) {
+			vc_NSP_FR := NS_Provider_FR_CT.create(id & "-provFR");
+			connect(self:NSCP, vc_NSP_FR:NSE);
+			vc_NSP_FR.start(NS_Provider_FR.main(g_nsvc_config, g_config, id));
+#endif
+		}
+
+		f_change_state(NSVC_S_DEAD_BLOCKED);
 	}
 
-	private function f_sendReset() runs on NS_CT {
-		NSCP.send(ts_NS_RESET(NS_CAUSE_OM_INTERVENTION, config.nsvci, config.nsei));
+	private function f_change_state(NsvcState new_state) runs on NSVC_CT {
+		var NsvcState old_state := vc_state;
+		vc_state := new_state;
+		log("NSVC ", g_nsvc_config.nsvci, " State Transition: ", old_state, " -> ", new_state);
+		NS_SP.send(ts_NsStsInd(g_config.nsei, g_nsvc_config.nsvci, old_state, new_state));
+	}
+
+	private function f_sendReset() runs on NSVC_CT {
+		NSCP.send(ts_NS_RESET(NS_CAUSE_OM_INTERVENTION, g_nsvc_config.nsvci, g_config.nsei));
 		Tns_reset.start;
-		g_state := NSE_S_WAIT_RESET;
+		vc_state := NSVC_S_WAIT_RESET;
 	}
 
-	private function f_sendAlive() runs on NS_CT {
+	private function f_sendAlive() runs on NSVC_CT {
 		NSCP.send(t_NS_ALIVE);
 		Tns_alive.start;
 	}
 
-	private function f_sendUnblock() runs on NS_CT {
+	private function f_sendUnblock() runs on NSVC_CT {
 		NSCP.send(t_NS_UNBLOCK);
 		Tns_block.start;
 	}
 
-	private function f_sendBlock(NsCause cause) runs on NS_CT {
-		NSCP.send(ts_NS_BLOCK(cause, config.nsvci));
+	private function f_sendBlock(NsCause cause) runs on NSVC_CT {
+		NSCP.send(ts_NS_BLOCK(cause, g_nsvc_config.nsvci));
 		Tns_block.start;
 	}
 
-	private altstep as_allstate() runs on NS_CT {
+	private altstep as_allstate() runs on NSVC_CT {
 		var PDU_NS rf;
 		var ASP_Event evt;
 
 		/* transition to DEAD if t_alive times out */
 		[] Tns_alive.timeout {
 			log("Tns-alive expired: changing to DEAD_BLOCKED + starting Tns-test");
-			f_change_state(NSE_S_DEAD_BLOCKED);
+			f_change_state(NSVC_S_DEAD_BLOCKED);
 			Tns_test.start;
 		}
 
@@ -235,33 +394,33 @@ module NS_Emulation {
 			/* FIXME */
 		}
 
-		[not config.handle_sns] as_handle_reset();
+		[not g_config.handle_sns] as_handle_reset();
 
-		[config.role_sgsn and config.handle_sns and ischosen(config.provider.ip)] as_sns_sgsn();
+		[g_config.role_sgsn and g_config.handle_sns and ischosen(g_nsvc_config.provider.ip)] as_sns_sgsn();
 
 		/* default case of handling unknown PDUs */
 		[] NSCP.receive(PDU_NS: ?) -> value rf {
-			log("Rx Unexpected NS PDU ", rf," in state ", g_state);
+			log("Rx Unexpected NS PDU ", rf," in state ", vc_state);
 			NSCP.send(ts_NS_STATUS(NS_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, rf));
 		}
 	}
 
-	private altstep as_handle_reset() runs on NS_CT {
+	private altstep as_handle_reset() runs on NSVC_CT {
 		var PDU_NS rf;
 
-		[config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
+		[g_config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
 			log("Provider Link came up: waiting for NS-RESET");
 			}
 
-		[not config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
+		[not g_config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
 			log("Provider Link came up: sending NS-RESET");
 			f_sendReset();
 			}
 
 		/* Respond to RESET with correct NSEI/NSVCI */
-		[] NSCP.receive(tr_NS_RESET(?, config.nsvci, config.nsei)) -> value rf {
-			f_change_state(NSE_S_ALIVE_BLOCKED);
-			NSCP.send(ts_NS_RESET_ACK(config.nsvci, config.nsei));
+		[] NSCP.receive(tr_NS_RESET(?, g_nsvc_config.nsvci, g_config.nsei)) -> value rf {
+			f_change_state(NSVC_S_ALIVE_BLOCKED);
+			NSCP.send(ts_NS_RESET_ACK(g_nsvc_config.nsvci, g_config.nsei));
 			log("Rx NS-RESET: Sending NS-ALIVE");
 			f_sendAlive();
 			Tns_test.start;
@@ -276,46 +435,47 @@ module NS_Emulation {
 
 	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
 	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
-	private altstep as_sns_sgsn() runs on NS_CT {
+	private altstep as_sns_sgsn() runs on NSVC_CT {
 		var PDU_NS rf;
-		[config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
+		[g_config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
 			log("Provider Link came up: sending NS-ALIVE");
 			f_sendAlive();
 			}
 
-		[not config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
+		[not g_config.role_sgsn] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
 			log("Provider Link came up: sending NS-ALIVE");
 			f_sendAlive();
 			}
 
-		[] NSCP.receive(tr_SNS_SIZE(config.nsei)) -> value rf {
+		[] NSCP.receive(tr_SNS_SIZE(g_config.nsei)) -> value rf {
 			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(ts_SNS_SIZE_ACK(config.nsei, omit));
+			NSCP.send(ts_SNS_SIZE_ACK(g_config.nsei, omit));
 		}
 		[] NSCP.receive(tr_SNS_SIZE(?)) {
 			setverdict(fail, "SNS-SIZE from unexpected NSEI");
 			self.stop;
 		}
-		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, true,
-				    {tr_SNS_IPv4(config.provider.ip.remote_ip,
-						 config.provider.ip.remote_udp_port)})) -> value rf {
+		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, true,
+				    {tr_SNS_IPv4(g_nsvc_config.provider.ip.remote_ip,
+						 g_nsvc_config.provider.ip.remote_udp_port)})) -> value rf {
 			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(ts_SNS_CONFIG_ACK(config.nsei, omit));
+			NSCP.send(ts_SNS_CONFIG_ACK(g_config.nsei, omit));
 			/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
-			var IP4_Elements v4 := { valueof(ts_SNS_IPv4(config.provider.ip.local_ip, config.provider.ip.local_udp_port)) };
-			NSCP.send(ts_SNS_CONFIG(config.nsei, true, v4));
+			var IP4_Elements v4 := { valueof(ts_SNS_IPv4(g_nsvc_config.provider.ip.local_ip,
+								     g_nsvc_config.provider.ip.local_udp_port)) };
+			NSCP.send(ts_SNS_CONFIG(g_config.nsei, true, v4));
 			alt {
-			[] NSCP.receive(tr_SNS_CONFIG_ACK(config.nsei, omit)) {
+			[] NSCP.receive(tr_SNS_CONFIG_ACK(g_config.nsei, omit)) {
 				/* success */
 				}
-			[] NSCP.receive(tr_SNS_CONFIG_ACK(config.nsei, ?)) {
+			[] NSCP.receive(tr_SNS_CONFIG_ACK(g_config.nsei, ?)) {
 				setverdict(fail, "Unexpected SNS-CONFIG-NACK");
 				self.stop;
 				}
 			}
 		}
-		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, false, ?)) { /* ignore */}
-		[] NSCP.receive(tr_SNS_CONFIG(config.nsei, true, ?)) {
+		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, false, ?)) { /* ignore */}
+		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, true, ?)) {
 			setverdict(fail, "Unexpected SNS-CONFIG content");
 			self.stop;
 		}
@@ -325,21 +485,21 @@ module NS_Emulation {
 		}
 	}
 
-	private altstep as_alive_blocked() runs on NS_CT {
+	private altstep as_alive_blocked() runs on NSVC_CT {
 		var PDU_NS rf;
 		/* bogus block, just respond with ACK */
-		[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
-			NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
+		[] NSCP.receive(tr_NS_BLOCK(?, g_nsvc_config.nsvci)) -> value rf {
+			NSCP.send(ts_NS_BLOCK_ACK(g_nsvc_config.nsvci));
 		}
 		/* Respond to UNBLOCK with UNBLOCK-ACK + change state */
 		[] NSCP.receive(t_NS_UNBLOCK) -> value rf {
 			NSCP.send(t_NS_UNBLOCK_ACK);
 			Tns_block.stop;
-			f_change_state(NSE_S_ALIVE_UNBLOCKED);
+			f_change_state(NSVC_S_ALIVE_UNBLOCKED);
 		}
 		[] NSCP.receive(t_NS_UNBLOCK_ACK) -> value rf {
 			Tns_block.stop;
-			f_change_state(NSE_S_ALIVE_UNBLOCKED);
+			f_change_state(NSVC_S_ALIVE_UNBLOCKED);
 		}
 		[] Tns_block.timeout {
 			/* repeat unblock transmission */
@@ -347,7 +507,7 @@ module NS_Emulation {
 		}
 	}
 
-	private altstep as_alive_unblocked() runs on NS_CT {
+	private altstep as_alive_unblocked() runs on NSVC_CT {
 		var NsUnitdataRequest ud_req;
 		var PDU_NS rf;
 		/* bogus unblock, just respond with ACK */
@@ -355,33 +515,33 @@ module NS_Emulation {
 			NSCP.send(t_NS_UNBLOCK_ACK);
 		}
 		/* Respond to BLOCK with BLOCK-ACK + change state */
-		[] NSCP.receive(tr_NS_BLOCK(?, config.nsvci)) -> value rf {
-			NSCP.send(ts_NS_BLOCK_ACK(config.nsvci));
+		[] NSCP.receive(tr_NS_BLOCK(?, g_nsvc_config.nsvci)) -> value rf {
+			NSCP.send(ts_NS_BLOCK_ACK(g_nsvc_config.nsvci));
 			Tns_block.stop;
-			f_change_state(NSE_S_ALIVE_BLOCKED);
+			f_change_state(NSVC_S_ALIVE_BLOCKED);
 		}
-		[] NSCP.receive(tr_NS_BLOCK_ACK(config.nsvci)) -> value rf {
+		[] NSCP.receive(tr_NS_BLOCK_ACK(g_nsvc_config.nsvci)) -> value rf {
 			Tns_block.stop;
 		}
 		/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
 		[] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
-			NS_SP.send(t_NsUdInd(config.nsei,
+			NS_SP.send(ts_NsUdInd(g_config.nsei,
 					     oct2int(rf.pDU_NS_Unitdata.bVCI),
 					     rf.pDU_NS_Unitdata.nS_SDU));
 		}
 		/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
-		[] NS_SP.receive(t_NsUdReq(config.nsei, ?, ?, omit)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, omit)) -> value ud_req {
 			/* using raw octetstring PDU */
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
 		}
-		[] NS_SP.receive(t_NsUdReq(config.nsei, ?, omit, ?)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, omit, ?)) -> value ud_req {
 			/* using decoded BSSGP PDU that we need to encode first */
 			var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
 		}
 	}
 
-	private altstep as_wait_reset() runs on NS_CT {
+	private altstep as_wait_reset() runs on NSVC_CT {
 		var PDU_NS rf;
 		[] Tns_reset.timeout {
 			/* If the sending entity of an NS-RESET PDU receives no NS-RESET-ACK PDU before timer
@@ -389,21 +549,21 @@ module NS_Emulation {
 			 * entire reset procedure shall be repeated */
 			f_sendReset();
 			}
-		[] NSCP.receive(tr_NS_RESET_ACK(config.nsvci, config.nsei)) -> value rf {
+		[] NSCP.receive(tr_NS_RESET_ACK(g_nsvc_config.nsvci, g_config.nsei)) -> value rf {
 			Tns_reset.stop;
-			f_change_state(NSE_S_ALIVE_BLOCKED);
+			f_change_state(NSVC_S_ALIVE_BLOCKED);
 			f_sendAlive();
 			f_sendUnblock();
 		}
 	}
 
-	private function f_ScanEvents() runs on NS_CT {
+	private function f_ScanEvents() runs on NSVC_CT {
 		var PDU_NS rf;
 		while (true) {
 			alt {
-			[g_state == NSE_S_WAIT_RESET] as_wait_reset();
-			[g_state == NSE_S_ALIVE_BLOCKED] as_alive_blocked();
-			[g_state == NSE_S_ALIVE_UNBLOCKED] as_alive_unblocked();
+			[vc_state == NSVC_S_WAIT_RESET] as_wait_reset();
+			[vc_state == NSVC_S_ALIVE_BLOCKED] as_alive_blocked();
+			[vc_state == NSVC_S_ALIVE_UNBLOCKED] as_alive_unblocked();
 			[] as_allstate();
 			}
 		}
