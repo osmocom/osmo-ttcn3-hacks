@@ -1181,7 +1181,6 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 	unsigned int data_block_bits, data_block_offsets[2];
 	unsigned int num_calls;
 	CodingScheme mcs;
-	boolean tlli_ind, e;
 
 	mcs = RLCMAC__Templates::f__rlcmac__cps__htype__to__mcs(in.mac__hdr().cps(), in.mac__hdr().header__type());
 	//fprintf(stderr, "RLCMAC: infered MCS %s (%d)\n", mcs.enum_to_str(static_cast<CodingScheme::enum_type>(mcs.as_int())), mcs.as_int());
@@ -1215,7 +1214,7 @@ OCTETSTRING enc__RlcmacUlEgprsDataBlock(const RlcmacUlEgprsDataBlock& si)
 	}
 
 	/* Put first TI + E byte */
-	aligned_buffer.put_c(tlli_ind << 1 | e << 0); /* M=0, E=1 LEN=0 */
+	aligned_buffer.put_c((in.tlli__ind() & 0x01) << 1 | (in.e() & 0x01) << 0);
 	//printbuffer("After encoding first byte", aligned_buffer);
 
 	if (in.e() == false) {
