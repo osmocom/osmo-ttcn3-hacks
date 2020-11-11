@@ -24,24 +24,28 @@ module NS_Emulation {
 	type record NsUnitdataRequest {
 		BssgpBvci	bvci,
 		Nsei		nsei,
+		integer		lsp,
 		octetstring	sdu optional,
 		PDU_BSSGP	bssgp optional
 	}
 
-	template NsUnitdataRequest tr_NsUdReq(template Nsei nsei, template BssgpBvci bvci, template octetstring sdu,
-					      template PDU_BSSGP bssgp) := {
+	template NsUnitdataRequest tr_NsUdReq(template Nsei nsei, template BssgpBvci bvci, template integer lsp,
+					      template octetstring sdu, template PDU_BSSGP bssgp) := {
 		bvci := bvci,
 		nsei := nsei,
+		lsp := lsp,
 		sdu := sdu,
 		bssgp := bssgp
 	}
 
 	template (value) NsUnitdataRequest ts_NsUdReq(template (value) Nsei nsei,
 						      template (value) BssgpBvci bvci,
+						      template (value) integer lsp,
 						      template (omit) octetstring sdu,
 						      template (omit) PDU_BSSGP bssgp) := {
 		bvci := bvci,
 		nsei := nsei,
+		lsp := lsp,
 		sdu := sdu,
 		bssgp := bssgp
 	}
@@ -184,7 +188,8 @@ module NS_Emulation {
 
 		/* references to the per-NSVC components */
 		var NsvcTable g_nsvcs := {};
-
+		/* list of indexes to g_nsvcs[] of currently unblocked NSVCs */
+		var ro_integer g_unblocked_nsvcs := {};
 	};
 	type record NsvcTableEntry {
 		Nsvci nsvci,
@@ -192,6 +197,7 @@ module NS_Emulation {
 		NsvcState state
 	};
 	type record of NsvcTableEntry NsvcTable;
+	type record of integer ro_integer;
 
 	/* add one NSVC (component and table entry */
 	function f_nsvc_add(NSVCConfiguration nsvc_cfg) runs on NS_CT {
@@ -206,6 +212,7 @@ module NS_Emulation {
 		te.vc_conn.start(NSVCStart(nsvc_cfg, g_config, nsvc_id));
 
 		g_nsvcs := g_nsvcs & { te };
+		/* no need to add to g_unblocked_nsvcs, as state is always DEAD_BLOCKED above */
 	}
 
 	function f_nsvc_find_idx(Nsvci nsvci) runs on NS_CT return integer {
@@ -231,6 +238,19 @@ module NS_Emulation {
 		var integer i := f_nsvc_find_idx(nsvci);
 		if (i < 0) {
 			return;
+		}
+		if (g_nsvcs[i].state != NSVC_S_ALIVE_UNBLOCKED and state == NSVC_S_ALIVE_UNBLOCKED) {
+			/* add index to list of unblocked NSVCs */
+			g_unblocked_nsvcs := g_unblocked_nsvcs & {i};
+		} else if (g_nsvcs[i].state == NSVC_S_ALIVE_UNBLOCKED and state != NSVC_S_ALIVE_UNBLOCKED) {
+			/* remove index to list of unblocked NSVCs */
+			var ro_integer new_unblocked_nsvcs := {};
+			for (var integer j := 0; j < lengthof(g_unblocked_nsvcs); j := j+1) {
+				if (g_unblocked_nsvcs[j] != i) {
+					new_unblocked_nsvcs := new_unblocked_nsvcs & {j};
+				}
+			}
+			g_unblocked_nsvcs := new_unblocked_nsvcs;
 		}
 		g_nsvcs[i].state := state;
 	}
@@ -302,11 +322,12 @@ module NS_Emulation {
 					log2str("Received UnitDataInd for invalid NSEI: ", rx_nsudi));
 			}
 		/* from user down to NS-VC */
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, *)) -> value rx_nsudr {
-			/* FIXME: load distribution function */
-			NSVC.send(rx_nsudr) to g_nsvcs[0].vc_conn;
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, ?, *)) -> value rx_nsudr {
+			/* load distribution function */
+			var integer nsvc_idx := g_unblocked_nsvcs[rx_nsudr.lsp mod lengthof(g_unblocked_nsvcs)];
+			NSVC.send(rx_nsudr) to g_nsvcs[nsvc_idx].vc_conn;
 			}
-		[] NS_SP.receive(tr_NsUdReq(?, ?, ?, *)) -> value rx_nsudr {
+		[] NS_SP.receive(tr_NsUdReq(?, ?, ?, ?, *)) -> value rx_nsudr {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Received NsUnitdataReq for invalid NSEI: ", rx_nsudr));
 			}
@@ -564,11 +585,11 @@ module NS_Emulation {
 					     rf.pDU_NS_Unitdata.nS_SDU));
 		}
 		/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, omit)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, ?, omit)) -> value ud_req {
 			/* using raw octetstring PDU */
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
 		}
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, omit, ?)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, omit, ?)) -> value ud_req {
 			/* using decoded BSSGP PDU that we need to encode first */
 			var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
