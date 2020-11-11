@@ -619,13 +619,25 @@ RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream)
 	}
 
 	/* RLC blocks at end */
-	if (ret_val.blocks().is_bound()) {
-		for (int i = 0; i < ret_val.blocks().size_of(); i++) {
-			unsigned int length = ret_val.blocks()[i].hdr()().length__ind();
-			if (length > aligned_buffer.get_read_len())
-				length = aligned_buffer.get_read_len();
-			ret_val.blocks()[i].payload() = OCTETSTRING(length, aligned_buffer.get_read_data());
-			aligned_buffer.increase_pos(length);
+	if (ret_val.e() == true) {
+		EgprsLlcBlock lb;
+		unsigned int length = aligned_buffer.get_read_len();
+		/* LI not present: The Upper Layer PDU that starts with the current RLC data block either
+		 * fills the current RLC data block precisely or continues in the following in-sequence RLC
+		 * data block */
+		lb.payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
+		aligned_buffer.increase_pos(length);
+		ret_val.blocks()[0] = lb;
+	} else {
+		/* RLC blocks at end */
+		if (ret_val.blocks().is_bound()) {
+			for (int i = 0; i < ret_val.blocks().size_of(); i++) {
+				unsigned int length = ret_val.blocks()[i].hdr()().length__ind();
+				if (length > aligned_buffer.get_read_len())
+					length = aligned_buffer.get_read_len();
+				ret_val.blocks()[i].payload() = OCTETSTRING(length, aligned_buffer.get_read_data());
+				aligned_buffer.increase_pos(length);
+			}
 		}
 	}
 
