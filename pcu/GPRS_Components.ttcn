@@ -77,7 +77,8 @@ type record DlTbf {
 	uint5_t			tfi,
 	GsmArfcn		arfcn optional,
 	BIT8                    ts_mask,
-	AckNackDescription	acknack_desc
+	AckNackDescription	acknack_desc,
+	EgprsAckNackDescription	egprs_acknack_desc
 };
 
 type union PacketUlAssignChan {
@@ -117,6 +118,15 @@ template AckNackDescription t_AckNackDescription_init := {
 	receive_block_bitmap := '0000000000000000000000000000000000000000000000000000000000000000'B
 }
 
+template EgprsAckNackDescription t_EgprsAckNackDescription_init := {
+	final_ack := '0'B,
+	begin_window := '1'B,
+	end_window := '1'B,
+	starting_seq_nr := 1,
+	compressed := '0'B,
+	urbb := '0000000000000000000000000000000000000000000000000000000000000000'B
+}
+
 const uint3_t USF_UNUSED := 7; /* used to indicate PRACH */
 
 template (value) GprsMS t_GprsMS_def := {
@@ -137,7 +147,8 @@ template (value) DlTbf t_DlTbf_def := {
 	tfi := 0,
 	arfcn := omit,
 	ts_mask := '00000000'B,
-	acknack_desc := t_AckNackDescription_init
+	acknack_desc := t_AckNackDescription_init,
+	egprs_acknack_desc := t_EgprsAckNackDescription_init
 };
 
 template (value) UlTbf t_UlTbf_def := {
@@ -401,10 +412,34 @@ runs on MS_BTS_IFACE_CT return integer  {
 	return n;
 }
 
+function f_dltbf_ack_block(inout DlTbf dl_tbf, RlcmacDlBlock dl_block, BIT1 final_ack := '0'B)
+runs on MS_BTS_IFACE_CT {
+	var boolean is_egprs := ischosen(dl_block.data_egprs);
+	if (is_egprs) {
+		f_egprs_acknackdesc_ack_block(dl_tbf.egprs_acknack_desc, dl_block, final_ack);
+	} else {
+		f_acknackdesc_ack_block(dl_tbf.acknack_desc, dl_block, final_ack);
+	}
+}
+
+function f_dltbf_ts_RLCMAC_DL_ACK_NACK(DlTbf dl_tbf, boolean use_egprs := false,
+				       template ChannelReqDescription chreq_desc := omit)
+runs on MS_BTS_IFACE_CT return template RlcmacUlBlock  {
+	if (use_egprs) {
+		return ts_RLCMAC_DL_ACK_NACK_EGPRS(dl_tbf.tfi, dl_tbf.egprs_acknack_desc, false, chreq_desc);
+	} else {
+		return ts_RLCMAC_DL_ACK_NACK(dl_tbf.tfi, dl_tbf.acknack_desc, false, chreq_desc);
+	}
+}
+
 function f_ultbf_inc_bsn(inout UlTbf ul_tbf)
 runs on MS_BTS_IFACE_CT {
 	ul_tbf.bsn := ul_tbf.bsn + 1;
-	ul_tbf.bsn := ul_tbf.bsn mod 128; /* FIXME: EGPRS SNS: 2048 */
+	if (ul_tbf.is_egprs) {
+		ul_tbf.bsn := ul_tbf.bsn mod 2048;
+	} else {
+		ul_tbf.bsn := ul_tbf.bsn mod 128;
+	}
 }
 
 function f_ultbf_next_ts(UlTbf ul_tbf)
@@ -640,12 +675,7 @@ function f_acknackdesc_ack_block(inout AckNackDescription desc, RlcmacDlBlock dl
 	var uint7_t bsn;
 	var integer i;
 	var integer inc;
-
-	if (ischosen(dl_block.data)) {
-		bsn := dl_block.data.mac_hdr.hdr_ext.bsn;
-	} else {
-		bsn := dl_block.data_egprs.mac_hdr.bsn1;
-	}
+	bsn := dl_block.data.mac_hdr.hdr_ext.bsn;
 
 	/* Filling hole? */
 	if (bsn < desc.starting_seq_nr) {
@@ -670,6 +700,53 @@ function f_acknackdesc_ack_block(inout AckNackDescription desc, RlcmacDlBlock dl
 	/* Now we can set current bit and update SSN */
 	desc.starting_seq_nr := (bsn + 1) mod 128;
 	desc.receive_block_bitmap[lengthof(desc.receive_block_bitmap) - 1] := int2bit(1, 1);
+
+	/* Finally update the final_ack bit as requested: */
+	desc.final_ack := final_ack;
+}
+
+/* TS 44.060 sec 12.3 Ack/Nack Description */
+function f_egprs_acknackdesc_ack_block(inout EgprsAckNackDescription desc, RlcmacDlBlock dl_block, BIT1 final_ack := '0'B)
+{
+	var uint11_t bsn;
+	var integer i;
+	var integer inc;
+	var integer n := 0;
+	var integer v_q := (desc.starting_seq_nr + 2047) mod 2048; /* SSN = V(Q) + 1 */
+
+	bsn := dl_block.data_egprs.mac_hdr.bsn1;
+
+	/* Repetition? */
+	if (bsn < v_q) {
+		/* Filling hole, wraparound: */
+		if (bsn - v_q > lengthof(desc.urbb)) {
+			desc.urbb[lengthof(desc.urbb) - (v_q + (2048 - bsn))] := int2bit(1, 1);
+			return;
+		}
+		return;
+	}
+
+	inc := bsn - v_q + 1;
+	desc.urbb[lengthof(desc.urbb) - inc] := int2bit(1, 1);
+
+	for (i :=  lengthof(desc.urbb) - 1; i >= lengthof(desc.urbb) - inc; i := i - 1) {
+		if (desc.urbb[i] == '0'B) {
+			break;
+		}
+		n := n + 1;
+	}
+
+	if (n > 0) {
+		/* SSN is increased, and so RBB values need to be moved */
+		for (i :=  lengthof(desc.urbb) - 1; i >= n; i := i - 1) {
+			desc.urbb[i] := desc.urbb[i - n];
+		}
+		for (i := n - 1; i >= 0; i := i - 1) {
+			desc.urbb[i] := int2bit(0, 1);
+		}
+
+		desc.starting_seq_nr := (desc.starting_seq_nr + n) mod 2048;
+	}
 
 	/* Finally update the final_ack bit as requested: */
 	desc.final_ack := final_ack;
@@ -1035,6 +1112,17 @@ runs on MS_BTS_IFACE_CT return uint32_t {
 	}
 
 	return f_rrbp_ack_fn(dl_fn, rrbp);
+}
+
+function f_dl_block_rrbp_valid(in RlcmacDlBlock dl_block)
+runs on MS_BTS_IFACE_CT return boolean {
+	if (ischosen(dl_block.data_egprs)) {
+		return dl_block.data_egprs.mac_hdr.esp != '00'B;
+	} else if (ischosen(dl_block.data)) {
+		return dl_block.data.mac_hdr.mac_hdr.rrbp_valid;
+	} else {
+		return dl_block.ctrl.mac_hdr.rrbp_valid;
+	}
 }
 
 /* Return true if a given Packet Paging Request contains the given IMSI, false otherwise */
