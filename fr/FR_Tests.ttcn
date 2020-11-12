@@ -6,9 +6,11 @@ import from Osmocom_Gb_Types all;
 
 import from NS_Emulation all;
 import from BSSGP_Emulation all;
+import from LLC_Templates all;
 
 modulepar {
 	integer mp_num_bvc := 10;
+	integer mp_num_ue_in_bvc := 10;
 	NSConfigurations mp_nsconfig := {
 		{
 			nsei := 123,
@@ -42,6 +44,7 @@ type record of BssgpCellId BssgpCellIds;
 
 type component test_CT {
 	var GbInstances g_gb;
+	port BSSGP_CT_PROC_PT BSSGP_PROC[16];
 };
 
 private function f_init_gb(inout GbInstance gb, charstring id, integer offset) runs on test_CT {
@@ -50,6 +53,7 @@ private function f_init_gb(inout GbInstance gb, charstring id, integer offset) r
 	gb.vc_BSSGP := BSSGP_CT.create(id_idx & "-BSSGPemu");
 	connect(gb.vc_BSSGP:BSCP, gb.vc_NS:NS_SP);
 	gb.vc_NS.start(NSStart(mp_nsconfig[offset], id_idx));
+	connect(self:BSSGP_PROC[offset], gb.vc_BSSGP:PROC);
 	gb.vc_BSSGP.start(BssgpStart(gb.cfg, testcasename()));
 }
 
@@ -72,6 +76,65 @@ function f_gen_bvc(integer base, integer idx) return BssgpBvcConfig {
 	return bvc;
 }
 
+/***********************************************************************
+ * UE simulation component
+ ***********************************************************************/
+
+type component UE_CT extends BSSGP_Client_CT {
+	var UE_Pars g_pars;
+	timer g_Tguard;
+	var LLC_Entities llc;
+}
+
+type record UE_Pars {
+	hexstring imsi,
+	OCT4 tlli
+};
+
+type function void_fn(charstring id) runs on UE_CT;
+
+function f_handler_init(void_fn fn, charstring id, UE_Pars pars) runs on UE_CT {
+	g_pars := pars;
+	llc := f_llc_create(false);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli);
+
+	fn.apply(id);
+	f_bssgp_client_unregister(g_pars.imsi);
+}
+
+function f_ul_ud(charstring id) runs on UE_CT {
+
+	log("Waiting for BVC-UNBLOCK");
+	alt {
+	[] BSSGP[0].receive(BssgpStatusIndication:{*,?,BVC_S_UNBLOCKED}) { }
+	[] BSSGP[0].receive { repeat; }
+	}
+
+	log ("Entering main loop");
+	while (true) {
+		var integer ran_index := 0;
+		//BSSGP[ran_index].send(ts_BSSGP_UL_UD(g_pars.tlli, g_pars.bssgp_cell_id[ran_index], llc_enc));
+		BSSGP[ran_index].send(ts_LLC_UI(f_rnd_octstring(512), '0000'B, '1'B, 0))
+		f_sleep(0.5);
+	}
+}
+
+function f_start_ue(void_fn fn, charstring id, GbInstance gb, integer imsi_suffix, BSSGP_BVC_CT bvc_comp, float t_guard := 30.0)
+runs on test_CT
+{
+	var UE_CT ue_comp;
+	var UE_Pars ue_pars := {
+		imsi := f_gen_imsi(imsi_suffix),
+		tlli := f_gprs_tlli_random()
+	};
+
+	ue_comp := UE_CT.create(id);
+	connect(ue_comp:BSSGP[0], bvc_comp:BSSGP_SP);
+	connect(ue_comp:BSSGP_SIG[0], bvc_comp:BSSGP_SP_SIG);
+	connect(ue_comp:BSSGP_PROC[0], bvc_comp:BSSGP_PROC);
+	ue_comp.start(f_handler_init(fn, id, ue_pars));
+}
+
 
 testcase TC_foo() runs on test_CT {
 
@@ -85,7 +148,19 @@ testcase TC_foo() runs on test_CT {
 		for (var integer j := 0; j < mp_num_bvc; j := j+1) {
 			g_gb[i].cfg.bvc := g_gb[i].cfg.bvc & { f_gen_bvc(i * 1000, j) };
 		}
+		log("Initializing Gb interface ", i, ": NSEI=", g_gb[i].cfg.nsei);
 		f_init_gb(g_gb[i], "gb", i);
+	}
+	for (var integer i := 0; i < lengthof(mp_nsconfig); i := i+1) {
+		for (var integer j := 0; j < mp_num_bvc; j := j+1) {
+			var BSSGP_BVC_CT bvc_comp := f_bssgp_get_bvci_ct(g_gb[i].cfg.bvc[j].bvci, BSSGP_PROC[i]);
+			for (var integer k := 0; k < mp_num_ue_in_bvc; k := k+1) {
+				var charstring id := "gb" & int2str(i) & "-bvc" & int2str(g_gb[i].cfg.bvc[j].bvci) & "-UEsim" & int2str(k);
+				f_start_ue(refers(f_ul_ud), id, g_gb[i], i*10000+j*100+k, bvc_comp);
+				/* a bit of staggering to ensure the timers above don't run all at the same time */
+				f_sleep(0.05);
+			}
+		}
 	}
 	while (true) {
 		f_sleep(100.0);
