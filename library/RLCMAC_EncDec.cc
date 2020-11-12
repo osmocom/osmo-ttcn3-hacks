@@ -207,17 +207,23 @@ static CodingScheme::enum_type payload_len_2_coding_scheme(size_t payload_len) {
 		return CodingScheme::MCS__3;
 	case 49:
 		return CodingScheme::MCS__4;
+	case 60: /* fall through */
 	case 61:
 		return CodingScheme::MCS__5;
+	case 78: /* fall through */
 	case 79:
 		return CodingScheme::MCS__6;
+	case 118: /* fall through */
 	case 119:
 		return CodingScheme::MCS__7;
-	case 142:
+	case 142: /* fall through */
+	case 143:
 		return CodingScheme::MCS__8;
+	case 154: /* fall through */
 	case 155:
 		return CodingScheme::MCS__9;
 	default:
+		fprintf(stderr, "ERROR: Unknown CodingSCheme for payload_len=%zu\n", payload_len);
 		return CodingScheme::CS__1;
 	}
 }
@@ -520,20 +526,52 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 static
 EgprsDlMacDataHeader dec__EgprsDlMacDataHeader_type1(const OCTETSTRING& stream)
 {
+	TTCN_Buffer ttcn_buffer(stream);
 	EgprsDlMacDataHeader ret_val;
+	const struct gprs_rlc_dl_header_egprs_1 *egprs1;
+	uint8_t tmp;
 
-	fprintf(stderr, "FIXME: Not implemented! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+	egprs1 = static_cast<const struct gprs_rlc_dl_header_egprs_1 *>
+		((const void *)ttcn_buffer.get_data());
 
+	ret_val.header__type() = EgprsHeaderType::RLCMAC__HDR__TYPE__1;
+	ret_val.tfi() = egprs1->tfi_lo << 1 | egprs1->tfi_hi << 0;
+	ret_val.rrbp() = egprs1->rrbp;
+	tmp = egprs1->es_p;
+	ret_val.esp() = BITSTRING(2, &tmp);
+	ret_val.usf() = egprs1->usf;
+	ret_val.bsn1() = egprs1->bsn1_lo << 10 | egprs1->bsn1_mid << 2 | egprs1->bsn1_hi;
+	ret_val.bsn2__offset() = egprs1->bsn2_lo << 7 | egprs1->bsn2_hi;
+	ret_val.pr() = egprs1->pr;
+	ret_val.cps() = egprs1->cps;
+
+	ttcn_buffer.increase_pos(sizeof(*egprs1));
 	return ret_val;
 }
 
 static
 EgprsDlMacDataHeader dec__EgprsDlMacDataHeader_type2(const OCTETSTRING& stream)
 {
+	TTCN_Buffer ttcn_buffer(stream);
 	EgprsDlMacDataHeader ret_val;
+	const struct gprs_rlc_dl_header_egprs_2 *egprs2;
+	uint8_t tmp;
 
-	fprintf(stderr, "FIXME: Not implemented! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
+	egprs2 = static_cast<const struct gprs_rlc_dl_header_egprs_2 *>
+		((const void *)ttcn_buffer.get_data());
 
+	ret_val.header__type() = EgprsHeaderType::RLCMAC__HDR__TYPE__2;
+	ret_val.tfi() = egprs2->tfi_lo << 1 | egprs2->tfi_hi << 0;
+	ret_val.rrbp() = egprs2->rrbp;
+	tmp = egprs2->es_p;
+	ret_val.esp() = BITSTRING(2, &tmp);
+	ret_val.usf() = egprs2->usf;
+	ret_val.bsn1() = egprs2->bsn1_lo << 10 | egprs2->bsn1_mid << 2 | egprs2->bsn1_hi;
+	ret_val.bsn2__offset() = 0; /*TODO: mark optional and not set ? */
+	ret_val.pr() = egprs2->pr;
+	ret_val.cps() = egprs2->cps;
+
+	ttcn_buffer.increase_pos(sizeof(*egprs2));
 	return ret_val;
 }
 
