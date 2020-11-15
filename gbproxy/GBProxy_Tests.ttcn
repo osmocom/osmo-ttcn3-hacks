@@ -209,6 +209,9 @@ type component test_CT {
 
 	port BSSGP_CT_PROC_PT PROC;
 
+	port BSSGP_BVC_MGMT_PT SGSN_MGMT;
+	port BSSGP_BVC_MGMT_PT PCU_MGMT;
+
 	port TELNETasp_PT GBPVTY;
 
 	var boolean g_initialized := false;
@@ -284,6 +287,7 @@ private function f_init_gb_pcu(inout GbInstance gb, charstring id, integer offse
 		connect(self:PROC, gb.vc_BSSGP:PROC);
 		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+		connect(self:PCU_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
 }
 
@@ -302,6 +306,7 @@ private function f_init_gb_sgsn(inout GbInstance gb, charstring id, integer offs
 		connect(self:PROC, gb.vc_BSSGP:PROC);
 		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+		connect(self:SGSN_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
 }
 
@@ -312,7 +317,20 @@ private function f_init_vty() runs on test_CT {
 	f_vty_transceive(GBPVTY, "enable");
 }
 
+type record of integer ro_integer;
+
+private function ro_integer_contains(ro_integer r, integer x) return boolean {
+	for (var integer j := 0; j < lengthof(r); j := j+1) {
+		if (r[j] == x) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function f_init() runs on test_CT {
+	var ro_integer bvci_unblocked := {};
+	var BssgpStatusIndication bsi;
 	var integer i;
 
 	if (g_initialized == true) {
@@ -338,6 +356,53 @@ function f_init() runs on test_CT {
 	f_sleep(4.0);
 	for (i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
 		f_init_gb_pcu(g_pcu[i], "GbProxy_Test", i);
+	}
+
+	/* wait until all BVC are unblocked on both sides */
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] SGSN_MGMT.receive(BssgpStatusIndication:{*, ?, BVC_S_UNBLOCKED}) -> value bsi {
+		bvci_unblocked := bvci_unblocked & { bsi.bvci };
+		if (lengthof(bvci_unblocked) != lengthof(g_sgsn[0].cfg.bvc)) {
+			repeat;
+			}
+		}
+	[] SGSN_MGMT.receive(BssgpStatusIndication:{*, ?, ?}) {
+		repeat;
+		}
+	[] SGSN_MGMT.receive {
+		setverdict(fail, "Received unexpected message on SGSN_MGMT");
+		mtc.stop;
+		}
+
+	[] PCU_MGMT.receive(BssgpStatusIndication:{*, ?, BVC_S_UNBLOCKED}) -> value bsi {
+		repeat;
+		}
+	[] PCU_MGMT.receive(BssgpStatusIndication:{*, ?, ?}) {
+		repeat;
+		}
+	[] PCU_MGMT.receive(BssgpResetIndication:{0}) {
+		repeat;
+		}
+	[] PCU_MGMT.receive {
+		setverdict(fail, "Received unexpected message on PCU_MGMT");
+		mtc.stop;
+		}
+
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for unblock of all BVCs");
+		mtc.stop;
+		}
+	}
+
+	/* iterate over list and check all BVCI */
+	for (i := 0; i < lengthof(g_sgsn[0].cfg.bvc); i := i+1) {
+		var BssgpBvci bvci := g_sgsn[0].cfg.bvc[i].bvci;
+		if (not ro_integer_contains(bvci_unblocked, bvci)) {
+			setverdict(fail, "BVCI=", bvci, " was not unblocked during start-up");
+			mtc.stop;
+		}
 	}
 }
 
