@@ -603,6 +603,9 @@ type component BSSGP_BVC_CT {
 	/* port towards the underlying BSSGP_CT */
 	port BSSGP_BVC_PT BVC;
 
+	/* port to a management instance */
+	port BSSGP_BVC_MGMT_SP_PT MGMT;
+
 	/* BSSGP-User SAP towards the user (Client) */
 	port BSSGP_SP_PT BSSGP_SP;
 	port BSSGP_SP_PT BSSGP_SP_SIG;
@@ -618,6 +621,9 @@ type component BSSGP_BVC_CT {
 	timer g_T1 := 15.0;
 	timer g_T2 := 60.0;
 	var boolean g_t1_waits_for_block_ack := false;
+	/* for re-transmissions */
+	var BssgpCause g_last_block_cause;
+	var BssgpCause g_last_reset_cause;
 
 	var ClientEntity ClientTable[16];
 };
@@ -638,6 +644,30 @@ type port BSSGP_BVC_PT message {
 	out	NsUnitdataRequest;
 } with { extension "internal" };
 
+/* port between BSSGP_BVC_CT and a management instance */
+type port BSSGP_BVC_MGMT_SP_PT message {
+	in	BssgpResetRequest,
+		BssgpBlockRequest,
+		BssgpUnblockRequest;
+	out	BssgpStatusIndication,
+		BssgpResetIndication;
+} with { extension "internal" };
+type port BSSGP_BVC_MGMT_PT message {
+	in	BssgpStatusIndication,
+		BssgpResetIndication;
+	out	BssgpResetRequest,
+		BssgpBlockRequest,
+		BssgpUnblockRequest;
+} with { extension "internal" };
+
+type record BssgpResetRequest {
+	BssgpCause cause
+};
+type record BssgpBlockRequest {
+	BssgpCause cause
+};
+type record BssgpUnblockRequest {
+};
 
 /* one element in the per-TLLI state table */
 type record ClientEntity {
@@ -892,6 +922,7 @@ private function f_ptp_sendBlock(BssgpCause cause) runs on BSSGP_BVC_CT {
 	BVC.send(ts_ptp_BnsUdReq(t_BVC_BLOCK(g_cfg.bvci, cause), 0, g_bvc_lsp));
 	g_t1_waits_for_block_ack := true;
 	g_T1.start;
+	g_last_block_cause := cause;
 }
 
 private function f_ptp_sendStatus(BssgpCause cause, PDU_BSSGP pdu) runs on BSSGP_BVC_CT {
@@ -899,22 +930,23 @@ private function f_ptp_sendStatus(BssgpCause cause, PDU_BSSGP pdu) runs on BSSGP
 	BVC.send(ts_ptp_BnsUdReq(ts_BSSGP_STATUS(g_cfg.bvci, cause, pdu), g_cfg.bvci, g_bvc_lsp));
 }
 
-private function f_ptp_sendReset() runs on BSSGP_BVC_CT {
+private function f_ptp_sendReset(BssgpCause cause := BSSGP_CAUSE_OM_INTERVENTION) runs on BSSGP_BVC_CT {
 	var PDU_BSSGP pdu;
 
 	/* The Cell Identifier IE is mandatory in the BVC-RESET PDU sent from BSS to
 	 * SGSN in order to reset a BVC corresponding to a PTP functional entity. The
 	 * Cell Identifier IE shall not be used in any other BVC-RESET PDU. */
 	if (g_sgsn_role) {
-		pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, g_cfg.bvci, omit));
+		pdu := valueof(ts_BVC_RESET(cause, g_cfg.bvci, omit));
 	} else {
-		pdu := valueof(ts_BVC_RESET(BSSGP_CAUSE_OM_INTERVENTION, g_cfg.bvci, g_cfg.cell_id));
+		pdu := valueof(ts_BVC_RESET(cause, g_cfg.bvci, g_cfg.cell_id));
 	}
 
 	/* BVC-RESET is always sent via the SIGNALLING BVCI, see Table 5.4.1 */
 	BVC.send(ts_ptp_BnsUdReq(pdu, 0, g_bvc_lsp));
 	g_T2.start;
 	//f_change_state(BVC_S_WAIT_RESET);
+	g_last_reset_cause := cause;
 }
 
 /* PTP-BVC is in BVC_S_BLOCKED state */
@@ -939,14 +971,19 @@ private altstep as_ptp_blocked() runs on BSSGP_BVC_CT {
 
 	[] g_T2.timeout {
 		/* BVC-RESET-ACK PDU was not received within T2: retransmit */
-		f_ptp_sendReset();
+		f_ptp_sendReset(g_last_reset_cause);
 	}
+
+	[] MGMT.receive(BssgpUnblockRequest:?) {
+		f_ptp_sendUnblock();
+		}
 }
 
 /* PTP-BVC is in UNBLOCKED state */
 private altstep as_ptp_unblocked() runs on BSSGP_BVC_CT {
 	var NsUnitdataIndication udi;
 	var NsStatusIndication nsi;
+	var BssgpBlockRequest bbr;
 	var BSSGP_Client_CT vc_conn;
 	var ASP_Event evt;
 	var PDU_BSSGP bs_pdu;
@@ -976,7 +1013,7 @@ private altstep as_ptp_unblocked() runs on BSSGP_BVC_CT {
 		f_ptp_sendUnblock();
 	}
 	[g_t1_waits_for_block_ack] g_T1.timeout {
-		f_ptp_sendBlock(BSSGP_CAUSE_OM_INTERVENTION);
+		f_ptp_sendBlock(g_last_block_cause);
 	}
 
 	/* simply acknowledge all per-BVC Flow Control Messages */
@@ -1080,17 +1117,25 @@ private altstep as_ptp_unblocked() runs on BSSGP_BVC_CT {
 		var octetstring llc_enc := enc_PDU_LLC(llc);
 		BVC.send(ts_ptp_BnsUdReq(ts_BSSGP_DL_UD(tlli, llc_enc), g_cfg.bvci, oct2int(tlli)));
 	}
+
+	[] MGMT.receive(BssgpBlockRequest:?) -> value bbr {
+		f_ptp_sendBlock(bbr.cause);
+		}
 }
 
 /* Events permitted in all states */
 private altstep as_ptp_allstate() runs on BSSGP_BVC_CT {
 	var NsUnitdataIndication udi;
+	var BssgpResetRequest brr;
 	var BSSGP_Client_CT vc_conn;
 	var OCT4 tlli, tlli_old;
 	var hexstring imsi;
 
 	/* Signaling BVC was reset */
 	[] BVC.receive(BssgpResetIndication:{0}) {
+		if (MGMT.checkstate("Connected")) {
+			MGMT.send(BssgpResetIndication:{0});
+		}
 		if (not g_sgsn_role) {
 			f_ptp_change_state(BVC_S_BLOCKED);
 			/* when the BSS side signaling PTP is RESET, all PTP BVC must start the
@@ -1146,6 +1191,10 @@ private altstep as_ptp_allstate() runs on BSSGP_BVC_CT {
 		f_tbl_client_llgmm_assign(tlli_old, tlli, vc_conn);
 		BSSGP_PROC.reply(BSSGP_llgmm_assign:{tlli_old, tlli}) to vc_conn;
 		}
+
+	[] MGMT.receive(BssgpResetRequest:?) -> value brr {
+		f_ptp_sendReset(brr.cause);
+		}
 }
 
 /* main loop for per-BVC component */
@@ -1194,6 +1243,9 @@ private function f_ptp_change_state(BvcState new_state) runs on BSSGP_BVC_CT {
 	}
 	log("BVCI(", g_cfg.bvci, ") State Transition: ", g_ptp_bvc_state, " -> ", new_state);
 	g_ptp_bvc_state := new_state;
+	if (MGMT.checkstate("Connected")) {
+		MGMT.send(ts_BssgpStsInd(omit, g_cfg.bvci, g_ptp_bvc_state));
+	}
 	for (var integer i := 0; i < sizeof(ClientTable); i := i+1) {
 		if (isbound(ClientTable[i].comp_ref) and ClientTable[i].comp_ref != null) {
 			BSSGP_SP.send(ts_BssgpStsInd(omit, g_cfg.bvci, g_ptp_bvc_state)) to ClientTable[i].comp_ref;
