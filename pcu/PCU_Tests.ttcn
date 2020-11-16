@@ -3047,6 +3047,176 @@ testcase TC_multitrx_multims_alloc() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify concurrent PDCH use of EGPRS and GPRS (EGPRS dl rlcmac blk is
+ * downgraded to CS1-4 so that GPRS can read the USF).
+ * See 3GPP TS 44.060 5.2.4a "Multiplexing of GPRS, EGPRS and EGPRS2 capable mobile stations"
+  */
+testcase TC_multiplex_dl_gprs_egprs() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	const integer num_ms := 2; /* 2 MS, first one is GPRS-only, second one is EGPRS */
+	var PollFnCtx pollctx;
+	var MSRadioAccessCapabilityV ms_racap;
+	var uint32_t sched_fn, dl_fn, ack_fn;
+	var octetstring data := f_rnd_octstring(10);
+	var RlcmacDlBlock dl_block;
+	var integer tx_data_remain := 5;
+	var integer tgt_ms;
+	var integer ms_gprs_usf_count[num_ms] := { 0, 0 };
+	var integer ms_egprs_usf_count[num_ms] := { 0, 0 };
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms(num_ms);
+
+	info_ind := valueof(ts_PCUIF_INFO_default);
+	/* Only use 1 PDCH to make sure both end up in the same slot: */
+	f_PCUIF_ver_INFO_PDCHMask_set(info_ind, '00000001'B, 0);
+	f_PCUIF_ver_INFO_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Set Initial MCS > 4 and maintain it non-variable to simplify test */
+	g_mcs_initial_dl := 5;
+	g_mcs_max_dl := 5;
+	f_pcuvty_set_allowed_cs_mcs();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_multi_ms_bssgp_register();
+
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MultislotCap_EGPRS mscap_egprs := {
+		egprsmultislotclass := '00011'B,
+		egprsextendeddynalloccap := '0'B
+	};
+
+	/* Establish UL TBF for MS0 (GPRS-only) */
+	ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+	pollctx := f_ms_establish_ul_tbf_2phase_access(g_ms[0], ts_RlcMacUlCtrl_PKT_RES_REQ(g_ms[0].tlli, ms_racap));
+	if (not match(g_ms[0].ul_tbf.tx_cs_mcs, cs_gprs_any)) {
+		setverdict(fail, "Wrong CS_MCS ", g_ms[0].ul_tbf.tx_cs_mcs, " received vs exp ", cs_gprs_any);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(g_ms[0], ts_RLCMAC_CTRL_ACK(g_ms[0].tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Establish UL TBF for MS1 (EGPRS) */
+	ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, mscap_egprs)) };
+	pollctx := f_ms_establish_ul_tbf_2phase_access(g_ms[1], ts_RlcMacUlCtrl_PKT_RES_REQ(g_ms[1].tlli, ms_racap));
+	if (not match(g_ms[1].ul_tbf.tx_cs_mcs, mcs_egprs_any)) {
+		setverdict(fail, "Wrong CS_MCS ", g_ms[1].ul_tbf.tx_cs_mcs, " received vs exp ", mcs_egprs_any);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(g_ms[1], ts_RLCMAC_CTRL_ACK(g_ms[1].tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Now SGSN sends some DL data to MS0, PCU will assign a GPRS DL TBF on PACCH */
+	BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[0].tlli, data));
+	f_sleep(0.1);
+	f_ms_rx_pkt_ass_pacch(g_ms[0], sched_fn, tr_RLCMAC_DL_PACKET_ASS);
+	/* DL Ass sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(g_ms[0], ts_RLCMAC_CTRL_ACK(g_ms[0].tlli), sched_fn);
+	/* After acking the dl assignment, dl tbf goes into FLOW state and PCU will provide DL data when BTS asks for it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0, cs_gprs_any);
+	/* ACK the DL block */
+	f_dltbf_ack_block(g_ms[0].dl_tbf, dl_block, '0'B);
+	f_ms_tx_ul_block(g_ms[0], f_dltbf_ts_RLCMAC_DL_ACK_NACK(g_ms[0].dl_tbf, false),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	/* Now SGSN sends some DL data to MS1, PCU will assign a EGPRS DL TBF on PACCH */
+	BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[1].tlli, data));
+	f_sleep(0.1);
+	f_ms_rx_pkt_ass_pacch(g_ms[1], sched_fn, tr_RLCMAC_DL_PACKET_ASS);
+	/* DL Ass sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(g_ms[1], ts_RLCMAC_CTRL_ACK(g_ms[1].tlli), sched_fn);
+	/* After acking the dl assignment, dl tbf goes into FLOW state and PCU will provide DL data when BTS asks for it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0, mcs_egprs_any);
+	/* ACK the DL block */
+	f_dltbf_ack_block(g_ms[1].dl_tbf, dl_block, '0'B);
+	f_ms_tx_ul_block(g_ms[1], f_dltbf_ts_RLCMAC_DL_ACK_NACK(g_ms[1].dl_tbf, true),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	data := f_rnd_octstring(1400);
+	BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[0].tlli, data));
+	BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[1].tlli, data));
+
+	for (var integer i := 0; i < 800; i := i + 1) {
+		f_rx_rlcmac_dl_block(dl_block, dl_fn);
+
+		if (match(dl_block, tr_RLCMAC_DUMMY_CTRL)) {
+			/* No more data to receive, done */
+			break;
+		}
+
+		if (ischosen(dl_block.ctrl)) {
+			setverdict(fail, "Unexpected DL CTRL block ", dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+		} else if (ischosen(dl_block.data_egprs)) {
+			if (not match(dl_block.data_egprs.mac_hdr.tfi, g_ms[1].dl_tbf.tfi)) {
+				setverdict(fail, "EGPRS DL DATA not matching EGPRS MS TFI (", g_ms[1].dl_tbf.tfi, "): ", dl_block.data_egprs.mac_hdr.tfi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			tgt_ms := 1;
+			if (match(dl_block.data_egprs.mac_hdr.usf, g_ms[0].ul_tbf.usf[7])) {
+				if (dl_block.data_egprs.mcs > MCS_4) {
+					setverdict(fail, "Signalling USF ", dl_block.data_egprs.mac_hdr.usf, " for GPRS-only MS using MCS > 4: ", dl_block);
+					f_shutdown(__BFILE__, __LINE__);
+				}
+				ms_egprs_usf_count[0] := ms_egprs_usf_count[0] + 1;
+			} else {
+				if (dl_block.data_egprs.mcs <= MCS_4) {
+					setverdict(fail, "Using too-low MCS for EGPRS MS: ", dl_block.data_egprs.mcs);
+					f_shutdown(__BFILE__, __LINE__);
+				}
+				if (match(dl_block.data_egprs.mac_hdr.usf, g_ms[1].ul_tbf.usf[7])) {
+					ms_egprs_usf_count[1] := ms_egprs_usf_count[1] + 1;
+				}
+			}
+		} else {
+			if (not match(dl_block.data.mac_hdr.hdr_ext.tfi, g_ms[0].dl_tbf.tfi)) {
+				setverdict(fail, "GPRS DL DATA not matching GPRS MS TFI (", g_ms[0].dl_tbf.tfi, "): ", dl_block.data.mac_hdr.hdr_ext.tfi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			tgt_ms := 0;
+			if (match(dl_block.data.mac_hdr.mac_hdr.usf, g_ms[0].ul_tbf.usf[7])) {
+				ms_gprs_usf_count[0] := ms_gprs_usf_count[0] + 1;
+			} else if (match(dl_block.data.mac_hdr.mac_hdr.usf, g_ms[1].ul_tbf.usf[7])) {
+				ms_gprs_usf_count[1] := ms_gprs_usf_count[1] + 1;
+			}
+		}
+
+		/* Keep Ack/Nack description updated */
+		f_dltbf_ack_block(g_ms[tgt_ms].dl_tbf, dl_block);
+
+		/* TDMA frame number on which we are supposed to send the ACK */
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			ack_fn := f_dl_block_ack_fn(dl_block, dl_fn);
+			f_ms_tx_ul_block(g_ms[tgt_ms], f_dltbf_ts_RLCMAC_DL_ACK_NACK(g_ms[tgt_ms].dl_tbf, ischosen(dl_block.data_egprs)), ack_fn);
+			if (tx_data_remain != 0) {
+				/* Submit more data from time to time to keep the TBF ongoing */
+				BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[0].tlli, data));
+				BSSGP[0].send(ts_BSSGP_DL_UD(g_ms[1].tlli, data));
+				tx_data_remain := tx_data_remain - 1;
+			}
+		}
+	}
+
+	log("results: ms_gprs_usf_count=", ms_gprs_usf_count, " / ms_egprs_usf_count=", ms_egprs_usf_count);
+	if (ms_gprs_usf_count[0] == 0 or ms_gprs_usf_count[1] == 0 or
+	    ms_egprs_usf_count[0] == 0 or ms_egprs_usf_count[1] == 0) {
+		    setverdict(fail, "USF thresholds not met!");
+		    f_shutdown(__BFILE__, __LINE__);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+
 private function f_TC_paging_cs_multi_ms(template (value) TsTrxBtsNum nr,
 					 boolean exp_imsi, boolean exp_tmsi)
 runs on RAW_PCU_Test_CT {
@@ -3273,6 +3443,7 @@ control {
 		execute( TC_dl_multislot_tbf_ms_class_from_2phase() );
 		execute( TC_ul_multislot_tbf_ms_class_from_2phase() );
 	}
+	execute( TC_multiplex_dl_gprs_egprs() );
 
 	execute( TC_pcuif_info_ind_subsequent() );
 }
