@@ -77,9 +77,14 @@ DIR=$BASEDIR/titan.ProtocolEmulations.SCCP/src
 FILES="SCCP_Emulation.ttcn  SCCP_EncDec.cc  SCCP_Mapping.ttcnpp  SCCP_Types.ttcn  SCCPasp_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.AF_PACKET/src
+FILES="AF_PACKET_PT.cc AF_PACKET_PT.hh AF_PACKET_PortType.ttcn AF_PACKET_PortTypes.ttcn "
+FILES+="FrameRelay_Types.ttcn FrameRelay_CodecPort.ttcn FrameRelay_Emulation.ttcn Q931_Types.ttcn Q933_Types.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Templates.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
-FILES+="NS_Provider_IPL4.ttcn NS_Emulation.ttcnpp NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
+FILES+="NS_Provider_IPL4.ttcn NS_Provider_FR.ttcn NS_Emulation.ttcnpp NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 FILES+="PCUIF_Types.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
