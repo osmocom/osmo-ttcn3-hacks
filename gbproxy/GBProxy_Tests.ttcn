@@ -861,6 +861,79 @@ testcase TC_resume() runs on test_CT
 	f_cleanup();
 }
 
+/* test the load-sharing between multiple NS-VC on the BSS side */
+private function f_TC_dl_ud_unidir(charstring id) runs on BSSGP_ConnHdlr {
+	var integer i;
+
+	for (i := 0; i < 10; i := i+1) {
+		var octetstring payload := f_rnd_octstring(i);
+		var template (value) PDU_BSSGP pdu_tx :=
+			ts_BSSGP_DL_UD(g_pars.tlli, payload, omit, ts_BSSGP_IMSI(g_pars.imsi));
+		SGSN[0].send(pdu_tx);
+	}
+	setverdict(pass);
+}
+testcase TC_load_sharing_dl() runs on test_CT_NS
+{
+	const integer num_ue := 10;
+	var BSSGP_ConnHdlr vc_conn[num_ue];
+	f_init();
+
+	/* all BVC are now fully brought up.  We disconnect BSSGP from NS on the BSS
+	 * side so we get the raw NsUnitdataIndication and hence observe different
+	 * NSVCI */
+	disconnect(g_pcu[0].vc_NS:NS_SP, g_pcu[0].vc_BSSGP:BSCP);
+	connect(g_pcu[0].vc_NS:NS_SP, self:NS);
+
+	/* there may still be some NS-VCs coming up? After all, the BVC-RESET succeeds after the first
+	 * of the NS-VC is ALIVE/UNBLOCKED */
+	f_sleep(3.0);
+
+	/* start parallel components generating DL-UNITDATA from the SGSN side */
+	for (var integer i:= 0; i < num_ue; i := i+1) {
+		vc_conn[i] := f_start_handler(refers(f_TC_dl_ud_unidir), testcasename(), g_pcu, g_sgsn, 5+i);
+	}
+
+	/* now start counting all the messages that were queued before */
+	/* TODO: We have a hard-coded assumption of 4 NS-VC in one NSE/NS-VCG here! */
+	var ro_integer rx_count := { 0, 0, 0, 0 };
+	timer T := 2.0;
+	T.start;
+	alt {
+	[] as_NsUdiCount(0, rx_count);
+	[] as_NsUdiCount(1, rx_count);
+	[] as_NsUdiCount(2, rx_count);
+	[] as_NsUdiCount(3, rx_count);
+	[] NS.receive(NsUnitdataIndication:{0,?,?,*,*}) { repeat; } /* signaling BVC */
+	[] NS.receive(NsStatusIndication:?) { repeat; }
+	[] NS.receive {
+		setverdict(fail, "Rx unexpected NS");
+		mtc.stop;
+		}
+	[] T.timeout {
+		}
+	}
+	for (var integer i := 0; i < lengthof(rx_count); i := i+1) {
+		log("Rx on NSVCI ", mp_nsconfig_pcu[0].nsvc[i].nsvci, ": ", rx_count[i]);
+		if (rx_count[i] == 0) {
+			setverdict(fail, "Data not shared over all NSVC");
+		}
+	}
+	setverdict(pass);
+}
+private altstep as_NsUdiCount(integer nsvc_idx, inout ro_integer roi) runs on test_CT_NS {
+	var NsUnitdataIndication udi;
+	var BssgpBvcConfig bvcc := g_pcu[0].cfg.bvc[0];
+	[] NS.receive(NsUnitdataIndication:{bvcc.bvci, g_pcu[0].cfg.nsei, mp_nsconfig_pcu[0].nsvc[nsvc_idx].nsvci, *, *}) -> value udi {
+		roi[nsvc_idx] := roi[nsvc_idx] + 1;
+		repeat;
+		}
+}
+type component test_CT_NS extends test_CT {
+	port NS_PT NS;
+};
+
+
 
 control {
 	execute( TC_BVC_bringup() );
@@ -871,6 +944,10 @@ control {
 	execute( TC_radio_status() );
 	execute( TC_suspend() );
 	execute( TC_resume() );
+	if (false) {
+		/* don't enable this by default, as we don't yet have any automatic test setup for FR with 4 NS-VC */
+		execute( TC_load_sharing_dl() );
+	}
 }
 
 
