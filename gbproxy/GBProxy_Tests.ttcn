@@ -153,9 +153,9 @@ modulepar {
 						ra_id := {
 							lai := {
 								mcc_mnc := c_mcc_mnc,
-								lac := 13200
+								lac := 13135
 							},
-							rac := 0
+							rac := 1
 						},
 						cell_id := 20961
 					},
@@ -225,6 +225,8 @@ type component BSSGP_ConnHdlr {
 	port BSSGP_PROC_PT PCU_PROC[NUM_PCU];
 	/* component reference to the component to which we're currently connected */
 	var BSSGP_BVC_CT pcu_ct[NUM_PCU];
+	/* BSSGP BVC configuration of the component to which we're currently connected */
+	var BssgpBvcConfig pcu_bvc_cfg[NUM_PCU];
 
 	/* array of per-BVC ports on the SGSN side */
 	port BSSGP_PT SGSN[NUM_SGSN];
@@ -236,6 +238,8 @@ type component BSSGP_ConnHdlr {
 	var BSSGP_ConnHdlrPars g_pars;
 	timer g_Tguard;
 	var LLC_Entities llc;
+
+	var ro_integer g_roi := {};
 }
 
 type record SGSN_ConnHdlrNetworkPars {
@@ -448,7 +452,9 @@ runs on test_CT return BSSGP_ConnHdlr {
 }
 
 /* Connect the PCU-side per-BVC ports (PCU/PCU_SIG/PCU_PROC) array slot 'port_idx' to specified per-BVC component */
-private function f_connect_to_pcu_bvc(integer port_idx, BSSGP_BVC_CT bvc_ct) runs on BSSGP_ConnHdlr {
+private function f_connect_to_pcu_bvc(integer port_idx, integer nse_idx, integer bvc_idx)
+runs on BSSGP_ConnHdlr {
+	var BSSGP_BVC_CT bvc_ct := g_pars.pcu[nse_idx].vc_BSSGP_BVC[bvc_idx]
 	if (PCU[port_idx].checkstate("Connected")) {
 		/* unregister + disconnect from old BVC */
 		f_client_unregister(g_pars.imsi, PCU_PROC[port_idx]);
@@ -462,6 +468,7 @@ private function f_connect_to_pcu_bvc(integer port_idx, BSSGP_BVC_CT bvc_ct) run
 	connect(self:PCU_PROC[port_idx], bvc_ct:BSSGP_PROC);
 	f_client_register(g_pars.imsi, g_pars.tlli, PCU_PROC[port_idx]);
 	pcu_ct[port_idx] := bvc_ct;
+	pcu_bvc_cfg[port_idx] := g_pars.pcu[nse_idx].cfg.bvc[bvc_idx];
 }
 
 /* Connect the SGSN-side per-BVC ports (SGSN/SGSN_SIG/SGSN_PROC) array slot 'port_idx' to specified per-BVC component */
@@ -499,7 +506,7 @@ runs on BSSGP_ConnHdlr {
 
 	/* default connections on PCU side: First BVC of each NSE/PCU */
 	for (i := 0; i < lengthof(g_pars.pcu); i := i+1) {
-		f_connect_to_pcu_bvc(i, g_pars.pcu[i].vc_BSSGP_BVC[0]);
+		f_connect_to_pcu_bvc(port_idx := i, nse_idx := i, bvc_idx := 0);
 	}
 
 	/* default connections on SGSN side: First BVC of each NSE/SGSN */
@@ -934,6 +941,500 @@ type component test_CT_NS extends test_CT {
 };
 
 
+/***********************************************************************
+ * PAGING PS procedure
+ ***********************************************************************/
+
+private function f_send_paging_ps(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+				boolean use_sig := false)
+runs on BSSGP_ConnHdlr return template (present) PDU_BSSGP {
+	var template (value) PDU_BSSGP pdu_tx;
+	var template (present) PDU_BSSGP pdu_rx;
+	/* we always specify '0' as BVCI in the templates below, as we override it with
+	 * 'p4' later anyway */
+	pdu_rx := tr_BSSGP_PS_PAGING(0);
+	pdu_rx.pDU_BSSGP_PAGING_PS.iMSI := tr_BSSGP_IMSI(g_pars.imsi);
+	if (ispresent(g_pars.p_tmsi)) {
+		pdu_tx := ts_BSSGP_PS_PAGING_PTMSI(0, g_pars.imsi, oct2int(g_pars.p_tmsi));
+		pdu_rx.pDU_BSSGP_PAGING_PS.pTMSI := tr_BSSGP_TMSI(oct2int(g_pars.p_tmsi));
+	} else {
+		pdu_tx := ts_BSSGP_PS_PAGING_IMSI(0, g_pars.imsi);
+		pdu_rx.pDU_BSSGP_PAGING_PS.pTMSI := omit;
+	}
+	pdu_tx.pDU_BSSGP_PAGING_PS.paging_Field4 := p4;
+	pdu_rx.pDU_BSSGP_PAGING_PS.paging_Field4 := p4;
+	if (use_sig == false) {
+		SGSN[sgsn_idx].send(pdu_tx);
+	} else {
+		SGSN_SIG[sgsn_idx].send(pdu_tx);
+	}
+	return pdu_rx;
+}
+
+/* send paging defined by 'p4' on given SGSN-side index (ptp or signaling) and expect one paging to arrive on
+ * specified PCU index */
+private function f_send_paging_ps_exp_one_bss(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+					      boolean use_sig := false,integer pcu_idx := 0)
+runs on BSSGP_ConnHdlr {
+	var template (present) PDU_BSSGP exp_rx;
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	exp_rx := f_send_paging_ps(p4, sgsn_idx, use_sig);
+	/* Expect paging to propagate to the one BSS addressed by the BVCI only */
+	timer T := 2.0;
+	T.start;
+	alt {
+	[not use_sig] PCU[pcu_idx].receive(exp_rx) {
+		setverdict(pass);
+		repeat;
+		}
+	[not use_sig] PCU_SIG[pcu_idx].receive(exp_rx) {
+		setverdict(fail, "Received paging on SIGNALING BVC, expected PTP BVC");
+		}
+	[use_sig] PCU_SIG[pcu_idx].receive(exp_rx) {
+		setverdict(pass);
+		repeat;
+		}
+	[use_sig] PCU[pcu_idx].receive(exp_rx) {
+		setverdict(fail, "Received paging on PTP BVC, expected SIGNALING BVC");
+		}
+	[] any from PCU.receive(exp_rx) {
+		setverdict(fail, "Paging received on unexpected BVC");
+		}
+	[] any from PCU_SIG.receive(exp_rx) {
+		setverdict(fail, "Paging received on unexpected BVC");
+		}
+	[] any from PCU.receive(PDU_BSSGP:{pDU_BSSGP_PAGING_PS:=?}) {
+		setverdict(fail, "Different Paging than expected received PTP BVC");
+		}
+	[] any from PCU_SIG.receive(PDU_BSSGP:{pDU_BSSGP_PAGING_PS:=?}) {
+		setverdict(fail, "Different Paging than expected on SIGNALING BVC");
+		}
+	[] T.timeout;
+	}
+}
+
+private function f_TC_paging_ps_ptp_bss(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_ps_exp_one_bss(ts_BssgpP4BssArea, 0, false, 0);
+}
+testcase TC_paging_ps_ptp_bss() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_bss), testcasename(), g_pcu, g_sgsn, 9);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on PTP-BVC for Location Area */
+private function f_TC_paging_ps_ptp_lac(charstring id) runs on BSSGP_ConnHdlr
+{
+	var template (present) PDU_BSSGP exp_rx;
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_ps_exp_one_bss(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, false, 0);
+}
+testcase TC_paging_ps_ptp_lac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_lac), testcasename(), g_pcu, g_sgsn, 10);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on PTP-BVC for Routeing Area */
+private function f_TC_paging_ps_ptp_rac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_ps_exp_one_bss(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, false, 0);
+}
+testcase TC_paging_ps_ptp_rac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_rac), testcasename(), g_pcu, g_sgsn, 11);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on PTP-BVC for BVCI (one cell) */
+private function f_TC_paging_ps_ptp_bvci(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* this should be the normal case for MS in READY MM state after a lower layer failure */
+	f_send_paging_ps_exp_one_bss(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, false, 0);
+}
+testcase TC_paging_ps_ptp_bvci() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_bvci), testcasename(), g_pcu, g_sgsn, 12);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* altstep for expecting BSSGP PDU on signaling BVC of given pcu_idx + storing in 'roi' */
+private altstep as_paging_sig_pcu(integer pcu_idx, template (present) PDU_BSSGP exp_rx, inout ro_integer roi)
+runs on BSSGP_ConnHdlr {
+[] PCU_SIG[pcu_idx].receive(exp_rx) {
+	if (ro_integer_contains(roi, pcu_idx)) {
+		setverdict(fail, "Received multiple paging on same SIG BVC");
+	}
+	roi := roi & { pcu_idx };
+	repeat;
+	}
+[] PCU[pcu_idx].receive(exp_rx) {
+	setverdict(fail, "Received paging on PTP BVC, expected SIGNALING BVC");
+	}
+[] PCU_SIG[pcu_idx].receive(PDU_BSSGP:{pDU_BSSGP_PAGING_PS:=?}) {
+	setverdict(fail, "Different Paging than expected received SIGNALING BVC");
+	}
+[] PCU[pcu_idx].receive(PDU_BSSGP:{pDU_BSSGP_PAGING_PS:=?}) {
+	setverdict(fail, "Different Paging than expected received PTP BVC");
+	}
+}
+
+type record of default ro_default;
+
+/* send PS-PAGING on SIG BVC, expect it to arrive on given list of PCU indexes */
+private function f_send_paging_ps_exp_multi(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+					    ro_integer exp_on_pcu_idx) runs on BSSGP_ConnHdlr
+{
+	var template (present) PDU_BSSGP exp_rx;
+	exp_rx := f_send_paging_ps(p4, 0, true);
+
+	/* FIXME: make sure the relevant BVCs/BSS are connected to the ports! */
+	var ro_default defaults := {};
+	for (var integer i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		var default d := activate(as_paging_sig_pcu(i, exp_rx, g_roi));
+		defaults := defaults & { d };
+	}
+	f_sleep(2.0);
+	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
+		deactivate(defaults[i]);
+	}
+	log("Paging received on PCU ", g_roi);
+
+	for (var integer i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		var boolean rx_on_i := ro_integer_contains(g_roi, i);
+		var boolean exp_on_i := ro_integer_contains(exp_on_pcu_idx, i);
+		if (exp_on_i and not rx_on_i) {
+			setverdict(fail, "PS-PAGING not received on ", mp_nsconfig_pcu[i].nsei);
+		}
+		if (not exp_on_i and rx_on_i) {
+			setverdict(fail, "PS-PAGING not expected but received on ", mp_nsconfig_pcu[i].nsei);
+		}
+	}
+	setverdict(pass);
+}
+
+/* PS-PAGING on SIG-BVC for BSS Area */
+private function f_TC_paging_ps_sig_bss(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* we expect the paging to arrive on all three NSE */
+	f_send_paging_ps_exp_multi(ts_BssgpP4BssArea, 0, {0, 1, 2});
+}
+testcase TC_paging_ps_sig_bss() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on SIG-BVC for Location Area */
+private function f_TC_paging_ps_sig_lac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* Both PCU index 0 and 1 have a BVC within the LAC */
+	f_send_paging_ps_exp_multi(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, {0, 1});
+}
+testcase TC_paging_ps_sig_lac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on SIG-BVC for Routeing Area */
+private function f_TC_paging_ps_sig_rac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* Only PCU index 0 has a matching BVC within the LAC */
+	f_send_paging_ps_exp_multi(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, {0});
+}
+testcase TC_paging_ps_sig_rac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* PS-PAGING on SIG-BVC for BVCI (one cell) */
+private function f_TC_paging_ps_sig_bvci(charstring id) runs on BSSGP_ConnHdlr
+{
+	f_send_paging_ps_exp_multi(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, {0});
+}
+testcase TC_paging_ps_sig_bvci() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+
+/***********************************************************************
+ * PAGING CS procedure
+ ***********************************************************************/
+
+private function f_send_paging_cs(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+				  boolean use_sig := false)
+runs on BSSGP_ConnHdlr return template (present) PDU_BSSGP {
+	var template (value) PDU_BSSGP pdu_tx;
+	var template (present) PDU_BSSGP pdu_rx;
+	/* we always specify '0' as BVCI in the templates below, as we override it with
+	 * 'p4' later anyway */
+	pdu_rx := tr_BSSGP_CS_PAGING(0);
+	pdu_rx.pDU_BSSGP_PAGING_CS.iMSI := tr_BSSGP_IMSI(g_pars.imsi);
+	if (ispresent(g_pars.p_tmsi)) {
+		pdu_tx := ts_BSSGP_CS_PAGING_PTMSI(0, g_pars.imsi, oct2int(g_pars.p_tmsi));
+		pdu_rx.pDU_BSSGP_PAGING_CS.tMSI := tr_BSSGP_TMSI(oct2int(g_pars.p_tmsi));
+	} else {
+		pdu_tx := ts_BSSGP_CS_PAGING_IMSI(0, g_pars.imsi);
+		pdu_rx.pDU_BSSGP_PAGING_CS.tMSI := omit;
+	}
+	pdu_tx.pDU_BSSGP_PAGING_CS.paging_Field4 := p4;
+	pdu_rx.pDU_BSSGP_PAGING_CS.paging_Field4 := p4;
+	if (use_sig == false) {
+		SGSN[sgsn_idx].send(pdu_tx);
+	} else {
+		SGSN_SIG[sgsn_idx].send(pdu_tx);
+	}
+	return pdu_rx;
+}
+
+/* send paging defined by 'p4' on given SGSN-side index (ptp or signaling) and expect one paging to arrive on
+ * specified PCU index */
+private function f_send_paging_cs_exp_one_bss(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+					      boolean use_sig := false,integer pcu_idx := 0)
+runs on BSSGP_ConnHdlr {
+	var template (present) PDU_BSSGP exp_rx;
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	exp_rx := f_send_paging_cs(p4, sgsn_idx, use_sig);
+	/* Expect paging to propagate to the one BSS addressed by the BVCI only */
+	timer T := 2.0;
+	T.start;
+	alt {
+	[not use_sig] PCU[pcu_idx].receive(exp_rx) {
+		setverdict(pass);
+		repeat;
+		}
+	[not use_sig] PCU_SIG[pcu_idx].receive(exp_rx) {
+		setverdict(fail, "Received paging on SIGNALING BVC, expected PTP BVC");
+		}
+	[use_sig] PCU_SIG[pcu_idx].receive(exp_rx) {
+		setverdict(pass);
+		repeat;
+		}
+	[use_sig] PCU[pcu_idx].receive(exp_rx) {
+		setverdict(fail, "Received paging on PTP BVC, expected SIGNALING BVC");
+		}
+	[] any from PCU.receive(exp_rx) {
+		setverdict(fail, "Paging received on unexpected BVC");
+		}
+	[] any from PCU_SIG.receive(exp_rx) {
+		setverdict(fail, "Paging received on unexpected BVC");
+		}
+	[] any from PCU.receive(PDU_BSSGP:{pDU_BSSGP_PAGING_CS:=?}) {
+		setverdict(fail, "Different Paging than expected received PTP BVC");
+		}
+	[] any from PCU_SIG.receive(PDU_BSSGP:{pDU_BSSGP_PAGING_CS:=?}) {
+		setverdict(fail, "Different Paging than expected on SIGNALING BVC");
+		}
+	[] T.timeout;
+	}
+}
+
+private function f_TC_paging_cs_ptp_bss(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_cs_exp_one_bss(ts_BssgpP4BssArea, 0, false, 0);
+}
+testcase TC_paging_cs_ptp_bss() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_bss), testcasename(), g_pcu, g_sgsn, 17);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on PTP-BVC for Location Area */
+private function f_TC_paging_cs_ptp_lac(charstring id) runs on BSSGP_ConnHdlr
+{
+	var template (present) PDU_BSSGP exp_rx;
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_cs_exp_one_bss(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, false, 0);
+}
+testcase TC_paging_cs_ptp_lac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_lac), testcasename(), g_pcu, g_sgsn, 18);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on PTP-BVC for Routeing Area */
+private function f_TC_paging_cs_ptp_rac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* doesn't really make sense: Sending to a single BVCI means the message ends up
+	 * at that BVC (cell) only, and paging all over the BSS area is not possible */
+	f_send_paging_cs_exp_one_bss(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, false, 0);
+}
+testcase TC_paging_cs_ptp_rac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_rac), testcasename(), g_pcu, g_sgsn, 19);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on PTP-BVC for BVCI (one cell) */
+private function f_TC_paging_cs_ptp_bvci(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* this should be the normal case for MS in READY MM state after a lower layer failure */
+	f_send_paging_cs_exp_one_bss(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, false, 0);
+}
+testcase TC_paging_cs_ptp_bvci() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_bvci), testcasename(), g_pcu, g_sgsn, 20);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* send CS-PAGING on SIG BVC, expect it to arrive on given list of PCU indexes */
+private function f_send_paging_cs_exp_multi(template (value) Paging_Field4 p4, integer sgsn_idx := 0,
+					    ro_integer exp_on_pcu_idx) runs on BSSGP_ConnHdlr
+{
+	var template (present) PDU_BSSGP exp_rx;
+	exp_rx := f_send_paging_cs(p4, 0, true);
+
+	/* FIXME: make sure the relevant BVCs/BSS are connected to the ports! */
+	var ro_default defaults := {};
+	for (var integer i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		var default d := activate(as_paging_sig_pcu(i, exp_rx, g_roi));
+		defaults := defaults & { d };
+	}
+	f_sleep(2.0);
+	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
+		deactivate(defaults[i]);
+	}
+	log("Paging received on PCU ", g_roi);
+
+	for (var integer i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		var boolean rx_on_i := ro_integer_contains(g_roi, i);
+		var boolean exp_on_i := ro_integer_contains(exp_on_pcu_idx, i);
+		if (exp_on_i and not rx_on_i) {
+			setverdict(fail, "PS-PAGING not received on ", mp_nsconfig_pcu[i].nsei);
+		}
+		if (not exp_on_i and rx_on_i) {
+			setverdict(fail, "PS-PAGING not expected but received on ", mp_nsconfig_pcu[i].nsei);
+		}
+	}
+	setverdict(pass);
+}
+
+/* CS-PAGING on SIG-BVC for BSS Area */
+private function f_TC_paging_cs_sig_bss(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* we expect the paging to arrive on all three NSE */
+	f_send_paging_cs_exp_multi(ts_BssgpP4BssArea, 0, {0, 1, 2});
+}
+testcase TC_paging_cs_sig_bss() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on SIG-BVC for Location Area */
+private function f_TC_paging_cs_sig_lac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* Both PCU index 0 and 1 have a BVC within the LAC */
+	f_send_paging_cs_exp_multi(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, {0, 1});
+}
+testcase TC_paging_cs_sig_lac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on SIG-BVC for Routeing Area */
+private function f_TC_paging_cs_sig_rac(charstring id) runs on BSSGP_ConnHdlr
+{
+	/* Only PCU index 0 has a matching BVC within the LAC */
+	f_send_paging_cs_exp_multi(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, {0});
+}
+testcase TC_paging_cs_sig_rac() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
+/* CS-PAGING on SIG-BVC for BVCI (one cell) */
+private function f_TC_paging_cs_sig_bvci(charstring id) runs on BSSGP_ConnHdlr
+{
+	f_send_paging_cs_exp_multi(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, {0});
+}
+testcase TC_paging_cs_sig_bvci() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
+	vc_conn.done;
+
+	f_cleanup();
+}
+
 
 control {
 	execute( TC_BVC_bringup() );
@@ -948,6 +1449,32 @@ control {
 		/* don't enable this by default, as we don't yet have any automatic test setup for FR with 4 NS-VC */
 		execute( TC_load_sharing_dl() );
 	}
+
+	/* PAGING-PS over PTP BVC */
+	execute( TC_paging_ps_ptp_bss() );
+	execute( TC_paging_ps_ptp_lac() );
+	execute( TC_paging_ps_ptp_rac() );
+	execute( TC_paging_ps_ptp_bvci() );
+
+	/* PAGING-PS over SIG BVC */
+	execute( TC_paging_ps_sig_bss() );
+	execute( TC_paging_ps_sig_lac() );
+	execute( TC_paging_ps_sig_rac() );
+	execute( TC_paging_ps_sig_bvci() );
+
+	/* PAGING-CS over PTP BVC */
+	execute( TC_paging_cs_ptp_bss() );
+	execute( TC_paging_cs_ptp_lac() );
+	execute( TC_paging_cs_ptp_rac() );
+	execute( TC_paging_cs_ptp_bvci() );
+
+	/* PAGING-CS over SIG BVC */
+	execute( TC_paging_cs_sig_bss() );
+	execute( TC_paging_cs_sig_lac() );
+	execute( TC_paging_cs_sig_rac() );
+	execute( TC_paging_cs_sig_bvci() );
+
+
 }
 
 
