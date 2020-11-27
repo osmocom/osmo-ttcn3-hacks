@@ -397,14 +397,65 @@ altstep as_sig_wait_ns_alive_unblocked() runs on BSSGP_CT {
 
 }
 
-/* handling of events irrespective of BVC state */
-altstep as_sig_allstate() runs on BSSGP_CT {
+/* handling of events irrespective of BVC state (before state-specific handling) */
+altstep as_sig_allstate_pre() runs on BSSGP_CT {
+	var NsUnitdataIndication udi;
+
+	/* Respond to RESET for signalling BVCI 0 */
+	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, omit), 0)) -> value udi {
+		log("Rx BVC-RESET for Signaling BVCI=0");
+		if (MGMT.checkstate("Connected")) {
+			MGMT.send(BssgpResetIndication:{0});
+		}
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET_ACK(0, omit), 0, 0));
+		for (var integer i := 0; i < sizeof(BvcTable); i := i+1) {
+			if (isbound(BvcTable[i].comp_ref) and BvcTable[i].comp_ref != null) {
+				BVC.send(BssgpResetIndication:{0}) to BvcTable[i].comp_ref;
+			}
+		}
+	}
+
+	/* any BLOCK or UNBLOCK for the SIGNALING BVCI are illegal */
+	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK(0, ?), 0)) -> value udi {
+		setverdict(fail, "Rx BVC-BLOCK illegal for BVCI=0: ", udi);
+	}
+	[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK(0), 0)) -> value udi {
+		setverdict(fail, "Rx BVC-UNBLOCK illegal for BVCI=0: ", udi);
+	}
+	[] BSCP.receive(f_BnsUdInd(t_BVC_BLOCK_ACK(0), 0)) -> value udi {
+		setverdict(fail, "Rx BVC-BLOCK-ACK illegal for BVCI=0: ", udi);
+	}
+	[] BSCP.receive(f_BnsUdInd(t_BVC_UNBLOCK_ACK(0), 0)) -> value udi {
+		setverdict(fail, "Rx BVC-UNBLOCK-ACK illegal for BVCI=0: ", udi);
+	}
+
+	/* BVC-RESET-ACK for BVCI=0 while T2 is running: Answer to a BVC-RESET we sent earlier */
+	[g_T2.running] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(0, omit), 0)) -> value udi {
+		log("BVCI(0) Rx BVC-RESET-ACK");
+		g_T2.stop;
+		f_sign_change_state(BVC_S_UNBLOCKED);
+		for (var integer i := 0; i < sizeof(BvcTable); i := i+1) {
+			if (isbound(BvcTable[i].comp_ref) and BvcTable[i].comp_ref != null) {
+				BVC.send(BssgpResetIndication:{0}) to BvcTable[i].comp_ref;
+			}
+		}
+	}
+	[] g_T2.timeout {
+		setverdict(fail, "Timeout waiting for BVC-RESET-ACK on BVCI=0");
+		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(udi.bvci, BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp), 0, 0));
+		g_T2.start;
+	}
+}
+
+/* handling of events irrespective of BVC state (after state-specific handling) */
+altstep as_sig_allstate_post() runs on BSSGP_CT {
 	var BSSGP_Client_CT vc_conn;
 	var NsUnitdataIndication udi;
 	var NsStatusIndication nsi;
 	var ASP_Event evt;
 	var BSSGP_BVC_CT bvc_comp_ref;
 	var BssgpBvci bvci;
+	var BssgpResetRequest brr;
 
 	/* Respond to RESET for signalling BVCI 0 */
 	[] BSCP.receive(f_BnsUdInd(tr_BVC_RESET(?, 0, omit), 0)) -> value udi {
@@ -447,29 +498,6 @@ altstep as_sig_allstate() runs on BSSGP_CT {
 		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(ptp_bvci, BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp), 0, 0));
 	}
 
-	/* BVC-RESET-ACK for BVCI=0 while T2 is running: Answer to a BVC-RESET we sent earlier */
-	[g_T2.running] BSCP.receive(f_BnsUdInd(tr_BVC_RESET_ACK(0, omit), 0)) -> value udi {
-		log("BVCI(0) Rx BVC-RESET-ACK");
-		g_T2.stop;
-		f_sign_change_state(BVC_S_UNBLOCKED);
-		for (var integer i := 0; i < sizeof(BvcTable); i := i+1) {
-			if (isbound(BvcTable[i].comp_ref) and BvcTable[i].comp_ref != null) {
-				BVC.send(BssgpResetIndication:{0}) to BvcTable[i].comp_ref;
-			}
-		}
-	}
-	[] g_T2.timeout {
-		setverdict(fail, "Timeout waiting for BVC-RESET-ACK on BVCI=0");
-		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(udi.bvci, BSSGP_CAUSE_BVCI_UNKNOWN, udi.bssgp), 0, 0));
-		g_T2.start;
-	}
-
-	/* default case of handling unknown PDUs */
-	[] BSCP.receive(f_BnsUdInd(?, ?)) -> value udi {
-		setverdict(fail, "Rx Unexpected BSSGP PDU ", udi.bssgp,"  in state ", g_sign_bvc_state);
-		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(0, BSSGP_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, udi.bssgp), 0, 0));
-	}
-
 	/* Forwarding of ASP_Event to per-BVC components */
 	[] BSCP.receive(ASP_Event:?) -> value evt {
 		for (var integer i := 0; i < sizeof(BvcTable); i := i+1) {
@@ -494,6 +522,17 @@ altstep as_sig_allstate() runs on BSSGP_CT {
 			}
 		}
 	}
+
+	/* default case of handling unknown PDUs */
+	[] BSCP.receive(f_BnsUdInd(?, ?)) -> value udi {
+		setverdict(fail, "Rx Unexpected BSSGP PDU ", udi.bssgp,"  in state ", g_sign_bvc_state);
+		BSCP.send(f_BnsUdReq(ts_BSSGP_STATUS(0, BSSGP_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, udi.bssgp), 0, 0));
+	}
+
+	[] MGMT.receive(BssgpResetRequest:?) -> value brr {
+		BSCP.send(f_BnsUdReq(ts_BVC_RESET(brr.cause, 0, omit), 0, 0));
+		g_T2.start;
+		}
 }
 
 /* send the highest decoded layer of the message through given port */
@@ -552,9 +591,11 @@ private function f_bssgp_ScanEvents() runs on BSSGP_CT {
 	while (true) {
 		alt {
 		[g_sign_bvc_state == BVC_S_WAIT_RESET] as_sig_wait_reset();
+		[] as_sig_allstate_pre();
 		[g_sign_bvc_state == BVC_S_WAIT_NS_ALIVE_UNBLOCKED] as_sig_wait_ns_alive_unblocked();
 		[g_sign_bvc_state == BVC_S_UNBLOCKED] as_sig_unblocked();
-		[] as_sig_allstate();
+		[g_sign_bvc_state == BVC_S_WAIT_RESET] as_sig_wait_reset();
+		[] as_sig_allstate_post();
 		}
 	} /* while */
 }
