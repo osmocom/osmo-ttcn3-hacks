@@ -216,6 +216,8 @@ type component test_CT {
 
 	var boolean g_initialized := false;
 	var boolean g_use_echo := false;
+
+	var ro_integer g_roi := {};
 };
 
 type component BSSGP_ConnHdlr {
@@ -301,6 +303,7 @@ private function f_init_gb_pcu(inout GbInstance gb, charstring id, integer offse
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
 		connect(self:PCU_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
+	connect(self:PCU_MGMT, gb.vc_BSSGP:MGMT);
 }
 
 private function f_init_gb_sgsn(inout GbInstance gb, charstring id, integer offset) runs on test_CT {
@@ -320,6 +323,7 @@ private function f_init_gb_sgsn(inout GbInstance gb, charstring id, integer offs
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
 		connect(self:SGSN_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
+	connect(self:SGSN_MGMT, gb.vc_BSSGP:MGMT);
 }
 
 
@@ -1933,6 +1937,57 @@ testcase TC_bvc_reset_ptp_from_bss() runs on test_CT
 	f_cleanup();
 }
 
+private altstep as_count_bvc_block(integer sgsn_idx, BssgpBvci bvci, inout ro_integer roi)
+runs on test_CT {
+	var BSSGP_BVC_CT sgsn_bvc_ct := f_get_sgsn_bvc_ct(sgsn_idx, bvci);
+	[] SGSN_MGMT.receive(tr_BssgpStsInd(?, bvci, BVC_S_BLOCKED)) from sgsn_bvc_ct {
+		roi := roi & { bvci };
+	}
+}
+/* reset the signaling BVC from one BSS; expect no signaling BVC reset on SGSN; but BVC-BLOCK for PTP */
+testcase TC_bvc_reset_sig_from_bss() runs on test_CT {
+
+	f_init();
+	f_sleep(3.0);
+
+	/* Start BVC-RESET procedure for BVCI=0 */
+	PCU_MGMT.send(BssgpResetRequest:{cause:=BSSGP_CAUSE_OM_INTERVENTION}) to g_pcu[0].vc_BSSGP;
+
+	/* Activate altsteps: One for each PTP BVC within that PCUs NSE */
+	var ro_default defaults := {};
+	for (var integer i := 0; i < lengthof(g_pcu[0].cfg.bvc); i := i+1) {
+		var BssgpBvcConfig bvcc := g_pcu[0].cfg.bvc[i];
+		var default d := activate(as_count_bvc_block(0, bvcc.bvci, g_roi));
+		defaults := defaults & { d };
+	}
+
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] SGSN_MGMT.receive(BssgpResetIndication:{0}) {
+		setverdict(fail, "BSS-side Reset of BVCI=0 should not propagate");
+		}
+	[] T.timeout;
+	}
+
+	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
+		deactivate(defaults[i]);
+	}
+
+	/* check if BVC-block was received on all expected BVC */
+	for (var integer i := 0; i < lengthof(g_pcu[0].cfg.bvc); i := i+1) {
+		var BssgpBvcConfig bvcc := g_pcu[0].cfg.bvc[i];
+		if (not ro_integer_contains(g_roi, bvcc.bvci)) {
+			setverdict(fail, "Missing SGSN-side BVC-BLOCK of BVCI=", bvcc.bvci);
+		}
+	}
+
+	/* check if BVC-block was not received on any unexpected BVC is not required as
+	 * such a message would basically run into 'no matching clause'  */
+
+	f_cleanup();
+}
+
 private function f_reset_ptp_bvc_from_sgsn(integer pcu_idx, integer bvc_idx) runs on test_CT
 {
 	var BSSGP_BVC_CT pcu_bvc_ct := g_pcu[pcu_idx].vc_BSSGP_BVC[bvc_idx];
@@ -1964,6 +2019,50 @@ testcase TC_bvc_reset_ptp_from_sgsn() runs on test_CT
 	f_cleanup();
 }
 
+private altstep as_count_bvc0_block(integer pcu_idx, Nsei nsei, inout ro_integer roi)
+runs on test_CT {
+	var BSSGP_CT pcu_ct := g_pcu[pcu_idx].vc_BSSGP;
+	[] PCU_MGMT.receive(BssgpResetIndication:{0}) from pcu_ct {
+		roi := roi & { nsei };
+	}
+}
+/* reset the signaling BVC from the SGSN; expect all signaling BVC on all BSS to be reset */
+testcase TC_bvc_reset_sig_from_sgsn() runs on test_CT {
+
+	f_init();
+	f_sleep(3.0);
+
+	/* Start BVC-RESET procedure for BVCI=0 */
+	SGSN_MGMT.send(BssgpResetRequest:{cause:=BSSGP_CAUSE_OM_INTERVENTION}) to g_sgsn[0].vc_BSSGP;
+
+	/* Activate altsteps: One for each PCU NSE */
+	var ro_default defaults := {};
+	for (var integer i := 0; i < lengthof(g_pcu); i := i+1) {
+		var NSConfiguration nscfg := mp_nsconfig_pcu[i];
+		var default d := activate(as_count_bvc0_block(i, nscfg.nsei, g_roi));
+		defaults := defaults & { d };
+	}
+
+	f_sleep(3.0);
+
+	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
+		deactivate(defaults[i]);
+	}
+
+	/* check if BVC-block was received on all expected BVC */
+	for (var integer i := 0; i < lengthof(g_pcu); i := i+1) {
+		var NSConfiguration nscfg := mp_nsconfig_pcu[i];
+		if (not ro_integer_contains(g_roi, nscfg.nsei)) {
+			setverdict(fail, "Missing PCU-side BVC-RESET of BVCI=0 on PCU index ", i);
+		}
+	}
+
+	/* check if BVC-block was not received on any unexpected BVC is not required as
+	 * such a message would basically run into 'no matching clause'  */
+
+	f_cleanup();
+}
+
 control {
 	execute( TC_BVC_bringup() );
 	execute( TC_ul_unitdata() );
@@ -1976,7 +2075,9 @@ control {
 	execute( TC_bvc_block_ptp() );
 	execute( TC_bvc_unblock_ptp() );
 	execute( TC_bvc_reset_ptp_from_bss() );
+	execute( TC_bvc_reset_sig_from_bss() );
 	execute( TC_bvc_reset_ptp_from_sgsn() );
+	execute( TC_bvc_reset_sig_from_sgsn() );
 	if (false) {
 		/* don't enable this by default, as we don't yet have any automatic test setup for FR with 4 NS-VC */
 		execute( TC_load_sharing_dl() );
