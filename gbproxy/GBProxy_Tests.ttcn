@@ -726,6 +726,7 @@ type component GlobalTest_CT extends test_CT {
 	port BSSGP_PT G_SGSN[NUM_SGSN];
 };
 
+/* connect the signaling BVC of each NSE to the G_PCU / G_SGSN ports */
 private function f_global_init() runs on GlobalTest_CT {
 	var integer i;
 	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
@@ -733,6 +734,17 @@ private function f_global_init() runs on GlobalTest_CT {
 	}
 	for (i := 0; i < lengthof(g_pcu); i := i+1) {
 		connect(self:G_PCU[i], g_pcu[i].vc_BSSGP:GLOBAL);
+	}
+}
+
+/* connect the first PTP BVC of each NSE to the G_PCU / G_SGSN ports */
+private function f_global_init_ptp() runs on GlobalTest_CT {
+	var integer i;
+	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
+		connect(self:G_SGSN[i], g_sgsn[i].vc_BSSGP_BVC[0]:GLOBAL);
+	}
+	for (i := 0; i < lengthof(g_pcu); i := i+1) {
+		connect(self:G_PCU[i], g_pcu[i].vc_BSSGP_BVC[0]:GLOBAL);
 	}
 }
 
@@ -2324,6 +2336,64 @@ testcase TC_bvc_reset_sig_from_sgsn() runs on test_CT {
 	f_cleanup();
 }
 
+/***********************************************************************
+ * FLOW-CONTROL-BVC procedure
+ ***********************************************************************/
+
+private altstep as_g_count_sgsn(integer sgsn_idx, inout ro_integer roi,
+				 template PDU_BSSGP exp_rx, template (omit) PDU_BSSGP tx_reply)
+runs on GlobalTest_CT {
+	[] G_SGSN[sgsn_idx].receive(exp_rx) {
+		roi := roi & { sgsn_idx };
+		if (ispresent(tx_reply)) {
+			G_SGSN[sgsn_idx].send(tx_reply);
+		}
+	}
+}
+/* Send FC-BVC from simulated PCU; expect each SGSN to receive it; expect PCU to receive ACK */
+testcase TC_fc_bvc() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init_ptp();
+
+	var template (value) PDU_BSSGP pdu_tx := t_BVC_FC_BVC(10240, 2000, 1024, 1000, '01'O);
+	/* we cannot use pdu_tx as there are some subtle differences in the length field :/ */
+	var template (present) PDU_BSSGP pdu_rx := tr_BVC_FC_BVC(10240, 2000, 1024, 1000, '01'O);
+	var template (omit) PDU_BSSGP ack_tx :=
+		t_BVC_FC_BVC_ACK(pdu_tx.pDU_BSSGP_FLOW_CONTROL_BVC.tag.unstructured_Value);
+
+	/* Send a FC-BVC from BSS to gbproxy, expect an ACK in response */
+	G_PCU[0].send(pdu_tx);
+
+	/* Activate altsteps: One for each SGSN-side PTP BVC port */
+	var ro_default defaults := {};
+	for (var integer i := 0; i < lengthof(g_sgsn); i := i+1) {
+		var default d := activate(as_g_count_sgsn(i, g_roi, pdu_rx, ack_tx));
+		defaults := defaults & { d };
+	}
+
+	f_sleep(3.0);
+
+	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
+		deactivate(defaults[i]);
+	}
+
+	/* check if BVC-block was received on all expected BVC */
+	for (var integer i := 0; i < lengthof(g_sgsn); i := i+1) {
+		if (not ro_integer_contains(g_roi, i)) {
+			setverdict(fail, "Missing BVC-FLOW-CONTROL on SGSN index ", i);
+		}
+	}
+
+	/* Expect ACK on PCU side */
+	G_PCU[0].receive(ack_tx);
+
+	setverdict(pass);
+
+	f_cleanup();
+}
+
+
 control {
 	execute( TC_BVC_bringup() );
 	execute( TC_ul_unitdata() );
@@ -2385,6 +2455,7 @@ control {
 
 
 	execute( TC_flush_ll() );
+	execute( TC_fc_bvc() );
 }
 
 
