@@ -39,7 +39,7 @@ if [ -x $DUMPCAP ]; then
     CAP_ERR="1"
     if [ -x /sbin/setcap ]; then
 	# N. B: this check requires libcap2-bin package
-	setcap -q -v 'cap_net_admin,cap_net_raw=pie' $DUMPCAP
+	/sbin/setcap -q -v 'cap_net_admin,cap_net_raw=pie' $DUMPCAP
 	CAP_ERR="$?"
     fi
     if [ -u $DUMPCAP -o "$CAP_ERR" = "0" ]; then
