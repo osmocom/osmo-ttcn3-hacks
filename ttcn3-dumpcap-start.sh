@@ -30,7 +30,14 @@ fi
 kill_rm_pidfile $PIDFILE_NETCAT
 kill_rm_pidfile $PIDFILE_PCAP
 
-if [ -x $DUMPCAP ]; then
+if [ ! -x $DUMPCAP ]; then
+	echo "Missing required dumpcap binary at ${DUMPCAP}"
+	exit 31
+fi
+
+if [ "$(id -u)" = "0" ]; then
+	CMD="$DUMPCAP -q"
+else
     CAP_ERR="1"
     if [ -x /sbin/setcap ]; then
 	# N. B: this check requires libcap2-bin package
