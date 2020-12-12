@@ -66,6 +66,24 @@ modulepar {
 					nsvci := 101
 				}
 			}
+		}, {
+			nsei := 102,
+			role_sgsn := true,
+			handle_sns := false,
+			nsvc := {
+				{
+					provider := {
+						ip := {
+							address_family := AF_INET,
+							local_udp_port := 8888,
+							local_ip := "127.0.0.1",
+							remote_udp_port := 23000,
+							remote_ip := "127.0.0.1"
+						}
+					},
+					nsvci := 102
+				}
+			}
 		}
 	};
 	/* BSS NSEI start at 2000 + x
@@ -263,7 +281,7 @@ type record of BssgpConfig BssgpConfigs;
 type record of NSConfiguration NSConfigurations;
 type record of BssgpCellId BssgpCellIds;
 
-const integer NUM_SGSN := 1;
+const integer NUM_SGSN := 2;
 
 type component test_CT {
 	var GbInstances g_pcu;
@@ -370,11 +388,14 @@ private function f_init_gb_pcu(inout GbInstance gb, charstring id, integer offse
 	gb.vc_BSSGP.start(BssgpStart(gb.cfg, bssgp_id));
 
 	for (var integer i := 0; i < lengthof(gb.cfg.bvc); i := i + 1) {
+		/* obtain the component reference of the BSSGP_BVC_CT for each PTP BVC */
 		connect(self:PROC, gb.vc_BSSGP:PROC);
 		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+		/* connect all of the per-BVC MGMT ports to our PCU_MGMT port (1:N) */
 		connect(self:PCU_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
+	/* connect all of the BSSGP/NSE global MGMT port to our PCU_MGMT port (1:N) */
 	connect(self:PCU_MGMT, gb.vc_BSSGP:MGMT);
 }
 
@@ -390,11 +411,14 @@ private function f_init_gb_sgsn(inout GbInstance gb, charstring id, integer offs
 	gb.vc_BSSGP.start(BssgpStart(gb.cfg, bssgp_id));
 
 	for (var integer i := 0; i < lengthof(gb.cfg.bvc); i := i + 1) {
+		/* obtain the component reference of the BSSGP_BVC_CT for each PTP BVC */
 		connect(self:PROC, gb.vc_BSSGP:PROC);
 		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
+		/* connect all of the per-BVC MGMT ports to our SGSN_MGMT port (1:N) */
 		connect(self:SGSN_MGMT, gb.vc_BSSGP_BVC[i]:MGMT);
 	}
+	/* connect all of the BSSGP/NSE global MGMT port to our SGSN_MGMT port (1:N) */
 	connect(self:SGSN_MGMT, gb.vc_BSSGP:MGMT);
 }
 
@@ -425,8 +449,25 @@ private function ro_integer_contains(ro_integer r, integer x) return boolean {
 	return false;
 }
 
+private type record of ro_integer roro_integer;
+
+/* count the number of unblocked BVCI for each SGSN NSE */
+private altstep as_count_unblocked4nse(integer sgsn_idx, inout roro_integer bvci_unblocked)
+runs on test_CT {
+	var BssgpStatusIndication bsi;
+	[] SGSN_MGMT.receive(BssgpStatusIndication:{g_sgsn[sgsn_idx].cfg.nsei, ?, BVC_S_UNBLOCKED}) -> value bsi {
+		bvci_unblocked[sgsn_idx] := bvci_unblocked[sgsn_idx] & { bsi.bvci };
+		/* 'repeat' until sufficient number of BVC-rest has been received on all SGSNs */
+		for (var integer i := 0; i < lengthof(bvci_unblocked); i := i+1) {
+			if (lengthof(bvci_unblocked[i]) < lengthof(g_sgsn[i].cfg.bvc)) {
+				repeat;
+			}
+		}
+	}
+}
+
 function f_init(float t_guard := 30.0) runs on test_CT {
-	var ro_integer bvci_unblocked := {};
+	var roro_integer bvci_unblocked;
 	var BssgpStatusIndication bsi;
 	var integer i;
 
@@ -438,17 +479,21 @@ function f_init(float t_guard := 30.0) runs on test_CT {
 	g_Tguard.start(t_guard);
 	activate(as_gTguard(g_Tguard));
 
-	g_sgsn[0].cfg := {
-		nsei := mp_nsconfig_sgsn[0].nsei,
-		sgsn_role := true,
-		bvc := { }
-	}
+	var BssgpBvcConfigs bvcs := { };
 	for (i := 0; i < lengthof(mp_gbconfigs); i := i+1) {
 		g_pcu[i].cfg := mp_gbconfigs[i];
 		/* make sure all have a proper crate_cb, which cannot be specified in config file */
 		f_fix_create_cb(g_pcu[i].cfg);
 		/* concatenate all the PCU-side BVCs for the SGSN side */
-		g_sgsn[0].cfg.bvc := g_sgsn[0].cfg.bvc & g_pcu[i].cfg.bvc;
+		bvcs := bvcs & g_pcu[i].cfg.bvc;
+	}
+
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		g_sgsn[i].cfg := {
+			nsei := mp_nsconfig_sgsn[i].nsei,
+			sgsn_role := true,
+			bvc := bvcs
+		}
 	}
 
 	f_init_vty();
@@ -468,16 +513,18 @@ function f_init(float t_guard := 30.0) runs on test_CT {
 		f_init_gb_pcu(g_pcu[i], "GbProxy_Test", i);
 	}
 
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		bvci_unblocked[i] := {};
+	}
+
 	/* wait until all BVC are unblocked on both sides */
 	timer T := 15.0;
 	T.start;
 	alt {
-	[] SGSN_MGMT.receive(BssgpStatusIndication:{*, ?, BVC_S_UNBLOCKED}) -> value bsi {
-		bvci_unblocked := bvci_unblocked & { bsi.bvci };
-		if (lengthof(bvci_unblocked) != lengthof(g_sgsn[0].cfg.bvc)) {
-			repeat;
-			}
-		}
+	/* TODO: We need to add more lines if NUM_SGSN increases.  Activating default altsteps
+	 * unfortunately doesn't work as we want to access the local variable bvci_unblocked.  */
+	[] as_count_unblocked4nse(0, bvci_unblocked);
+	[lengthof(g_sgsn) > 1] as_count_unblocked4nse(1, bvci_unblocked);
 	[] SGSN_MGMT.receive(BssgpStatusIndication:{*, ?, ?}) {
 		repeat;
 		}
@@ -505,17 +552,19 @@ function f_init(float t_guard := 30.0) runs on test_CT {
 
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for unblock of all BVCs on SGSN side; ",
-			   "unblocked so far: ", bvci_unblocked, "expected: ", g_sgsn[0].cfg.bvc);
+			   "unblocked so far: ", bvci_unblocked);
 		/* don't stop here but print below analysis */
 		}
 	}
 
-	/* iterate over list and check all BVCI */
-	for (i := 0; i < lengthof(g_sgsn[0].cfg.bvc); i := i+1) {
-		var BssgpBvci bvci := g_sgsn[0].cfg.bvc[i].bvci;
-		if (not ro_integer_contains(bvci_unblocked, bvci)) {
-			setverdict(fail, "BVCI=", bvci, " was not unblocked during start-up");
-			mtc.stop;
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		/* iterate over list and check all BVCI */
+		for (var integer j := 0; j < lengthof(g_sgsn[i].cfg.bvc); j := j+1) {
+			var BssgpBvci bvci := g_sgsn[i].cfg.bvc[j].bvci;
+			if (not ro_integer_contains(bvci_unblocked[i], bvci)) {
+				setverdict(fail, "SGSN ", i, " BVCI=", bvci, " was not unblocked during start-up");
+				mtc.stop;
+			}
 		}
 	}
 
