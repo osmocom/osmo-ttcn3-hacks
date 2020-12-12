@@ -62,7 +62,7 @@ echo $PID > $PIDFILE_NETCAT
 # but must use dumpcap with each individual interface name.  We also
 # must write pcapng files, as only those can record the interface of
 # each packet
-ADDL_ARGS=""
+ADDL_ARGS="-i lo"
 for f in /sys/class/net/*; do
 	DEV=`basename $f`
 	if [[ "$DEV" == "hdlcnet"* ]]; then
