@@ -171,6 +171,9 @@ type component test_CT {
 	/* only needed at start to get the per-BVC references */
 	port BSSGP_CT_PROC_PT PROC;
 
+	/* used by RIM related test */
+	port BSSGP_PT RIM[NUM_GB];
+
 	var GTP_Emulation_CT vc_GTP;
 
 	port TELNETasp_PT SGSNVTY;
@@ -247,6 +250,8 @@ private function f_init_gb(inout GbInstance gb, charstring id, integer offset) r
 		gb.vc_BSSGP_BVC[i] := f_bssgp_get_bvci_ct(gb.cfg.bvc[i].bvci, PROC);
 		disconnect(self:PROC, gb.vc_BSSGP:PROC);
 	}
+	/* connect RIM related port */
+	connect(gb.vc_BSSGP:RIM, self:RIM[offset]);
 }
 
 private function f_init_gsup(charstring id) runs on test_CT {
@@ -3130,9 +3135,92 @@ testcase TC_paging_ps() runs on test_CT {
 	f_cleanup();
 }
 
+private function f_TC_bssgp_rim_dummy(charstring id) runs on BSSGP_ConnHdlr {
+}
+
+/* Run a RIM single report procedure over the sgsn. Since the SGSN will only do a transparent routing of the
+ * RIM messages this basically tests if the message is correctly transfered from one GB interface to the
+ * other and vice versa. */
+testcase TC_bssgp_rim_single_report() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_bssgp_rim_dummy), testcasename(), g_gb, 17);
+	vc_conn.done;
+
+	timer T := 2.0;
+
+	var template RIM_Routing_Address dst_addr;
+	var template RIM_Routing_Address src_addr;
+	var template RAN_Information_Request_RIM_Container req_cont;
+	var template RAN_Information_RIM_Container res_cont;
+	var template PDU_BSSGP bssgp_rim_pdu;
+	var template PDU_BSSGP bssgp_rim_pdu_expect;
+
+	dst_addr := t_RIM_Routing_Address_cid(g_gb[1].cfg.bvc[0].cell_id);
+	src_addr := t_RIM_Routing_Address_cid(g_gb[0].cfg.bvc[0].cell_id);
 
 
+	/* Send NACC Ran information request to SGSN at GB interface #0. We epect the SGSN to forward this request
+	 * based on the cell id in dst_addr to GB interface #1. */
+	req_cont := ts_RAN_Information_Request_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+							     ts_RIM_Sequence_Number(1),
+							     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+							     ts_RIM_Protocol_Version_Number(1),
+							     tsu_RAN_Information_Request_Application_Container_NACC(g_gb[1].cfg.bvc[0].cell_id),
+							     omit);
+	bssgp_rim_pdu := ts_RAN_INFORMATION_REQUEST(ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+						    ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+						    req_cont);
+	bssgp_rim_pdu_expect := tr_RAN_INFORMATION_REQUEST(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+							   tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+							   tr_RAN_Information_Request_RIM_Container);
+	RIM[0].send(bssgp_rim_pdu);
+	T.start;
+	alt {
+		[] RIM[1].receive(bssgp_rim_pdu_expect) { }
+		[] RIM[1].receive {
+			setverdict(fail, "Unexpected BSSGP RIM PDU received");
+		}
+		[] T.timeout {
+			setverdict(fail, "No BSSGP RIM PDU received");
+			mtc.stop;
+		}
+	}
 
+	/* Now also emulate also the response as well and send it back on GB interface #1. Expect the result on
+	 * GB interface #0 */
+	var octetstring si1 := '198fb100000000000000000000000000007900002b'O;
+	var octetstring si3 := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
+	var octetstring si13 := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
+	var octetstring si := si1 & si3 & si13;
+
+	res_cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						     ts_RIM_Sequence_Number(2),
+						     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+						     ts_RIM_Protocol_Version_Number(1),
+						     tsu_ApplContainer_or_ApplErrContainer_NACC(tsu_ApplContainer_NACC(g_gb[0].cfg.bvc[0].cell_id, false, 3, si)),
+						     omit);
+	bssgp_rim_pdu := ts_PDU_BSSGP_RAN_INFORMATION(ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+									    ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+									    res_cont);
+	bssgp_rim_pdu_expect := tr_PDU_BSSGP_RAN_INFORMATION(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+							     tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+							     ?);
+	RIM[1].send(bssgp_rim_pdu);
+	T.start;
+	alt {
+		[] RIM[0].receive(bssgp_rim_pdu_expect) { }
+		[] RIM[0].receive {
+			setverdict(fail, "Unexpected BSSGP RIM PDU received");
+		}
+		[] T.timeout {
+			setverdict(fail, "No BSSGP RIM PDU received");
+			mtc.stop;
+		}
+	}
+
+	f_cleanup();
+}
 
 control {
 	execute( TC_attach() );
@@ -3195,6 +3283,8 @@ control {
 	execute( TC_suspend_resume() );
 	execute( TC_suspend_rau() );
 	execute( TC_paging_ps() );
+
+	execute( TC_bssgp_rim_single_report() );
 
 	/* At the end, may crash osmo-sgsn, see OS#3957, OS#4245 */
 	execute( TC_attach_req_id_req_ra_update() );
