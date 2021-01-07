@@ -102,7 +102,13 @@ friend template (value) PCUIF_info_ind ts_PCUIF_INFO_default(template (value) PC
 	local_port := { mp_nsconfig.nsvc[0].provider.ip.remote_udp_port, 0 },
 	remote_port := { mp_nsconfig.nsvc[0].provider.ip.local_udp_port, 0 },
 	remote_addr := f_PCUIF_ver_INFO_RemoteAddr(
-		f_PCUIF_AF2addr_type(mp_nsconfig.nsvc[0].provider.ip.address_family), mp_nsconfig.nsvc[0].provider.ip.local_ip)
+		f_PCUIF_AF2addr_type(mp_nsconfig.nsvc[0].provider.ip.address_family), mp_nsconfig.nsvc[0].provider.ip.local_ip),
+	si1 := { 85, 6, 25, 143, 177, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 121, 0, 0, 43 },
+	si1_is_set := 1,
+	si3 := { 73, 6, 27, 117, 48, 0, 241, 16, 35, 110, 201, 3, 60, 39, 71, 64, 121, 0, 0, 60, 11, 43, 43 },
+	si3_is_set := 1,
+	si13 := { 1, 6, 0, 144, 0, 24, 90, 111, 201, 224, 132, 16, 171, 43, 43, 43, 43, 43, 43, 43, 43, 43, 43 },
+	si13_is_set := 1
 }
 
 type record lqual_range {
@@ -3566,6 +3572,80 @@ testcase TC_paging_cs_multi_ms_imsi_tmsi() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Send a RIM RAN info request to the PCU and verify the response */
+testcase TC_rim_ran_info_req_single_rep() runs on RAW_PCU_Test_CT {
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+	var PCUIF_info_ind info_ind;
+	timer T := 2.0;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+
+	var template RIM_Routing_Address dst_addr;
+	var template RIM_Routing_Address src_addr;
+	var template RAN_Information_Request_RIM_Container req_cont;
+	var template RAN_Information_RIM_Container res_cont;
+	var template PDU_BSSGP bssgp_rim_pdu;
+	var template PDU_BSSGP bssgp_rim_pdu_expect;
+	var template RAN_Information_RIM_Container rim_cont_expect;
+
+	var BssgpCellId src_cid := {ra_id := { lai := { mcc_mnc := '262F42'H, lac := 12345}, rac := 0 }, cell_id := 20962 };
+	src_addr := t_RIM_Routing_Address_cid(src_cid);
+	dst_addr := t_RIM_Routing_Address_cid(mp_gb_cfg.bvc[0].cell_id);
+
+	var octetstring si1_expect := '198fb100000000000000000000000000007900002b'O;
+	var octetstring si3_expect := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
+	var octetstring si13_expect := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
+	var octetstring si_expect := si1_expect & si3_expect & si13_expect;
+
+	req_cont := ts_RAN_Information_Request_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+							     ts_RIM_Sequence_Number(1),
+							     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+							     ts_RIM_Protocol_Version_Number(1),
+							     tsu_RAN_Information_Request_Application_Container_NACC(mp_gb_cfg.bvc[0].cell_id),
+							     omit);
+	bssgp_rim_pdu := ts_RAN_INFORMATION_REQUEST(ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+						    ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+						    req_cont);
+
+
+	rim_cont_expect := tr_RAN_Information_RIM_Container(tr_RIM_Application_Identity(RIM_APP_ID_NACC),
+							    tr_RIM_Sequence_Number(1),
+							    tr_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+							    tr_RIM_Protocol_Version_Number(1),
+							    tru_ApplContainer_or_ApplErrContainer_NACC(tru_ApplContainer_NACC(mp_gb_cfg.bvc[0].cell_id, false, 3, si_expect)),
+							    omit);
+
+	bssgp_rim_pdu_expect := tr_PDU_BSSGP_RAN_INFORMATION(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+							     tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+							     rim_cont_expect);
+	RIM.send(bssgp_rim_pdu);
+	T.start;
+	alt {
+		[] RIM.receive(bssgp_rim_pdu_expect) { }
+		[] RIM.receive {
+			setverdict(fail, "Unexpected BSSGP RIM PDU received");
+		}
+		[] T.timeout {
+			setverdict(fail, "No BSSGP RIM PDU received");
+			mtc.stop;
+		}
+	}
+
+	/* FIXME: work around a race condition between PCUIF and BSSGP */
+	f_sleep(0.2); /* i.e. give the IUT some time to process everything */
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -3639,6 +3719,8 @@ control {
 	execute( TC_multiplex_dl_gprs_egprs() );
 
 	execute( TC_pcuif_info_ind_subsequent() );
+
+	execute( TC_rim_ran_info_req_single_rep() );
 }
 
 }
