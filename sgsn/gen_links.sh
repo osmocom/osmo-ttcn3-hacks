@@ -84,7 +84,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn GSM_RR_Types.ttcn Osmocom_Types.ttcn RLCMAC_Templates.ttcn RLCMAC_Types.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn RLCMAC_EncDec.cc "
-FILES+="NS_Provider_IPL4.ttcn NS_Emulation.ttcnpp PCUIF_Types.ttcn NS_CodecPort.ttcn NS_CodecPort_CtrlFunct.ttcn NS_CodecPort_CtrlFunctDef.cc "
+FILES+="NS_Provider_IPL4.ttcn NS_Emulation.ttcnpp PCUIF_Types.ttcn "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
@@ -92,7 +92,7 @@ FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 FILES+="RAN_Emulation.ttcnpp RAN_Adapter.ttcnpp SCCP_Templates.ttcn "
 # IPA_Emulation + dependencies
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc GSUP_Types.ttcn GSUP_Emulation.ttcn "
-FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn IPCP_Types.ttcn RAW_NS.ttcn "
+FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn IPCP_Types.ttcn RAW_NS.ttcnpp "
 gen_links $DIR $FILES
 
 ignore_pp_results

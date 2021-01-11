@@ -10,23 +10,29 @@ module RAW_NS {
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+import from Misc_Helpers all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from Osmocom_Gb_Types all;
-import from NS_CodecPort all;
+import from NS_Emulation all;
 import from NS_Types all;
 import from BSSGP_Types all;
-import from NS_CodecPort all;
-import from NS_CodecPort_CtrlFunct all;
 import from NS_Emulation all;
 import from Native_Functions all;
 import from IPL4asp_Types all;
+import from NS_Provider_IPL4 all;
+#ifdef NS_EMULATION_FR
+import from NS_Provider_FR all;
+#endif
 
 public type component RAW_NS_CT {
 	/* UDP port towards the bottom (IUT) */
-	port NS_CODEC_PT NSCP[4];
-	var ConnectionId g_ns_conn_id[4] := {-1, -1, -1, -1};
-	var NSConfiguration g_nsconfig[4];
+	port NS_PROVIDER_PT NSCP[4];
+	var NS_Provider_IPL4_CT vc_NSP_IP[4];
+#ifdef NS_EMULATION_FR
+	var NS_Provider_FR_CT vc_NSP_FR[4];
+#endif
+	var NSConfiguration g_nsconfig;
 	timer g_T_guard;
 }
 
@@ -37,7 +43,7 @@ public altstep as_Tguard() runs on RAW_NS_CT {
 		}
 }
 
-function f_init_ns_codec(NSConfiguration ns_config, integer idx := 0, float guard_secs := 60.0, integer tc_offset := 0) runs on RAW_NS_CT {
+function f_init_ns_codec(NSConfiguration ns_config, integer idx := 0, float guard_secs := 60.0, charstring id := testcasename()) runs on RAW_NS_CT {
 	var Result res;
 
 	if (not g_T_guard.running) {
@@ -45,54 +51,64 @@ function f_init_ns_codec(NSConfiguration ns_config, integer idx := 0, float guar
 		activate(as_Tguard());
 	}
 
-	if (not isbound(g_nsconfig) or not isbound(g_nsconfig[idx])) {
-		/* copy most parts from mp_nsconfig */
-		g_nsconfig[idx] := ns_config;
-		/* adjust those parts different for each NS-VC */
-		g_nsconfig[idx].nsvc[0].nsvci := ns_config.nsvc[0].nsvci + idx;
-		g_nsconfig[idx].nsvc[0].provider.ip.local_udp_port := ns_config.nsvc[0].provider.ip.local_udp_port + idx + tc_offset;
+	if (not isbound(g_nsconfig)) {
+		g_nsconfig := ns_config;
 	}
 
-	map(self:NSCP[idx], system:NSCP);
-	/* Connect the UDP socket */
-	var NSConfiguration nscfg := g_nsconfig[idx];
-	var NSVCConfiguration nsvc_cfg := nscfg.nsvc[0];
-	log("connecting NSCP[", idx, "] to ", nscfg);
-	res := f_IPL4_connect(NSCP[idx], nsvc_cfg.provider.ip.remote_ip, nsvc_cfg.provider.ip.remote_udp_port,
-				nsvc_cfg.provider.ip.local_ip, nsvc_cfg.provider.ip.local_udp_port, 0, { udp := {}});
-	if (not ispresent(res.connId)) {
-		setverdict(fail, "Could not connect NS UDP socket, check your configuration ", g_nsconfig[idx]);
-		mtc.stop;
+	if (ischosen(ns_config.nsvc[idx].provider.ip)) {
+		/* Connect the UDP socket */
+		vc_NSP_IP[idx] := NS_Provider_IPL4_CT.create(id & "-provIP");
+		connect(self:NSCP[idx], vc_NSP_IP[idx]:NSE);
+		vc_NSP_IP[idx].start(NS_Provider_IPL4.main(ns_config.nsvc[idx], ns_config, id));
+#ifdef NS_EMULATION_FR
+	} else if (ischosen(ns_config.nsvc[idx].provider.fr)) {
+		vc_NSP_FR[idx] := NS_Provider_FR_CT.create(id & "-provFR");
+		connect(self:NSCP[idx], vc_NSP_FR[idx]:NSE);
+		vc_NSP_FR[idx].start(NS_Provider_FR.main(ns_config.nsvc[idx], ns_config, id));
+#endif
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unsupported NS provider");
 	}
-	g_ns_conn_id[idx] := res.connId;
 
+	NSCP[idx].receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP});
+}
+
+function f_clean_ns_codec() runs on RAW_NS_CT {
+	for (var integer i := 0; i < lengthof(vc_NSP_IP); i := i + 1) {
+		vc_NSP_IP[i].stop;
+	}
+#ifdef NS_EMULATION_FR
+	for (var integer i := 0; i < lengthof(vc_NSP_FR); i := i + 1) {
+		vc_NSP_FR[i].stop;
+	}
+#endif NS_EMULATION_FR
 }
 
 public altstep ax_rx_fail_on_any_ns(integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom nrf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(?)) -> value nrf {
+	var PDU_NS nrf;
+	[] NSCP[idx].receive(PDU_NS: ?) -> value nrf {
 		setverdict(fail, "Received unexpected NS: ", nrf);
 		mtc.stop;
 		}
 }
 
 function f_ns_exp(template PDU_NS exp_rx, integer idx := 0) runs on RAW_NS_CT return PDU_NS {
-	var NS_RecvFrom nrf;
+	var PDU_NS nrf;
 	log("f_ns_exp() expecting ", exp_rx);
 	/* last activated altstep has the lowest priority */
 	var default d := activate(ax_rx_fail_on_any_ns());
 	alt {
-	[] NSCP[idx].receive(t_NS_RecvFrom(exp_rx)) -> value nrf { }
+	[] NSCP[idx].receive(PDU_NS: exp_rx) -> value nrf { }
 	}
 	deactivate(d);
-	return nrf.msg;
+	return nrf;
 }
 
 /* perform outbound NS-ALIVE procedure */
 function f_outgoing_ns_alive(integer idx := 0) runs on RAW_NS_CT {
-	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], t_NS_ALIVE));
+	NSCP[idx].send(t_NS_ALIVE);
 	alt {
-	[] NSCP[idx].receive(t_NS_RecvFrom(t_NS_ALIVE_ACK));
+	[] NSCP[idx].receive(t_NS_ALIVE_ACK);
 	[] NSCP[idx].receive { repeat; }
 	}
 }
@@ -100,10 +116,10 @@ function f_outgoing_ns_alive(integer idx := 0) runs on RAW_NS_CT {
 /* perform outbound NS-ALIVE procedure */
 function f_outgoing_ns_alive_no_ack(integer idx := 0, float tout := 10.0) runs on RAW_NS_CT {
 	timer T := tout;
-	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], t_NS_ALIVE));
+	NSCP[idx].send(t_NS_ALIVE);
 	T.start;
 	alt {
-	[] NSCP[idx].receive(t_NS_RecvFrom(t_NS_ALIVE_ACK)) {
+	[] NSCP[idx].receive(t_NS_ALIVE_ACK) {
 		setverdict(fail, "Received unexpected NS-ALIVE ACK");
 		}
 	[] NSCP[idx].receive { repeat; }
@@ -115,11 +131,11 @@ function f_outgoing_ns_alive_no_ack(integer idx := 0, float tout := 10.0) runs o
 
 function f_outgoing_ns_reset(integer idx := 0, float tout := 10.0) runs on RAW_NS_CT {
 	timer T := tout;
-	var template PDU_NS reset := ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig[idx].nsvc[0].nsvci, g_nsconfig[idx].nsei)
-	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], reset));
+	var template PDU_NS reset := ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig.nsvc[idx].nsvci, g_nsconfig.nsei)
+	NSCP[idx].send(reset);
 	T.start;
 	alt {
-	[] NSCP[idx].receive(t_NS_RecvFrom(ts_NS_RESET_ACK(g_nsconfig[idx].nsvc[0].nsvci, g_nsconfig[idx].nsei))) {
+	[] NSCP[idx].receive(ts_NS_RESET_ACK(g_nsconfig.nsvc[idx].nsvci, g_nsconfig.nsei)) {
 		setverdict(pass);
 		}
 	[] NSCP[idx].receive { repeat; }
@@ -131,17 +147,26 @@ function f_outgoing_ns_reset(integer idx := 0, float tout := 10.0) runs on RAW_N
 
 /* perform outbound NS-BLOCK procedure */
 function f_outgoing_ns_block(NsCause cause, integer idx := 0) runs on RAW_NS_CT {
-	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_BLOCK(cause, g_nsconfig[idx].nsvc[0].nsvci)));
+	NSCP[idx].send(ts_NS_BLOCK(cause, g_nsconfig.nsvc[idx].nsvci));
 	alt {
-	[] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_BLOCK_ACK(g_nsconfig[idx].nsvc[0].nsvci)));
+	[] NSCP[idx].receive(tr_NS_BLOCK_ACK(g_nsconfig.nsvc[idx].nsvci));
+	[] NSCP[idx].receive { repeat; }
+	}
+}
+
+/* perform outbound NS-UNBLOCK procedure */
+function f_outgoing_ns_unblock(integer idx := 0) runs on RAW_NS_CT {
+	NSCP[idx].send(t_NS_UNBLOCK);
+	alt {
+	[] NSCP[idx].receive(t_NS_UNBLOCK_ACK);
 	[] NSCP[idx].receive { repeat; }
 	}
 }
 
 /* receive NS-ALIVE and ACK it */
 altstep as_rx_alive_tx_ack(boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	[] NSCP[idx].receive(t_NS_RecvFrom(t_NS_ALIVE)) {
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], t_NS_ALIVE_ACK));
+	[] NSCP[idx].receive(t_NS_ALIVE) {
+		NSCP[idx].send(t_NS_ALIVE_ACK);
 		if (not oneshot) { repeat; }
 		}
 }
@@ -153,11 +178,11 @@ runs on RAW_NS_CT {
 	var PDU_BSSGP bssgp_tx := valueof(ts_BVC_RESET(BSSGP_CAUSE_NET_SV_CAP_MOD_GT_ZERO_KBPS, bvci,
 						       tx_cell_id));
 	timer T := 5.0;
-	NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx))));
+	NSCP[idx].send(ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx)));
 	T.start;
 	alt {
-	[exp_ack] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_UNITDATA(t_SduCtrlB, 0,
-						  decmatch tr_BVC_RESET_ACK(bvci, rx_cell_id)))) {
+	[exp_ack] NSCP[idx].receive(tr_NS_UNITDATA(t_SduCtrlB, 0,
+						   decmatch tr_BVC_RESET_ACK(bvci, rx_cell_id))) {
 		setverdict(pass);
 		}
 	[exp_ack] T.timeout {
@@ -173,13 +198,13 @@ runs on RAW_NS_CT {
 /* Receive a BSSGP RESET for given BVCI and ACK it */
 altstep as_rx_bvc_reset_tx_ack(BssgpBvci bvci, template BssgpCellId rx_cell_id, template (omit) BssgpCellId tx_cell_id,
 				boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom ns_rf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_UNITDATA(t_SduCtrlB, 0,
-						  decmatch tr_BVC_RESET(?, bvci, rx_cell_id))))
+	var PDU_NS ns_rf;
+	[] NSCP[idx].receive(tr_NS_UNITDATA(t_SduCtrlB, 0,
+						  decmatch tr_BVC_RESET(?, bvci, rx_cell_id)))
 								-> value ns_rf {
-		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.msg.pDU_NS_Unitdata.nS_SDU);
+		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.pDU_NS_Unitdata.nS_SDU);
 		var PDU_BSSGP bssgp_tx := valueof(ts_BVC_RESET_ACK(bvci, tx_cell_id));
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx))));
+		NSCP[idx].send(ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx)));
 		if (not oneshot) { repeat; }
 		}
 }
@@ -187,27 +212,25 @@ altstep as_rx_bvc_reset_tx_ack(BssgpBvci bvci, template BssgpCellId rx_cell_id, 
 
 /* Receive a BSSGP UNBLOCK for given BVCI and ACK it */
 altstep as_rx_bvc_unblock_tx_ack(BssgpBvci bvci, boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom ns_rf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_UNITDATA(t_SduCtrlB, 0,
-						  decmatch t_BVC_UNBLOCK(bvci))))
-								-> value ns_rf {
-		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.msg.pDU_NS_Unitdata.nS_SDU);
+	var PDU_NS ns_rf;
+	[] NSCP[idx].receive(tr_NS_UNITDATA(t_SduCtrlB, 0, decmatch t_BVC_UNBLOCK(bvci))) -> value ns_rf {
+		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.pDU_NS_Unitdata.nS_SDU);
 		var PDU_BSSGP bssgp_tx := valueof(t_BVC_UNBLOCK_ACK(bvci));
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx))));
+		NSCP[idx].send(ts_NS_UNITDATA(t_SduCtrlB, 0, enc_PDU_BSSGP(bssgp_tx)));
 		if (not oneshot) { repeat; }
 		}
 }
 
 /* Receive a BSSGP FLOW-CONTROL-BVC and ACK it */
 altstep as_rx_bvc_fc_tx_ack(BssgpBvci bvci, boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom ns_rf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_UNITDATA(t_SduCtrlB, bvci,
-						  decmatch tr_BVC_FC_BVC)))
+	var PDU_NS ns_rf;
+	[] NSCP[idx].receive(tr_NS_UNITDATA(t_SduCtrlB, bvci,
+					    decmatch tr_BVC_FC_BVC))
 								-> value ns_rf {
-		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.msg.pDU_NS_Unitdata.nS_SDU);
+		var PDU_BSSGP bssgp_rx := dec_PDU_BSSGP(ns_rf.pDU_NS_Unitdata.nS_SDU);
 		var OCT1 tag := bssgp_rx.pDU_BSSGP_FLOW_CONTROL_BVC.tag.unstructured_Value;
 		var PDU_BSSGP bssgp_tx := valueof(t_BVC_FC_BVC_ACK(tag));
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_UNITDATA(t_SduCtrlB, bvci, enc_PDU_BSSGP(bssgp_tx))));
+		NSCP[idx].send(ts_NS_UNITDATA(t_SduCtrlB, bvci, enc_PDU_BSSGP(bssgp_tx)));
 		if (not oneshot) { repeat; }
 		}
 }
@@ -218,19 +241,18 @@ altstep as_rx_bvc_fc_tx_ack(BssgpBvci bvci, boolean oneshot := false, integer id
 
 /* Receive a NS-RESET and ACK it */
 public altstep as_rx_ns_reset_ack(boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom ns_rf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(tr_NS_RESET(NS_CAUSE_OM_INTERVENTION, g_nsconfig[idx].nsvc[0].nsvci,
-						  g_nsconfig[idx].nsei))) -> value ns_rf {
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], ts_NS_RESET_ACK(g_nsconfig[idx].nsvc[0].nsvci,
-									    g_nsconfig[idx].nsei)));
+	var PDU_NS ns_rf;
+	[] NSCP[idx].receive(tr_NS_RESET(NS_CAUSE_OM_INTERVENTION, g_nsconfig.nsvc[idx].nsvci,
+						  g_nsconfig.nsei)) -> value ns_rf {
+		NSCP[idx].send(ts_NS_RESET_ACK(g_nsconfig.nsvc[idx].nsvci, g_nsconfig.nsei));
 		if (not oneshot) { repeat; }
 		}
 }
 /* Receive a NS-UNBLOCK and ACK it */
 public altstep as_rx_ns_unblock_ack(boolean oneshot := false, integer idx := 0) runs on RAW_NS_CT {
-	var NS_RecvFrom ns_rf;
-	[] NSCP[idx].receive(t_NS_RecvFrom(t_NS_UNBLOCK)) -> value ns_rf {
-		NSCP[idx].send(t_NS_Send(g_ns_conn_id[idx], t_NS_UNBLOCK_ACK));
+	var PDU_NS ns_rf;
+	[] NSCP[idx].receive(t_NS_UNBLOCK) -> value ns_rf {
+		NSCP[idx].send(t_NS_UNBLOCK_ACK);
 		if (not oneshot) { repeat; }
 		}
 }
