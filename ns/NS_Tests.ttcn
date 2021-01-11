@@ -1,0 +1,500 @@
+module NS_Tests {
+
+/* Osmocom NS test suite for NS over framerelay or udp ip.access style in TTCN-3
+ * (C) 2021 sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Alexander Couzens <lynxis@fe80.eu>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Osmocom_Gb_Types all;
+import from NS_Types all;
+import from BSSGP_Types all;
+import from UD_Types all;
+import from NS_Emulation all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from RAW_NS all;
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+modulepar {
+	OsmoNsDialect mp_dialect := NS2_DIALECT_IPACCESS;
+	NSConfiguration mp_nsconfig := {
+		nsei := 96,
+		role_sgsn := false,
+		handle_sns := false,
+		nsvc := {
+			{
+				provider := {
+					ip := {
+						address_family := AF_INET,
+						local_udp_port := 21000,
+						local_ip := "127.0.0.1",
+						remote_udp_port := 23000,
+						remote_ip := "127.0.0.1"
+					}
+				},
+				nsvci := 97
+			}
+		}
+	};
+}
+
+type component RAW_Test_CT extends RAW_NS_CT {
+	port TELNETasp_PT NSVTY;
+}
+
+private function f_init_vty() runs on RAW_Test_CT {
+	map(self:NSVTY, system:NSVTY);
+	f_vty_set_prompts(NSVTY);
+	f_vty_transceive(NSVTY, "enable");
+	f_vty_transceive(NSVTY, "nsvc nsei " & int2str(mp_nsconfig.nsei) & " force-unconfigured");
+}
+
+/* ensure no matching message is received within 'tout' */
+function f_ensure_no_ns(integer idx := 0, boolean answer_alive := false, float tout := 3.0)
+runs on RAW_Test_CT {
+	var PDU_NS nrf;
+
+	timer T := tout;
+	var default d := activate(ax_rx_fail_on_any_ns(idx));
+	T.start;
+	alt {
+	[answer_alive] as_rx_alive_tx_ack();
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+	deactivate(d);
+}
+
+function f_fails_except_reset(integer idx := 0, float tout := 15.0)
+runs on RAW_Test_CT {
+	var PDU_NS nrf;
+	timer T := 15.0;
+	T.start;
+	alt {
+	[] NSCP[idx].receive(tr_NS_RESET(*, *, *)) {
+		repeat;
+	}
+	[] NSCP[idx].receive(PDU_NS: ?) -> value nrf {
+		setverdict(fail, "Received unexpected NS: ", nrf);
+		mtc.stop;
+	}
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+testcase TC_tx_reset() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 10.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+testcase TC_tx_reset_tx_alive() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 10.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+
+	/* check outgoing NS procedure */
+	f_outgoing_ns_alive();
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+testcase TC_tx_reset_rx_alive() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 10.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+
+	activate(as_rx_ns_unblock_ack());
+	/* check outgoing NS procedure */
+	as_rx_alive_tx_ack(oneshot := true);
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.2 unblock procedure
+ *
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ */
+testcase TC_tx_unblock() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+	/* send alive acks */
+	activate(as_rx_alive_tx_ack());
+
+	f_outgoing_ns_unblock();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.2 tx unblock retries
+ *
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ */
+testcase TC_tx_unblock_retries() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+	/* send alive acks */
+	activate(as_rx_alive_tx_ack());
+
+	f_outgoing_ns_unblock();
+	f_outgoing_ns_unblock();
+	f_outgoing_ns_unblock();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.2 block procedure
+ *
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ * TTCN  -> NS: block
+ * TTCN <-  NS: block ack
+ */
+testcase TC_tx_block() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+	activate(as_rx_alive_tx_ack());
+
+	f_outgoing_ns_unblock();
+	f_sleep(1.0);
+
+	f_outgoing_ns_block(NS_CAUSE_EQUIPMENT_FAILURE);
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.2 block procedure by vty
+ *
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN  -> NS: unblock
+ * TTCN <-  NS: unblock ack
+ * vty: block nsvc
+ * TTCN <-  NS: block
+ * TTCN  -> NS: block ack
+ */
+function tx_block_by_vty(float guard_secs := 30.0) runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := guard_secs);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+	activate(as_rx_alive_tx_ack());
+
+	f_outgoing_ns_unblock();
+	f_sleep(1.0);
+
+	f_vty_transceive(NSVTY, "nsvc " & int2str(mp_nsconfig.nsvc[0].nsvci) & " block");
+
+	alt {
+	[] as_rx_ns_block_ack(oneshot := true, nsvci := mp_nsconfig.nsvc[0].nsvci);
+	}
+	setverdict(pass);
+}
+
+testcase TC_tx_block_by_vty() runs on RAW_Test_CT {
+	tx_block_by_vty(30.0);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.2 block precedure by vty and reset the NSVC.
+ *            The NSVC should be still blocked after the reset.
+ */
+testcase TC_tx_block_by_vty_reset() runs on RAW_Test_CT {
+	timer T := 10.0;
+
+	tx_block_by_vty(60.0);
+	f_outgoing_ns_reset();
+
+	var default d := activate(ax_rx_fail_on_any_ns());
+	T.start;
+	alt {
+	[] as_rx_alive_tx_ack();
+	[] T.timeout { setverdict(pass); }
+	}
+	deactivate(d);
+}
+
+/* 48.016 7.4.1 ignore unexpected NS_ALIVE ACK */
+testcase TC_no_reset_alive_ack() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].send(t_NS_ALIVE_ACK);
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET with wrong nsei */
+testcase TC_reset_wrong_nsei() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].send(ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei + 20));
+	NSCP[0].receive(tr_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET with wrong nsvci */
+testcase TC_reset_wrong_nsvci() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].send(ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig.nsvc[0].nsvci + 20, g_nsconfig.nsei));
+	NSCP[0].receive(tr_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET with wrong nsvci + nsei */
+testcase TC_reset_wrong_nsei_nsvci() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].send(ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig.nsvc[0].nsvci + 20, g_nsconfig.nsei + 20));
+	NSCP[0].receive(tr_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET_ACK with wrong nsei */
+testcase TC_reset_ack_wrong_nsei() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].receive(tr_NS_RESET(*, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	NSCP[0].send(ts_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei + 20));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET_ACK with wrong nsvci */
+testcase TC_reset_ack_wrong_nsvci() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].receive(tr_NS_RESET(*, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	NSCP[0].send(ts_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci + 20, g_nsconfig.nsei));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 NS_RESET_ACK with wrong nsvci + nsei */
+testcase TC_reset_ack_wrong_nsei_nsvci() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	NSCP[0].receive(tr_NS_RESET(*, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	NSCP[0].send(ts_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci + 20, g_nsconfig.nsei + 20));
+	f_fails_except_reset();
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3.1 ignore unexpected NS_RESET_ACK after NS_RESET+ALIVE */
+testcase TC_ignore_reset_ack() runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+
+	/* unblock and alive */
+	alt {
+	[] as_rx_ns_unblock_ack(oneshot := true);
+	[] as_rx_alive_tx_ack();
+	}
+
+	NSCP[0].send(ts_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	f_ensure_no_ns(answer_alive := true, tout := 15.0);
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+/* 48.016 7.3 NS_RESET retries */
+testcase TC_reset_retries() runs on RAW_Test_CT {
+	var integer reset := 0;
+
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	alt {
+	[] NSCP[0].receive(tr_NS_RESET(*, *, *)) {
+		reset := reset + 1;
+		if (reset <= 3) {
+			repeat;
+		} else {
+			setverdict(pass);
+		}
+	}
+	}
+
+	f_sleep(1.0);
+}
+
+/* 48.016 behave RESET_ACK got dropped
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN <-  NS: unblock
+ * TTCN  -> NS: reset
+ * TTCN <-  NS: reset ack
+ * TTCN <-  NS: unblock
+ */
+testcase TC_reset_on_block_reset() runs on RAW_Test_CT {
+	var integer i := 0;
+
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 30.0);
+
+	f_outgoing_ns_reset();
+	activate(as_rx_alive_tx_ack());
+
+	alt {
+	[] NSCP[0].receive(t_NS_UNBLOCK) {
+		NSCP[0].send(ts_NS_RESET(NS_CAUSE_EQUIPMENT_FAILURE, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+		i := i + 1;
+		if (i < 3) {
+			repeat;
+		} else {
+			setverdict(pass);
+		}
+	}
+	[] NSCP[0].receive(tr_NS_RESET_ACK(g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei)) { repeat; }
+	}
+
+	f_sleep(1.0);
+}
+
+/* 48.016 7.4 test procedure for frame relay with a single nsvci */
+function f_alive_retries_single(boolean reset := false) runs on RAW_Test_CT {
+	f_init_vty();
+	f_init_ns_codec(mp_nsconfig, guard_secs := 60.0);
+
+	/* do a NS Reset procedure */
+	f_outgoing_ns_reset();
+
+	alt {
+	[] as_rx_ns_unblock_ack(oneshot := true);
+	[] as_rx_alive_tx_ack();
+	}
+
+	/* wait for one alive and answer it */
+	as_rx_alive_tx_ack(oneshot := true);
+	NSCP[0].receive(t_NS_ALIVE);
+	NSCP[0].receive(t_NS_ALIVE);
+	NSCP[0].receive(t_NS_ALIVE);
+	NSCP[0].receive(t_NS_ALIVE);
+	if (reset) {
+		NSCP[0].receive(tr_NS_RESET(*, g_nsconfig.nsvc[0].nsvci, g_nsconfig.nsei));
+	} else {
+		f_ensure_no_ns(tout := 10.0);
+	}
+
+	setverdict(pass);
+	f_sleep(1.0);
+}
+
+testcase TC_alive_retries_single_reset() runs on RAW_Test_CT {
+	f_alive_retries_single(reset := true);
+}
+
+testcase TC_alive_retries_single_no_resp() runs on RAW_Test_CT {
+	f_alive_retries_single(reset := false);
+}
+
+control {
+	execute( TC_tx_reset() );
+
+	/* 48.016 7.2 Block procedure */
+	execute( TC_tx_block() );
+	execute( TC_tx_block_by_vty() );
+	execute( TC_tx_block_by_vty_reset() );
+	// execute( TC_block_other_nsvc() ); // reset, unblock, sleep(1), block over another nsvci 
+	/* 48.016 7.2 Unblock procedure */
+	execute( TC_tx_unblock() );
+	execute( TC_tx_unblock_retries() );
+	// execute( TC_rx_unblock_tx_unblock() ); // wait for an rx unblock pdu, send an unblock pdu, expect unblock ack pdu
+	// execute( TC_unblockable() ); // block a NS-VCI via vty, try block procedure
+
+	/* 48.016 7.2.1 Block Abnormal Condition */
+	/* 48.016 7.2.1 Unblock Abnormal Condition */
+
+	/* 48.016 7.3.1 Abnormal Condition */
+	if (mp_dialect == NS2_DIALECT_STATIC_RESETBLOCK) {
+		execute( TC_reset_wrong_nsei() );
+		execute( TC_reset_wrong_nsvci() );
+		execute( TC_reset_wrong_nsei_nsvci() );
+		execute( TC_reset_ack_wrong_nsei() );
+		execute( TC_reset_ack_wrong_nsvci() );
+		execute( TC_reset_ack_wrong_nsei_nsvci() );
+		execute( TC_reset_retries() );
+		execute( TC_reset_on_block_reset() );
+	}
+	execute( TC_ignore_reset_ack() );
+
+	/* 48.016 7.4 Test procedure on frame relay */
+	execute( TC_tx_reset_tx_alive() );
+	execute( TC_tx_reset_rx_alive() );
+
+	/* 48.016 7.4.1 Abnormal Condition */
+	if (mp_dialect == NS2_DIALECT_STATIC_RESETBLOCK) {
+		// execute( TC_alive_retries_multi() ); // check if alive retries works and block over an alive nsvc
+		execute( TC_alive_retries_single_reset() );
+	} else if (mp_dialect == NS2_DIALECT_IPACCESS) {
+		execute( TC_alive_retries_single_no_resp() );
+	}
+	execute( TC_no_reset_alive_ack() );
+}
+
+}
