@@ -338,6 +338,80 @@ testcase TC_pcuif_suspend() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Make sure TBF is released and no data is sent for in after reciving a Suspend Request from that MS. See OS#4761 */
+testcase TC_pcuif_suspend_active_tbf() runs on RAW_PCU_Test_CT {
+	var octetstring ra_id := enc_RoutingAreaIdentification(mp_gb_cfg.bvc[0].cell_id.ra_id);
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var GprsMS ms;
+	timer T;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resoultion) and make sure it is ACKED fine */
+	f_ms_tx_ul_data_block_multi(ms, 1, with_tlli := true);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	/* DL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	/* Now SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0);
+
+	/* MS has moved to CS, it sent SUSP REQ to BTS and PCU gets it, TBF is freed: */
+	BTS.send(ts_PCUIF_SUSP_REQ(0, ms.tlli, ra_id, 0));
+
+	T.start(2.0);
+	alt {
+	[] BSSGP_GLOBAL[0].receive(tr_BSSGP_SUSPEND(ms.tlli, mp_gb_cfg.bvc[0].cell_id.ra_id)) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for BSSGP SUSPEND");
+		f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* Make sure we don't receive data for that TBF since it was released
+	 * before. Also check our TBF is not polled for UL. */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	if (dl_block.ctrl.mac_hdr.usf != USF_UNUSED) {
+		setverdict(fail, "Unexpected USF ", dl_block.ctrl.mac_hdr.usf);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* New data arrives, PCU should page the MS since no TBF active exists: */
+	/* Send some more data, it will never reach the MS */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Test of correct Timing Advance at the time of TBF establishment
  * (derived from timing offset of the Access Burst). */
 testcase TC_ta_rach_imm_ass() runs on RAW_PCU_Test_CT {
@@ -3494,6 +3568,7 @@ testcase TC_paging_cs_multi_ms_imsi_tmsi() runs on RAW_PCU_Test_CT {
 
 control {
 	execute( TC_pcuif_suspend() );
+	execute( TC_pcuif_suspend_active_tbf() );
 	execute( TC_ta_ptcch_idle() );
 	execute( TC_ta_rach_imm_ass() );
 	execute( TC_ta_idle_dl_tbf_ass() );
