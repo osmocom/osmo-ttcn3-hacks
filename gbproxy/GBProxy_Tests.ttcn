@@ -353,6 +353,8 @@ type record BSSGP_ConnHdlrPars {
 	RoutingAreaIdentificationV ra optional,
 	GbInstances pcu,
 	GbInstances sgsn,
+	/* The SGSN index to be used within the test */
+	integer sgsn_idx,
 	float t_guard
 };
 
@@ -600,9 +602,10 @@ type function void_fn(charstring id) runs on BSSGP_ConnHdlr;
 
 /* helper function to create, connect and start a BSSGP_ConnHdlr component */
 function f_start_handler(void_fn fn, charstring id, GbInstances pcu, GbInstances sgsn, integer imsi_suffix,
-			 float t_guard := 30.0, integer nri := mp_sgsn_nri[0][0])
+			 float t_guard := 30.0, integer sgsn_idx := 0, integer nri_idx := 0)
 runs on test_CT return BSSGP_ConnHdlr {
 	var BSSGP_ConnHdlr vc_conn;
+	var integer nri := mp_sgsn_nri[sgsn_idx][nri_idx];
 	var OCT4 p_tmsi := f_gen_tmsi(imsi_suffix, nri_v := nri, nri_bitlen := mp_nri_bitlength);
 
 	var BSSGP_ConnHdlrPars pars := {
@@ -616,6 +619,7 @@ runs on test_CT return BSSGP_ConnHdlr {
 		ra := omit,
 		pcu := pcu,
 		sgsn := sgsn,
+		sgsn_idx := sgsn_idx,
 		t_guard := t_guard
 	};
 
@@ -623,6 +627,23 @@ runs on test_CT return BSSGP_ConnHdlr {
 
 	vc_conn.start(f_handler_init(fn, id, pars));
 	return vc_conn;
+}
+
+function f_start_handlers(void_fn fn, charstring id, GbInstances pcu, GbInstances sgsn,
+			  integer imsi_suffix, float t_guard := 30.0)
+runs on test_CT
+{
+	var integer sgsn_idx, nri_idx;
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx:=sgsn_idx+1) {
+		for (nri_idx := 0; nri_idx < lengthof(mp_sgsn_nri[sgsn_idx]); nri_idx:=nri_idx+1) {
+			var integer extd_imsi_suffix := 1000*sgsn_idx + 100*nri_idx;
+			var BSSGP_ConnHdlr vc_conn;
+			vc_conn := f_start_handler(fn, id, pcu, sgsn, extd_imsi_suffix, t_guard,
+						   sgsn_idx, nri_idx);
+			/* Idea: we could also run them in parallel ? */
+			vc_conn.done;
+		}
+	}
 }
 
 /* Connect the PCU-side per-BVC ports (PCU/PCU_SIG/PCU_PROC) array slot 'port_idx' to specified per-BVC component */
@@ -711,7 +732,8 @@ runs on BSSGP_ConnHdlr {
 
 /* Send 'tx' on PTP-BVCI from PCU; expect 'rx' on SGSN */
 friend function f_pcu2sgsn(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
-			   integer pcu_idx := 0, integer sgsn_idx := 0, boolean use_sig := false) runs on BSSGP_ConnHdlr {
+			   integer pcu_idx := 0, boolean use_sig := false) runs on BSSGP_ConnHdlr {
+	var integer sgsn_idx := g_pars.sgsn_idx;
 	var PDU_BSSGP rx;
 	timer T := 1.0;
 
@@ -730,15 +752,15 @@ friend function f_pcu2sgsn(template (value) PDU_BSSGP tx, template (present) PDU
 		setverdict(pass);
 		}
 	[] SGSN_PTP[sgsn_idx].receive(PDU_BSSGP:?) -> value rx {
-		setverdict(fail, "Unexpected BSSGP on SGSN side: ", rx);
+		setverdict(fail, "Unexpected BSSGP on SGSN[", sgsn_idx, "] side: ", rx);
 		mtc.stop;
 		}
 	[] SGSN_SIG[sgsn_idx].receive(PDU_BSSGP:?) -> value rx {
-		setverdict(fail, "Unexpected SIG BSSGP on SGSN side: ", rx);
+		setverdict(fail, "Unexpected SIG BSSGP on SGSN[", sgsn_idx, "] side: ", rx);
 		mtc.stop;
 		}
 	[] T.timeout {
-		setverdict(fail, "Timeout waiting for BSSGP on SGSN side: ", exp_rx);
+		setverdict(fail, "Timeout waiting for BSSGP on SGSN[", sgsn_idx, "] side: ", exp_rx);
 		mtc.stop;
 		}
 	}
@@ -746,7 +768,8 @@ friend function f_pcu2sgsn(template (value) PDU_BSSGP tx, template (present) PDU
 
 /* Send 'tx' on PTP-BVCI from SGSN; expect 'rx' on PCU */
 friend function f_sgsn2pcu(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
-			   integer sgsn_idx:= 0, integer pcu_idx := 0, boolean use_sig := false) runs on BSSGP_ConnHdlr {
+			   integer pcu_idx := 0, boolean use_sig := false) runs on BSSGP_ConnHdlr {
+	var integer sgsn_idx := g_pars.sgsn_idx;
 	var PDU_BSSGP rx;
 	timer T := 1.0;
 
@@ -877,12 +900,8 @@ private function f_TC_BVC_bringup(charstring id) runs on BSSGP_ConnHdlr {
 }
 
 testcase TC_BVC_bringup() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_BVC_bringup), testcasename(), g_pcu, g_sgsn, 51);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_BVC_bringup), testcasename(), g_pcu, g_sgsn, 51);
 	f_cleanup();
 }
 
@@ -947,13 +966,9 @@ private function f_TC_ul_unitdata(charstring id) runs on BSSGP_ConnHdlr {
 
 testcase TC_ul_unitdata() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_ul_unitdata), testcasename(), g_pcu, g_sgsn, 1);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_ul_unitdata), testcasename(), g_pcu, g_sgsn, 1);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -977,13 +992,9 @@ private function f_TC_dl_unitdata(charstring id) runs on BSSGP_ConnHdlr {
 
 testcase TC_dl_unitdata() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_dl_unitdata), testcasename(), g_pcu, g_sgsn, 2);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_dl_unitdata), testcasename(), g_pcu, g_sgsn, 2);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -1001,13 +1012,9 @@ private function f_TC_ra_capability(charstring id) runs on BSSGP_ConnHdlr {
 }
 testcase TC_ra_capability() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_ra_capability), testcasename(), g_pcu, g_sgsn, 3);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_ra_capability), testcasename(), g_pcu, g_sgsn, 3);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -1032,13 +1039,9 @@ private function f_TC_ra_capability_upd(charstring id) runs on BSSGP_ConnHdlr {
 }
 testcase TC_ra_capability_upd() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_ra_capability_upd), testcasename(), g_pcu, g_sgsn, 4);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_ra_capability_upd), testcasename(), g_pcu, g_sgsn, 4);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -1056,13 +1059,9 @@ private function f_TC_radio_status(charstring id) runs on BSSGP_ConnHdlr {
 }
 testcase TC_radio_status() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_radio_status), testcasename(), g_pcu, g_sgsn, 5);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_radio_status), testcasename(), g_pcu, g_sgsn, 5);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -1357,12 +1356,8 @@ private function f_TC_paging_ps_ptp_bss(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4BssArea, 0, false, 0);
 }
 testcase TC_paging_ps_ptp_bss() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_bss), testcasename(), g_pcu, g_sgsn, 9);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_bss), testcasename(), g_pcu, g_sgsn, 9);
 	f_cleanup();
 }
 
@@ -1375,12 +1370,8 @@ private function f_TC_paging_ps_ptp_lac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_lac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_lac), testcasename(), g_pcu, g_sgsn, 10);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_lac), testcasename(), g_pcu, g_sgsn, 10);
 	f_cleanup();
 }
 
@@ -1395,12 +1386,8 @@ private function f_TC_paging_ps_ptp_lac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4LAC(unknown_la), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_lac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1412,12 +1399,8 @@ private function f_TC_paging_ps_ptp_rac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_rac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_rac), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_rac), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1435,12 +1418,8 @@ private function f_TC_paging_ps_ptp_rac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4RAC(unknown_ra), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_rac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1451,12 +1430,8 @@ private function f_TC_paging_ps_ptp_bvci(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_bvci() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_bvci), testcasename(), g_pcu, g_sgsn, 12);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_bvci), testcasename(), g_pcu, g_sgsn, 12);
 	f_cleanup();
 }
 
@@ -1467,12 +1442,8 @@ private function f_TC_paging_ps_ptp_bvci_unknown(charstring id) runs on BSSGP_Co
 	f_send_paging_ps_exp_one_bss(ts_BssgpP4Bvci(33333), 0, false, 0);
 }
 testcase TC_paging_ps_ptp_bvci_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_ptp_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_ptp_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1538,12 +1509,8 @@ private function f_TC_paging_ps_sig_bss(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_multi(ts_BssgpP4BssArea, 0, {0, 1, 2});
 }
 testcase TC_paging_ps_sig_bss() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
 	f_cleanup();
 }
 
@@ -1559,12 +1526,8 @@ private function f_TC_paging_ps_sig_lac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_multi(ts_BssgpP4LAC(pcu_bvc_cfg[2].cell_id.ra_id.lai), 0, {2});
 }
 testcase TC_paging_ps_sig_lac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
 	f_cleanup();
 }
 
@@ -1578,12 +1541,8 @@ private function f_TC_paging_ps_sig_lac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_ps_exp_no_bss(ts_BssgpP4LAC(unknown_la), 0, true);
 }
 testcase TC_paging_ps_sig_lac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1601,12 +1560,8 @@ private function f_TC_paging_ps_sig_rac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_multi(ts_BssgpP4RAC(pcu_bvc_cfg[2].cell_id.ra_id), 0, {2});
 }
 testcase TC_paging_ps_sig_rac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
 	f_cleanup();
 }
 
@@ -1623,12 +1578,8 @@ private function f_TC_paging_ps_sig_rac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_ps_exp_no_bss(ts_BssgpP4RAC(unknown_ra), 0, true);
 }
 testcase TC_paging_ps_sig_rac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1638,12 +1589,8 @@ private function f_TC_paging_ps_sig_bvci(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_ps_exp_multi(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, {0});
 }
 testcase TC_paging_ps_sig_bvci() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
 	f_cleanup();
 }
 
@@ -1653,12 +1600,8 @@ private function f_TC_paging_ps_sig_bvci_unknown(charstring id) runs on BSSGP_Co
 	f_send_paging_ps_exp_no_bss(ts_BssgpP4Bvci(33333), 0, true);
 }
 testcase TC_paging_ps_sig_bvci_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_ps_sig_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_ps_sig_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1778,12 +1721,8 @@ private function f_TC_paging_cs_ptp_bss(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4BssArea, 0, false, 0);
 }
 testcase TC_paging_cs_ptp_bss() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_bss), testcasename(), g_pcu, g_sgsn, 17);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_bss), testcasename(), g_pcu, g_sgsn, 17);
 	f_cleanup();
 }
 
@@ -1796,12 +1735,8 @@ private function f_TC_paging_cs_ptp_lac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4LAC(pcu_bvc_cfg[0].cell_id.ra_id.lai), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_lac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_lac), testcasename(), g_pcu, g_sgsn, 18);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_lac), testcasename(), g_pcu, g_sgsn, 18);
 	f_cleanup();
 }
 
@@ -1816,12 +1751,8 @@ private function f_TC_paging_cs_ptp_lac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4LAC(unknown_la), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_lac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1833,12 +1764,8 @@ private function f_TC_paging_cs_ptp_rac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4RAC(pcu_bvc_cfg[0].cell_id.ra_id), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_rac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_rac), testcasename(), g_pcu, g_sgsn, 19);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_rac), testcasename(), g_pcu, g_sgsn, 19);
 	f_cleanup();
 }
 
@@ -1856,12 +1783,8 @@ private function f_TC_paging_cs_ptp_rac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4RAC(unknown_ra), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_rac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1872,12 +1795,8 @@ private function f_TC_paging_cs_ptp_bvci(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_bvci() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_bvci), testcasename(), g_pcu, g_sgsn, 20);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_bvci), testcasename(), g_pcu, g_sgsn, 20);
 	f_cleanup();
 }
 
@@ -1888,12 +1807,8 @@ private function f_TC_paging_cs_ptp_bvci_unknown(charstring id) runs on BSSGP_Co
 	f_send_paging_cs_exp_one_bss(ts_BssgpP4Bvci(33333), 0, false, 0);
 }
 testcase TC_paging_cs_ptp_bvci_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_ptp_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_ptp_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1936,12 +1851,8 @@ private function f_TC_paging_cs_sig_bss(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_multi(ts_BssgpP4BssArea, 0, {0, 1, 2});
 }
 testcase TC_paging_cs_sig_bss() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_bss), testcasename(), g_pcu, g_sgsn, 13);
 	f_cleanup();
 }
 
@@ -1957,12 +1868,8 @@ private function f_TC_paging_cs_sig_lac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_multi(ts_BssgpP4LAC(pcu_bvc_cfg[2].cell_id.ra_id.lai), 0, {2});
 }
 testcase TC_paging_cs_sig_lac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_lac), testcasename(), g_pcu, g_sgsn, 14);
 	f_cleanup();
 }
 
@@ -1976,12 +1883,8 @@ private function f_TC_paging_cs_sig_lac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_cs_exp_no_bss(ts_BssgpP4LAC(unknown_la), 0, true);
 }
 testcase TC_paging_cs_sig_lac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_lac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -1999,12 +1902,8 @@ private function f_TC_paging_cs_sig_rac(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_multi(ts_BssgpP4RAC(pcu_bvc_cfg[2].cell_id.ra_id), 0, {2});
 }
 testcase TC_paging_cs_sig_rac() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_rac), testcasename(), g_pcu, g_sgsn, 15);
 	f_cleanup();
 }
 
@@ -2021,12 +1920,8 @@ private function f_TC_paging_cs_sig_rac_unknown(charstring id) runs on BSSGP_Con
 	f_send_paging_cs_exp_no_bss(ts_BssgpP4RAC(unknown_ra), 0, true);
 }
 testcase TC_paging_cs_sig_rac_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_rac_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -2036,12 +1931,8 @@ private function f_TC_paging_cs_sig_bvci(charstring id) runs on BSSGP_ConnHdlr
 	f_send_paging_cs_exp_multi(ts_BssgpP4Bvci(pcu_bvc_cfg[0].bvci), 0, {0});
 }
 testcase TC_paging_cs_sig_bvci() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_bvci), testcasename(), g_pcu, g_sgsn, 16);
 	f_cleanup();
 }
 
@@ -2051,12 +1942,8 @@ private function f_TC_paging_cs_sig_bvci_unknown(charstring id) runs on BSSGP_Co
 	f_send_paging_cs_exp_no_bss(ts_BssgpP4Bvci(33333), 0, true);
 }
 testcase TC_paging_cs_sig_bvci_unknown() runs on test_CT {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_paging_cs_sig_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
-	vc_conn.done;
-
+	f_start_handlers(refers(f_TC_paging_cs_sig_bvci_unknown), testcasename(), g_pcu, g_sgsn, 11);
 	f_cleanup();
 }
 
@@ -2084,13 +1971,9 @@ private function f_TC_flush_ll(charstring id) runs on BSSGP_ConnHdlr {
 }
 testcase TC_flush_ll() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_flush_ll), testcasename(), g_pcu, g_sgsn, 6);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_flush_ll), testcasename(), g_pcu, g_sgsn, 6);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -2156,13 +2039,9 @@ private function f_TC_llc_discarded(charstring id) runs on BSSGP_ConnHdlr {
 /* Send a LLC-DISCARDED from BSS side and expect it to show up on SGSN (SIG BVC) */
 testcase TC_llc_discarded() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_llc_discarded), testcasename(), g_pcu, g_sgsn, 6);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_llc_discarded), testcasename(), g_pcu, g_sgsn, 6);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
@@ -2522,13 +2401,9 @@ private function f_TC_fc_ms(charstring id) runs on BSSGP_ConnHdlr {
 /* Send a FLOW-CONTROL-MS from BSS side and expect it to show up on SGSN (PTP BVC) */
 testcase TC_fc_ms() runs on test_CT
 {
-	var BSSGP_ConnHdlr vc_conn;
 	f_init();
-
-	vc_conn := f_start_handler(refers(f_TC_fc_ms), testcasename(), g_pcu, g_sgsn, 21);
-	vc_conn.done;
+	f_start_handlers(refers(f_TC_fc_ms), testcasename(), g_pcu, g_sgsn, 21);
 	/* TODO: start multiple handlers (UEs) on various cells on same and other NSEs */
-
 	f_cleanup();
 }
 
