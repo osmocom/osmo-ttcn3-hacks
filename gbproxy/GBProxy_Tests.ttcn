@@ -825,6 +825,8 @@ friend function f_sgsn2pcu(template (value) PDU_BSSGP tx, template (present) PDU
 type component GlobalTest_CT extends test_CT {
 	port BSSGP_PT G_PCU[NUM_PCU];
 	port BSSGP_PT G_SGSN[NUM_SGSN];
+	port BSSGP_PT RIM_PCU[NUM_PCU];
+	port BSSGP_PT RIM_SGSN[NUM_SGSN];
 };
 
 /* connect the signaling BVC of each NSE to the G_PCU / G_SGSN ports */
@@ -832,9 +834,11 @@ private function f_global_init() runs on GlobalTest_CT {
 	var integer i;
 	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
 		connect(self:G_SGSN[i], g_sgsn[i].vc_BSSGP:GLOBAL);
+		connect(self:RIM_SGSN[i], g_sgsn[i].vc_BSSGP:RIM);
 	}
 	for (i := 0; i < lengthof(g_pcu); i := i+1) {
 		connect(self:G_PCU[i], g_pcu[i].vc_BSSGP:GLOBAL);
+		connect(self:RIM_PCU[i], g_pcu[i].vc_BSSGP:RIM);
 	}
 }
 
@@ -2581,6 +2585,321 @@ testcase TC_ms_reg_enq() runs on test_CT
 	f_cleanup();
 }
 
+/***********************************************************************
+ * RIM (RAN Information Management)
+ ***********************************************************************/
+
+/* Our tests here are rather synthetic, as they don't reflect normal message flows
+   as they would be observed in a live network.  However, for testing gbproxy, this shouldn't
+   matter as gbproxy is not concerned with anything but the source / destination routing
+   information */
+
+/* gbproxy must route all unknown RIM Routing Info (Cell Id) to the SGSN.  We just define
+   one here of which we know it is not used among the [simulated] PCUs */
+const BssgpCellId cell_id_sgsn := {
+	ra_id := {
+		lai := {
+			mcc_mnc := c_mcc_mnc,
+			lac := 65534
+		},
+		rac := 0
+	},
+	cell_id := 65533
+};
+
+/* Send 'tx' on PTP-BVCI from PCU; expect 'rx' on any of our SGSN (RIM can be routed anywhere) */
+friend function f_rim_pcu2sgsn(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
+			       integer pcu_idx := 0) runs on GlobalTest_CT {
+	var PDU_BSSGP rx;
+	timer T := 1.0;
+
+	RIM_PCU[pcu_idx].send(tx);
+	T.start;
+	alt {
+	[] any from RIM_SGSN.receive(exp_rx) {
+		setverdict(pass);
+		}
+	[] any from RIM_SGSN.receive(PDU_BSSGP:?) -> value rx {
+		setverdict(fail, "Unexpected BSSGP on SGSN side: ", rx);
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for BSSGP on SGSN side: ", exp_rx);
+		mtc.stop;
+		}
+	}
+}
+
+/* Send 'tx' on PTP-BVCI from SGSN; expect 'rx' on PCU */
+friend function f_rim_sgsn2pcu(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
+			       integer sgsn_idx := 0, integer pcu_idx := 0) runs on GlobalTest_CT {
+	var PDU_BSSGP rx;
+	timer T := 1.0;
+
+	RIM_SGSN[sgsn_idx].send(tx);
+	T.start;
+	alt {
+	[] RIM_PCU[pcu_idx].receive(exp_rx) {
+		setverdict(pass);
+		}
+	[] RIM_PCU[pcu_idx].receive(PDU_BSSGP:?) -> value rx {
+		setverdict(fail, "Unexpected BSSGP on PCU side: ", rx);
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for BSSGP on PCU side: ", exp_rx);
+		mtc.stop;
+		}
+	}
+}
+
+/* Send 'tx' on PTP-BVCI from SRC-PCU; expect 'rx' on DST-PCU */
+friend function f_rim_pcu2pcu(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
+			      integer src_pcu_idx, integer dst_pcu_idx) runs on GlobalTest_CT {
+	var integer rx_idx;
+	var PDU_BSSGP rx;
+	timer T := 1.0;
+
+	RIM_PCU[src_pcu_idx].send(tx);
+	T.start;
+	alt {
+	[] RIM_PCU[dst_pcu_idx].receive(exp_rx) -> value rx{
+		setverdict(pass);
+		}
+	[] any from RIM_PCU.receive(exp_rx) -> @index value rx_idx {
+		setverdict(fail, "Received RIM on wrong PCU[", rx_idx ,"], expected on PCU[", dst_pcu_idx, "]");
+		}
+	[] any from RIM_SGSN.receive(exp_rx) {
+		setverdict(fail, "Received RIM on SGSN but expected it on other PCU");
+		}
+	[] any from RIM_SGSN.receive(PDU_BSSGP:?) -> value rx {
+		setverdict(fail, "Unexpected BSSGP on SGSN side: ", rx);
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for BSSGP on SGSN side: ", exp_rx);
+		mtc.stop;
+		}
+	}
+}
+
+
+type function rim_fn(integer sgsn_idx, integer pcu_idx, integer bvc_idx) runs on GlobalTest_CT;
+
+/* helper function for the RIM test cases: Execute 'fn' for each BVC on each PCU for
+   each SGSN */
+private function f_rim_iterator(rim_fn fn) runs on GlobalTest_CT
+{
+	var integer sgsn_idx, pcu_idx, bvc_idx;
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx+1) {
+		for (pcu_idx := 0; pcu_idx < lengthof(g_pcu); pcu_idx := pcu_idx+1) {
+			for (bvc_idx := 0; bvc_idx < lengthof(g_pcu[pcu_idx].cfg.bvc); bvc_idx := bvc_idx+1) {
+				log("Testing RIM SGSN[", sgsn_idx, "] <-> PCU[", pcu_idx, "][", bvc_idx, "]");
+				fn.apply(sgsn_idx, pcu_idx, bvc_idx);
+			}
+		}
+	}
+}
+
+/* RAN-INFORMATION-REQUEST */
+private function f_TC_rim_info_req(integer sgsn_idx, integer pcu_idx, integer bvc_idx := 0)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu;
+	var template (value) RIM_Routing_Information ri_sgsn;
+	var template (value) RAN_Information_Request_RIM_Container cont;
+
+	ri_sgsn := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id_sgsn));
+	ri_pcu := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id));
+	cont := ts_RAN_Information_Request_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+							 ts_RIM_Sequence_Number(0),
+							 ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_STOP));
+	f_rim_pcu2sgsn(ts_RAN_INFORMATION_REQUEST(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			tr_RAN_INFORMATION_REQUEST(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			pcu_idx);
+	f_rim_sgsn2pcu(ts_RAN_INFORMATION_REQUEST(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			tr_RAN_INFORMATION_REQUEST(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			sgsn_idx, pcu_idx);
+}
+testcase TC_rim_info_req() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init();
+	f_rim_iterator(refers(f_TC_rim_info_req));
+	f_cleanup();
+}
+
+/* RAN-INFORMATION */
+private function f_TC_rim_info(integer sgsn_idx, integer pcu_idx, integer bvc_idx := 0)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu;
+	var template (value) RIM_Routing_Information ri_sgsn;
+	var template (value) RAN_Information_RIM_Container cont;
+
+	ri_sgsn := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id_sgsn));
+	ri_pcu := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id));
+	cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						 ts_RIM_Sequence_Number(0),
+						 ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_STOP));
+	f_rim_pcu2sgsn(ts_PDU_BSSGP_RAN_INFORMATION(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			pcu_idx);
+	f_rim_sgsn2pcu(ts_PDU_BSSGP_RAN_INFORMATION(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			sgsn_idx, pcu_idx);
+}
+testcase TC_rim_info() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init();
+	f_rim_iterator(refers(f_TC_rim_info));
+	f_cleanup();
+}
+
+/* RAN-INFORMATION-ACK */
+private function f_TC_rim_info_ack(integer sgsn_idx, integer pcu_idx, integer bvc_idx := 0)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu;
+	var template (value) RIM_Routing_Information ri_sgsn;
+	var template (value) RAN_Information_Ack_RIM_Container cont;
+
+	ri_sgsn := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id_sgsn));
+	ri_pcu := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id));
+	cont := ts_RAN_Information_Ack_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						     ts_RIM_Sequence_Number(0));
+	f_rim_pcu2sgsn(ts_PDU_BSSGP_RAN_INFORMATION_ACK(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_ACK(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			pcu_idx);
+	f_rim_sgsn2pcu(ts_PDU_BSSGP_RAN_INFORMATION_ACK(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_ACK(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			sgsn_idx, pcu_idx);
+}
+testcase TC_rim_info_ack() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init();
+	f_rim_iterator(refers(f_TC_rim_info_ack));
+	f_cleanup();
+}
+
+/* RAN-INFORMATION-ERROR */
+private function f_TC_rim_info_error(integer sgsn_idx, integer pcu_idx, integer bvc_idx := 0)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu;
+	var template (value) RIM_Routing_Information ri_sgsn;
+	var template (value) RAN_Information_Error_RIM_Container cont;
+
+	ri_sgsn := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id_sgsn));
+	ri_pcu := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id));
+	cont := ts_RAN_Information_Error_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						       ts_BSSGP_CAUSE(BSSGP_CAUSE_EQUIMENT_FAILURE),
+						       omit, valueof(t_BVC_UNBLOCK(23)));
+	f_rim_pcu2sgsn(ts_PDU_BSSGP_RAN_INFORMATION_ERROR(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_ERROR(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			pcu_idx);
+	f_rim_sgsn2pcu(ts_PDU_BSSGP_RAN_INFORMATION_ERROR(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_ERROR(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			sgsn_idx, pcu_idx);
+}
+testcase TC_rim_info_error() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init();
+	f_rim_iterator(refers(f_TC_rim_info_error));
+	f_cleanup();
+}
+
+/* RAN-INFORMATION-APPLICATION-ERROR */
+private function f_TC_rim_info_app_error(integer sgsn_idx, integer pcu_idx, integer bvc_idx := 0)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu;
+	var template (value) RIM_Routing_Information ri_sgsn;
+	var template (value) Application_Error_Container app_cont;
+	var template (value) RAN_Information_Application_Error_RIM_Container cont;
+
+	ri_sgsn := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id_sgsn));
+	ri_pcu := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, t_RIM_Routing_Address_cid(cell_id));
+	app_cont := tsu_Application_Error_Container_NACC(cell_id, 23,
+							 tsu_Application_Container_IE_NACC_req(cell_id));
+	cont := ts_RAN_Information_Application_Error_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+								   ts_RIM_Sequence_Number(0),
+								   ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_STOP),
+								   omit, app_cont);
+	f_rim_pcu2sgsn(ts_PDU_BSSGP_RAN_INFORMATION_APPLICATION_ERROR(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_APPLICATION_ERROR(dst := ri_sgsn, src := ri_pcu, cont := cont),
+			pcu_idx);
+	f_rim_sgsn2pcu(ts_PDU_BSSGP_RAN_INFORMATION_APPLICATION_ERROR(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION_APPLICATION_ERROR(dst := ri_pcu, src := ri_sgsn, cont := cont),
+			sgsn_idx, pcu_idx);
+}
+testcase TC_rim_info_app_error() runs on GlobalTest_CT
+{
+	f_init();
+	f_global_init();
+	f_rim_iterator(refers(f_TC_rim_info_app_error));
+	f_cleanup();
+}
+
+/* RAN-INFORMATION routing directly between PCUs, without SGSN involvement */
+private function f_TC_rim_info_pcu2pcu(integer src_pcu_idx, integer src_bvc_idx,
+					integer dst_pcu_idx, integer dst_bvc_idx)
+runs on GlobalTest_CT
+{
+	var BssgpCellId cell_id_src := g_pcu[src_pcu_idx].cfg.bvc[src_bvc_idx].cell_id;
+	var BssgpCellId cell_id_dst := g_pcu[dst_pcu_idx].cfg.bvc[dst_bvc_idx].cell_id;
+	var template (value) RIM_Routing_Information ri_pcu_src;
+	var template (value) RIM_Routing_Information ri_pcu_dst;
+	var template (value) RAN_Information_RIM_Container cont;
+
+	log("Testing RIM PCU2PCU from PCU[", src_pcu_idx, "][", src_bvc_idx, "] to PCU[",
+	    dst_pcu_idx, "][", dst_bvc_idx, "]");
+
+	ri_pcu_src := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID,
+						 t_RIM_Routing_Address_cid(cell_id_src));
+	ri_pcu_dst := ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID,
+						 t_RIM_Routing_Address_cid(cell_id_dst));
+	cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						 ts_RIM_Sequence_Number(0),
+						 ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_STOP));
+	f_rim_pcu2pcu(ts_PDU_BSSGP_RAN_INFORMATION(dst := ri_pcu_dst, src := ri_pcu_src, cont := cont),
+			tr_PDU_BSSGP_RAN_INFORMATION(dst := ri_pcu_dst, src := ri_pcu_src, cont := cont),
+			src_pcu_idx, dst_pcu_idx);
+}
+testcase TC_rim_info_pcu2pcu() runs on GlobalTest_CT
+{
+	var integer src_pcu_idx, dst_pcu_idx;
+	var integer src_bvc_idx, dst_bvc_idx;
+	f_init();
+	f_global_init();
+
+	for (src_pcu_idx := 0; src_pcu_idx < lengthof(g_pcu); src_pcu_idx := src_pcu_idx + 1) {
+		for (src_bvc_idx := 0; src_bvc_idx < lengthof(g_pcu[src_pcu_idx].cfg.bvc); src_bvc_idx := src_bvc_idx + 1) {
+			for (dst_pcu_idx := 0; dst_pcu_idx < lengthof(g_pcu); dst_pcu_idx := dst_pcu_idx + 1) {
+				if (dst_pcu_idx == src_pcu_idx) {
+					continue;
+				}
+
+				for (dst_bvc_idx := 0; dst_bvc_idx < lengthof(g_pcu[dst_pcu_idx].cfg.bvc);
+dst_bvc_idx := dst_bvc_idx + 1) {
+					f_TC_rim_info_pcu2pcu(src_pcu_idx, src_bvc_idx, dst_pcu_idx, dst_bvc_idx);
+				}
+			}
+		}
+	}
+
+	f_cleanup();
+}
+
+
 control {
 	execute( TC_BVC_bringup() );
 	execute( TC_ul_unitdata() );
@@ -2647,6 +2966,14 @@ control {
 	execute( TC_paging_cs_sig_rac_unknown() );
 	execute( TC_paging_cs_sig_bvci() );
 	execute( TC_paging_cs_sig_bvci_unknown() );
+
+	/* RAN Information Management */
+	execute( TC_rim_info_req() );
+	execute( TC_rim_info() );
+	execute( TC_rim_info_ack() );
+	execute( TC_rim_info_error() );
+	execute( TC_rim_info_app_error() );
+	execute( TC_rim_info_pcu2pcu() );
 
 
 	execute( TC_flush_ll() );
