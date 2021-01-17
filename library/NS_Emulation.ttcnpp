@@ -1,5 +1,5 @@
 /* GPRS-NS Emulation in TTCN-3
- * (C) 2018-2020 Harald Welte <laforge@gnumonks.org>
+ * (C) 2018-2021 Harald Welte <laforge@gnumonks.org>
  * contributions by sysmocom - s.f.m.c. GmbH
  * All rights reserved.
  *
@@ -152,7 +152,9 @@ module NS_Emulation {
 		PortNumber local_udp_port,
 		charstring local_ip,
 		PortNumber remote_udp_port,
-		charstring remote_ip
+		charstring remote_ip,
+		uint8_t data_weight,
+		uint8_t signalling_weight
 	};
 	type record NSVCConfigurationFR {
 		charstring netdev,	/* HDLC net-device for AF_PACKET socket */
@@ -192,10 +194,11 @@ module NS_Emulation {
 		/* references to the per-NSVC components */
 		var NsvcTable g_nsvcs := {};
 		/* list of indexes to g_nsvcs[] of currently unblocked NSVCs */
-		var ro_integer g_unblocked_nsvcs := {};
+		var ro_integer g_unblocked_nsvcs_sig := {};
+		var ro_integer g_unblocked_nsvcs_data := {};
 	};
 	type record NsvcTableEntry {
-		Nsvci nsvci,
+		NSVCConfiguration cfg,
 		NSVC_CT vc_conn,
 		NsvcState state
 	};
@@ -244,7 +247,7 @@ module NS_Emulation {
 		var charstring nsvc_id := g_id & "-NSVCI" & int2str(nsvc_cfg.nsvci);
 		var NsvcTableEntry te;
 
-		te.nsvci := nsvc_cfg.nsvci;
+		te.cfg := nsvc_cfg;
 		te.vc_conn := NSVC_CT.create(nsvc_id);
 		te.state := NSVC_S_DEAD_BLOCKED;
 
@@ -258,7 +261,7 @@ module NS_Emulation {
 	function f_nsvc_find_idx(Nsvci nsvci) runs on NS_CT return integer {
 		var integer i;
 		for (i := 0; i < lengthof(g_nsvcs); i := i+1) {
-			if (g_nsvcs[i].nsvci == nsvci) {
+			if (g_nsvcs[i].cfg.nsvci == nsvci) {
 				return i;
 			}
 		}
@@ -281,16 +284,32 @@ module NS_Emulation {
 		}
 		if (g_nsvcs[i].state != NSVC_S_ALIVE_UNBLOCKED and state == NSVC_S_ALIVE_UNBLOCKED) {
 			/* add index to list of unblocked NSVCs */
-			g_unblocked_nsvcs := g_unblocked_nsvcs & {i};
+			if (not ischosen(g_nsvcs[i].cfg.provider.ip) or
+			    g_nsvcs[i].cfg.provider.ip.signalling_weight > 0) {
+				g_unblocked_nsvcs_sig := g_unblocked_nsvcs_sig & {i};
+			}
+			if (not ischosen(g_nsvcs[i].cfg.provider.ip) or
+			    g_nsvcs[i].cfg.provider.ip.data_weight > 0) {
+				g_unblocked_nsvcs_data := g_unblocked_nsvcs_data & {i};
+			}
 		} else if (g_nsvcs[i].state == NSVC_S_ALIVE_UNBLOCKED and state != NSVC_S_ALIVE_UNBLOCKED) {
 			/* remove index to list of unblocked NSVCs */
-			var ro_integer new_unblocked_nsvcs := {};
-			for (var integer j := 0; j < lengthof(g_unblocked_nsvcs); j := j+1) {
-				if (g_unblocked_nsvcs[j] != i) {
-					new_unblocked_nsvcs := new_unblocked_nsvcs & {j};
+			var ro_integer new_unblocked_nsvcs_sig := {};
+			for (var integer j := 0; j < lengthof(g_unblocked_nsvcs_sig); j := j+1) {
+				if (g_unblocked_nsvcs_sig[j] != i) {
+					new_unblocked_nsvcs_sig := new_unblocked_nsvcs_sig & {j};
 				}
 			}
-			g_unblocked_nsvcs := new_unblocked_nsvcs;
+			g_unblocked_nsvcs_sig := new_unblocked_nsvcs_sig;
+
+			var ro_integer new_unblocked_nsvcs_data := {};
+			for (var integer j := 0; j < lengthof(g_unblocked_nsvcs_data); j := j+1) {
+				if (g_unblocked_nsvcs_data[j] != i) {
+					new_unblocked_nsvcs_data := new_unblocked_nsvcs_data & {j};
+				}
+			}
+			g_unblocked_nsvcs_data := new_unblocked_nsvcs_data;
+
 		}
 		g_nsvcs[i].state := state;
 	}
@@ -365,11 +384,17 @@ module NS_Emulation {
 					log2str("Received UnitDataInd for invalid NSEI: ", rx_nsudi));
 			}
 		/* from user down to NS-VC */
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, ?, *)) -> value rx_nsudr {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, 0, ?, ?, *)) -> value rx_nsudr {
 			/* load distribution function */
-			var integer nsvc_idx := g_unblocked_nsvcs[rx_nsudr.lsp mod lengthof(g_unblocked_nsvcs)];
+			var integer nsvc_idx := g_unblocked_nsvcs_sig[rx_nsudr.lsp mod lengthof(g_unblocked_nsvcs_sig)];
 			NSVC.send(rx_nsudr) to g_nsvcs[nsvc_idx].vc_conn;
 			}
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, ?, *)) -> value rx_nsudr {
+			/* load distribution function */
+			var integer nsvc_idx := g_unblocked_nsvcs_data[rx_nsudr.lsp mod lengthof(g_unblocked_nsvcs_data)];
+			NSVC.send(rx_nsudr) to g_nsvcs[nsvc_idx].vc_conn;
+			}
+
 		[] NS_SP.receive(tr_NsUdReq(?, ?, ?, ?, *)) -> value rx_nsudr {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Received NsUnitdataReq for invalid NSEI: ", rx_nsudr));
@@ -392,10 +417,14 @@ module NS_Emulation {
 			}
 			if (nsvc_cfg.provider.ip.address_family == AF_INET) {
 				v4 := v4 & { valueof(ts_SNS_IPv4(nsvc_cfg.provider.ip.local_ip,
-								 nsvc_cfg.provider.ip.local_udp_port)) };
+								 nsvc_cfg.provider.ip.local_udp_port,
+								 nsvc_cfg.provider.ip.signalling_weight,
+								 nsvc_cfg.provider.ip.data_weight)) };
 			} else if (nsvc_cfg.provider.ip.address_family == AF_INET6) {
 				v6 := v6 & { valueof(ts_SNS_IPv6(nsvc_cfg.provider.ip.local_ip,
-								 nsvc_cfg.provider.ip.local_udp_port)) };
+								 nsvc_cfg.provider.ip.local_udp_port,
+								 nsvc_cfg.provider.ip.signalling_weight,
+								 nsvc_cfg.provider.ip.data_weight)) };
 			}
 		}
 
@@ -690,18 +719,66 @@ module NS_Emulation {
 		/* tolerate a late NS-UNBLOCK-ACK from peer */
 		[] NSCP.receive(t_NS_UNBLOCK_ACK) -> value rf {
 		}
+
+		[not ischosen(g_nsvc_config.provider.ip) or
+		 g_nsvc_config.provider.ip.data_weight > 0] as_alive_unblocked_data();
+
+		[not ischosen(g_nsvc_config.provider.ip) or
+		 g_nsvc_config.provider.ip.signalling_weight > 0] as_alive_unblocked_sig();
+
+		/* catch any violations of above rule */
+		[ischosen(g_nsvc_config.provider.ip)] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected Rx NS-UNITDATA on NSVC with data_weight=",
+						g_nsvc_config.provider.ip.data_weight, ", sig_weight=",
+						g_nsvc_config.provider.ip.signalling_weight, ": ", rf));
+		}
+		[ischosen(g_nsvc_config.provider.ip)] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, *, *)) -> value ud_req {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected Rx TX-UNITDATA on NSVC with data_weight=",
+						g_nsvc_config.provider.ip.data_weight, ", sig_weight=",
+						g_nsvc_config.provider.ip.signalling_weight, ": ", ud_req));
+		}
+	}
+
+	/* user data transfer; only permitted for some NS-VC */
+	private altstep as_alive_unblocked_data() runs on NSVC_CT {
+		var NsUnitdataRequest ud_req;
+		var PDU_NS rf;
 		/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
-		[] NSCP.receive(tr_NS_UNITDATA(?, ?, ?)) -> value rf {
+		[] NSCP.receive(tr_NS_UNITDATA_User(?, ?)) -> value rf {
 			NS_SP.send(ts_NsUdInd(g_config.nsei, g_nsvc_config.nsvci,
 					     oct2int(rf.pDU_NS_Unitdata.bVCI),
 					     rf.pDU_NS_Unitdata.nS_SDU));
 		}
 		/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, ?, omit)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, t_BssgpBvciUser, ?, ?, omit)) -> value ud_req {
 			/* using raw octetstring PDU */
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
 		}
-		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, ?, ?, omit, ?)) -> value ud_req {
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, t_BssgpBvciUser, ?, omit, ?)) -> value ud_req {
+			/* using decoded BSSGP PDU that we need to encode first */
+			var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
+			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
+		}
+	}
+
+	/* signalling (BVCI=0) transfer; only permitted for some NS-VC */
+	private altstep as_alive_unblocked_sig() runs on NSVC_CT {
+		var NsUnitdataRequest ud_req;
+		var PDU_NS rf;
+		/* NS-UNITDATA PDU from network to NS-UNITDATA.ind to user */
+		[] NSCP.receive(tr_NS_UNITDATA(?, 0, ?)) -> value rf {
+			NS_SP.send(ts_NsUdInd(g_config.nsei, g_nsvc_config.nsvci,
+					     oct2int(rf.pDU_NS_Unitdata.bVCI),
+					     rf.pDU_NS_Unitdata.nS_SDU));
+		}
+		/* NS-UNITDATA.req from user to NS-UNITDATA PDU on network */
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, 0, ?, ?, omit)) -> value ud_req {
+			/* using raw octetstring PDU */
+			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, ud_req.sdu));
+		}
+		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, 0, ?, omit, ?)) -> value ud_req {
 			/* using decoded BSSGP PDU that we need to encode first */
 			var octetstring enc := enc_PDU_BSSGP(ud_req.bssgp);
 			NSCP.send(ts_NS_UNITDATA(t_SduCtrlB, ud_req.bvci, enc));
