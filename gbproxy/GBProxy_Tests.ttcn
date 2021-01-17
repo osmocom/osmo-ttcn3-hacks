@@ -359,6 +359,19 @@ type record BSSGP_ConnHdlrPars {
 	float t_guard
 };
 
+private function get_bvc_idx_for_bvci(GbInstance gbi, BssgpBvci bvci) return integer
+{
+	var integer i;
+
+	for (i := 0; i < lengthof(gbi.cfg.bvc); i := i + 1) {
+		if (gbi.cfg.bvc[i].bvci == bvci) {
+			return i;
+		}
+	}
+	setverdict(fail, "Could not find BVC Index for BVCI ", bvci);
+	return -1;
+}
+
 private function f_cellid_to_RAI(in BssgpCellId cell_id) return RoutingAreaIdentificationV {
 	/* mcc_mnc is encoded as of 24.008 10.5.5.15 */
 	var BcdMccMnc mcc_mnc := cell_id.ra_id.lai.mcc_mnc;
@@ -864,7 +877,9 @@ friend function f_sgsn2pcu(template (value) PDU_BSSGP tx, template (present) PDU
 
 type component GlobalTest_CT extends test_CT {
 	port BSSGP_PT G_PCU[NUM_PCU];
+	var integer  g_pcu_idx[NUM_PCU];	/* BVC index currently connected to G_PCU */
 	port BSSGP_PT G_SGSN[NUM_SGSN];
+	var integer  g_sgsn_idx[NUM_SGSN];	/* BVC index currently connected to G_SGSN */
 	port BSSGP_PT RIM_PCU[NUM_PCU];
 	port BSSGP_PT RIM_SGSN[NUM_SGSN];
 };
@@ -886,16 +901,41 @@ private function f_global_init() runs on GlobalTest_CT {
 private function f_global_init_ptp() runs on GlobalTest_CT {
 	var integer i;
 	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
+		log("Connecting G_SGSN[", i, "] to BVCI=", g_sgsn[i].cfg.bvc[0].bvci);
 		connect(self:G_SGSN[i], g_sgsn[i].vc_BSSGP_BVC[0]:GLOBAL);
+		g_sgsn_idx[i] := 0;
 	}
 	for (i := 0; i < lengthof(g_pcu); i := i+1) {
+		log("Connecting G_PCU[", i, "] to BVCI=", g_pcu[i].cfg.bvc[0].bvci);
 		connect(self:G_PCU[i], g_pcu[i].vc_BSSGP_BVC[0]:GLOBAL);
+		g_pcu_idx[i] := 0;
 	}
+}
+
+/* (re)connect G_SGSN[sgsn_idx] to a specific PTP BVCI */
+private function f_global_ptp_connect_sgsn_bvci(integer sgsn_idx, BssgpBvci bvci) runs on GlobalTest_CT
+{
+	var integer sgsn_bvc_idx := get_bvc_idx_for_bvci(g_sgsn[sgsn_idx], bvci);
+	var integer old_sgsn_bvc_idx := g_sgsn_idx[sgsn_idx];
+	disconnect(self:G_SGSN[sgsn_idx], g_sgsn[sgsn_idx].vc_BSSGP_BVC[old_sgsn_bvc_idx]:GLOBAL);
+	connect(self:G_SGSN[sgsn_idx], g_sgsn[sgsn_idx].vc_BSSGP_BVC[sgsn_bvc_idx]:GLOBAL);
+	g_sgsn_idx[sgsn_idx] := sgsn_bvc_idx;
+}
+
+/* (re)connect G_PCU[pcu_idx] to a specific PTP BVCI */
+private function f_global_ptp_connect_pcu_bvci(integer pcu_idx, BssgpBvci bvci) runs on GlobalTest_CT
+{
+	var integer pcu_bvc_idx := get_bvc_idx_for_bvci(g_pcu[pcu_idx], bvci);
+	var integer old_pcu_bvc_idx := g_pcu_idx[pcu_idx];
+	disconnect(self:G_PCU[pcu_idx], g_pcu[pcu_idx].vc_BSSGP_BVC[old_pcu_bvc_idx]:GLOBAL);
+	connect(self:G_PCU[pcu_idx], g_pcu[pcu_idx].vc_BSSGP_BVC[pcu_bvc_idx]:GLOBAL);
+	g_pcu_idx[pcu_idx] := pcu_bvc_idx;
 }
 
 /* Send 'tx' on PTP-BVCI from PCU; expect 'rx' on SGSN */
 friend function f_global_pcu2sgsn(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
 				  integer pcu_idx := 0, integer sgsn_idx := 0) runs on GlobalTest_CT {
+	var integer rx_idx;
 	var PDU_BSSGP rx;
 	timer T := 1.0;
 
@@ -904,6 +944,9 @@ friend function f_global_pcu2sgsn(template (value) PDU_BSSGP tx, template (prese
 	alt {
 	[] G_SGSN[sgsn_idx].receive(exp_rx) {
 		setverdict(pass);
+		}
+	[] any from G_SGSN.receive(exp_rx) -> @index value rx_idx {
+		setverdict(fail, "BSSGP arrived on wrong SGSN[", rx_idx, "] instead of SGSN[", sgsn_idx, "]");
 		}
 	[] G_SGSN[sgsn_idx].receive(PDU_BSSGP:?) -> value rx {
 		setverdict(fail, "Unexpected BSSGP on SGSN side: ", rx);
@@ -919,6 +962,7 @@ friend function f_global_pcu2sgsn(template (value) PDU_BSSGP tx, template (prese
 /* Send 'tx' on PTP-BVCI from SGSN; expect 'rx' on PCU */
 friend function f_global_sgsn2pcu(template (value) PDU_BSSGP tx, template (present) PDU_BSSGP exp_rx,
 				  integer sgsn_idx := 0, integer pcu_idx := 0) runs on GlobalTest_CT {
+	var integer rx_idx;
 	var PDU_BSSGP rx;
 	timer T := 1.0;
 
@@ -927,6 +971,9 @@ friend function f_global_sgsn2pcu(template (value) PDU_BSSGP tx, template (prese
 	alt {
 	[] G_PCU[pcu_idx].receive(exp_rx) {
 		setverdict(pass);
+		}
+	[] any from G_PCU.receive(exp_rx) -> @index value rx_idx {
+		setverdict(fail, "BSSGP arrived on wrong PCU[", rx_idx, "] instead of PCU[", pcu_idx, "]");
 		}
 	[] G_PCU[pcu_idx].receive(PDU_BSSGP:?) -> value rx {
 		setverdict(fail, "Unexpected BSSGP on PCU side: ", rx);
@@ -2978,6 +3025,189 @@ dst_bvc_idx := dst_bvc_idx + 1) {
 	f_cleanup();
 }
 
+/***********************************************************************
+ * STATUS handling
+ ***********************************************************************/
+
+/* BSSGP STATUS PDU must be routed based on inner "PDU In Error" message */
+
+/* generate a TMSI with NRI matching sgsn_idx + nri_idx */
+private function f_gen_tmsi_for_sgsn_nri(integer sgsn_idx, integer nri_idx) runs on test_CT return OCT4
+{
+	var integer nri := mp_sgsn_nri[sgsn_idx][nri_idx];
+	return f_gen_tmsi(0, nri_v := nri, nri_bitlen := mp_nri_bitlength);
+}
+
+/* generate a TLLI with NRI matching sgsn_idx + nri_idx */
+private function f_gen_tlli_for_sgsn_nri(integer sgsn_idx, integer nri_idx) runs on test_CT return OCT4
+{
+	var OCT4 p_tmsi := f_gen_tmsi_for_sgsn_nri(sgsn_idx, nri_idx);
+	return f_gprs_tlli_from_tmsi(p_tmsi, TLLI_LOCAL);
+}
+
+/* STATUS in uplink direction; expect routing by its NRI */
+private function f_TC_status_ul(integer pcu_idx, integer sgsn_idx, PDU_BSSGP inner)
+runs on GlobalTest_CT
+{
+	var template (value) PDU_BSSGP tx := ts_BSSGP_STATUS(omit, BSSGP_CAUSE_EQUIMENT_FAILURE, inner);
+	var template (present) PDU_BSSGP exp_rx :=
+		tr_BSSGP_STATUS(omit, BSSGP_CAUSE_EQUIMENT_FAILURE,
+				tx.pDU_BSSGP_STATUS.pDU_in_Error.erroneous_BSSGP_PDU);
+
+	f_global_pcu2sgsn(tx, exp_rx, pcu_idx, sgsn_idx);
+}
+
+/* STATUS in uplink direction; expect routing by its NRI */
+private function f_TC_status_dl(integer sgsn_idx, integer pcu_idx, PDU_BSSGP inner)
+runs on GlobalTest_CT
+{
+	var template (value) PDU_BSSGP tx := ts_BSSGP_STATUS(omit, BSSGP_CAUSE_EQUIMENT_FAILURE, inner);
+	var template (present) PDU_BSSGP exp_rx :=
+		tr_BSSGP_STATUS(omit, BSSGP_CAUSE_EQUIMENT_FAILURE,
+				tx.pDU_BSSGP_STATUS.pDU_in_Error.erroneous_BSSGP_PDU);
+
+	f_global_sgsn2pcu(tx, exp_rx, sgsn_idx, pcu_idx);
+}
+
+/* STATUS in uplink direction on SIG-BVC containing a TLLI; expect routing by its NRI */
+testcase TC_status_sig_ul_tlli() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, nri_idx;
+
+	f_init();
+	f_global_init();
+
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+		for (nri_idx := 0; nri_idx < lengthof(mp_sgsn_nri[sgsn_idx]); nri_idx := nri_idx + 1) {
+			/* some downlink PDU occurring on SIG-BVC with a TLLI */
+			var OCT4 tlli := f_gen_tlli_for_sgsn_nri(sgsn_idx, nri_idx);
+			var PDU_BSSGP inner := valueof(ts_BSSGP_FLUSH_LL(tlli, 2342));
+
+			f_TC_status_ul(0, sgsn_idx, inner);
+		}
+	}
+
+	f_cleanup();
+}
+
+/* STATUS in uplink direction on SIG-BVC containing a TMSI; expect routing by its NRI */
+testcase TC_status_sig_ul_tmsi() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, nri_idx;
+
+	f_init();
+	f_global_init();
+
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+		for (nri_idx := 0; nri_idx < lengthof(mp_sgsn_nri[sgsn_idx]); nri_idx := nri_idx + 1) {
+			/* some downlink PDU occurring on SIG-BVC with a TMSI */
+			const hexstring imsi := '001010123456789'H
+			var OCT4 tmsi := f_gen_tmsi_for_sgsn_nri(sgsn_idx, nri_idx);
+			var BssgpBvci bvci := g_pcu[0].cfg.bvc[0].bvci;
+			var PDU_BSSGP inner := valueof(ts_BSSGP_CS_PAGING_PTMSI(bvci, imsi, oct2int(tmsi)));
+			f_TC_status_ul(0, sgsn_idx, inner);
+		}
+	}
+
+	f_cleanup();
+}
+
+
+/* STATUS in uplink direction on PTP-BVC containing a TLLI; expect routing by its NRI */
+testcase TC_status_ptp_ul_tlli() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, nri_idx;
+
+	f_init();
+	f_global_init_ptp();
+
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+		for (nri_idx := 0; nri_idx < lengthof(mp_sgsn_nri[sgsn_idx]); nri_idx := nri_idx + 1) {
+			/* some downlink PDU occurring on PTP-BVC with a TLLI */
+			var OCT4 tlli := f_gen_tlli_for_sgsn_nri(sgsn_idx, nri_idx);
+			var PDU_BSSGP inner := valueof(ts_BSSGP_DL_UD(tlli, '2342'O));
+
+			f_TC_status_ul(0, sgsn_idx, inner);
+		}
+	}
+
+	f_cleanup();
+}
+
+/* STATUS in uplink direction on PTP-BVC containing a TMSI; expect routing by its NRI */
+testcase TC_status_ptp_ul_tmsi() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, nri_idx;
+
+	f_init();
+	f_global_init_ptp();
+
+	for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+		for (nri_idx := 0; nri_idx < lengthof(mp_sgsn_nri[sgsn_idx]); nri_idx := nri_idx + 1) {
+			/* some downlink PDU occurring on PTP-BVC with a TMSI */
+			const hexstring imsi := '001010123456789'H
+			var OCT4 tmsi := f_gen_tmsi_for_sgsn_nri(sgsn_idx, nri_idx);
+			var BssgpBvci bvci := g_pcu[0].cfg.bvc[0].bvci;
+			var PDU_BSSGP inner := valueof(ts_BSSGP_CS_PAGING_PTMSI(bvci, imsi, oct2int(tmsi)));
+			f_TC_status_ul(0, sgsn_idx, inner);
+		}
+	}
+
+	f_cleanup();
+}
+
+/* STATUS in downlink direction in SIG-BVC containing a BVCI; expect routing by it */
+testcase TC_status_sig_dl_bvci() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, pcu_idx, bvc_idx;
+
+	f_init();
+	f_global_init();
+
+	/* test each BVC in each PCU from each SGSN */
+	for (pcu_idx := 0; pcu_idx < lengthof(g_pcu); pcu_idx := pcu_idx + 1) {
+		for (bvc_idx := 0; bvc_idx < lengthof(g_pcu[pcu_idx].cfg.bvc); bvc_idx := bvc_idx + 1) {
+			for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+				/* some uplink PDU occurring on SIG-BVC containing a BVCI */
+				var BssgpBvci bvci := g_pcu[pcu_idx].cfg.bvc[bvc_idx].bvci;
+				var PDU_BSSGP inner := valueof(ts_BSSGP_LLC_DISCARDED('12345678'O, 1, bvci, 23));
+				f_TC_status_dl(sgsn_idx, pcu_idx, inner);
+			}
+		}
+	}
+
+	f_cleanup();
+}
+
+/* STATUS in downlink direction in PTP-BVC; expect routing by BVCI */
+testcase TC_status_ptp_dl_bvci() runs on GlobalTest_CT
+{
+	var integer sgsn_idx, pcu_idx, bvc_idx;
+
+	f_init();
+	f_global_init_ptp();
+
+	/* test each BVC in each PCU from each SGSN */
+	for (pcu_idx := 0; pcu_idx < lengthof(g_pcu); pcu_idx := pcu_idx + 1) {
+		for (bvc_idx := 0; bvc_idx < lengthof(g_pcu[pcu_idx].cfg.bvc); bvc_idx := bvc_idx + 1) {
+			var BssgpBvci bvci := g_pcu[pcu_idx].cfg.bvc[bvc_idx].bvci;
+			f_global_ptp_connect_pcu_bvci(pcu_idx, bvci);
+			for (sgsn_idx := 0; sgsn_idx < NUM_SGSN; sgsn_idx := sgsn_idx + 1) {
+				f_global_ptp_connect_sgsn_bvci(sgsn_idx, bvci);
+
+				/* some uplink PDU occurring on PTP-BVC */
+				var BssgpCellId cell_id := g_pcu[pcu_idx].cfg.bvc[bvc_idx].cell_id;
+				var PDU_BSSGP inner := valueof(ts_BSSGP_UL_UD('12345678'O, cell_id, '4223'O));
+				f_TC_status_dl(sgsn_idx, pcu_idx, inner);
+			}
+		}
+	}
+
+	f_cleanup();
+}
+
+/* TODO: test case for DL-STATUS(SUSPEND/RESUME) containing RA-ID; expect routing by RA-ID */
+/* TODO: test case for UL-STATUS(PAGING-by-IMSI) after sending an actual PAGIN-by-IMSI in DL first */
 
 control {
 	execute( TC_BVC_bringup() );
@@ -3061,6 +3291,16 @@ control {
 	execute( TC_fc_bvc() );
 	execute( TC_fc_ms() );
 	execute( TC_ms_reg_enq() );
+
+	/* Uplink STATUS */
+	execute( TC_status_sig_ul_tlli() );
+	execute( TC_status_sig_ul_tmsi() );
+	execute( TC_status_ptp_ul_tlli() );
+	execute( TC_status_ptp_ul_tmsi() );
+
+	/* Downlink STATUS */
+	execute( TC_status_sig_dl_bvci() );
+	execute( TC_status_ptp_dl_bvci() );
 }
 
 
