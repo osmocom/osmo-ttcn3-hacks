@@ -183,7 +183,7 @@ module NS_Emulation {
 		port NS_SP_PT NS_SP;
 
 		/* port towards the per-NSVC components */
-		port NS_PT NSVC;
+		port NSint_PT NSVC;
 
 		/* all of the NS configuration a user passes to us */
 		var NSConfiguration g_config;
@@ -201,6 +201,43 @@ module NS_Emulation {
 	};
 	type record of NsvcTableEntry NsvcTable;
 	type record of integer ro_integer;
+
+	/* internal port from the NS-VC point of view */
+	type port NSint_SP_PT message {
+		in	NsUnitdataRequest,
+			SnsRequest,
+			NsCtrlRequest;
+		out	NsUnitdataIndication,
+			SnsIndication,
+			NsStatusIndication;
+	} with { extension "internal" };
+
+	/* internal port from the NS-VCG point of view */
+	type port NSint_PT message {
+		in	ASP_Event,
+			NsStatusIndication,
+			SnsIndication,
+			NsUnitdataIndication;
+		out	NsUnitdataRequest,
+			SnsRequest,
+			NsCtrlRequest;
+	} with { extension "internal" };
+
+	/* Used by NS-VC to report reception of a SNS PDU to NS-VCG */
+	type record SnsIndication {
+		Nsvci		nsvci,
+		PDU_NS		ns
+	};
+
+	/* Used by NS-VCG to request transmission of a SNS PDU via a NS-VC */
+	type record SnsRequest {
+		Nsvci		nsvci,
+		PDU_NS		ns
+	};
+
+	type enumerated NsCtrlRequest {
+		StartAliveProcedure	(0)
+	};
 
 	/* add one NSVC (component and table entry */
 	function f_nsvc_add(NSVCConfiguration nsvc_cfg) runs on NS_CT {
@@ -320,6 +357,9 @@ module NS_Emulation {
 		[] NSVC.receive(tr_NsUdInd(g_config.nsei, ?, ?)) -> value rx_nsudi {
 			NS_SP.send(rx_nsudi);
 			}
+
+		[g_config.handle_sns and g_config.role_sgsn] as_vcg_sns_sgsn();
+
 		[] NSVC.receive(tr_NsUdInd(?, ?, ?)) -> value rx_nsudi {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Received UnitDataInd for invalid NSEI: ", rx_nsudi));
@@ -336,6 +376,92 @@ module NS_Emulation {
 			}
 	}
 
+	/* generate a list of v4 + v6 endpoints based on the NSVConfigurations. This is not strictly
+	 * accurate, as we should create a list of _endpoints_, while we actually create a list of
+	 * NSVCs.  Those are only identical as long as our peer only implements one endpoint */
+	private function gen_sns_ip_elems(out template (omit) IP4_Elements v4_out,
+					  out template (omit) IP6_Elements v6_out) runs on NS_CT {
+		var integer i;
+		var IP4_Elements v4 := {};
+		var IP6_Elements v6 := {};
+
+		for (i := 0; i < lengthof(g_config.nsvc); i := i + 1) {
+			var NSVCConfiguration nsvc_cfg := g_config.nsvc[i];
+			if (not ischosen(nsvc_cfg.provider.ip)) {
+				continue;
+			}
+			if (nsvc_cfg.provider.ip.address_family == AF_INET) {
+				v4 := v4 & { valueof(ts_SNS_IPv4(nsvc_cfg.provider.ip.local_ip,
+								 nsvc_cfg.provider.ip.local_udp_port)) };
+			} else if (nsvc_cfg.provider.ip.address_family == AF_INET6) {
+				v6 := v6 & { valueof(ts_SNS_IPv6(nsvc_cfg.provider.ip.local_ip,
+								 nsvc_cfg.provider.ip.local_udp_port)) };
+			}
+		}
+
+		/* we must not return empty lists, but 'omit' as otherwise we get wrong SNS IEs */
+		if (lengthof(v4) == 0) {
+			v4_out := omit;
+		} else {
+			v4_out := v4;
+		}
+		if (lengthof(v6) == 0) {
+			v6_out := omit;
+		} else {
+			v6_out := v6;
+		}
+	}
+
+	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
+	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
+	private altstep as_vcg_sns_sgsn() runs on NS_CT {
+		var SnsIndication sind;
+		var NSVC_CT vc;
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_SIZE(g_config.nsei)}) -> value sind sender vc {
+			/* blindly acknowledge whatever the PCU sends */
+			NSVC.send(SnsRequest:{sind.nsvci, ts_SNS_SIZE_ACK(g_config.nsei, omit)}) to vc;
+		}
+		/* FIXME: We assume our peer has only one endpoint */
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, true,
+				    {tr_SNS_IPv4(g_config.nsvc[0].provider.ip.remote_ip,
+						 g_config.nsvc[0].provider.ip.remote_udp_port)})})
+										-> value sind sender vc {
+			/* blindly acknowledge whatever the PCU sends */
+			NSVC.send(SnsRequest:{sind.nsvci, ts_SNS_CONFIG_ACK(g_config.nsei, omit)}) to vc;
+			/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
+			var template (omit) IP4_Elements v4;
+			var template (omit) IP6_Elements v6;
+			gen_sns_ip_elems(v4, v6);
+			NSVC.send(SnsRequest:{sind.nsvci,
+					      ts_SNS_CONFIG(g_config.nsei, true, v4, v6)}) to vc;
+			alt {
+			[] NSVC.receive(SnsIndication:{sind.nsvci,
+							tr_SNS_CONFIG_ACK(g_config.nsei, omit)}) from vc {
+				/* success */
+				log("SNS Config succeeded. Sending Alive");
+				/* inform all NS-VC that they are now considered alive */
+				for (var integer i := 0; i < lengthof(g_nsvcs); i := i+1) {
+					NSVC.send(NsCtrlRequest:StartAliveProcedure) to g_nsvcs[i].vc_conn;
+					}
+				}
+			[] NSVC.receive(SnsIndication:{sind.nsvci,
+							tr_SNS_CONFIG_ACK(g_config.nsei, ?)}) from vc {
+				setverdict(fail, "Unexpected SNS-CONFIG-NACK");
+				self.stop;
+				}
+			}
+		}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, false, ?)}) { /* ignore */}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, true, ?)}) {
+			setverdict(fail, "Unexpected SNS-CONFIG content");
+			self.stop;
+		}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(?, ?, ?)}) {
+			setverdict(fail, "SNS-CONFIG from unexpected NSEI");
+			self.stop;
+		}
+	}
+
 	/***********************************************************************
 	 per-NSVC component. Exists once for each NS-VC in the NS-VCG
 	 ***********************************************************************/
@@ -349,7 +475,7 @@ module NS_Emulation {
 #endif
 
 		/* port towards the NS_CT */
-		port NS_SP_PT NS_SP;
+		port NSint_SP_PT NS_SP;
 
 		/* configuration passed by the user */
 		var NSVCConfiguration	g_nsvc_config;
@@ -454,7 +580,7 @@ module NS_Emulation {
 
 		[not g_config.handle_sns] as_handle_reset();
 
-		[g_config.role_sgsn and g_config.handle_sns and ischosen(g_nsvc_config.provider.ip)] as_sns_sgsn();
+		[g_config.handle_sns and ischosen(g_nsvc_config.provider.ip)] as_nsvc_sns();
 
 		/* default case of handling unknown PDUs */
 		[] NSCP.receive(PDU_NS: ?) -> value rf {
@@ -491,90 +617,32 @@ module NS_Emulation {
 		}
 	}
 
-	/* generate a list of v4 + v6 endpoints based on the NSVConfigurations. This is not strictly
-	 * accurate, as we should create a list of _endpoints_, while we actually create a list of
-	 * NSVCs.  Those are only identical as long as our peer only implements one endpoint */
-	private function gen_sns_ip_elems(out template (omit) IP4_Elements v4_out,
-					  out template (omit) IP6_Elements v6_out) runs on NSVC_CT {
-		var integer i;
-		var IP4_Elements v4 := {};
-		var IP6_Elements v6 := {};
-
-		for (i := 0; i < lengthof(g_config.nsvc); i := i + 1) {
-			var NSVCConfiguration nsvc_cfg := g_config.nsvc[i];
-			if (not ischosen(nsvc_cfg.provider.ip)) {
-				continue;
-			}
-			if (nsvc_cfg.provider.ip.address_family == AF_INET) {
-				v4 := v4 & { valueof(ts_SNS_IPv4(nsvc_cfg.provider.ip.local_ip,
-								 nsvc_cfg.provider.ip.local_udp_port)) };
-			} else if (nsvc_cfg.provider.ip.address_family == AF_INET6) {
-				v6 := v6 & { valueof(ts_SNS_IPv6(nsvc_cfg.provider.ip.local_ip,
-								 nsvc_cfg.provider.ip.local_udp_port)) };
-			}
-		}
-
-		/* we must not return empty lists, but 'omit' as otherwise we get wrong SNS IEs */
-		if (lengthof(v4) == 0) {
-			v4_out := omit;
-		} else {
-			v4_out := v4;
-		}
-		if (lengthof(v6) == 0) {
-			v6_out := omit;
-		} else {
-			v6_out := v6;
-		}
-	}
-
-	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
-	 * of the protocol, merely sufficient to make the PCU/BSS side happy to proceed */
-	private altstep as_sns_sgsn() runs on NSVC_CT {
+	private altstep as_nsvc_sns() runs on NSVC_CT {
 		var PDU_NS rf;
+		var SnsRequest sreq;
 		[] NSCP.receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP}) {
 			log("Provider Link came up. Waiting for SNS Size");
-			}
+		}
 
-		[] NSCP.receive(tr_SNS_SIZE(g_config.nsei)) -> value rf {
-			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(ts_SNS_SIZE_ACK(g_config.nsei, omit));
+		/* pass up to NS-VCG */
+		[] NSCP.receive(tr_SNS(g_config.nsei)) -> value rf {
+			NS_SP.send(SnsIndication:{g_nsvc_config.nsvci, rf});
 		}
-		[] NSCP.receive(tr_SNS_SIZE(?)) {
-			setverdict(fail, "SNS-SIZE from unexpected NSEI");
+		[] NSCP.receive(tr_SNS(?)) -> value rf {
+			setverdict(fail, "SNS from unexpected NSEI: ", rf);
 			self.stop;
 		}
-		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, true,
-				    {tr_SNS_IPv4(g_nsvc_config.provider.ip.remote_ip,
-						 g_nsvc_config.provider.ip.remote_udp_port)})) -> value rf {
-			/* blindly acknowledge whatever the PCU sends */
-			NSCP.send(ts_SNS_CONFIG_ACK(g_config.nsei, omit));
-			/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
-			var template (omit) IP4_Elements v4;
-			var template (omit) IP6_Elements v6;
-			gen_sns_ip_elems(v4, v6);
-			NSCP.send(ts_SNS_CONFIG(g_config.nsei, true, v4, v6));
-			alt {
-			[] NSCP.receive(tr_SNS_CONFIG_ACK(g_config.nsei, omit)) {
-				/* success */
-				log("SNS Config succeeded. Sending Alive");
-				f_change_state(NSVC_S_ALIVE_UNBLOCKED);
-				f_sendAlive();
-				Tns_test.start;
-				}
-			[] NSCP.receive(tr_SNS_CONFIG_ACK(g_config.nsei, ?)) {
-				setverdict(fail, "Unexpected SNS-CONFIG-NACK");
-				self.stop;
-				}
-			}
+		[] NS_SP.receive(SnsRequest:{g_nsvc_config.nsvci, ?}) -> value sreq {
+			NSCP.send(sreq.ns);
 		}
-		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, false, ?)) { /* ignore */}
-		[] NSCP.receive(tr_SNS_CONFIG(g_config.nsei, true, ?)) {
-			setverdict(fail, "Unexpected SNS-CONFIG content");
+		[] NS_SP.receive(SnsRequest:?) -> value sreq {
+			setverdict(fail, "Unexpected SNS from NSVC: ", sreq);
 			self.stop;
 		}
-		[] NSCP.receive(tr_SNS_CONFIG(?, ?, ?)) {
-			setverdict(fail, "SNS-CONFIG from unexpected NSEI");
-			self.stop;
+		[] NS_SP.receive(NsCtrlRequest:StartAliveProcedure) {
+			f_change_state(NSVC_S_ALIVE_UNBLOCKED);
+			f_sendAlive();
+			Tns_test.start;
 		}
 	}
 
