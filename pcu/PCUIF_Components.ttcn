@@ -19,6 +19,10 @@ import from UD_Types all;
 import from PCUIF_Types all;
 import from PCUIF_CodecPort all;
 
+import from Osmocom_Types all;
+import from RLCMAC_Types all;
+import from GSM_RR_Types all;
+
 /* Component communication diagram:
  *
  * +-----+               +----------+      +---------+
@@ -119,11 +123,54 @@ template RAW_PCU_Command tr_RAW_PCU_CMD(template RAW_PCU_CommandType cmd := ?,
 	data := data
 }
 
+/* PCUIF req_data containing decoded rlcmac/rr, for users to be able to match
+ * directly on receive()
+ */
+type record BTS_PDTCH_Block {
+	uint8_t		bts_nr,
+	PCUIF_data	raw,
+	RlcmacDlBlock	dl_block
+};
+type record BTS_PTCCH_Block {
+	uint8_t		bts_nr,
+	PCUIF_data	raw,
+	PTCCHDownlinkMsg dl_block
+};
+type record BTS_CCCH_Block {
+	uint8_t		bts_nr,
+	PCUIF_data	raw,
+	GsmRrMessage	rr_msg
+};
+template BTS_PDTCH_Block tr_PCUIF_DATA_PDTCH(template uint8_t bts_nr,
+					    template PCUIF_data raw,
+					    template RlcmacDlBlock dl_block := ?) := {
+	bts_nr := bts_nr,
+	raw := raw,
+	dl_block := dl_block
+};
+template BTS_PTCCH_Block tr_PCUIF_DATA_PTCCH(template uint8_t bts_nr,
+					    template PCUIF_data raw,
+					    template PTCCHDownlinkMsg dl_block := ?) := {
+	bts_nr := bts_nr,
+	raw := raw,
+	dl_block := dl_block
+};
+template BTS_CCCH_Block tr_PCUIF_DATA_RR(template uint8_t bts_nr,
+					    template PCUIF_data raw,
+					    template GsmRrMessage rr_msg := ?) := {
+	bts_nr := bts_nr,
+	raw := raw,
+	rr_msg := rr_msg
+};
+
 /* Generic port for messages and events */
 type port RAW_PCU_MSG_PT message {
 	inout RAW_PCU_Command;
 	inout RAW_PCU_Event;
 	inout PCUIF_Message;
+	inout BTS_PDTCH_Block;
+	inout BTS_PTCCH_Block;
+	inout BTS_CCCH_Block;
 } with { extension "internal" };
 
 /* TDMA frame clock generator */
@@ -361,11 +408,14 @@ runs on RAW_PCU_BTS_CT {
 	[] CLCK.receive(tr_RAW_PCU_CLCK_EV) { repeat; }
 }
 
-function f_BTS_CT_handler(integer bts_nr, PCUIF_info_ind info_ind)
+function f_BTS_CT_handler(integer bts_nr, PCUIF_info_ind info_ind, boolean decode_data_req := false)
 runs on RAW_PCU_BTS_CT {
 	var PCUIF_Message pcu_msg;
 	var RAW_PCU_Command cmd;
 	var RAW_PCU_Event event;
+	var BTS_PDTCH_Block pcu_msg_pdtch;
+	var BTS_PTCCH_Block pcu_msg_ptcch;
+	var BTS_CCCH_Block pcu_msg_rr;
 
 	/* Init TDMA clock generator (so we can stop and start it) */
 	vc_CLCK_GEN := RAW_PCU_ClckGen_CT.create("ClckGen-" & int2str(bts_nr)) alive;
@@ -374,6 +424,7 @@ runs on RAW_PCU_BTS_CT {
 	/* Wait until the PCU is connected */
 	PCUIF.receive(tr_RAW_PCU_EV(PCU_EV_CONNECT));
 
+	var template PCUIF_Sapi tr_ccch_sapi := (PCU_IF_SAPI_PCH, PCU_IF_SAPI_AGCH);
 	alt {
 	/* Wait for TXT.ind (PCU_VERSION) and respond with INFO.ind (SI13) */
 	[] PCUIF.receive(tr_PCUIF_TXT_IND(bts_nr, PCU_VERSION, ?)) -> value pcu_msg {
@@ -406,6 +457,35 @@ runs on RAW_PCU_BTS_CT {
 		    "/TS" & int2str(pcu_msg.u.act_req.ts_nr));
 		repeat;
 		}
+	[decode_data_req] PCUIF.receive(tr_PCUIF_DATA_REQ(bts_nr, ?, ?, sapi := tr_ccch_sapi)) -> value pcu_msg {
+		var octetstring data;
+		/* On PCH the payload is prefixed with paging group (3 octets): skip it.
+		 * TODO: add an additional template parameter, so we can match it. */
+		if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_PCH) {
+			data := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
+		} else if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_AGCH) {
+			data := pcu_msg.u.data_req.data;
+		}
+		pcu_msg_rr.bts_nr := bts_nr;
+		pcu_msg_rr.raw := pcu_msg.u.data_req;
+		pcu_msg_rr.rr_msg := dec_GsmRrMessage(data);
+		TC.send(pcu_msg_rr);
+		repeat;
+	}
+	[decode_data_req] PCUIF.receive(tr_PCUIF_DATA_REQ(bts_nr, ?, ?, sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg {
+		pcu_msg_pdtch.bts_nr := bts_nr;
+		pcu_msg_pdtch.raw := pcu_msg.u.data_req;
+		pcu_msg_pdtch.dl_block := dec_RlcmacDlBlock(pcu_msg_pdtch.raw.data);
+		TC.send(pcu_msg_pdtch);
+		repeat;
+	}
+	[decode_data_req] PCUIF.receive(tr_PCUIF_DATA_REQ(bts_nr, ?, ?, sapi := PCU_IF_SAPI_PTCCH)) -> value pcu_msg {
+		pcu_msg_ptcch.bts_nr := bts_nr;
+		pcu_msg_ptcch.raw := pcu_msg.u.data_req;
+		pcu_msg_ptcch.dl_block := dec_PTCCHDownlinkMsg(pcu_msg_ptcch.raw.data);
+		TC.send(pcu_msg_ptcch);
+		repeat;
+	}
 	/* PCU -> test case forwarding (filter by the BTS number) */
 	[] PCUIF.receive(tr_PCUIF_MSG(?, bts_nr)) -> value pcu_msg {
 		TC.send(pcu_msg);
