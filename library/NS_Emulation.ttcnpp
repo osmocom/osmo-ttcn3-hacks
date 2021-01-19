@@ -107,6 +107,7 @@ module NS_Emulation {
 	}
 
 	type enumerated NsvcState {
+		NSVC_S_DISABLED,		/* administratively disabled */
 		NSVC_S_DEAD_BLOCKED,
 		NSVC_S_WAIT_RESET,
 		NSVC_S_ALIVE_BLOCKED,
@@ -127,6 +128,25 @@ module NS_Emulation {
 			NsUnitdataIndication;
 		out	NsUnitdataRequest;
 	} with { extension "internal" };
+
+	/* port from our (internal) point of view */
+	type port NS_CTRL_SP_PT message {
+		in	NsDisableVcRequest,
+			NsEnableVcRequest;
+	} with { extension "internal" };
+
+	/* port from the user point of view */
+	type port NS_CTRL_PT message {
+		out	NsEnableVcRequest,
+			NsDisableVcRequest;
+	} with { extension "internal" };
+
+	type record NsDisableVcRequest {
+		Nsvci nsvci
+	};
+	type record NsEnableVcRequest {
+		Nsvci nsvci
+	};
 
 	type component NS_Provider_CT {
 		/* upper port, facing to NS_Emulation:NSCP */
@@ -187,6 +207,9 @@ module NS_Emulation {
 		/* port towards the per-NSVC components */
 		port NSint_PT NSVC;
 
+		/* control port, used to manipulate at runtime */
+		port NS_CTRL_SP_PT NS_CTRL;
+
 		/* all of the NS configuration a user passes to us */
 		var NSConfiguration g_config;
 		var charstring g_id;
@@ -239,7 +262,9 @@ module NS_Emulation {
 	};
 
 	type enumerated NsCtrlRequest {
-		StartAliveProcedure	(0)
+		StartAliveProcedure	(0),
+		DisableReq		(1),	/* administratively disable NS-VC */
+		EnableReq		(2)	/* administratively enable NS-VC */
 	};
 
 	/* add one NSVC (component and table entry */
@@ -346,6 +371,8 @@ module NS_Emulation {
 		var NsStatusIndication rx_nssi;
 		var NsUnitdataIndication rx_nsudi;
 		var NsUnitdataRequest rx_nsudr;
+		var NsDisableVcRequest rx_disar;
+		var NsEnableVcRequest rx_enar;
 		/* pass from NS-VCs up to user */
 		[] NSVC.receive(tr_NsStsInd(g_config.nsei, ?, ?, NSVC_S_ALIVE_UNBLOCKED)) -> value rx_nssi {
 			/* check if this one is the first to be unblocked */
@@ -384,6 +411,14 @@ module NS_Emulation {
 					log2str("Received UnitDataInd for invalid NSEI: ", rx_nsudi));
 			}
 		/* from user down to NS-VC */
+		[] NS_CTRL.receive(NsDisableVcRequest:?) -> value rx_disar {
+			var integer nsvc_idx := f_nsvc_find_idx(rx_disar.nsvci);
+			NSVC.send(NsCtrlRequest:DisableReq) to g_nsvcs[nsvc_idx].vc_conn;
+			}
+		[] NS_CTRL.receive(NsEnableVcRequest:?) -> value rx_enar {
+			var integer nsvc_idx := f_nsvc_find_idx(rx_enar.nsvci);
+			NSVC.send(NsCtrlRequest:EnableReq) to g_nsvcs[nsvc_idx].vc_conn;
+			}
 		[] NS_SP.receive(tr_NsUdReq(g_config.nsei, 0, ?, ?, *)) -> value rx_nsudr {
 			/* load distribution function */
 			var integer nsvc_idx := g_unblocked_nsvcs_sig[rx_nsudr.lsp mod lengthof(g_unblocked_nsvcs_sig)];
@@ -577,6 +612,15 @@ module NS_Emulation {
 		var PDU_NS rf;
 		var ASP_Event evt;
 
+		[] NS_SP.receive(NsCtrlRequest:DisableReq) {
+			/* To make NS-VCG remove us from list of active NS-VC */
+			f_change_state(NSVC_S_DEAD_BLOCKED);
+			log("Disabling NSVC on user request");
+			f_change_state(NSVC_S_DISABLED);
+			Tns_test.stop;
+			Tns_alive.stop;
+		}
+
 		/* transition to DEAD if t_alive times out */
 		[] Tns_alive.timeout {
 			log("Tns-alive expired: changing to DEAD_BLOCKED + starting Tns-test");
@@ -615,6 +659,25 @@ module NS_Emulation {
 		[] NSCP.receive(PDU_NS: ?) -> value rf {
 			log("Rx Unexpected NS PDU ", rf," in state ", vc_state);
 			NSCP.send(ts_NS_STATUS(NS_CAUSE_PDU_NOT_COMPATIBLE_WITH_PROTOCOL_STATE, rf));
+		}
+	}
+
+	private altstep as_disabled() runs on NSVC_CT {
+		[g_config.handle_sns == true] NS_SP.receive(NsCtrlRequest:EnableReq) {
+			f_change_state(NSVC_S_ALIVE_UNBLOCKED);
+			f_sendAlive();
+			Tns_test.start;
+		}
+		[g_config.handle_sns == false] NS_SP.receive(NsCtrlRequest:EnableReq) {
+			f_change_state(NSVC_S_DEAD_BLOCKED);
+			Tns_test.start;
+		}
+		/* drop any received messages while in this state */
+		[] NSCP.receive {
+			log("Dropping inbound NS mesage as NS-VC is disabled");
+		}
+		[] NS_SP.receive {
+			log("Dropping user primitive as NS-VC is disabled");
 		}
 	}
 
@@ -808,7 +871,8 @@ module NS_Emulation {
 			[vc_state == NSVC_S_WAIT_RESET] as_wait_reset();
 			[vc_state == NSVC_S_ALIVE_BLOCKED] as_alive_blocked();
 			[vc_state == NSVC_S_ALIVE_UNBLOCKED] as_alive_unblocked();
-			[] as_allstate();
+			[vc_state == NSVC_S_DISABLED] as_disabled();
+			[vc_state != NSVC_S_DISABLED] as_allstate();
 			}
 		}
 	}
