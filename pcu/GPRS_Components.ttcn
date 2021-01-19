@@ -506,35 +506,45 @@ runs on MS_BTS_IFACE_CT return RlcmacDlBlock {
 				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
 				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
 				  block_nr := nr.blk_nr));
-	as_ms_rx_pkt_ass_pacch(ms, poll_fn, t_pkt_ass, nr, ignore_dummy, dl_block);
+	alt {
+		[] as_ms_rx_pkt_ass_pacch(ms, poll_fn, t_pkt_ass, nr, dl_block);
+		[ignore_dummy] as_ms_rx_ignore_dummy(ms, nr);
+		/* TODO: fail */
+		[] BTS.receive {
+			setverdict(fail, "Unexpected BTS message");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	}
 	return dl_block;
+}
+
+altstep as_ms_rx_ignore_dummy(inout GprsMS ms, template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
+runs on MS_BTS_IFACE_CT {
+	var BTS_PDTCH_Block data_msg;
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL())) -> value data_msg {
+
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
 }
 
 altstep as_ms_rx_pkt_ass_pacch(inout GprsMS ms, out uint32_t poll_fn,
 			       template RlcmacDlBlock t_pkt_ass := ?,
 			       template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum,
-			       boolean ignore_dummy := true,
 			       out RlcmacDlBlock dl_block)
 runs on MS_BTS_IFACE_CT {
-	var PCUIF_Message pcu_msg;
-	[] BTS.receive(tr_PCUIF_DATA_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-					 sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg {
-		var uint32_t dl_fn;
-		dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
-		if (ignore_dummy and match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
-			/* TODO: sleep? */
-			BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)), block_nr := nr.blk_nr));
-			repeat;
-		}
-
-		if (not match(dl_block, t_pkt_ass)) {
-			setverdict(fail, "Failed to match Packet Assignment:", t_pkt_ass);
-			f_shutdown(__BFILE__, __LINE__);
-		}
-
-		dl_fn := pcu_msg.u.data_req.fn;
+	var BTS_PDTCH_Block data_msg;
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr,
+							 sapi := PCU_IF_SAPI_PDTCH),
+					     t_pkt_ass)) -> value data_msg {
+		var uint32_t dl_fn := data_msg.raw.fn;
+		dl_block := data_msg.dl_block;
 		poll_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
 
 		if (match(dl_block, tr_RLCMAC_UL_PACKET_ASS)) {
@@ -777,22 +787,21 @@ function f_egprs_acknackdesc_ack_block(inout EgprsAckNackDescription desc, Rlcma
 	desc.final_ack := final_ack;
 }
 
-/* This function can be used to send DATA.cnf in response to the IUT originated DATA.req.
- * NOTE: it's the responsibility of caller to make sure that pcu_msg contains u.data_req. */
-function f_pcuif_tx_data_cnf(in PCUIF_Message pcu_msg)
+/* This function can be used to send DATA.cnf in response to the IUT originated DATA.req. */
+function f_pcuif_tx_data_cnf(in BTS_CCCH_Block data_msg)
 runs on MS_BTS_IFACE_CT {
 	var PCUIF_Message pcu_msg_cnf := {
 		msg_type := PCU_IF_MSG_DATA_CNF,
-		bts_nr := pcu_msg.bts_nr,
-		spare := pcu_msg.spare,
-		u := { data_cnf := pcu_msg.u.data_req }
+		bts_nr := data_msg.bts_nr,
+		spare := '0000'O,
+		u := { data_cnf := data_msg.raw }
 	};
 
 	/* PCU wants DATA.cnf containing basically everything that was in DATA.req,
 	 * but PCU_IF_SAPI_PCH is a special case - paging group shall be excluded. */
-	if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_PCH) {
-		pcu_msg_cnf.u.data_cnf.data := substr(pcu_msg.u.data_req.data, 3,
-						      pcu_msg.u.data_req.len - 3);
+	if (data_msg.raw.sapi == PCU_IF_SAPI_PCH) {
+		pcu_msg_cnf.u.data_cnf.data := substr(data_msg.raw.data, 3,
+						      data_msg.raw.len - 3);
 	}
 
 	BTS.send(pcu_msg_cnf);
@@ -802,43 +811,52 @@ runs on MS_BTS_IFACE_CT {
 // Low level APIs
 ////////////////////////
 
+altstep as_rx_ptcch(out BTS_PTCCH_Block ret_msg, template (present) PTCCHDownlinkMsg msg := ?,
+		    template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum, boolean do_repeat := false)
+runs on MS_BTS_IFACE_CT {
+	[] BTS.receive(tr_PCUIF_DATA_PTCCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PTCCH),
+					   msg)) -> value ret_msg {
+		if (do_repeat) {
+			BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+						  sapi := PCU_IF_SAPI_PTCCH, fn := 0,
+						  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+						  block_nr := nr.blk_nr))
+			repeat;
+		}
+	}
+}
+
+altstep as_ms_rx_imm_ass(template PCUIF_Sapi sapi := PCU_IF_SAPI_AGCH,
+			 template GsmRrMessage t_imm_ass := ?,
+			 template (present) TsTrxBtsNum nr := ts_TsTrxBtsNum,
+			 out GsmRrMessage rr_imm_ass)
+runs on MS_BTS_IFACE_CT {
+	var BTS_CCCH_Block data_msg;
+	[] BTS.receive(tr_PCUIF_DATA_RR(nr.bts_nr,
+					tr_PCUIF_DATA(nr.trx_nr, 0, sapi := sapi),
+					t_imm_ass)) -> value data_msg {
+		rr_imm_ass := data_msg.rr_msg;
+		log("Rx Immediate Assignment: ", rr_imm_ass);
+		/* Send DATA.cnf back to the IUT (only needed for PCH) */
+		if (data_msg.raw.sapi == PCU_IF_SAPI_PCH) {
+			f_pcuif_tx_data_cnf(data_msg);
+		}
+		setverdict(pass);
+	}
+}
+
 function f_pcuif_rx_imm_ass(template PCUIF_Sapi sapi := PCU_IF_SAPI_AGCH,
 			    template GsmRrMessage t_imm_ass := ?,
 			    template (present) TsTrxBtsNum nr := tr_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT return GsmRrMessage {
 	var GsmRrMessage rr_imm_ass;
-	var PCUIF_Message pcu_msg;
-	var octetstring data;
 	timer T;
 
 	T.start(2.0);
 	alt {
-	[] BTS.receive(tr_PCUIF_DATA_REQ(nr.bts_nr, nr.trx_nr, ts_nr := 0,
-					 sapi := sapi, data := ?)) -> value pcu_msg {
-		/* On PCH the payload is prefixed with paging group (3 octets): skip it.
-		 * TODO: add an additional template parameter, so we can match it. */
-		if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_PCH) {
-			data := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
-		} else {
-			data := pcu_msg.u.data_req.data;
-		}
-
-		rr_imm_ass := dec_GsmRrMessage(data);
-		if (not match(rr_imm_ass, t_imm_ass)) {
-			/* Not for us? Wait for more. */
-			repeat;
-		}
-
-		log("Rx Immediate Assignment: ", rr_imm_ass);
-
-		/* Send DATA.cnf back to the IUT (only needed for PCH) */
-		if (pcu_msg.u.data_req.sapi == PCU_IF_SAPI_PCH) {
-			f_pcuif_tx_data_cnf(pcu_msg);
-		}
-
-		setverdict(pass);
-		}
-	[] BTS.receive { repeat; }
+	[] as_ms_rx_imm_ass(sapi, t_imm_ass, nr, rr_imm_ass);
+	[] BTS.receive { repeat; } /* TODO: use as_ms_rx_ignore_dummy instead? */
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for Immediate Assignment");
 		f_shutdown(__BFILE__, __LINE__);
@@ -898,14 +916,16 @@ runs on MS_BTS_IFACE_CT {
 }
 
 /* Enqueue RTS.req, expect DATA.req with UL ACK from the PCU */
-function f_pcuif_rx_data_req(out PCUIF_Message pcu_msg,
+function f_pcuif_rx_data_req_pdtch(out BTS_PDTCH_Block data_msg,
 			     template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT {
 	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
 				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
 				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)), block_nr := nr.blk_nr));
-	BTS.receive(tr_PCUIF_DATA_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-				      sapi := PCU_IF_SAPI_PDTCH)) -> value pcu_msg;
+
+	BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH))
+		   ) -> value data_msg;
 }
 
 /* Expect a Paging Request Type 1 from PCU on PCUIF on specified sapi.  */
@@ -914,27 +934,22 @@ function f_pcuif_rx_pch_pag_req1(template MobileIdentityV mi1 := ?,
 				 template (present) TsTrxBtsNum nr := tr_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT return GsmRrMessage {
 	var GsmRrMessage rr_pag_req1;
-	var PCUIF_Message pcu_msg;
 	var octetstring imsi_suff_octstr;
 	var integer pag_group_rx;
-	var octetstring macblock;
 
-	BTS.receive(tr_PCUIF_DATA_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-				      sapi := PCU_IF_SAPI_PCH)) -> value pcu_msg;
+	var BTS_CCCH_Block data_msg;
+	BTS.receive(tr_PCUIF_DATA_RR(nr.bts_nr,
+				     tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PCH),
+				     tr_PAG_REQ1(tr_MI_LV(mi1)))) -> value data_msg;
+	rr_pag_req1 := data_msg.rr_msg;
+	log("Rx Paging Request Type1: ", rr_pag_req1);
+
 
 	/* First 3 bytes contain IMSI suffix to calculate paging group: */
-	imsi_suff_octstr := substr(pcu_msg.u.data_req.data, 0, 3);
+	imsi_suff_octstr := substr(data_msg.raw.data, 0, 3);
 	pag_group_rx := str2int(oct2char(imsi_suff_octstr[0])) * 100 +
 			str2int(oct2char(imsi_suff_octstr[1])) * 10 +
 			str2int(oct2char(imsi_suff_octstr[2]));
-
-	/* Make sure we've got RR Paging Request Type 1 for a given MI */
-	macblock := substr(pcu_msg.u.data_req.data, 3, pcu_msg.u.data_req.len - 3);
-	rr_pag_req1 := dec_GsmRrMessage(macblock);
-	if (not match(rr_pag_req1, tr_PAG_REQ1(tr_MI_LV(mi1)))) {
-		setverdict(fail, "Failed to match Paging Request Type 1: ", rr_pag_req1);
-		f_shutdown(__BFILE__, __LINE__);
-	}
 
 	/* Make sure that received paging froup matches the expected one */
 	if (not match(pag_group_rx, pag_group)) {
@@ -942,7 +957,8 @@ runs on MS_BTS_IFACE_CT return GsmRrMessage {
 		f_shutdown(__BFILE__, __LINE__);
 	}
 
-	f_pcuif_tx_data_cnf(pcu_msg);
+	/* Send DATA.cnf back to the IUT (only needed for PCH) */
+	f_pcuif_tx_data_cnf(data_msg);
 	return rr_pag_req1;
 }
 
@@ -950,12 +966,12 @@ function f_rx_rlcmac_dl_block(out RlcmacDlBlock dl_block, out uint32_t dl_fn,
 			      template (present) CodingScheme exp_cs_mcs := ?,
 			      template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT {
-	var PCUIF_Message pcu_msg;
-	f_pcuif_rx_data_req(pcu_msg, nr := nr);
-	dl_block := dec_RlcmacDlBlock(pcu_msg.u.data_req.data);
-	dl_fn := pcu_msg.u.data_req.fn;
+	var BTS_PDTCH_Block data_msg;
+	f_pcuif_rx_data_req_pdtch(data_msg, nr := nr);
+	dl_block := data_msg.dl_block;
+	dl_fn := data_msg.raw.fn;
 
-	var integer len := lengthof(pcu_msg.u.data_req.data);
+	var integer len := lengthof(data_msg.raw.data);
 	var CodingScheme cs_mcs := f_rlcmac_block_len2cs_mcs(len)
 	if (not match(f_rlcmac_block_len2cs_mcs(len), exp_cs_mcs)) {
 		setverdict(fail, "Failed to match Coding Scheme exp ", exp_cs_mcs, " vs ", cs_mcs, " (", len, ")");
