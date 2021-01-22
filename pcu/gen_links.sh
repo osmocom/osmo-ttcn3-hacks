@@ -55,6 +55,9 @@ FILES+="NS_Provider_IPL4.ttcn NS_Emulation.ttcnpp "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn RAW_NS.ttcnpp "
+# IPA_Emulation + dependencies
+FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc "
+FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

@@ -56,6 +56,10 @@ import from StatsD_CodecPort all;
 import from StatsD_CodecPort_CtrlFunct all;
 import from StatsD_Checker all;
 
+import from IPA_Emulation all;
+import from Osmocom_CTRL_Adapter all;
+import from Osmocom_CTRL_Functions all;
+
 modulepar {
 	charstring mp_pcu_sock_path := PCU_SOCK_DEFAULT;
 
@@ -63,6 +67,9 @@ modulepar {
 
 	charstring mp_pcu_statsd_ip := "127.0.0.1";
 	integer mp_pcu_statsd_port := 8125;
+
+	charstring mp_ctrl_neigh_ip := "127.0.0.1";
+	integer mp_ctrl_neigh_port := 4248;
 }
 
 
@@ -111,7 +118,7 @@ type record lqual_range {
 	uint8_t high
 }
 
-type component RAW_PCU_Test_CT extends bssgp_CT, MS_BTS_IFACE_CT, StatsD_ConnHdlr {
+type component RAW_PCU_Test_CT extends bssgp_CT, MS_BTS_IFACE_CT, StatsD_ConnHdlr, CTRL_Adapter_CT {
 	/* PCU interface abstraction component */
 	var RAW_PCUIF_CT vc_PCUIF;
 
@@ -3566,6 +3573,184 @@ testcase TC_paging_cs_multi_ms_imsi_tmsi() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+private function f_skip_dummy(integer max_num_iter)
+runs on RAW_PCU_Test_CT return RlcmacDlBlock {
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var integer i := 0;
+	while (true) {
+		f_rx_rlcmac_dl_block(dl_block, sched_fn);
+		if (not match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+			break;
+		}
+		if (i > max_num_iter) {
+			setverdict(fail, "Rx unexpected DL block: ", dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+		i := i + 1;
+	}
+	return dl_block;
+}
+
+/* Handle groups of PKT NEIGHBOUR CELL DATA packets */
+private function f_handle_pkt_neighbor_cell_data(inout GprsMS ms, octetstring exp_si)
+runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var integer i := 0;
+	var uint5_t exp_container_idx := 0;
+	var integer si_offset := 0;
+	var integer len;
+	var octetstring exp_si_chunk;
+	var GlobalTfi gtfi := { is_dl_tfi := false, tfi := ms.ul_tbf.tfi };
+
+	dl_block := f_skip_dummy(50);
+
+	while (true) {
+		var template RlcmacDlCtrlMsg exp_msg; exp_msg :=
+				tr_RlcMacDlCtrl_PKT_NEIGH_CELL_DATA(gtfi, exp_container_idx);
+
+		/* Make sure last Dl block is a Pkt Neighbour Cell Data */
+		if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, exp_msg))) {
+			setverdict(fail, "Rx unexpected DL block: ", dl_block, " vs exp ", tr_RLCMAC_DL_CTRL(?, exp_msg));
+			f_shutdown(__BFILE__, __LINE__);
+		}
+		var PacketNeighbourCellData neigh_data := dl_block.ctrl.payload.u.neighbour_cell_data;
+		var PacketNeighbourCellDataContainer cont := neigh_data.container_list[0];
+
+		if (cont.cd_length == 31) { /* continues on next message */
+			len := lengthof(cont.container_data);
+			exp_si_chunk := substr(exp_si, si_offset, len);
+			if (cont.container_data != exp_si_chunk) {
+				setverdict(fail, "Rx unexpected SI chunk at offset ", si_offset, ": ",
+					   cont.container_data, " vs exp ", exp_si_chunk);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			si_offset := si_offset + len;
+		} else if (cont.cd_length == 0) {
+			/* we are done */
+			if (si_offset != lengthof(exp_si)) {
+				setverdict(fail, "Rx unexpectd SI length ", si_offset,
+					   " vs exp ", lengthof(exp_si));
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			break;
+		} else { /* data length, last message */
+			len := cont.cd_length;
+			exp_si_chunk := substr(exp_si, si_offset, len);
+			if (cont.container_data != exp_si_chunk) {
+				setverdict(fail, "Rx unexpected SI chunk at offset ", si_offset, ": ",
+					   cont.container_data, " vs exp ", exp_si_chunk);
+				f_shutdown(__BFILE__, __LINE__);
+				return;
+			}
+			si_offset := si_offset + len;
+			/* we are done */
+			if (si_offset != lengthof(exp_si)) {
+				setverdict(fail, "Rx unexpectd SI length ", si_offset,
+					   " vs exp ", lengthof(exp_si));
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			break;
+		}
+
+		exp_container_idx := exp_container_idx + 1;
+		f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	}
+	return;
+}
+
+/* Verify PCU handles outbound Network Assisted Cell Change Cell Change (NACC, TS 44.060 sec 8.8). */
+testcase TC_nacc_outbound_success() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var PollFnCtx pollctx;
+	var uint32_t sched_fn;
+	var GprsMS ms;
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+	var BssgpCellId src := valueof(ts_BssgpCellId(ts_RAI(ts_LAI(f_enc_BcdMccMnc(info_ind.mcc, info_ind.mnc, info_ind.mnc_3_digits == 1), /* '262F42'H */
+								    info_ind.lac),
+							     info_ind.rac),
+						      info_ind.cell_id));
+	var BssgpCellId dst := valueof(ts_BssgpCellId(ts_RAI(ts_LAI('023F43'H, /* Decided by test itself (emulating BSC) */
+								    423),
+							     2),
+						      5));
+	var template RIM_Routing_Address src_addr := t_RIM_Routing_Address_cid(src);
+	var template RIM_Routing_Address dst_addr := t_RIM_Routing_Address_cid(dst);
+	var octetstring si1 := '198fb100000000000000000000000000007900002b'O;
+	var octetstring si3 := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
+	var octetstring si13 := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
+	var octetstring si := si1 & si3 & si13;
+	var template RAN_Information_RIM_Container res_cont;
+	res_cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						     ts_RIM_Sequence_Number(2),
+						     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+						     ts_RIM_Protocol_Version_Number(1),
+						     tsu_ApplContainer_or_ApplErrContainer_NACC(tsu_ApplContainer_NACC(dst, false, 3, si)),
+						     omit);
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+
+	/* RIM procedure: */
+	RIM.receive(tr_RAN_INFORMATION_REQUEST(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+							   tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+							   tr_RAN_Information_Request_RIM_Container));
+	RIM.send(ts_PDU_BSSGP_RAN_INFORMATION(ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+						   ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+						   res_cont));
+
+	/* Announce SI back to MS, continue NACC procedure */
+	f_handle_pkt_neighbor_cell_data(ms, si);
+
+	/* Obtain a Downlink block and make sure it is a Pkt Cell Chg Continue */
+	f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -3639,6 +3824,7 @@ control {
 	execute( TC_multiplex_dl_gprs_egprs() );
 
 	execute( TC_pcuif_info_ind_subsequent() );
+	execute( TC_nacc_outbound_success() );
 }
 
 }
