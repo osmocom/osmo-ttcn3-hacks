@@ -3583,7 +3583,7 @@ runs on RAW_PCU_Test_CT return RlcmacDlBlock {
 		if (not match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
 			break;
 		}
-		if (i > max_num_iter) {
+		if (max_num_iter > 0 and i > max_num_iter) {
 			setverdict(fail, "Rx unexpected DL block: ", dl_block);
 			f_shutdown(__BFILE__, __LINE__);
 		}
@@ -3751,6 +3751,67 @@ testcase TC_nacc_outbound_success() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify PCU transmits Pkt Cell Change Continue if RAC+CI resolution fails during outbound NACC procedure */
+testcase TC_nacc_outbound_rac_ci_resolve_timeout() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var PollFnCtx pollctx;
+	var uint32_t sched_fn;
+	var GprsMS ms;
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	/* we receive RAC+CI resolution request, but we never answer to it, timeout should occur */
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, omit);
+
+	/* Wait until we receive something non-dummy */
+	dl_block := f_skip_dummy(0);
+	/* Make sure it is a Pkt Cell Chg Continue */
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -3825,6 +3886,7 @@ control {
 
 	execute( TC_pcuif_info_ind_subsequent() );
 	execute( TC_nacc_outbound_success() );
+	execute( TC_nacc_outbound_rac_ci_resolve_timeout() );
 }
 
 }
