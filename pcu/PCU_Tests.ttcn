@@ -3812,6 +3812,82 @@ testcase TC_nacc_outbound_rac_ci_resolve_timeout() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify PCU transmits Pkt Cell Change Continue if SI resolution fails during outbound NACC procedure */
+testcase TC_nacc_outbound_si_resolve_timeout() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var PollFnCtx pollctx;
+	var uint32_t sched_fn;
+	var GprsMS ms;
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+	var BssgpCellId src := valueof(ts_BssgpCellId(ts_RAI(ts_LAI(f_enc_BcdMccMnc(info_ind.mcc, info_ind.mnc, info_ind.mnc_3_digits == 1), /* '262F42'H */
+								    info_ind.lac),
+							     info_ind.rac),
+						      info_ind.cell_id));
+	var BssgpCellId dst := valueof(ts_BssgpCellId(ts_RAI(ts_LAI('023F43'H, /* Decided by test itself (emulating BSC) */
+								    423),
+							     2),
+						      5));
+	var template RIM_Routing_Address src_addr := t_RIM_Routing_Address_cid(src);
+	var template RIM_Routing_Address dst_addr := t_RIM_Routing_Address_cid(dst);
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+
+	/* RIM procedure: */
+	RIM.receive(tr_RAN_INFORMATION_REQUEST(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
+							   tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
+							   tr_RAN_Information_Request_RIM_Container));
+	/* We never answer the RIM procude -> PCU timeouts and should send Pkt Cell Chg continue */
+
+	/* Wait until we receive something non-dummy */
+	dl_block := f_skip_dummy(0);
+	/* Make sure it is a Pkt Cell Chg Continue */
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -3887,6 +3963,7 @@ control {
 	execute( TC_pcuif_info_ind_subsequent() );
 	execute( TC_nacc_outbound_success() );
 	execute( TC_nacc_outbound_rac_ci_resolve_timeout() );
+	execute( TC_nacc_outbound_si_resolve_timeout() );
 }
 
 }
