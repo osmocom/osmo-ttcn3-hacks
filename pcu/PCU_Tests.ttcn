@@ -3685,7 +3685,8 @@ runs on RAW_PCU_Test_CT {
 
 /* Start NACC from MS side */
 private function f_outbound_nacc_success(inout GprsMS ms, PCUIF_info_ind info_ind,
-					 boolean exp_rac_ci_query := true, boolean exp_si_query := true)
+					 boolean exp_rac_ci_query := true, boolean exp_si_query := true,
+					 boolean skip_final_ctrl_ack := false)
 runs on RAW_PCU_Test_CT {
 	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
 	var RlcmacDlBlock dl_block;
@@ -3745,7 +3746,7 @@ runs on RAW_PCU_Test_CT {
 		f_shutdown(__BFILE__, __LINE__);
 	}
 	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
-	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+	if (not skip_final_ctrl_ack and dl_block.ctrl.mac_hdr.rrbp_valid) {
 		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
 		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
 	}
@@ -3788,6 +3789,61 @@ testcase TC_nacc_outbound_success() runs on RAW_PCU_Test_CT {
 
 	/* Start NACC from MS side */
 	f_outbound_nacc_success(ms, info_ind);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Verify Pkt Cell Change Continue is retransmitted if not CTRL ACKed */
+testcase TC_nacc_outbound_success_no_ctrl_ack() runs on RAW_PCU_Test_CT {
+	var PollFnCtx pollctx;
+	var GprsMS ms;
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var MultislotCap_GPRS mscap_gprs := {
+		gprsmultislotclass := '00011'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	var MSRadioAccessCapabilityV ms_racap := { valueof(ts_RaCapRec('0001'B /* E-GSM */, mscap_gprs, omit)) };
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Make sure we are not affected by full cache from previous tests */
+	f_pcuvty_flush_neigh_caches();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side, avoid sending final CTRL ACK */
+	f_outbound_nacc_success(ms, info_ind, skip_final_ctrl_ack := true);
+
+	/* Wait until we receive something non-dummy */
+	dl_block := f_skip_dummy(0, sched_fn);
+	/* Make sure it is a Pkt Cell Chg Continue (retransmitted)*/
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+	}
+	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
@@ -4401,6 +4457,7 @@ control {
 
 	execute( TC_pcuif_info_ind_subsequent() );
 	execute( TC_nacc_outbound_success() );
+	execute( TC_nacc_outbound_success_no_ctrl_ack() );
 	execute( TC_nacc_outbound_success_twice() );
 	execute( TC_nacc_outbound_success_twice_nocache() );
 	execute( TC_nacc_outbound_rac_ci_resolve_conn_refused() );
