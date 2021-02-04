@@ -545,6 +545,7 @@ EgprsDlMacDataHeader dec__EgprsDlMacDataHeader_type1(const OCTETSTRING& stream)
 	ret_val.bsn2__offset() = egprs1->bsn2_lo << 7 | egprs1->bsn2_hi;
 	ret_val.pr() = egprs1->pr;
 	ret_val.cps() = egprs1->cps;
+	ret_val.spb() = OMIT_VALUE;
 
 	ttcn_buffer.increase_pos(sizeof(*egprs1));
 	return ret_val;
@@ -571,6 +572,7 @@ EgprsDlMacDataHeader dec__EgprsDlMacDataHeader_type2(const OCTETSTRING& stream)
 	ret_val.bsn2__offset() = 0; /*TODO: mark optional and not set ? */
 	ret_val.pr() = egprs2->pr;
 	ret_val.cps() = egprs2->cps;
+	ret_val.spb() = OMIT_VALUE;
 
 	ttcn_buffer.increase_pos(sizeof(*egprs2));
 	return ret_val;
