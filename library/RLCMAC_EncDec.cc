@@ -505,6 +505,7 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 		/* LI not present: The Upper Layer PDU that starts with the current RLC data block either
 		 * fills the current RLC data block precisely or continues in the following in-sequence RLC
 		 * data block */
+		lb.hdr() = OMIT_VALUE;
 		lb.payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
 		ttcn_buffer.increase_pos(length);
 		ret_val.blocks()[0] = lb;
@@ -663,6 +664,7 @@ RlcmacDlEgprsDataBlock dec__RlcmacDlEgprsDataBlock(const OCTETSTRING& stream)
 		/* LI not present: The Upper Layer PDU that starts with the current RLC data block either
 		 * fills the current RLC data block precisely or continues in the following in-sequence RLC
 		 * data block */
+		lb.hdr() = OMIT_VALUE;
 		lb.payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
 		aligned_buffer.increase_pos(length);
 		ret_val.blocks()[0] = lb;
@@ -792,6 +794,7 @@ RlcmacUlDataBlock dec__RlcmacUlDataBlock(const OCTETSTRING& stream)
 		/* LI not present: The Upper Layer PDU that starts with the current RLC data block either
 		 * fills the current RLC data block precisely or continues in the following in-sequence RLC
 		 * data block */
+		lb.hdr() = OMIT_VALUE;
 		lb.payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
 		ttcn_buffer.increase_pos(length);
 		ret_val.blocks()[0] = lb;
@@ -945,6 +948,7 @@ RlcmacUlEgprsDataBlock dec__RlcmacUlEgprsDataBlock(const OCTETSTRING& stream)
 		/* LI not present: The Upper Layer PDU that starts with the current RLC data block either
 		 * fills the current RLC data block precisely or continues in the following in-sequence RLC
 		 * data block */
+		lb.hdr() = OMIT_VALUE;
 		lb.payload() = OCTETSTRING(length, aligned_buffer.get_read_data());
 		aligned_buffer.increase_pos(length);
 		ret_val.blocks()[0] = lb;
