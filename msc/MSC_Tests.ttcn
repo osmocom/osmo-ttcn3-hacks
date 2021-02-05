@@ -1679,43 +1679,69 @@ testcase TC_mt_crcx_ran_reject() runs on MTC_CT {
 
 /* Test MT Call T310 timer */
 friend function f_tc_mt_t310(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
-	f_init_handler(pars, 200.0);
 	var CallParameters cpars := valueof(t_CallParams('123456'H, 0));
-	var MNCC_PDU mncc;
 	var MgcpCommand mgcp_cmd;
+	var PDU_BSSAP bssap;
+	timer T310;
 
+	f_init_handler(pars);
+
+	/* Initiate a MT call, establish connection */
 	f_mt_call_start(cpars);
 
 	/* MS->MSC: CALL CONFIRMED */
 	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_CALL_CONF(cpars.transaction_id)));
 	MNCC.receive(tr_MNCC_CALL_CONF_ind(cpars.mncc_callref));
 
-	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
-	cpars.mgcp_call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-	cpars.mgcp_ep := mgcp_cmd.line.ep;
-	/* FIXME: Respond to CRCX */
+	/* NOTE: MSC is expected to start T310 here */
 
-	/* old libosmocore T310 default timeout is 180s. so let's wait 190 */
-	timer T := 190.0;
-	T.start;
+	/* MSC->MGW: CRCX (first) */
+	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
+	f_handle_crcx(cpars, mgcp_cmd); /* MSC<-MGW: OK */
+
+	/* BSC->BSC: BSSMAP ASSIGNMENT REQ */
+	BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, ?)) -> value bssap;
+	BSSAP.send(ts_BSSMAP_AssignmentComplete(omit,
+		aoip := f_ts_BSSMAP_IE_AoIP_TLA(cpars.bss_rtp_ip, cpars.bss_rtp_port),
+		speechCodec := ts_BSSMAP_IE_SpeechCodec({ ts_CodecFR })));
+
+	/* MSC->MGW: MDCX */
+	MGCP.receive(tr_MDCX) -> value mgcp_cmd;
+	MGCP.send(ts_MDCX_ACK(mgcp_cmd.line.trans_id, cpars.mgw_conn_1.mgcp_connection_id,
+		sdp := omit));
+
+	/* MSC->MGW: CRCX (second) */
+	MGCP.receive(tr_CRCX) -> value mgcp_cmd;
+	f_handle_crcx(cpars, mgcp_cmd); /* MSC<-MGW: OK */
+	MNCC.receive(tr_MNCC_RTP_CREATE(cpars.mncc_callref));
+
+	/* Reschedule the guard timeout */
+	g_Tguard.start(30.0 + 10.0);
+
+	/* NOTE: the BSC is expected to respond with CC ALERTING at this state, so
+	 * the MSC would stop T310.  However, the idea is to verify T310 expiration
+	 * here, so grab some popcorn and wait for MNCC DISC.ind. */
+	T310.start(30.0 + 2.0);
 	alt {
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for T310");
+	[] T310.timeout {
+		setverdict(fail, "Timeout waiting for MNCC DISC.ind due to T310");
 		mtc.stop;
 		}
 	[] MNCC.receive(tr_MNCC_DISC_ind(cpars.mncc_callref)) {
 		MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
+		log("Rx MNCC DISC.ind, T310.read yelds ", T310.read);
+		setverdict(pass);
 		}
 	}
+
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_DISC(cpars.transaction_id)));
 	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
-	/* FIXME: We're sending this with TIflag 0: allocated by sender, which is wrong */
-	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id)));
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id, '1'B)));
 
 	alt {
 	[] MGCP.receive(tr_DLCX(?)) -> value mgcp_cmd {
 		MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-		f_create_mgcp_delete_ep(cpars.mgcp_ep);
+		// FIXME: f_create_mgcp_delete_ep(cpars.mgcp_ep);
 		repeat;
 		}
 	[] as_clear_cmd_compl_disc();
@@ -6342,7 +6368,7 @@ control {
 	execute( TC_mo_crcx_ran_reject() );
 	execute( TC_mt_crcx_ran_reject() );
 	execute( TC_mo_setup_and_dtmf_dup() );
-	//execute( TC_mt_t310() );
+	execute( TC_mt_t310() );
 	execute( TC_gsup_cancel() );
 	execute( TC_lu_imsi_auth_tmsi_encr_1_13() );
 	execute( TC_lu_imsi_auth_tmsi_encr_3_13() );
