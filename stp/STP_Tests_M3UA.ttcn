@@ -34,17 +34,57 @@ import from SCCP_Emulation all;
 
 import from STP_Tests_Common all;
 
-modulepar {
-	HostList mp_stp_m3ua_ip := { "127.0.0.1", "::1" };
-	HostList mp_local_m3ua_ip := { "127.0.0.1", "::1" };
-	integer mp_stp_m3ua_port := 2905;
-	integer mp_stp_m3ua_clnt_port := 2906;
-	integer mp_local_m3ua_port := 9999;
-	integer mp_recovery_timeout_msec := 2000;
-}
-
 private const integer NR_M3UA := 3;	/* number of M3UA clients in ATS */
 private const integer NR_M3UA_SRV := 1;	/* number of M3UA servres in ATS */
+
+modulepar {
+	/* STP-side IP addresses */
+	HostList mp_stp_m3ua_ip := { "127.0.0.1", "::1" };
+	/* local IP addresses */
+	HostList mp_local_m3ua_ip := { "127.0.0.1", "::1" };
+	M3uaConfigs mp_m3ua_configs := {
+		/* as-sender: One ASP within AS */
+		{
+			remote_sctp_port := 2905,
+			local_sctp_port := 9999,
+			point_code := 23,
+			routing_ctx := 1023
+		},
+		/* as-receiver: Two ASP within AS */
+		{
+			remote_sctp_port := 2905,
+			local_sctp_port := 10000,
+			point_code := 42,
+			routing_ctx := 1042
+		}, {
+			remote_sctp_port := 2905,
+			local_sctp_port := 10001,
+			point_code := 42,
+			routing_ctx := 1042
+		},
+		/* as-client: One ASP within AS */
+		{
+			remote_sctp_port := 2906,
+			local_sctp_port := 10002,
+			point_code := 55,
+			routing_ctx := 1055
+		}
+	};
+	integer mp_recovery_timeout_msec := 2000;
+	charstring mp_sccp_service_type := "mtp3_itu";
+}
+
+type record M3uaConfig {
+	/* STP-side SCTP port for M3UA */
+	integer remote_sctp_port,
+	/* local M3UA base port on TTCN3 side */
+	integer local_sctp_port,
+	/* point code routed via this M3U */
+	integer point_code,
+	/* associated routing context */
+	integer routing_ctx
+};
+type record length (NR_M3UA+NR_M3UA_SRV) of M3uaConfig M3uaConfigs;
 
 private function M3UA_SRV(integer idx) return integer {
 	return NR_M3UA+idx;
@@ -127,6 +167,7 @@ friend function f_M3UA_connect(integer i) runs on RAW_M3UA_CT {
 	var Option opt_add_local_addrs;
 	var OptionList opt_list := {};
 	var template SocketList opt_add_remote_addrs;
+	var M3uaConfig m3cfg := mp_m3ua_configs[i];
 
 	if (lengthof(mp_local_m3ua_ip) == 0 or lengthof(mp_stp_m3ua_ip) == 0) {
 		setverdict(fail, "Empty local or remote address trying to connect SCTP socket: ",
@@ -142,15 +183,15 @@ friend function f_M3UA_connect(integer i) runs on RAW_M3UA_CT {
 
 	if (lengthof(mp_stp_m3ua_ip) > 1) {
 		for (var integer j := 1; j < lengthof(mp_stp_m3ua_ip); j := j + 1) {
-			var Socket sk := valueof(ts_Socket(mp_stp_m3ua_ip[j], mp_stp_m3ua_port));
+			var Socket sk := valueof(ts_Socket(mp_stp_m3ua_ip[j], m3cfg.remote_sctp_port));
 			opt_add_remote_addrs[j - 1] := sk;
 		}
 	} else {
 		opt_add_remote_addrs := omit;
 	}
 
-	res := M3UA_CodecPort_CtrlFunct.f_IPL4_connect(M3UA[i], mp_stp_m3ua_ip[0], mp_stp_m3ua_port,
-						       mp_local_m3ua_ip[0], mp_local_m3ua_port+i, 0,
+	res := M3UA_CodecPort_CtrlFunct.f_IPL4_connect(M3UA[i], mp_stp_m3ua_ip[0], m3cfg.remote_sctp_port,
+						       mp_local_m3ua_ip[0], m3cfg.local_sctp_port, 0,
 						       {sctp:=valueof(ts_SCTP(3, 0, opt_add_remote_addrs))},
 						       opt_list);
 	if (not ispresent(res.connId)) {
@@ -170,6 +211,7 @@ friend function f_M3UA_listen(integer i) runs on RAW_M3UA_CT {
 	var Result res;
 	var Option opt_add_local_addrs;
 	var OptionList opt_list := {};
+	var M3uaConfig m3cfg := mp_m3ua_configs[i];
 
 	if (lengthof(mp_local_m3ua_ip) == 0 ) {
 		setverdict(fail, "Empty local address trying to bind SCTP socket: ",
@@ -183,7 +225,7 @@ friend function f_M3UA_listen(integer i) runs on RAW_M3UA_CT {
 		opt_list := {opt_add_local_addrs};
 	}
 
-	res := M3UA_CodecPort_CtrlFunct.f_IPL4_listen(M3UA[i], mp_local_m3ua_ip[0], mp_local_m3ua_port+i,
+	res := M3UA_CodecPort_CtrlFunct.f_IPL4_listen(M3UA[i], mp_local_m3ua_ip[0], m3cfg.local_sctp_port,
 						      {sctp:=valueof(ts_SCTP)}, opt_list);
 	if (not ispresent(res.connId)) {
 		setverdict(fail, "Could not bind M3UA socket, check your configuration");
@@ -335,10 +377,10 @@ testcase TC_asp_act_broadcast() runs on RAW_M3UA_CT {
 
 /* test whether the STP accepts M3UA DATA without Routing Context IE */
 testcase TC_act_rctx_data_no_rctx() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1023, 4);
-	var OCT4 pc_sender := int2oct(23, 4);
-	var OCT4 rctx_receiver := int2oct(1042, 4);
-	var OCT4 pc_receiver := int2oct(42, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[1].point_code, 4);
 
 	f_init_m3ua();
 	/* bring up the sender specifying a routing context */
@@ -367,10 +409,10 @@ runs on RAW_M3UA_CT {
 
 /* test "traffic-mode override" behavior */
 testcase TC_tmt_override() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1023, 4);
-	var OCT4 pc_sender := int2oct(23, 4);
-	var OCT4 rctx_receiver := int2oct(1042, 4);
-	var OCT4 pc_receiver := int2oct(42, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[1].point_code, 4);
 
 	f_init_m3ua();
 
@@ -404,10 +446,10 @@ runs on RAW_M3UA_CT {
 
 /* test "traffic-mode load-share" behavior */
 testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1023, 4);
-	var OCT4 pc_sender := int2oct(23, 4);
-	var OCT4 rctx_receiver := int2oct(1042, 4);
-	var OCT4 pc_receiver := int2oct(42, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[1].point_code, 4);
 	var integer i;
 
 	f_init_m3ua();
@@ -457,10 +499,10 @@ testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
 
 /* test "traffic-mode broadcast" behavior */
 testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1023, 4);
-	var OCT4 pc_sender := int2oct(23, 4);
-	var OCT4 rctx_receiver := int2oct(1042, 4);
-	var OCT4 pc_receiver := int2oct(42, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[1].point_code, 4);
 	var integer i;
 
 	f_init_m3ua();
@@ -519,8 +561,8 @@ testcase TC_rkm_reg_static_notpermitted() runs on RAW_M3UA_CT {
 
 /* Send RKM registration; expect OK as RCTX does match config */
 testcase TC_rkm_reg_static_permitted() runs on RAW_M3UA_CT {
-	var OCT3 dpc := int2oct(23, 3); // must match config
-	var OCT4 rctx := int2oct(1023, 4);  // must match config
+	var OCT3 dpc := int2oct(mp_m3ua_configs[0].point_code, 3); // must match config
+	var OCT4 rctx := int2oct(mp_m3ua_configs[0].routing_ctx, 4);  // must match config
 
 	f_init_m3ua();
 
@@ -549,7 +591,7 @@ testcase TC_rkm_reg_dynamic_permitted() runs on RAW_M3UA_CT {
 /* try to de-register a routing key that was never registered -> error */
 testcase TC_rkm_unreg_never_registered() runs on RAW_M3UA_CT {
 	f_init_m3ua();
-	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(mp_m3ua_configs[0].routing_ctx,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_NOT_REG)}));
 	f_clear_m3ua();
 }
@@ -565,15 +607,15 @@ testcase TC_rkm_unreg_invalid() runs on RAW_M3UA_CT {
 /* try to de-register a routing key that was registered -> OK*/
 testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 	f_init_m3ua();
-	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1023,4))));
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(mp_m3ua_configs[0].routing_ctx,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_SUCCESS)}));
 	f_clear_m3ua();
 }
 
 /* try to de-register a routing key for an active ASP -> ERROR */
 testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
-	var OCT3 dpc := int2oct(23, 3); // must match config
-	var OCT4 rctx := int2oct(1023, 4);  // must match config
+	var OCT3 dpc := int2oct(mp_m3ua_configs[0].point_code, 3); // must match config
+	var OCT4 rctx := int2oct(mp_m3ua_configs[0].routing_ctx, 4);  // must match config
 
 	f_init_m3ua();
 
@@ -640,7 +682,7 @@ testcase TC_clnt_asp_act() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_init_m3ua_srv();
 
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(1055, 4));
+	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4));
 
 	f_clear_m3ua();
 }
@@ -652,7 +694,7 @@ testcase TC_clnt_asp_act_tmt_loadshare() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 	f_init_m3ua_srv();
 
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), tmt := c_M3UA_TMT_loadshare, rctx := int2oct(1055, 4));
+	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), tmt := c_M3UA_TMT_loadshare, rctx := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4));
 
 	f_clear_m3ua();
 }
@@ -660,16 +702,16 @@ testcase TC_clnt_asp_act_tmt_loadshare() runs on RAW_M3UA_CT {
 /* Test traffic being routed through "server" side STP (M3UA SG), coming back in "client"
  * side STP (M3UA ASP) */
 testcase TC_clnt_sg_to_asp() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1023, 4);
-	var OCT4 pc_sender := int2oct(23, 4);
-	var OCT4 rctx_receiver := int2oct(1055, 4);
-	var OCT4 pc_receiver := int2oct(55, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[M3UA_SRV(0)].point_code, 4);
 
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0);
 
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(1055, 4));
+	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4));
 
 	f_sleep(1.0);
 
@@ -682,16 +724,16 @@ testcase TC_clnt_sg_to_asp() runs on RAW_M3UA_CT {
 /* Test traffic being routed through "client" side STP (M3UA ASP), coming back in "server"
  * side STP (M3UA SG) */
 testcase TC_clnt_asp_to_sg() runs on RAW_M3UA_CT {
-	var OCT4 rctx_sender := int2oct(1055, 4);
-	var OCT4 pc_sender := int2oct(55, 4);
-	var OCT4 rctx_receiver := int2oct(1023, 4);
-	var OCT4 pc_receiver := int2oct(23, 4);
+	var OCT4 rctx_sender := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(mp_m3ua_configs[M3UA_SRV(0)].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(mp_m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(mp_m3ua_configs[0].point_code, 4);
 
 	f_init_m3ua();
 	f_M3UA_asp_up_act(0);
 
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(1055, 4));
+	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(mp_m3ua_configs[M3UA_SRV(0)].routing_ctx, 4));
 
 	f_sleep(1.0);
 
