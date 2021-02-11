@@ -4624,6 +4624,272 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice2() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Test MS sending Pkt Cell Change Notify twice (different tgt cell each time)
+ * while sending Pkt Neigh Data Change */
+testcase TC_nacc_outbound_pkt_cell_chg_notif_twice3() runs on RAW_PCU_Test_CT {
+	var PollFnCtx pollctx;
+	var GprsMS ms;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var CtrlMessage rx_ctrl;
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Make sure we are not affected by full cache from previous tests */
+	f_pcuvty_flush_neigh_caches();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap_gprs_def));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+
+	/* Receive first Pkt Neigh data Change, then trigger a new Pkt Cell Change Notif (different ARFCN+BSIC): */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default, single_step := true);
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* It should trigger RAC_CI resolution to start again: */
+	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+			int2str(info_ind.lac) & "." &
+			int2str(info_ind.cell_id) & "." &
+			int2str(req_arfcn + 1) & "." &
+			int2str(req_bsic + 1);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+	/* Transmit SI back to MS */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default);
+
+	/* Obtain a Downlink block and make sure it is a Pkt Cell Chg Continue */
+	f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
+}
+
+/* Test MS sending Pkt Cell Change Notification twice (different tgt cell) while sending Pkt Cell Change Continue */
+testcase TC_nacc_outbound_pkt_cell_chg_notif_twice4() runs on RAW_PCU_Test_CT {
+	var PollFnCtx pollctx;
+	var GprsMS ms;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var CtrlMessage rx_ctrl;
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Make sure we are not affected by full cache from previous tests */
+	f_pcuvty_flush_neigh_caches();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap_gprs_def));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+
+	/* Announce SI back to MS, continue NACC procedure */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default);
+
+	/* trigger a Pkt Cell Change Notif with different tgt cell */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* PCU TBF NACC state changed, so we should next receive a dummy block: */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* It should trigger RAC_CI resolution to start again: */
+	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+			int2str(info_ind.lac) & "." &
+			int2str(info_ind.cell_id) & "." &
+			int2str(req_arfcn + 1) & "." &
+			int2str(req_bsic + 1);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+	/* Transmit SI back to MS */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default);
+
+	/* Obtain a Downlink block and make sure it is a Pkt Cell Chg Continue */
+	f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
+}
+
+/* Test MS sending Pkt Cell Change Notification twice (different tgt cell) while waiting for Pkt Cell Change Continue CTRL ACK*/
+testcase TC_nacc_outbound_pkt_cell_chg_notif_twice5() runs on RAW_PCU_Test_CT {
+	var PollFnCtx pollctx;
+	var GprsMS ms;
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var CtrlMessage rx_ctrl;
+	var GsmArfcn req_arfcn := 862;
+	var uint6_t req_bsic := 43;
+
+	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Make sure we are not affected by full cache from previous tests */
+	f_pcuvty_flush_neigh_caches();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Send PACKET RESOURCE REQUEST */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap_gprs_def));
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Start NACC from MS side */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn, req_bsic);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* osmo-pcu should now ask for resolution: */
+	f_ipa_ctrl_wait_link_up();
+	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+				    int2str(info_ind.lac) & "." &
+				    int2str(info_ind.cell_id) & "." &
+				    int2str(req_arfcn) & "." &
+				    int2str(req_bsic);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+
+	/* Announce SI back to MS, continue NACC procedure */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default);
+
+	/* Obtain a Downlink block and make sure it is a Pkt Cell Chg Continue */
+	f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* trigger a Pkt Cell Change Notif with different tgt cell */
+	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
+	/* PCU TBF NACC state changed, so we should next receive a dummy block: */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+
+	/* It should trigger RAC_CI resolution to start again: */
+	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+			int2str(info_ind.lac) & "." &
+			int2str(info_ind.cell_id) & "." &
+			int2str(req_arfcn + 1) & "." &
+			int2str(req_bsic + 1);
+	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	/* RIM procedure: */
+	as_outbound_nacc_rim_resolve(info_ind);
+	/* Transmit SI back to MS */
+	f_ms_handle_pkt_neighbor_cell_data(ms, si_default);
+
+	/* Obtain a Downlink block and make sure it is a Pkt Cell Chg Continue */
+	f_rx_rlcmac_dl_block(dl_block, sched_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_CELL_CHG_CONTINUE))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
+		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
+		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	}
+}
+
 /* Send a RIM RAN info request to the PCU and verify the response, we expect
  * getting the system information back which we have transfered to the PCU via
  * PCUIF on startup. */
@@ -4858,6 +5124,9 @@ control {
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_dup5() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice2() );
+	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice3() );
+	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice4() );
+	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice5() );
 
 	execute( TC_rim_ran_info_req_single_rep() );
 	execute( TC_rim_ran_info_req_single_rep_no_si() );
