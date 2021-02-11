@@ -533,6 +533,17 @@ runs on MS_BTS_IFACE_CT {
 	}
 }
 
+altstep as_ms_rx_fail_dummy(inout GprsMS ms, template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
+runs on MS_BTS_IFACE_CT {
+	var BTS_PDTCH_Block data_msg;
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL())) -> value data_msg {
+		setverdict(fail, "Unexpected Dummy Ctrl block ", data_msg);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+}
+
 altstep as_ms_rx_pkt_ass_pacch(inout GprsMS ms, out uint32_t poll_fn,
 			       template RlcmacDlBlock t_pkt_ass := ?,
 			       template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum,
@@ -805,6 +816,101 @@ runs on MS_BTS_IFACE_CT {
 	}
 
 	BTS.send(pcu_msg_cnf);
+}
+
+
+altstep as_ms_rx_pkt_neighbor_cell_data(inout GprsMS ms, octetstring exp_si,
+					inout uint5_t exp_container_idx /* := 0 */,
+					inout integer si_offset /* := 0 */,
+					template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
+runs on MS_BTS_IFACE_CT {
+	var integer len;
+	var octetstring exp_si_chunk;
+	var GlobalTfi gtfi := { is_dl_tfi := false, tfi := ms.ul_tbf.tfi };
+	var BTS_PDTCH_Block data_msg;
+	var boolean do_repeat := true;
+
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr, tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+							tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_NEIGH_CELL_DATA(gtfi, exp_container_idx))
+			)) -> value data_msg {
+
+		var PacketNeighbourCellData neigh_data := data_msg.dl_block.ctrl.payload.u.neighbour_cell_data;
+		var PacketNeighbourCellDataContainer cont := neigh_data.container_list[0];
+
+		if (cont.cd_length == 31) { /* continues on next message */
+			len := lengthof(cont.container_data);
+			exp_si_chunk := substr(exp_si, si_offset, len);
+			if (cont.container_data != exp_si_chunk) {
+				setverdict(fail, "Rx unexpected SI chunk at offset ", si_offset, ": ",
+					   cont.container_data, " vs exp ", exp_si_chunk);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			si_offset := si_offset + len;
+		} else if (cont.cd_length == 0) {
+			/* we are done */
+			if (si_offset != lengthof(exp_si)) {
+				setverdict(fail, "Rx unexpectd SI length ", si_offset,
+					   " vs exp ", lengthof(exp_si));
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			do_repeat := false;
+		} else { /* data length, last message */
+			len := cont.cd_length;
+			exp_si_chunk := substr(exp_si, si_offset, len);
+			if (cont.container_data != exp_si_chunk) {
+				setverdict(fail, "Rx unexpected SI chunk at offset ", si_offset, ": ",
+					   cont.container_data, " vs exp ", exp_si_chunk);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			si_offset := si_offset + len;
+			/* we are done */
+			if (si_offset != lengthof(exp_si)) {
+				setverdict(fail, "Rx unexpectd SI length ", si_offset,
+					   " vs exp ", lengthof(exp_si));
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			do_repeat := false;
+		}
+
+		exp_container_idx := exp_container_idx + 1;
+
+		if (do_repeat) {
+			BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+						  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+						  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+						  block_nr := nr.blk_nr));
+			repeat;
+		}
+	}
+}
+
+/* Handle groups of PKT NEIGHBOUR CELL DATA packets */
+function f_ms_handle_pkt_neighbor_cell_data(inout GprsMS ms, octetstring exp_si)
+runs on MS_BTS_IFACE_CT {
+	var uint5_t exp_container_idx := 0;
+	var integer si_offset := 0;
+	var BTS_PDTCH_Block data_msg;
+	template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum;
+
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[exp_container_idx == 0] as_ms_rx_ignore_dummy(ms, nr);
+	[exp_container_idx > 0]	 as_ms_rx_fail_dummy(ms, nr);
+	[]	as_ms_rx_pkt_neighbor_cell_data(ms, exp_si, exp_container_idx, si_offset, nr);
+	[] 	BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr, tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DL_CTRL(?, ?)
+			)) -> value data_msg {
+				var GlobalTfi gtfi := { is_dl_tfi := false, tfi := ms.ul_tbf.tfi };
+				setverdict(fail, "Rx unexpected DL block: ", data_msg.dl_block, " vs exp ",
+					   tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_NEIGH_CELL_DATA(gtfi, exp_container_idx)));
+				f_shutdown(__BFILE__, __LINE__);
+		}
+	};
+
+	return;
 }
 
 ////////////////////////
