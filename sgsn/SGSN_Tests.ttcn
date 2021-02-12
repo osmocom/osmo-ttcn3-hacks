@@ -371,7 +371,7 @@ function f_init(BcdMccMnc mcc_mnc := '262F42'H) runs on test_CT {
 			}
 		}
 	};
-	g_gb[2].cfg := {
+	g_gb[2].cfg := { /* [2] configured to have same RAC as [1] */
 		nsei := 98,
 		sgsn_role := false,
 		bvc := {
@@ -381,7 +381,7 @@ function f_init(BcdMccMnc mcc_mnc := '262F42'H) runs on test_CT {
 					ra_id := {
 						lai := {
 							mcc_mnc := mcc_mnc,
-							lac := 13300
+							lac := 13200
 						},
 						rac := 0
 					},
@@ -844,11 +844,19 @@ private function f_gmm_gsup_lu_isd() runs on BSSGP_ConnHdlr {
 	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
 }
 
-friend function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres, integer ran_index := 0) runs on BSSGP_ConnHdlr {
-	var RoutingAreaIdentificationV old_ra := f_random_RAI();
-	var template PDU_L3_MS_SGSN attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra, false, false, omit, omit);
+friend function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres, integer ran_index := 0,
+			     template (omit) RoutingAreaIdentificationV old_ra := omit) runs on BSSGP_ConnHdlr {
+	var RoutingAreaIdentificationV old_ra_val;
+	var template PDU_L3_MS_SGSN attach_req;
 	var PDU_L3_SGSN_MS l3_mt;
 
+	if (istemplatekind(old_ra, "omit")) {
+		old_ra_val := f_random_RAI();
+	} else {
+		old_ra_val := valueof(old_ra);
+	}
+
+	attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), old_ra_val, false, false, omit, omit);
 	/* indicate R99 capability of the MS to enable UMTS AKA in presence of
 	 * 3G auth vectors */
 	attach_req.msgs.gprs_mm.attachRequest.msNetworkCapability.msNetworkCapabilityV.revisionLevelIndicatior := '1'B;
@@ -1612,12 +1620,12 @@ runs on BSSGP_ConnHdlr {
 }
 
 /* Transceive given 'payload' as MO message from Gb -> OsmoSGSN -> GTP */
-private function f_gtpu_xceive_mo(inout PdpActPars apars, octetstring payload, integer ran_index := 0)
+private function f_gtpu_xceive_mo(inout PdpActPars apars, octetstring payload, integer ran_index := 0, uint9_t n_u := 0)
 runs on BSSGP_ConnHdlr {
 	/* Send PDU via SNDCP/LLC/BSSGP/NS via simulated MS/PCU to the SGSN */
 	var GtpPeer peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
 	var PDU_SN sndcp := valueof(ts_SN_UD(apars.nsapi, payload));
-	BSSGP[ran_index].send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, 0));
+	BSSGP[ran_index].send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, n_u));
 	/* Expect PDU via GTP from SGSN on simulated GGSN */
 	alt {
 	[] GTP.receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload));
@@ -3230,6 +3238,137 @@ testcase TC_bssgp_rim_single_report() runs on test_CT {
 	f_cleanup();
 }
 
+/* Test if the SGSN routes traffic to new cell after the MS attached to it */
+private function f_TC_cell_change_different_rai_ci_attach(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	/* first perform regular attach */
+	f_gmm_attach(false, false, ran_index := 0);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars, ran_index := 0);
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 0);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 0);
+
+	/* Now attach on different cell: */
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[0]);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[1]);
+	g_pars.net.expect_auth	:= false;
+	f_gmm_attach(false, false, ran_index := 1, old_ra := f_cellid_to_RAI(g_pars.bssgp_cell_id[0]));
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 1);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 1, n_u := 1);
+}
+testcase TC_cell_change_different_rai_ci_attach() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_cell_change_different_rai_ci_attach), testcasename(), g_gb, 68);
+	vc_conn.done;
+	f_cleanup();
+}
+
+/* Test if the SGSN routes traffic to new cell after the MS attached to it */
+/* Assumption: g_gb[1] and g_gb[2] configured with same RAC */
+private function f_TC_cell_change_different_ci_attach(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[0]);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[1]);
+
+	/* first perform regular attach */
+	f_gmm_attach(false, false, ran_index := 1);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars, ran_index := 1);
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 1);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 1);
+
+	/* Now attach on different cell: */
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[1]);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[2]);
+	g_pars.net.expect_auth	:= false;
+	f_gmm_attach(false, false, ran_index := 2, old_ra := f_cellid_to_RAI(g_pars.bssgp_cell_id[1]));
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 2);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 2, n_u := 1);
+}
+testcase TC_cell_change_different_ci_attach() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_cell_change_different_ci_attach), testcasename(), g_gb, 69);
+	vc_conn.done;
+	f_cleanup();
+}
+
+/* Test if the SGSN silently drops MO data message coming from new BVCI if RAC changed (eg. cell change) */
+private function f_TC_cell_change_different_rai_ci_data(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	/* first perform regular attach */
+	f_gmm_attach(false, false, ran_index := 0);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars, ran_index := 0);
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 0);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 0);
+
+	/* Send some data over new bvci, it should be silently discarded since
+	 * RAC changed and SGSN expects a RAU to occur in that case */
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[1]);
+	var octetstring payload := f_rnd_octstring(200);
+	var PDU_SN sndcp := valueof(ts_SN_UD(apars.nsapi, payload));
+	BSSGP[1].send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, 1));
+	var GtpPeer peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
+	timer T := 2.0;
+	T.start;
+	alt {
+	[] GTP.receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload)) {
+		setverdict(fail, "Unexpected GTP message");
+	}
+	[] T.timeout { setverdict(pass); }
+	}
+
+	/* Expect SGSN to continue routing DL data to last known NSEI+BVCI */
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[1]);
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 0);
+}
+testcase TC_cell_change_different_rai_ci_data() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_cell_change_different_rai_ci_data), testcasename(), g_gb, 70);
+	vc_conn.done;
+	f_cleanup();
+}
+
+/* Test if the SGSN routes traffic to new cell after the MS switched cell without re-attaching */
+/* Assumption: g_gb[1] and g_gb[2] configured with same RAC */
+private function f_TC_cell_change_different_ci_data(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[0]);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[1]);
+
+	/* first perform regular attach */
+	f_gmm_attach(false, false, ran_index := 1);
+	/* then activate PDP context */
+	f_pdp_ctx_act(apars, ran_index := 1);
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 1);
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 1);
+
+	/* Now attach on different cell: */
+	f_bssgp_client_unregister(g_pars.imsi, BSSGP_PROC[1]);
+	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[2]);
+
+	f_gtpu_xceive_mo(apars, f_rnd_octstring(200), ran_index := 2, n_u := 1);
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := 2);
+}
+testcase TC_cell_change_different_ci_data() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_cell_change_different_ci_data), testcasename(), g_gb, 71);
+	vc_conn.done;
+	f_cleanup();
+}
+
 control {
 	execute( TC_attach() );
 	execute( TC_attach_mnc3() );
@@ -3293,6 +3432,11 @@ control {
 	execute( TC_paging_ps() );
 
 	execute( TC_bssgp_rim_single_report() );
+
+	execute( TC_cell_change_different_rai_ci_attach() );
+	execute( TC_cell_change_different_rai_ci_data() );
+	execute( TC_cell_change_different_ci_attach() );
+	execute( TC_cell_change_different_ci_data() );
 
 	/* At the end, may crash osmo-sgsn, see OS#3957, OS#4245 */
 	execute( TC_attach_req_id_req_ra_update() );
