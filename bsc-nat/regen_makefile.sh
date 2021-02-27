@@ -2,7 +2,7 @@
 
 MAIN=BSCNAT_Tests.ttcn
 
-FILES="*.ttcn *.ttcnpp SCCP_EncDec.cc IPA_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc RTP_EncDec.cc SDP_EncDec.cc *.c MGCP_CodecPort_CtrlFunctDef.cc TELNETasp_PT.cc"
+FILES="*.ttcn *.ttcnpp SCCP_EncDec.cc IPA_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc RTP_EncDec.cc SDP_EncDec.cc *.c MGCP_CodecPort_CtrlFunctDef.cc TELNETasp_PT.cc Native_FunctionDefs.cc"
 
 export CPPFLAGS_TTCN3="-DIPA_EMULATION_SCCP -DIPA_EMULATION_MGCP -DIPA_EMULATION_CTRL -DRAN_EMULATION_BSSAP -DRAN_EMULATION_MGCP -DRAN_EMULATION_CTRL -DUSE_MTP3_DISTRIBUTOR"
 
