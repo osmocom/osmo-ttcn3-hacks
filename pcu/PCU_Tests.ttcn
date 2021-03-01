@@ -1313,6 +1313,185 @@ testcase TC_t3169() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify that a Downlink TBF is kept available until T3191 fires, at which
+ * point the TBF is no longer available. In order to get to start of T3191, we
+ * have to wait for x2031 since that marks the IDLE TBF time, that is, the delay
+ * until TBF release procedure starts after draining DL queue.  */
+testcase TC_x2031_t3191() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var RlcmacDlBlock dl_block;
+	var octetstring data1 := f_rnd_octstring(200);
+	var octetstring data2 := f_rnd_octstring(10);
+	var uint32_t dl_fn;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+	var GprsMS ms;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	/* Set timer to 1 sec (default 5) to speedup test: */
+	info_ind.t3191 := 1;
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data1));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+
+	while (true) {
+		f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, ?, ?);
+
+		/* Keep Ack/Nack description updated (except for last BSN) */
+		f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, dl_fn));
+			break;
+		}
+	}
+
+	/* Now we wait for IDLE TBF timer (X2031) to time out and receive a FINAL ACK */
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[] as_ms_rx_ignore_dummy(ms, nr);
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   ?)) -> value data_msg {
+		if (data_msg.dl_block.data.mac_hdr.hdr_ext.fbi) {
+			log("Received FINAL_ACK");
+			ms.dl_tbf.acknack_desc.final_ack := '1'B;
+			break;
+		}
+		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, data_msg.dl_block);
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, data_msg.raw.fn));
+		}
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	/* Avoid ACKing the last RLC data block on purpose here, wait for t3191
+	   to time out. We simply sleep instead of requesting blocks because
+	   otherwise retransmissions would keep restarting the timer. */
+	f_sleep(int2float(info_ind.t3191));
+
+	/* The TBF should be freed now, so new data should trigger an Assignment: */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data2));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	/* Now that we confirmed the new assignment in the dl-tbf, lets receive the data and ack it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data2, 0);
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '1'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Same as TC_zero_x2031_t3191, but this time without x2031 (immediate FINAL_ACK).  */
+testcase TC_zero_x2031_t3191() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var RlcmacDlBlock dl_block;
+	var octetstring data1 := f_rnd_octstring(1400);
+	var octetstring data2 := f_rnd_octstring(10);
+	var uint32_t dl_fn;
+	var GprsMS ms;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	/* Set timer to 1 sec (default 5) to speedup test: */
+	info_ind.t3191 := 1;
+	f_init_raw(testcasename(), info_ind);
+
+	f_vty_config2(PCUVTY, {"pcu"}, "timer X2031 0");
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data1));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+
+	/* Send enough DL data to at least be able to DL ACK once (excl the
+	 * FINAL_ACK one), so that PCU sees we are listening in PDCH and avoids
+	 * other code paths like trying to Imm Assign on CCCH again, etc.. */
+	while (true) {
+		f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, ?, ?);
+
+		if (dl_block.data.mac_hdr.hdr_ext.fbi) {
+			log("Received FINAL_ACK");
+			ms.dl_tbf.acknack_desc.final_ack := '1'B;
+			break;
+		}
+
+		/* Keep Ack/Nack description updated (except for last BSN) */
+		f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, dl_fn));
+		}
+	}
+
+	/* Avoid ACKing the last RLC data block on purpose here, wait for t3191
+	   to time out. We simply sleep instead of requesting blocks because
+	   otherwise retransmissions would keep restarting the timer. */
+	f_sleep(int2float(info_ind.t3191));
+
+	/* The TBF should be freed now, so new data should trigger an Assignment: */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data2));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	/* Now that we confirmed the new assignment in the dl-tbf, lets receive the data and ack it */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data2, 0);
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '1'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify that a Downlink TBF can be assigned using PACCH shortly after the
  * release of prev DL TBF due to MS staying in PDCH for a while (T3192, in PCU
  * T3193) after DL TBF release */
@@ -5231,6 +5410,8 @@ control {
 	execute( TC_mcs_initial_dl() );
 	execute( TC_mcs_max_dl() );
 	execute( TC_t3169() );
+	execute( TC_x2031_t3191() );
+	execute( TC_zero_x2031_t3191() );
 	execute( TC_t3193() );
 	execute( TC_countdown_procedure() );
 	execute( TC_ul_all_sizes() );
