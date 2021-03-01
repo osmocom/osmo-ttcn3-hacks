@@ -1547,6 +1547,126 @@ testcase TC_t3193() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Verify after N3105_MAX is reached, T3195 is started and upon timeout TBF is
+   freed and no longer available. Trigger it by sending DL blocks and never DL
+   ACKing the data (which are requested through RRBP) */
+testcase TC_n3105_max_t3195() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var RlcmacDlBlock dl_block;
+	var octetstring data1 := f_rnd_octstring(1000);
+	var octetstring data2 := f_rnd_octstring(10);
+	var uint32_t dl_fn;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+	var GprsMS ms;
+	const integer N3105_MAX := 2;
+	var integer N3105 := 0;
+	timer T_3195 := 1.0;
+	var integer num_poll_recv := 0;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	/* Speedup test: */
+	info_ind.n3105 := N3105_MAX;
+	info_ind.t3195 := 1;
+	f_init_raw(testcasename(), info_ind);
+
+	/* Disable "MS delay release" timer, to avoid old DL data kept in cached
+	 * MS and retransmitted after the TBF is released and later on created
+	 * (because the MS is reused)  */
+	f_vty_config2(PCUVTY, {"pcu"}, "timer X2030 0");
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data1));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+
+	/* Now we go on receiving DL data and not answering RRBP: */
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[not T_3195.running] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DATA)) -> value data_msg {
+		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			if (num_poll_recv == 0) {
+				/* ACK first one so PCU detects we are there and doesn't retransmit Imm Ass */
+				f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, data_msg.dl_block);
+				f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+						 f_dl_block_ack_fn(data_msg.dl_block, data_msg.raw.fn));
+			} else {
+				log("Ignoring RRBP ", num_poll_recv);
+				N3105 := N3105 + 1;
+			}
+			num_poll_recv  := num_poll_recv + 1;
+		}
+
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	/* At this point in time (N3105_MAX reached), PCU already moved TBF to
+	 * RELEASE state so no data for it is tx'ed, hence the dummy blocks:
+	 */
+	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL)) -> value data_msg {
+		if (not T_3195.running) {
+			T_3195.start;
+			/* We even send some new data, nothing should be sent to MS */
+			BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data1));
+		}
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] T_3195.timeout {
+		log("T_3195 timeout");
+		/* Done in alt */
+		}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	/* after T_3195 timeout, TBF is released */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data2));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data2, 0);
+
+	/* ACK the DL block */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '1'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify PCU handles correctly Countdown Procedure based on BS_CV_MAX */
 testcase TC_countdown_procedure() runs on RAW_PCU_Test_CT  {
 	var RlcmacDlBlock dl_block;
@@ -5413,6 +5533,7 @@ control {
 	execute( TC_x2031_t3191() );
 	execute( TC_zero_x2031_t3191() );
 	execute( TC_t3193() );
+	execute( TC_n3105_max_t3195() );
 	execute( TC_countdown_procedure() );
 	execute( TC_ul_all_sizes() );
 	execute( TC_ul_data_toolong_fills_padding() );
