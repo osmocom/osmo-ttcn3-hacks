@@ -2130,6 +2130,97 @@ testcase TC_ul_flow_multiple_llc_blocks() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Validate an Imm Assignment is retransmitted if first RRBP requesting DL
+ * ACK/NACK is not answered */
+testcase TC_dl_no_ack_retrans_imm_ass() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring data1 := f_rnd_octstring(200);
+	var octetstring data2 := f_rnd_octstring(10);
+	var uint32_t dl_fn;
+	var GprsMS ms;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename())
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data1));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+
+	/* Recv DL data until receiving RRBP to DL ACK (because it's last queued DL data) */
+	while (true) {
+		f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, ?, ?);
+
+		/* Keep Ack/Nack description updated (except for last BSN) */
+		f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			/* Don't transmit DL ACK here on purpose ignore it */
+			break;
+		}
+	}
+
+	/* PCU starts whole process again */
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+
+	/* Recv DL data until receiving RRBP to DL ACK (because it's last queued
+	/* DL data), after that we receive only DUMMY blocks so we are done */
+	var boolean data_received := false;
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[data_received] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL)) { /* done */ }
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DATA)) -> value data_msg {
+		data_received := true;
+		f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, data_msg.dl_block);
+		if (data_msg.dl_block.data.mac_hdr.hdr_ext.fbi) {
+			log("Received FINAL_ACK");
+			ms.dl_tbf.acknack_desc.final_ack := '1'B;
+		}
+		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, data_msg.raw.fn));
+		}
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify allocation and use of multislot tbf, triggered by MS class provided in SGSN. SYS#5131 */
 testcase TC_dl_multislot_tbf_ms_class_from_sgsn() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
@@ -5153,6 +5244,7 @@ control {
 	execute( TC_imm_ass_dl_block_retrans() );
 	execute( TC_dl_flow_more_blocks() );
 	execute( TC_ul_flow_multiple_llc_blocks() );
+	execute( TC_dl_no_ack_retrans_imm_ass() );
 	execute( TC_paging_cs_from_bts() );
 	execute( TC_paging_cs_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_cs_from_sgsn_sign() );
