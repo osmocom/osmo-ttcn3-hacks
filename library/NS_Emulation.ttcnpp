@@ -214,6 +214,11 @@ module NS_Emulation {
 		var NSConfiguration g_config;
 		var charstring g_id;
 
+		/* references to the endpoint provider components */
+		var IpEndpointTable g_ip_endpoints := {};
+		/* control port for NS-IP provider */
+		port NSPIP_PROC_PT NSPIP_PROC;
+
 		/* references to the per-NSVC components */
 		var NsvcTable g_nsvcs := {};
 		/* list of indexes to g_nsvcs[] of currently unblocked NSVCs */
@@ -226,6 +231,17 @@ module NS_Emulation {
 		NsvcState state
 	};
 	type record of NsvcTableEntry NsvcTable;
+	type record IpEndpointTableEntry {
+		/* configuration */
+		AddressFamily address_family,
+		PortNumber local_udp_port,
+		charstring local_ip,
+		uint8_t data_weight,
+		uint8_t signalling_weight,
+		/* state */
+		NS_Provider_IPL4_CT provider_ct
+	};
+	type record of IpEndpointTableEntry IpEndpointTable;
 
 	/* internal port from the NS-VC point of view */
 	type port NSint_SP_PT message {
@@ -267,20 +283,82 @@ module NS_Emulation {
 		ForceAliveState		(3)
 	};
 
+	function f_ipep_find(AddressFamily af, PortNumber local_udp_port, charstring local_ip,
+			     out IpEndpointTableEntry ret)
+	runs on NS_CT return boolean {
+		var integer i;
+		for (i := 0; i < lengthof(g_ip_endpoints); i := i+1) {
+			var IpEndpointTableEntry ipep := g_ip_endpoints[i];
+			if (ipep.address_family == af and ipep.local_udp_port == local_udp_port and
+			    ipep.local_ip == local_ip) {
+				ret := ipep;
+				return true;
+			}
+		}
+		return false
+	}
+
+	/* find or create IP endpoint component for [local part of] nsvc_cfg */
+	function f_ipep_find_or_create(NSVCConfiguration nsvc_cfg)
+	runs on NS_CT return NS_Provider_IPL4_CT {
+		var IpEndpointTableEntry ipep;
+		if (f_ipep_find(nsvc_cfg.provider.ip.address_family,
+				nsvc_cfg.provider.ip.local_udp_port,
+				nsvc_cfg.provider.ip.local_ip, ipep)) {
+			return ipep.provider_ct;
+		} else {
+			var charstring nsvc_id := g_id & "-NSVCI" & int2str(nsvc_cfg.nsvci);
+			ipep := {
+				address_family := nsvc_cfg.provider.ip.address_family,
+				local_udp_port := nsvc_cfg.provider.ip.local_udp_port,
+				local_ip := nsvc_cfg.provider.ip.local_ip,
+				data_weight := nsvc_cfg.provider.ip.data_weight,
+				signalling_weight := nsvc_cfg.provider.ip.signalling_weight,
+				provider_ct := -
+			};
+			/* Create ipep and add it to the list */
+			log("Creating NSIP provider for ",  ipep.local_ip, ":",
+			    ipep.local_udp_port);
+			ipep.provider_ct := NS_Provider_IPL4_CT.create(nsvc_id & "-provIP");
+			connect(self:NSPIP_PROC, ipep.provider_ct:PROC);
+			ipep.provider_ct.start(NS_Provider_IPL4.main(nsvc_cfg, g_config, nsvc_id));
+			g_ip_endpoints := g_ip_endpoints & { ipep };
+			return ipep.provider_ct;
+		}
+	}
+
 	/* add one NSVC (component and table entry */
 	function f_nsvc_add(NSVCConfiguration nsvc_cfg) runs on NS_CT {
 		var charstring nsvc_id := g_id & "-NSVCI" & int2str(nsvc_cfg.nsvci);
 		var NsvcTableEntry te;
+		var NS_Provider_IPL4_CT vc_ipep := null;
+
+		/* For the IP provider, we have one provider component per local endpoint,
+		 * which we must create before adding the NSVcs (for each remote endpoint)
+		 * to it */
+		if (ischosen(nsvc_cfg.provider.ip)) {
+			vc_ipep := f_ipep_find_or_create(nsvc_cfg);
+		}
+
+		/* Start the actual NSVC component */
 
 		te.cfg := nsvc_cfg;
 		te.vc_conn := NSVC_CT.create(nsvc_id);
 		te.state := NSVC_S_DEAD_BLOCKED;
 
 		connect(self:NSVC, te.vc_conn:NS_SP);
-		te.vc_conn.start(NSVCStart(nsvc_cfg, g_config, nsvc_id));
+		log("Starting NSVC component for ",  nsvc_cfg);
+		te.vc_conn.start(NSVCStart(nsvc_cfg, g_config, nsvc_id, vc_ipep));
 
 		g_nsvcs := g_nsvcs & { te };
 		/* no need to add to g_unblocked_nsvcs, as state is always DEAD_BLOCKED above */
+
+		/* For the IP provider, we must explicitly associate each NSVC with it */
+		if (ischosen(nsvc_cfg.provider.ip)) {
+			/* this causes NS_Provider_IPL4.f_nsvc_add() to be executed */
+			f_nspip_add_nsvc(vc_ipep, nsvc_cfg.provider.ip.remote_ip,
+					 nsvc_cfg.provider.ip.remote_udp_port, te.vc_conn);
+		}
 	}
 
 	function f_nsvc_find_idx(Nsvci nsvci) runs on NS_CT return integer {
@@ -555,19 +633,18 @@ module NS_Emulation {
 		timer Tns_reset := 10.0;
 	}
 
-	function NSVCStart(NSVCConfiguration init_config, NSConfiguration init_g_config, charstring id := testcasename()) runs on NSVC_CT {
+	function NSVCStart(NSVCConfiguration init_config, NSConfiguration init_g_config, charstring id :=
+testcasename(), NS_Provider_IPL4_CT nsp_ip := null) runs on NSVC_CT {
 		g_nsvc_config := init_config;
 		g_config := init_g_config;
-		f_init(id & "-NSVCemu" & int2str(g_nsvc_config.nsvci));
+		f_init(id & "-NSVCemu" & int2str(g_nsvc_config.nsvci), nsp_ip);
 		f_ScanEvents();
 	}
 
-	private function f_init(charstring id) runs on NSVC_CT {
+	private function f_init(charstring id, NS_Provider_IPL4_CT nsp_ip) runs on NSVC_CT {
 		if (ischosen(g_nsvc_config.provider.ip)) {
-			/* Connect the UDP socket */
-			vc_NSP_IP := NS_Provider_IPL4_CT.create(id & "-provIP");
-			connect(self:NSCP, vc_NSP_IP:NSE);
-			vc_NSP_IP.start(NS_Provider_IPL4.main(g_nsvc_config, g_config, id));
+			/* the provider already exists; we just associate with it */
+			vc_NSP_IP := nsp_ip
 #ifdef NS_EMULATION_FR
 		} else if (ischosen(g_nsvc_config.provider.fr)) {
 			vc_NSP_FR := NS_Provider_FR_CT.create(id & "-provFR");
