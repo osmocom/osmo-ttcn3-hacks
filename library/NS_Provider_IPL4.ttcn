@@ -1,5 +1,5 @@
 /* NS Provider for NS/UDP/IP
- * (C) 2020 Harald Welte <laforge@gnumonks.org>
+ * (C) 2020-2021 Harald Welte <laforge@gnumonks.org>
  * contributions by sysmocom - s.f.m.c. GmbH
  * All rights reserved.
  *
@@ -9,43 +9,144 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+/* This provider can be operated in two modes:
+ *
+ * 1) the "classic" mode, where - similar to the NS_Provider_FR - there is
+ *    only one NSVC per provider.  In this mode, the "NSE" port is used to
+ *    exchange data with the next higher level component, such as a NSVC_CT
+ *    or a RAW_NS_CT.
+ *
+ * 2) the enew "endpoint" mode, where one provider can host a number of different
+ *    NSVCs.  This is needed in most non-trivial IP-SNS scenarios.   The 'NSE'
+ *    port of this component is no longer used.  Instead, there is a NSVC port
+ *    array, one of which will be used for each NSVC.   The NSVCs are dynamically
+ *    added and removed via the PROC procedure port, controlled by NS_CT.
+ */
+
 module NS_Provider_IPL4 {
 
+import from Misc_Helpers all;
 import from NS_Emulation all;
 import from NS_Types all;
 
 import from IPL4asp_Types all;
 import from IPL4asp_PortType all;
 
+/* maximum number of NS-VCs within one Provider (== IP endpoint) */
+private const integer NUM_MAX_NSVC := 16;
+
 type component NS_Provider_IPL4_CT extends NS_Provider_CT {
 	/* down-facing port towards IPL4asp to IUT */
 	port IPL4asp_PT IPL4;
 	var integer g_conn_id := -1;
+
+	/* per-NSVC ports and state */
+	port NS_PROVIDER_PT NSVC[NUM_MAX_NSVC];
+	var PerNsvcState g_nsvc[NUM_MAX_NSVC];
+
+	/* management port via which  */
+	port NSPIP_PROC_PT PROC;
 };
 
-function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id) runs on NS_Provider_IPL4_CT {
+type record PerNsvcState {
+	charstring remote_ip,
+	PortNumber remote_port,
+	NSVC_CT	vc_nsvc
+};
 
-	/* connect socket */
+signature NSPIP_add_nsvc(charstring remote_ip, PortNumber remote_port, NSVC_CT vc_nsvc);
+signature NSPIP_del_nsvc(charstring remote_ip, PortNumber remote_port);
+
+type port NSPIP_PROC_PT procedure {
+	inout NSPIP_add_nsvc, NSPIP_del_nsvc;
+} with { extension "internal" };
+
+/* add a new NSVC to the provider */
+private function f_nsvc_add(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT
+{
+	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
+		if (g_nsvc[i].vc_nsvc == null) {
+			g_nsvc[i] := nsvc;
+			connect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
+			NSVC[i].send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_UP});
+			return;
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Overflow of g_nsvc array"));
+}
+
+private function f_nsvc_del(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT
+{
+	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
+		if (g_nsvc[i].vc_nsvc != null and
+		    g_nsvc[i].remote_ip == nsvc.remote_ip and
+		    g_nsvc[i].remote_port == nsvc.remote_port) {
+			g_nsvc[i] := {
+				remote_ip := -,
+				remote_port := -,
+				vc_nsvc := null
+			}
+			NSVC[i].send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_DOWN});
+			disconnect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
+			return;
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("attempt to delete unknown NSVC"));
+}
+
+private function f_get_nsvc_idx(charstring remote_ip, PortNumber remote_port)
+runs on NS_Provider_IPL4_CT return integer
+{
+	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
+		if (g_nsvc[i].vc_nsvc != null and
+		    g_nsvc[i].remote_ip == remote_ip and g_nsvc[i].remote_port == remote_port) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id) runs on NS_Provider_IPL4_CT {
+	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
+		g_nsvc[i].vc_nsvc := null;
+	}
+
+	/* in order to support any number of NSVC on this endpoiint, we only bind the socket
+	 * to its local ip/port, but do not connect it to the remote peer provided in 'config'. */
 	map(self:IPL4, system:IPL4);
-	var Result res := f_IPL4_connect(IPL4, config.provider.ip.remote_ip,
-					 config.provider.ip.remote_udp_port,
-					 config.provider.ip.local_ip,
-					 config.provider.ip.local_udp_port, 0, { udp := {}});
+	var Result res := f_IPL4_listen(IPL4, config.provider.ip.local_ip,
+					 config.provider.ip.local_udp_port, { udp := {}});
 	if (not ispresent(res.connId)) {
 		setverdict(fail, "Could not connect NS UDP socket ", config.provider.ip);
 		mtc.stop;
 	}
 	g_conn_id := res.connId;
-	NSE.send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_UP});
+
+	if (NSE.checkstate("Connected")) {
+		NSE.send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_UP});
+	}
 
 	/* transceive between user-facing port and UDP socket */
 	while (true) {
 	var ASP_RecvFrom rx_rf;
 	var PDU_NS rx_pdu;
+	var integer rx_idx;
+	var charstring remote_ip;
+	var PortNumber remote_port;
+	var NSVC_CT vc_nsvc;
+	var NS_CT vc_caller;
 	alt {
 
 	[] IPL4.receive(ASP_RecvFrom:?) -> value rx_rf {
-		NSE.send(dec_PDU_NS(rx_rf.msg));
+		/* we have to resolve the NS-VC based on the remote peer */
+		var integer nsvc_idx := f_get_nsvc_idx(rx_rf.remName, rx_rf.remPort);
+		if (nsvc_idx == -1) {
+			/* backwards compatibility; if there's no NSVC, send to NSE port */
+			NSE.send(dec_PDU_NS(rx_rf.msg));
+		} else {
+			/* endpoint mode; send to the per-NSVC component via NSVC port */
+			NSVC[nsvc_idx].send(dec_PDU_NS(rx_rf.msg));
+		}
 		}
 
 	[] IPL4.receive(ASP_ConnId_ReadyToRelease:?) {
@@ -54,15 +155,44 @@ function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id)
 	[] IPL4.receive(ASP_Event:?) {
 		}
 
+	[] any from NSVC.receive(PDU_NS:?) -> value rx_pdu @index value rx_idx {
+		/* we can use the port array index directly into the g_nsvc array in order
+		 * to resolve the IP + port of the remote peer to which to send */
+		var ASP_SendTo tx := {
+			connId := g_conn_id,
+			remName := g_nsvc[rx_idx].remote_ip,
+			remPort := g_nsvc[rx_idx].remote_port,
+			proto := { udp := {} },
+			msg := enc_PDU_NS(rx_pdu)
+		};
+		IPL4.send(tx);
+		}
 	[] NSE.receive(PDU_NS:?) -> value rx_pdu {
-		IPL4.send(ASP_Send:{connId := g_conn_id, proto := { udp := {} }, msg := enc_PDU_NS(rx_pdu)});
+		/* backwards compatibility: If user uses the NSE port, use the destination
+		 * provided during main() initialization */
+		var ASP_SendTo tx := {
+			connId := g_conn_id,
+			remName := config.provider.ip.remote_ip,
+			remPort := config.provider.ip.remote_udp_port,
+			proto := { udp := {} },
+			msg := enc_PDU_NS(rx_pdu)
+		};
+		IPL4.send(tx);
+		}
+
+	/* procedure port to add/remove NSVCs from this provider */
+	[] PROC.getcall(NSPIP_add_nsvc:{?,?,?}) -> param (remote_ip, remote_port, vc_nsvc) sender vc_caller {
+		f_nsvc_add(PerNsvcState:{remote_ip, remote_port, vc_nsvc});
+		PROC.reply(NSPIP_add_nsvc:{remote_ip, remote_port, vc_nsvc}) to vc_caller;
+		}
+	[] PROC.getcall(NSPIP_del_nsvc:{?,?}) -> param (remote_ip, remote_port) sender vc_caller {
+		f_nsvc_del(PerNsvcState:{remote_ip, remote_port});
+		PROC.reply(NSPIP_del_nsvc:{remote_ip, remote_port}) to vc_caller;
 		}
 
 	} /* alt */
 	} /* while */
 
 } /* main */
-
-
 
 } /* module */
