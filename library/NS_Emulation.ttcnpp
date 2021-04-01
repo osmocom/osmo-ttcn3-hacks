@@ -413,6 +413,9 @@ module NS_Emulation {
 			f_nsvc_add(nsvc_cfg);
 		}
 
+		if (g_config.handle_sns and not g_config.role_sgsn) {
+			f_sns_outbound_size_config();
+		}
 		while (true) {
 			alt {
 			[] as_ns_common() {}
@@ -473,6 +476,7 @@ module NS_Emulation {
 			}
 
 		[g_config.handle_sns and g_config.role_sgsn] as_vcg_sns_sgsn();
+		[g_config.handle_sns and not g_config.role_sgsn] as_vcg_sns_pcu();
 
 		[] NSVC.receive(tr_NsUdInd(?, ?, ?)) -> value rx_nsudi {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
@@ -543,6 +547,81 @@ module NS_Emulation {
 		for (var integer i := 0; i < lengthof(g_nsvcs); i := i+1) {
 			NSVC.send(req) to g_nsvcs[i].vc_conn;
 		}
+	}
+
+	/* perform an outbound SNS-SIZE + SNS-CONFIG */
+	private function f_sns_outbound_size_config(integer idx := 0) runs on NS_CT {
+		var NSVCConfiguration nsvc_cfg := g_config.nsvc[idx];
+		var NSVC_CT vc;
+
+		if (nsvc_cfg.provider.ip.address_family == AF_INET) {
+			NSVC.send(SnsRequest:{nsvc_cfg.nsvci, ts_SNS_SIZE(g_config.nsei, rst_flag := true,
+									  max_nsvcs := 1,
+									  num_v4 := 1, num_v6 := omit)});
+		} else {
+			NSVC.send(SnsRequest:{nsvc_cfg.nsvci, ts_SNS_SIZE(g_config.nsei, rst_flag := true,
+									  max_nsvcs := 1,
+									  num_v4 := omit, num_v6 := 1)});
+		}
+		/* expect SIZE-ACK */
+		alt {
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_SIZE_ACK(g_config.nsei, omit)}) -> sender vc;
+		[] NSVC.receive(NsStatusIndication:?) { repeat; }
+		}
+		/* send a SNS-CONFIG in response and expect a SNS-CONFIG-ACK */
+		var template (omit) IP4_Elements v4;
+		var template (omit) IP6_Elements v6;
+		gen_sns_ip_elems(v4, v6);
+		NSVC.send(SnsRequest:{nsvc_cfg.nsvci,
+				      ts_SNS_CONFIG(g_config.nsei, true, v4, v6)}) to vc;
+		alt {
+		[] as_ns_common_status() {
+			repeat;
+			}
+		[] NSVC.receive(SnsIndication:{?,
+						tr_SNS_CONFIG_ACK(g_config.nsei, omit)}) from vc {
+			/* success */
+			log("Outbound SNS Config succeeded.");
+			}
+		[] NSVC.receive(SnsIndication:{?,
+						tr_SNS_CONFIG_ACK(g_config.nsei, ?)}) from vc {
+			setverdict(fail, "Unexpected SNS-CONFIG-NACK");
+			self.stop;
+			}
+		}
+	}
+
+	/* simple IP Sub-Network Service responder for the PCU/BSS side. This is not a full implementation
+	 * of the protocol, merely sufficient to make the SGSN side happy to proceed */
+	private altstep as_vcg_sns_pcu() runs on NS_CT {
+		var SnsIndication sind;
+		var NSVC_CT vc;
+
+		/* FIXME: We assume our peer has only one endpoint */
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, true,
+				    {tr_SNS_IPv4(g_config.nsvc[0].provider.ip.remote_ip,
+						 g_config.nsvc[0].provider.ip.remote_udp_port)})})
+										-> value sind sender vc {
+			/* blindly acknowledge whatever the SGSN sends */
+			NSVC.send(SnsRequest:{sind.nsvci, ts_SNS_CONFIG_ACK(g_config.nsei, omit)}) to vc;
+			log("Inbound SNS Config succeeded.");
+			/* switch to "alive" state already before sending the SNS-CONFIG, as otherwise
+			 * there would be a race condition between internally performing the state change
+			 * of all related NS-VCs and the first incoming NS-PDU after SNS-CONFIG-ACK */
+			f_broadcast_ns_ctrl(NsCtrlRequest:ForceAliveState);
+			/* inform all NS-VC that they are now considered alive */
+			f_broadcast_ns_ctrl(NsCtrlRequest:StartAliveProcedure);
+		}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, false, ?)}) { /* ignore */}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(g_config.nsei, true, ?)}) {
+			setverdict(fail, "Unexpected SNS-CONFIG content");
+			self.stop;
+		}
+		[] NSVC.receive(SnsIndication:{?, tr_SNS_CONFIG(?, ?, ?)}) {
+			setverdict(fail, "SNS-CONFIG from unexpected NSEI");
+			self.stop;
+		}
+
 	}
 
 	/* simple IP Sub-Network Service responder for the SGSN side. This is not a full implementation
