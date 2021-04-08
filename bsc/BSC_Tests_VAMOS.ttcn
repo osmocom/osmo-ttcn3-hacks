@@ -1,0 +1,377 @@
+module BSC_Tests_VAMOS {
+
+/* Integration Tests for OsmoBSC
+ * (C) 2017-2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ *
+ * There are test cases that run in so-called 'handler mode' and test cases
+ * that run directly on top of the BSSAP and RSL CodecPorts.  The "handler mode"
+ * tests abstract the multiplexing/demultiplexing of multiple SCCP connections
+ * and/or RSL channels and are hence suitable for higher-level test cases, while
+ * the "raw" tests directly on top of the CodecPorts are more suitable for lower-
+ * level testing.
+ */
+
+import from BSC_Tests all;
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from IPL4asp_Types all;
+
+import from BSSAP_Types all;
+import from RAN_Adapter all;
+import from BSSAP_LE_Adapter all;
+import from BSSAP_LE_CodecPort all;
+import from BSSAP_LE_Types all;
+import from BSSLAP_Types all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from IPA_Emulation all;
+import from IPA_CodecPort all;
+import from IPA_Types all;
+import from IPA_Testing all;
+import from RSL_Types all;
+import from RSL_Emulation all;
+import from MGCP_Emulation all;
+import from MGCP_Templates all;
+import from MGCP_Types all;
+import from MGCP_CodecPort all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+import from StatsD_Checker all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_Types all;
+import from MobileL3_RRM_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
+
+import from SCCP_Templates all;
+import from BSSMAP_Templates all;
+import from BSSMAP_LE_Templates all;
+
+import from SCCPasp_Types all;
+
+import from GSM_SystemInformation all;
+import from GSM_RestOctets all;
+import from TCCConversion_Functions all;
+
+import from RAN_Emulation all;
+import from MSC_ConnectionHandler all;
+
+import from Native_Functions all;
+
+const integer NUM_BTS := 3;
+const integer NUM_MSC := 3;
+
+testcase TC_chan_act_to_vamos() runs on test_CT {
+	f_init_vty();
+
+	f_logp(BSCVTY, "TC_chan_act_to_vamos");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	f_vty_transceive(BSCVTY, "bts 0 trx 0 timeslot 1 sub-slot 0 activate-vamos fr");
+
+	var RSL_Message rsl;
+
+	rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+	var RSL_IE_Body chan_mode_ie;
+	if (f_rsl_find_ie(rsl, RSL_IE_CHAN_MODE, chan_mode_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_CHAN_MODE");
+		mtc.stop;
+	}
+	if (chan_mode_ie.chan_mode.ch_rate_type != RSL_CHRT_OSMO_TCH_F_VAMOS) {
+		setverdict(fail, "expected chan_mode.ch_rate_type == RSL_CHRT_OSMO_TCH_F_VAMOS");
+		mtc.stop;
+	}
+
+	var RSL_IE_Body osmo_tsc_ie;
+	if (f_rsl_find_ie(rsl, RSL_IE_OSMO_TRAINING_SEQUENCE, osmo_tsc_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_OSMO_TRAINING_SEQUENCE");
+		mtc.stop;
+	}
+
+	var RslChannelNr chan_nr := rsl.ies[0].body.chan_nr;
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 23+10));
+
+	f_sleep(1.0);
+	f_vty_transceive(BSCVTY, "show lchan summary");
+	var charstring lchan_info := f_vty_transceive_ret(BSCVTY, "show lchan 0 0 1 0");
+	if (f_strstr(lchan_info, "State: ESTABLISHED") < 0) {
+		log("'show lchan' replied: ", lchan_info);
+		setverdict(fail, "lchan is not in state ESTABLISHED");
+		mtc.stop;
+	}
+
+	f_shutdown_helper();
+}
+
+private function f_est_lchan_and_mode_modify_to_vamos() runs on MSC_ConnHdlr {
+	var PDU_BSSAP ass_cmd := f_gen_ass_req(g_pars.use_osmux);
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl(g_pars.use_osmux);
+
+	/* puzzle together the ASSIGNMENT REQ for given codec[s] */
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		ass_cmd.pdu.bssmap.assignmentRequest.codecList := g_pars.ass_codec_list;
+		exp_compl.pdu.bssmap.assignmentComplete.speechCodec.codecElements[0] :=
+								g_pars.ass_codec_list.codecElements[0];
+		if (isvalue(g_pars.expect_mr_s0_s7)) {
+			exp_compl.pdu.bssmap.assignmentComplete.speechCodec.codecElements[0].s0_7 :=
+								g_pars.expect_mr_s0_s7;
+		}
+	}
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType :=
+				f_BSSMAP_chtype_from_codec(g_pars.ass_codec_list.codecElements[0]);
+	log("expecting ASS COMPL like this: ", exp_compl);
+
+	f_establish_fully(ass_cmd, exp_compl);
+
+	/* Expecting TCH/F in timeslot 1 to be active. Let's make sure. */
+	var charstring lchan_info := f_vty_transceive_ret(BSCVTY, "show lchan 0 0 1 0");
+	if (f_strstr(lchan_info, "State: ESTABLISHED") < 0) {
+		log("'show lchan' replied: ", lchan_info);
+		setverdict(fail, "lchan is not in state ESTABLISHED");
+		mtc.stop;
+	}
+
+	f_vty_transceive(BSCVTY, "vamos modify lchan 0 0 1 0 tsc 2 3");
+
+	var RSL_Message rsl_rr;
+	RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl_rr;
+
+	var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl_rr.ies[2].body.l3_info.payload);
+	log("Rx L3 from net: ", l3);
+	if (not ischosen(l3.msgs.rrm.channelModeModify)) {
+		setverdict(fail, "Expected channelModeModify message");
+		mtc.stop;
+	}
+	f_rsl_reply(ts_RRM_ModeModifyAck(l3.msgs.rrm.channelModeModify.channelDescription,
+					 l3.msgs.rrm.channelModeModify.channelMode), rsl_rr);
+
+	var RSL_Message rsl;
+	RSL.receive(tr_RSL_MODE_MODIFY_REQ(g_chan_nr, ?)) -> value rsl;
+
+	var RSL_IE_Body chan_mode_ie;
+	if (f_rsl_find_ie(rsl, RSL_IE_CHAN_MODE, chan_mode_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_CHAN_MODE");
+		mtc.stop;
+	}
+	if (chan_mode_ie.chan_mode.ch_rate_type != RSL_CHRT_OSMO_TCH_F_VAMOS) {
+		setverdict(fail, "expected chan_mode.ch_rate_type == RSL_CHRT_OSMO_TCH_F_VAMOS");
+		mtc.stop;
+	}
+
+	var RSL_IE_Body osmo_tsc_ie;
+	if (f_rsl_find_ie(rsl, RSL_IE_OSMO_TRAINING_SEQUENCE, osmo_tsc_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_OSMO_TRAINING_SEQUENCE");
+		mtc.stop;
+	}
+
+	RSL.send(ts_RSL_MODE_MODIFY_ACK(g_chan_nr));
+	f_sleep(1.0);
+	lchan_info := f_vty_transceive_ret(BSCVTY, "show lchan 0 0 1 0");
+	if (f_strstr(lchan_info, "State: ESTABLISHED") < 0) {
+		log("'show lchan' replied: ", lchan_info);
+		setverdict(fail, "lchan is not in state ESTABLISHED");
+		mtc.stop;
+	}
+}
+
+private function f_TC_mode_modify_to_vamos(charstring id) runs on MSC_ConnHdlr {
+	f_est_lchan_and_mode_modify_to_vamos();
+}
+
+testcase TC_mode_modify_to_vamos() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	vc_conn := f_start_handler(refers(f_TC_mode_modify_to_vamos), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+private function f_est_and_reassign_to_secondary_lchan(integer reassign_to_tn := -1) runs on MSC_ConnHdlr {
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+
+	/* puzzle together the ASSIGNMENT REQ for given codec[s] */
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		ass_cmd.pdu.bssmap.assignmentRequest.codecList := g_pars.ass_codec_list;
+		exp_compl.pdu.bssmap.assignmentComplete.speechCodec.codecElements[0] :=
+								g_pars.ass_codec_list.codecElements[0];
+		if (isvalue(g_pars.expect_mr_s0_s7)) {
+			exp_compl.pdu.bssmap.assignmentComplete.speechCodec.codecElements[0].s0_7 :=
+								g_pars.expect_mr_s0_s7;
+		}
+	}
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType :=
+				f_BSSMAP_chtype_from_codec(g_pars.ass_codec_list.codecElements[0]);
+	log("expecting ASS COMPL like this: ", exp_compl);
+
+	f_establish_fully(ass_cmd, exp_compl);
+
+	f_sleep(1.0);
+
+	var RslChannelNr new_chan_nr := g_chan_nr;
+	if (reassign_to_tn < 0) {
+		reassign_to_tn := g_chan_nr.tn + 1;
+	}
+	new_chan_nr.tn := reassign_to_tn;
+
+	activate(as_Media_mgw());
+
+	/* 128 is the TEI for trx 0's VAMOS shadow */
+	f_rslem_register(128, new_chan_nr, RSL_PROC);
+	log("f_rslem_register(128, new_chan_nr = ", new_chan_nr, ")");
+
+	f_vty_transceive(BSCVTY, "bts 0 trx 0 timeslot " & int2str(g_chan_nr.tn) & " sub-slot 0"
+			 & " reassign-to trx 0 timeslot " & int2str(new_chan_nr.tn) & " vamos-sub-slot 0 tsc 4 2");
+	/* RSL CHAN ACT is ACKed by RSL emulation */
+
+	var RSL_Message rsl;
+	var RSL_IE_Body ie;
+	var boolean b_unused;
+	interleave {
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
+		log("Rx L3 from net: ", l3);
+		if (ischosen(l3.msgs.rrm.assignmentCommand)) {
+
+			var PDU_ML3_MS_NW l3_tx := valueof(ts_RRM_AssignmentComplete('00'O));
+			RSL.send(ts_RSL_EST_IND(new_chan_nr, valueof(ts_RslLinkID_DCCH(0)),
+						 enc_PDU_ML3_MS_NW(l3_tx)));
+
+			var RSL_Message chan_act := f_rslem_get_last_act(RSL_PROC, 128, new_chan_nr);
+			log("VAMOS secondary chan act was ", chan_act);
+
+		} else {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected L3 received", l3));
+		}
+		}
+	[] RSL.receive(tr_RSL_IPA_CRCX(new_chan_nr)) -> value rsl {
+		var uint7_t rtp_pt := 0;
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			rtp_pt := ie.ipa_rtp_pt;
+		}
+		RSL.send(ts_RSL_IPA_CRCX_ACK(new_chan_nr, 123,
+						oct2int(f_inet_addr("1.2.3.4")),
+						4321,
+						rtp_pt));
+		}
+	[] RSL.receive(tr_RSL_IPA_MDCX(new_chan_nr, ?)) -> value rsl{
+		/* Extract conn_id, ip, port, rtp_pt2 from request + use in response */
+		b_unused := f_rsl_find_ie(rsl, RSL_IE_IPAC_CONN_ID, ie);
+		var uint16_t conn_id := ie.ipa_conn_id;
+		/* mandatory */
+		b_unused := f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_IP, ie);
+		var HostPort peer;
+		peer.host := f_inet_ntoa(int2oct(ie.ipa_remote_ip, 4));
+		b_unused := f_rsl_find_ie(rsl, RSL_IE_IPAC_REMOTE_PORT, ie);
+		peer.port_nr := ie.ipa_remote_port;
+		var uint7_t rtp_pt := 0;
+		/* optional */
+		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD, ie)) {
+			rtp_pt := ie.ipa_rtp_pt;
+		}
+		RSL.send(ts_RSL_IPA_MDCX_ACK(new_chan_nr, conn_id,
+						oct2int(f_inet_addr(peer.host)),
+						peer.port_nr,
+						rtp_pt));
+		}
+	[] RSL.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {}
+	[] RSL.receive(tr_RSL_RF_CHAN_REL(g_chan_nr)) {
+		/*
+		RSL.send(ts_ASP_RSL_UD(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr),
+				       IPAC_PROTO_RSL_TRX0));
+		*/
+		}
+	/* (There must be no RSL_MT_REL_REQ on the old lchan.) */
+	}
+
+	f_sleep(1.0);
+	f_vty_transceive(BSCVTY, "show lchan summary");
+	f_sleep(5.0);
+}
+
+private function f_TC_assign_to_secondary_lchan(charstring id) runs on MSC_ConnHdlr {
+	f_est_and_reassign_to_secondary_lchan();
+}
+
+testcase TC_assign_to_secondary_lchan() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	vc_conn := f_start_handler(refers(f_TC_assign_to_secondary_lchan), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+private function f_TC_vamos_multiplex_tch_f_tch_f1(charstring id) runs on MSC_ConnHdlr {
+	f_est_lchan_and_mode_modify_to_vamos();
+	f_logp(BSCVTY, "f_est_lchan_and_mode_modify_to_vamos done");
+}
+
+private function f_TC_vamos_multiplex_tch_f_tch_f2(charstring id) runs on MSC_ConnHdlr {
+	f_est_and_reassign_to_secondary_lchan(1);
+}
+
+testcase TC_vamos_multiplex_tch_f_tch_f() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.imsi := '001014234234234'H;
+	pars2.media_nr := 2;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars1.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	pars2.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	vc_conn1 := f_start_handler(refers(f_TC_vamos_multiplex_tch_f_tch_f1), pars1);
+	vc_conn1.done;
+
+	vc_conn2 := f_start_handler(refers(f_TC_vamos_multiplex_tch_f_tch_f2), pars2);
+	vc_conn2.done;
+	f_shutdown_helper();
+}
+
+control {
+	execute( TC_mode_modify_to_vamos() );
+	execute( TC_chan_act_to_vamos() );
+	execute( TC_assign_to_secondary_lchan() );
+	execute( TC_vamos_multiplex_tch_f_tch_f() );
+}
+
+}
