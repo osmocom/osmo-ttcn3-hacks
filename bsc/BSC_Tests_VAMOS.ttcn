@@ -1,0 +1,1127 @@
+module BSC_Tests {
+
+/* Integration Tests for OsmoBSC
+ * (C) 2017-2018 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ *
+ * There are test cases that run in so-called 'handler mode' and test cases
+ * that run directly on top of the BSSAP and RSL CodecPorts.  The "handler mode"
+ * tests abstract the multiplexing/demultiplexing of multiple SCCP connections
+ * and/or RSL channels and are hence suitable for higher-level test cases, while
+ * the "raw" tests directly on top of the CodecPorts are more suitable for lower-
+ * level testing.
+ */
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from IPL4asp_Types all;
+
+import from BSSAP_Types all;
+import from RAN_Adapter all;
+import from BSSAP_LE_Adapter all;
+import from BSSAP_LE_CodecPort all;
+import from BSSAP_LE_Types all;
+import from BSSLAP_Types all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from IPA_Emulation all;
+import from IPA_CodecPort all;
+import from IPA_Types all;
+import from IPA_Testing all;
+import from RSL_Types all;
+import from RSL_Emulation all;
+import from MGCP_Emulation all;
+import from MGCP_Templates all;
+import from MGCP_Types all;
+import from MGCP_CodecPort all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+import from StatsD_Checker all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_Types all;
+import from MobileL3_RRM_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
+
+import from SCCP_Templates all;
+import from BSSMAP_Templates all;
+import from BSSMAP_LE_Templates all;
+
+import from SCCPasp_Types all;
+
+import from GSM_SystemInformation all;
+import from GSM_RestOctets all;
+import from TCCConversion_Functions all;
+
+const integer NUM_BTS := 3;
+const integer NUM_MSC := 3;
+
+/* per-BTS state which we keep */
+type record BTS_State {
+	/* component reference to the IPA_Client component used for RSL */
+	IPA_Client rsl
+}
+
+/* Set of all System Information received during one RSL port's startup.
+ * Note that some System Information may be sent on RSL, but lacking actual SI data, to indicate that the BTS should not
+ * broadcast that SI type. That will be reflected as 'omit' here.
+ */
+type record SystemInformationConfig {
+	SystemInformationType1 si1 optional,
+	SystemInformationType2 si2 optional,
+	SystemInformationType2bis si2bis optional,
+	SystemInformationType2ter si2ter optional,
+	SI2quaterRestOctetsList si2quater optional,
+	SystemInformationType3 si3 optional,
+	SystemInformationType4 si4 optional,
+	SystemInformationType13 si13 optional,
+	SystemInformationType5 si5 optional,
+	SystemInformationType5bis si5bis optional,
+	SystemInformationType5ter si5ter optional,
+	SystemInformationType6 si6 optional
+};
+
+const SystemInformationConfig SystemInformationConfig_omit := {
+	si1 := omit,
+	si2 := omit,
+	si2bis := omit,
+	si2ter := omit,
+	si2quater := omit,
+	si3 := omit,
+	si4 := omit,
+	si13 := omit,
+	si5 := omit,
+	si5bis := omit,
+	si5ter := omit,
+	si6 := omit
+};
+
+/* tr_EUTRAN_CellDesc with defaults used in BSC_Tests.ttcn */
+template EUTRAN_CellDesc tr_EUTRAN_CellDesc_default(template (present) uint16_t e_arfcn := ?,
+						    template uint3_t meas_bw := 3)
+:= tr_EUTRAN_CellDesc(e_arfcn := e_arfcn,
+		      meas_bw_presence := '1'B,
+		      meas_bw := meas_bw);
+
+/* tr_EUTRAN_NeighbourCells with defaults used in BSC_Tests.ttcn */
+template EUTRAN_NeighbourCells tr_EUTRAN_NeighbourCells_default(template (present) EUTRAN_CellDescs cell_desc_list := { tr_EUTRAN_CellDesc_default },
+								template uint3_t prio := 3,
+								template (present) uint5_t thresh_high := 20,
+								template uint5_t thresh_low := 10,
+								template uint5_t qrxlevmin := 22)
+:= tr_EUTRAN_NeighbourCells(
+	cell_desc_list := cell_desc_list,
+	prio_presence := '1'B,
+	prio := prio,
+	thresh_high := thresh_high,
+	thresh_low_presence := '1'B,
+	thresh_low := thresh_low,
+	qrxlevmin_presence := '1'B,
+	qrxlevmin := qrxlevmin);
+
+template SystemInformationConfig SystemInformationConfig_default := {
+	si1 := {
+	    cell_chan_desc := '8FB38000000000000000000000000000'O,
+	    rach_control := {
+		max_retrans := RACH_MAX_RETRANS_7,
+		tx_integer := '1001'B,
+		cell_barr_access := false,
+		re_not_allowed := true,
+		acc := '0000010000000000'B
+	    },
+	    rest_octets := ?
+	},
+	si2 := {
+	    bcch_freq_list := '00000000000000000000000000000000'O,
+	    ncc_permitted := '11111111'B,
+	    rach_control := {
+		max_retrans := RACH_MAX_RETRANS_7,
+		tx_integer := '1001'B,
+		cell_barr_access := false,
+		re_not_allowed := true,
+		acc := '0000010000000000'B
+	    }
+	},
+	si2bis := omit,
+	si2ter := {
+	    extd_bcch_freq_list := '8E320000000000000000000000000800'O,
+	    rest_octets := ?
+	},
+	si2quater := {
+		tr_SI2quaterRestOctets_EUTRAN( repeated_neigh_cells := { tr_EUTRAN_NeighbourCells_default } )
+	},
+	si3 := {
+	    cell_id := 0,
+	    lai := {
+		mcc_mnc := '001F01'H,
+		lac := 1
+	    },
+	    ctrl_chan_desc := {
+		msc_r99 := true,
+		att := true,
+		bs_ag_blks_res := 1,
+		ccch_conf := CCHAN_DESC_1CCCH_COMBINED,
+		si22ind := false,
+		cbq3 := CBQ3_IU_MODE_NOT_SUPPORTED,
+		spare := '00'B,
+		bs_pa_mfrms := 3,
+		t3212 := 30
+	    },
+	    cell_options := {
+		dn_ind := false,
+		pwrc := false,
+		dtx := MS_SHALL_USE_UL_DTX,
+		radio_link_tout_div4 := 7
+	    },
+	    cell_sel_par := {
+		cell_resel_hyst_2dB := 2,
+		ms_txpwr_max_cch := 7,
+		acs := '0'B,
+		neci := true,
+		rxlev_access_min := 0
+	    },
+	    rach_control := {
+		max_retrans := RACH_MAX_RETRANS_7,
+		tx_integer := '1001'B,
+		cell_barr_access := false,
+		re_not_allowed := true,
+		acc := '0000010000000000'B
+	    },
+	    rest_octets := {
+		sel_params := {
+		    presence := '0'B,
+		    params := omit
+		},
+		pwr_offset := {
+		    presence := '0'B,
+		    offset := omit
+		},
+		si_2ter_ind := '1'B,
+		early_cm_ind := '0'B,
+		sched_where := {
+		    presence := '0'B,
+		    where := omit
+		},
+		gprs_ind := {
+		    presence := '1'B,
+		    ind := {
+			ra_colour := 0,
+			si13_pos := '0'B
+		    }
+		},
+		umts_early_cm_ind := '1'B,
+		si2_quater_ind := {
+		    presence := '1'B,
+		    ind := '0'B
+		},
+		iu_mode_ind := omit,
+		si21_ind := {
+		    presence := '0'B,
+		    pos := omit
+		}
+	    }
+	},
+	si4 := {
+	    lai := {
+		mcc_mnc := '001F01'H,
+		lac := 1
+	    },
+	    cell_sel_par := {
+		cell_resel_hyst_2dB := 2,
+		ms_txpwr_max_cch := 7,
+		acs := '0'B,
+		neci := true,
+		rxlev_access_min := 0
+	    },
+	    rach_control := {
+		max_retrans := RACH_MAX_RETRANS_7,
+		tx_integer := '1001'B,
+		cell_barr_access := false,
+		re_not_allowed := true,
+		acc := '0000010000000000'B
+	    },
+	    cbch_chan_desc := {
+		iei := '64'O,
+		v := {
+		    chan_nr := {
+			u := {
+			sdcch4 := {
+			    tag := '001'B,
+			    sub_chan := 2
+			}
+			},
+			tn := 0
+		    },
+		    tsc := 2,
+		    h := false,
+		    arfcn := 871,
+		    maio_hsn := omit
+		}
+	    },
+	    cbch_mobile_alloc := omit,
+	    rest_octets := {
+		sel_params := {
+		    presence := '0'B,
+		    params := omit
+		},
+		pwr_offset := {
+		    presence := '0'B,
+		    offset := omit
+		},
+		gprs_ind := {
+		    presence := '1'B,
+		    ind := {
+			ra_colour := 0,
+			si13_pos := '0'B
+		    }
+		},
+		s_presence := '0'B,
+		s := omit
+	    }
+	},
+	si13 := {
+		rest_octets := {
+			presence := '1'B,
+			bcch_change_mark := ?,
+			si_change_field := '0000'B,
+			presence2 := '0'B,
+			si13_change_mark := omit,
+			gprs_ma := omit,
+			zero := '0'B, /* PBCCH not present in cell */
+			rac := 0,
+			spgc_ccch_sup := '0'B,
+			priority_access_thr := '110'B,
+			network_control_order := '00'B,
+			gprs_cell_opts := {
+				nmo := '01'B,
+				t3168 := '011'B,
+				t3192 := '010'B,
+				drx_timer_max := '011'B,
+				access_burst_type := '0'B,
+				control_ack_type := '1'B,
+				bs_cv_max := 15,
+				pan_presence := '1'B,
+				pan_dec  := 1,
+				pan_inc  := 1,
+				pan_max  := '111'B,
+				ext_info_presence := ?,
+				ext_info_length := *,
+				ext_info := *
+			},
+			gprs_pwr_ctrl_params := {
+				alpha := 0,
+				t_avg_w := '10000'B,
+				t_avg_t := '10000'B,
+				pc_meas_chan := '0'B,
+				n_avg_i := '1000'B
+			}
+		}
+	},
+	si5 := {
+	    bcch_freq_list := '10000000000000000000000000000000'O
+	},
+	si5bis := omit,
+	si5ter := {
+	    extd_bcch_freq_list := '9E050020000000000000000000000000'O
+	},
+	si6 := {
+	    cell_id := 0,
+	    lai := {
+		mcc_mnc := '001F01'H,
+		lac := 1
+	    },
+	    cell_options := {
+		dtx_ext := '1'B,
+		pwrc := false,
+		dtx := '01'B,
+		radio_link_timeout := '0111'B
+	    },
+	    ncc_permitted := '11111111'B,
+	    rest_octets := ?
+	}
+    };
+
+
+/* List of all the System Information received on all RSL ports */
+type record of SystemInformationConfig SystemInformationConfig_list;
+
+function f_sysinfo_dec_raw(inout SystemInformationConfig si, RSL_Message rsl)
+{
+	var RSL_IE_Body sysinfo_type_ie;
+	var RSL_IE_SysinfoType si_type;
+	var octetstring data;
+
+	if (f_rsl_find_ie(rsl, RSL_IE_SYSINFO_TYPE, sysinfo_type_ie) == false) {
+		setverdict(fail, "Cannot find RSL_IE_SYSINFO_TYPE");
+		mtc.stop;
+	}
+	si_type := sysinfo_type_ie.sysinfo_type;
+
+	if (rsl.msg_type == RSL_MT_BCCH_INFO) {
+		var RSL_IE_Body bcch_ie;
+		if (f_rsl_find_ie(rsl, RSL_IE_FULL_BCCH_INFO, bcch_ie)) {
+			data := bcch_ie.other.payload;
+		}
+	} else if (rsl.msg_type == RSL_MT_SACCH_FILL) {
+		var RSL_IE_Body l3_ie;
+		if (f_rsl_find_ie(rsl, RSL_IE_L3_INFO, l3_ie)) {
+			data := l3_ie.l3_info.payload;
+		}
+	} else {
+		setverdict(fail, "Don't understand this System Information message");
+		mtc.stop;
+	}
+
+	var boolean handled := false;
+
+	if (rsl.msg_type == RSL_MT_BCCH_INFO) {
+		handled := true;
+
+		if (si_type == RSL_SYSTEM_INFO_1) {
+			if (not isbound(data)) {
+				si.si1 := omit;
+			} else {
+				si.si1 := dec_SystemInformation(data).payload.si1;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_2) {
+			if (not isbound(data)) {
+				si.si2 := omit;
+			} else {
+				si.si2 := dec_SystemInformation(data).payload.si2;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_2bis) {
+			if (not isbound(data)) {
+				si.si2bis := omit;
+			} else {
+				si.si2bis := dec_SystemInformation(data).payload.si2bis;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_2ter) {
+			if (not isbound(data)) {
+				si.si2ter := omit;
+			} else {
+				si.si2ter := dec_SystemInformation(data).payload.si2ter;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_2quater) {
+			if (not isbound(data)) {
+				si.si2quater := {};
+			} else {
+				var SystemInformationType2quater decoded := dec_SystemInformation(data).payload.si2quater;
+				/* this is a *record* of SI2quaterRestOctets! (multiplexed) */
+				si.si2quater[decoded.rest_octets.si2quater_index] := decoded.rest_octets;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_3) {
+			if (not isbound(data)) {
+				si.si3 := omit;
+			} else {
+				si.si3 := dec_SystemInformation(data).payload.si3;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_4) {
+			if (not isbound(data)) {
+				si.si4 := omit;
+			} else {
+				si.si4 := dec_SystemInformation(data).payload.si4;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_13) {
+			if (not isbound(data)) {
+				si.si13 := omit;
+			} else {
+				si.si13 := dec_SystemInformation(data).payload.si13;
+			}
+		} else {
+			handled := false;
+		}
+	} else if (rsl.msg_type == RSL_MT_SACCH_FILL) {
+		handled := true;
+
+		if (si_type == RSL_SYSTEM_INFO_5) {
+			if (not isbound(data)) {
+				si.si5 := omit;
+			} else {
+				si.si5 := dec_SystemInformation(data).payload.si5;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_5bis) {
+			if (not isbound(data)) {
+				si.si5bis := omit;
+			} else {
+				si.si5bis := dec_SystemInformation(data).payload.si5bis;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_5ter) {
+			if (not isbound(data)) {
+				si.si5ter := omit;
+			} else {
+				si.si5ter := dec_SystemInformation(data).payload.si5ter;
+			}
+		} else if (si_type == RSL_SYSTEM_INFO_6) {
+			if (not isbound(data)) {
+				si.si6 := omit;
+			} else {
+				si.si6 := dec_SystemInformation(data).payload.si6;
+			}
+		} else {
+			handled := false;
+		}
+	}
+
+	if (not handled) {
+		setverdict(fail, "Unexpected SI type in ", rsl.msg_type, " message: ", si_type);
+	}
+}
+
+type component test_CT extends CTRL_Adapter_CT {
+	/* Array of per-BTS state */
+	var BTS_State bts[NUM_BTS];
+	/* RSL common Channel Port (for RSL_Emulation) */
+	port RSL_CCHAN_PT RSL_CCHAN[NUM_BTS];
+	/* array of per-BTS RSL test ports */
+	port IPA_RSL_PT IPA_RSL[NUM_BTS];
+	port IPA_CODEC_PT IPA; /* Required for compilation of TC_rsl_unknown_unit_id() */
+	/* CTRL muxed over IPA in SCCPlite conn BSC<->MSC (or BSC-NAT) */
+	port IPA_CTRL_PT SCCPLITE_IPA_CTRL;
+
+	var MGCP_Emulation_CT vc_MGCP;
+	port TELNETasp_PT BSCVTY;
+
+	/* StatsD */
+	var StatsD_Checker_CT vc_STATSD;
+
+	var RAN_Adapter g_bssap[NUM_MSC];
+	var BSSAP_LE_Adapter g_bssap_le;
+	/* for old legacy-tests only */
+	port BSSAP_CODEC_PT BSSAP;
+	port BSSAP_LE_CODEC_PT BSSAP_LE;
+
+	/* are we initialized yet */
+	var boolean g_initialized := false;
+
+	/* Osmux is enabled through VTY */
+	var boolean g_osmux_enabled := false;
+
+	/*Configure T(tias) over VTY, seconds */
+	var integer g_bsc_sccp_timer_ias :=  7 * 60;
+	/*Configure T(tiar) over VTY, seconds */
+	var integer g_bsc_sccp_timer_iar := 15 * 60;
+
+	/* global test case guard timer (actual timeout value is set in f_init()) */
+	timer T_guard := 30.0;
+
+	var CounterNameValsList g_ctr_msc;
+	var CounterNameValsList g_ctr_bsc;
+	var CounterNameValsList g_ctr_bts;
+
+	/* System Information bytes as received during RSL startup, for each RSL[idx]. */
+	var SystemInformationConfig_list g_system_information := {};
+}
+
+modulepar {
+	/* IP address at which the BSC can be reached */
+	charstring mp_bsc_ip := "127.0.0.1";
+	/* port number to which to establish the IPA OML connections */
+	integer mp_bsc_oml_port := 3002;
+	/* port number to which to establish the IPA RSL connections */
+	integer mp_bsc_rsl_port := 3003;
+	/* port number to which to establish the IPA CTRL connection */
+	integer mp_bsc_ctrl_port := 4249;
+	/* port number to which to listen for STATSD metrics */
+	integer mp_bsc_statsd_port := 8125;
+	/* IP address at which the test binds */
+	charstring mp_test_ip := "127.0.0.1";
+
+	RAN_Configurations mp_bssap_cfg := {
+		{
+			transport := BSSAP_TRANSPORT_AoIP,
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 185,	/* 0.23.1 first MSC emulation */
+			own_ssn := 254,
+			peer_pc := 187, /* 0.23.3 osmo-bsc */
+			peer_ssn := 254,
+			sio := '83'O,
+			rctx := 1
+		},
+		{
+			transport := BSSAP_TRANSPORT_AoIP,
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23906, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 2,	/* 0.0.2 second MSC emulation */
+			own_ssn := 254,
+			peer_pc := 187, /* 0.23.3 osmo-bsc */
+			peer_ssn := 254,
+			sio := '83'O,
+			rctx := 2
+		},
+		{
+			transport := BSSAP_TRANSPORT_AoIP,
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23907, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 3,	/* 0.0.3 third MSC emulation */
+			own_ssn := 254,
+			peer_pc := 187, /* 0.23.3 osmo-bsc */
+			peer_ssn := 254,
+			sio := '83'O,
+			rctx := 3
+		}
+	};
+
+	BSSAP_LE_Configuration mp_bssap_le_cfg := {
+		sccp_service_type := "mtp3_itu",
+		sctp_addr := { 23908, "127.0.0.1", 2905, "127.0.0.1" },
+		own_pc := 190,	/* 0.23.6 SMLC emulation */
+		own_ssn := 252,	/* SMLC side SSN */
+		peer_pc := 187, /* 0.23.3 osmo-bsc */
+		peer_ssn := 250, /* BSC side SSN */
+		sio := '83'O,
+		rctx := 6
+	};
+	boolean mp_enable_lcs_tests := true;
+
+	/* Whether to enable osmux tests. Can be dropped completely and enable
+	   unconditionally once new version of osmo-bsc is released (current
+	   version: 1.4.1) */
+	boolean mp_enable_osmux_test := true;
+	/* Value set in osmo-bsc.cfg "ms max power" */
+	uint8_t mp_exp_ms_power_level := 7;
+}
+
+private function f_gen_test_hdlr_pars(integer bssap_idx := 0) return TestHdlrParams {
+
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
+		pars.aoip := true;
+	} else {
+		pars.aoip := false;
+	}
+	pars.exp_ms_power_level := mp_exp_ms_power_level;
+	pars.mscpool.bssap_idx := bssap_idx;
+
+	return pars;
+}
+
+/* Convenience functions for rate counters using g_ctr_msc. */
+
+private function f_ctrs_msc_init(integer mscs_count := NUM_MSC, CounterNameVals counternames := counternames_msc_mscpool) runs on test_CT {
+	g_ctr_msc := f_counter_name_vals_get_n(IPA_CTRL, "msc", mscs_count, counternames);
+	log("initial msc rate counters: ", g_ctr_msc);
+}
+
+private function f_ctrs_msc_add(integer msc_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_msc, msc_nr, countername, val);
+}
+
+/*  f_ctrs_msc_init();
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_do_other(on_msc := 1);
+ *  f_ctrs_msc_add(0, "thing", 2);
+ *  f_ctrs_msc_add(1, "other");
+ *  f_ctrs_msc_verify();
+ */
+private function f_ctrs_msc_verify() runs on test_CT {
+	log("verifying msc rate counters: ", g_ctr_msc);
+	f_counter_name_vals_expect_n(IPA_CTRL, "msc", g_ctr_msc);
+}
+
+/* convenience: f_ctrs_msc_add() and f_ctrs_msc_verify() in one call.
+ *  f_ctrs_msc_init();
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_do_thing(on_msc := 0);
+ *  f_ctrs_msc_expect(0, "thing", 3);
+ */
+private function f_ctrs_msc_expect(integer msc_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_msc_add(msc_nr, countername, val);
+	f_ctrs_msc_verify();
+}
+
+/* Convenience functions for rate counters using g_ctr_bts, always also including g_ctr_bsc. */
+
+private function f_ctrs_bsc_and_bts_init(integer bts_count := NUM_BTS, CounterNameVals counternames := counternames_bsc_bts_handover) runs on test_CT {
+	g_ctr_bts := f_counter_name_vals_get_n(IPA_CTRL, "bts", bts_count, counternames);
+	log("initial bts rate counters: ", g_ctr_bts);
+	f_ctrs_bsc_init(counternames);
+}
+
+private function f_ctrs_bsc_and_bts_add(integer bts_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_bts, bts_nr, countername, val);
+	f_ctrs_bsc_add(countername, val);
+}
+
+/*  f_ctrs_bsc_and_bts_init();
+ *  f_do_thing(on_bts := 0);
+ *  f_do_thing(on_bts := 0);
+ *  f_do_other(on_bts := 1);
+ *  f_ctrs_bsc_and_bts_add(0, "thing", 2);
+ *  f_ctrs_bsc_and_bts_add(1, "other");
+ *  f_ctrs_bsc_and_bts_verify();
+ */
+private function f_ctrs_bsc_and_bts_verify() runs on test_CT {
+	f_counter_name_vals_expect_n(IPA_CTRL, "bts", g_ctr_bts);
+	f_ctrs_bsc_verify();
+}
+
+/* convenience: f_ctrs_bsc_and_bts_add() and f_ctrs_bsc_and_bts_verify() in one call.
+ *  f_ctrs_bsc_and_bts_init();
+ *  f_do_thing(on_bts := 0);
+ *  f_do_thing(on_bts := 0);
+ *  f_do_thing(on_bts := 0);
+ *  f_ctrs_bsc_and_bts_expect(0, "thing", 3);
+ */
+private function f_ctrs_bsc_and_bts_expect(integer bts_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_bsc_and_bts_add(bts_nr, countername, val);
+	f_ctrs_bsc_and_bts_verify();
+}
+
+
+/* Convenience functions for rate counters using g_ctr_bsc. */
+
+private function f_ctrs_bsc_init(CounterNameVals counternames := counternames_bsc_bts_handover) runs on test_CT {
+	g_ctr_bsc := f_counter_name_vals_get_n(IPA_CTRL, "bsc", 1, counternames);
+	log("initial bsc rate counters: ", g_ctr_bsc);
+}
+
+private function f_ctrs_bsc_add(charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_bsc, 0, countername, val);
+}
+
+/*  f_ctrs_bsc_init();
+ *  f_do_thing();
+ *  f_do_thing();
+ *  f_do_other();
+ *  f_ctrs_bsc_add("thing", 2);
+ *  f_ctrs_bsc_add("other");
+ *  f_ctrs_bsc_verify();
+ */
+private function f_ctrs_bsc_verify() runs on test_CT {
+	f_counter_name_vals_expect_n(IPA_CTRL, "bsc", g_ctr_bsc);
+}
+
+/* convenience: f_ctrs_bsc_add() and f_ctrs_bsc_verify() in one call.
+ *  f_ctrs_bsc_init();
+ *  f_do_thing();
+ *  f_ctrs_bsc_expect("thing", 1);
+ */
+private function f_ctrs_bsc_expect(charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_bsc_add(countername, val);
+	f_ctrs_bsc_verify();
+}
+
+
+private function f_shutdown_helper() runs on test_CT {
+	all component.stop;
+	setverdict(pass);
+	mtc.stop;
+}
+
+private function f_legacy_bssap_reset(integer bssap_idx := 0) runs on test_CT {
+	var BSSAP_N_UNITDATA_ind ud_ind;
+	var boolean reset_received := false;
+	timer T := 5.0;
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[bssap_idx].sccp_addr_peer, g_bssap[bssap_idx].sccp_addr_own,
+					 ts_BSSMAP_Reset(0, g_osmux_enabled)));
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[bssap_idx].sccp_addr_own, g_bssap[bssap_idx].sccp_addr_peer,
+					       tr_BSSMAP_ResetAck(g_osmux_enabled))) {
+		log("BSSMAP: Received RESET-ACK in response to RESET, we're ready to go!");
+		}
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset(g_osmux_enabled))) -> value ud_ind {
+		log("BSSMAP: Respoding to inbound RESET with RESET-ACK");
+		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
+			   ts_BSSMAP_ResetAck(g_osmux_enabled)));
+		reset_received := true;
+		repeat;
+		}
+	[] BSSAP.receive { repeat; }
+	[] T.timeout {
+			log("BSSMAP: Timeout waiting for RESET-ACK after sending RESET");
+			/* If we received a RESET after ours was sent, it
+			   may be a race condition where the other peer beacame
+			   available after we sent it, but we are in a desired
+			   state anyway, so go forward. */
+			if (not reset_received) {
+				setverdict(fail);
+			}
+		}
+	}
+}
+
+type record IPA_Client {
+	/* IPA Emulation component reference */
+	IPA_Emulation_CT vc_IPA,
+	/* Unit-ID and other CCM parameters to use for IPA client emulation */
+	IPA_CCM_Parameters ccm_pars,
+	/* String identifier for this IPA Client */
+	charstring id,
+	/* Associated RSL Emulation Component (if any). Only used in "Handler mode" */
+	RSL_Emulation_CT vc_RSL optional
+}
+
+/*! Start the IPA/RSL related bits for one IPA_Client.
+ *  \param clnt IPA_Client for which to establish
+ *  \param bsc_host IP address / hostname of the BSC
+ *  \param bsc_port TCP port number of the BSC
+ *  \param i number identifying this BTS
+ *  \param handler_mode Start an RSL_Emulation_CT component (true) or not (false) */
+function f_ipa_rsl_start(inout IPA_Client clnt, charstring bsc_host, PortNumber bsc_port, integer i,
+			 boolean handler_mode := false)
+runs on test_CT {
+	timer T := 10.0;
+
+	clnt.id := "IPA" & int2str(i) & "-RSL";
+	clnt.vc_IPA := IPA_Emulation_CT.create(clnt.id & "-IPA");
+	clnt.ccm_pars := c_IPA_default_ccm_pars;
+	clnt.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
+	clnt.ccm_pars.unit_id := int2str(1234+i) & "/0/0";
+	if (handler_mode) {
+		clnt.vc_RSL := RSL_Emulation_CT.create(clnt.id & "-RSL");
+		connect(clnt.vc_RSL:CCHAN_PT, self:RSL_CCHAN[i]);
+	}
+
+	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	if (handler_mode) {
+		connect(clnt.vc_IPA:IPA_RSL_PORT, clnt.vc_RSL:IPA_PT);
+	} else {
+		connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[i]);
+	}
+
+	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", 10000+i, clnt.ccm_pars));
+	if (handler_mode) {
+		clnt.vc_RSL.start(RSL_Emulation.main());
+		return;
+	}
+
+	/* wait for IPA RSL link to connect and send ID ACK */
+	T.start;
+	alt {
+	[] IPA_RSL[i].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK)) {
+		T.stop;
+		IPA_RSL[i].send(ts_ASP_RSL_UD(ts_RSL_PAGING_LOAD_IND(23)));
+		}
+	[] IPA_RSL[i].receive(ASP_IPA_Event:?) { repeat }
+	[] IPA_RSL[i].receive { repeat }
+	[] T.timeout {
+		setverdict(fail, "Timeout RSL waiting for ASP_IPA_EVENT_ID_ACK");
+		mtc.stop;
+		}
+	}
+}
+
+function f_ipa_rsl_stop(inout IPA_Client clnt) runs on test_CT {
+	if (not isbound(clnt) or not isbound(clnt.vc_IPA)) {
+		return;
+	}
+	clnt.vc_IPA.stop;
+	if (isbound(clnt.vc_RSL)) {
+		clnt.vc_RSL.stop;
+	}
+}
+
+/* Wait for the OML connection to be brought up by the external osmo-bts-omldummy */
+function f_wait_oml(integer bts_nr, charstring status, float secs_max) runs on test_CT {
+	timer T := secs_max;
+	T.start;
+	while (true) {
+		if (f_ctrl_get_bts(IPA_CTRL, bts_nr, "oml-connection-state") == status) {
+			T.stop;
+			/* the 'degraded' state exists from OML connection time, and we have to wait
+			 * until all MO's are initialized */
+			T.start(1.0);
+			T.timeout;
+			return;
+		}
+		f_sleep(0.1);
+		if (not T.running) {
+			setverdict(fail, "Timeout waiting for BTS" & int2str(bts_nr) & " oml-connection-state ", status);
+			mtc.stop;
+		}
+	}
+}
+
+/* global altstep for global guard timer; also takes care of responding RESET witH RESET-ACK */
+altstep as_Tguard() runs on test_CT {
+	var BSSAP_N_UNITDATA_ind ud_ind;
+	[] T_guard.timeout {
+			setverdict(fail, "Timeout of T_guard");
+			mtc.stop;
+		}
+	/* always respond with RESET ACK to RESET */
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset(g_osmux_enabled))) -> value ud_ind {
+		BSSAP.send(ts_BSSAP_UNITDATA_req(ud_ind.callingAddress, ud_ind.calledAddress,
+			   ts_BSSMAP_ResetAck(g_osmux_enabled)));
+		repeat;
+		}
+}
+
+altstep no_bssmap_reset() runs on test_CT {
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(?, ?, tr_BSSMAP_Reset(g_osmux_enabled))) {
+		setverdict(fail, "unexpected BSSMAP Reset");
+		mtc.stop;
+	}
+}
+
+function f_init_mgcp(charstring id) runs on test_CT {
+	id := id & "-MGCP";
+
+	var MGCPOps ops := {
+		create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(MGCP_Emulation.DummyUnitdataCallback)
+	};
+	var MGCP_conn_parameters mgcp_pars := {
+		callagent_ip := mp_bsc_ip,
+		callagent_udp_port := -1,
+		mgw_ip := mp_test_ip,
+		mgw_udp_port := 2427,
+		/* Enable it for SCCPlite, since we have 2 MGCP sockets towards MGW (UDP one +
+		   the on  with MGCP over IPA forwarded from MSC one) */
+		multi_conn_mode := (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_SCCPlite_SERVER)
+	};
+
+	vc_MGCP := MGCP_Emulation_CT.create(id);
+	vc_MGCP.start(MGCP_Emulation.main(ops, mgcp_pars, id));
+}
+
+/* Enable or disable (current default) Osmux. When enabling, BSSMAP Reset
+ * contains extra IE (OsmuxSupport) and osmo-bsc will handle AssignReq with
+ * OsmuxCID IE.
+ */
+private function f_vty_allow_osmux(boolean allow) runs on test_CT {
+	f_vty_enter_cfg_msc(BSCVTY, 0);
+	if (allow) {
+		f_vty_transceive(BSCVTY, "osmux on");
+	} else {
+		f_vty_transceive(BSCVTY, "osmux off");
+	}
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+	g_osmux_enabled := allow;
+}
+
+function f_init_vty(charstring id := "foo") runs on test_CT {
+	if (BSCVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:BSCVTY, system:BSCVTY);
+	f_vty_set_prompts(BSCVTY);
+	f_vty_transceive(BSCVTY, "enable");
+	f_cs7_inst_0_cfg(BSCVTY, {"sccp-timer ias " & int2str(g_bsc_sccp_timer_ias),
+			  "sccp-timer iar " & int2str(g_bsc_sccp_timer_iar)});
+}
+
+private function f_logp(TELNETasp_PT pt, charstring log_msg)
+{
+	// log on TTCN3 log output
+	log(log_msg);
+	// log in stderr log
+	f_vty_transceive(pt, "logp lglobal notice TTCN3 f_logp(): " & log_msg);
+}
+
+private function f_sysinfo_seen(integer rsl_idx, RSL_Message rsl) runs on test_CT
+{
+	if (rsl_idx >= lengthof(g_system_information)) {
+		g_system_information[rsl_idx] := SystemInformationConfig_omit
+	}
+	f_sysinfo_dec_raw(g_system_information[rsl_idx], rsl);
+}
+
+altstep as_catch_RSL_sysinfo(integer rsl_idx) runs on test_CT {
+	var ASP_RSL_Unitdata rx_rsl_ud;
+
+	/* For handler_mode := false, receiving the RSL bootstrap messages directly on IPA_RSL */
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+
+	/* For handler_mode := true, receiving the RSL bootstrap messages via RSL_Emulation  */
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+	[] RSL_CCHAN[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
+		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
+		repeat;
+		}
+}
+
+/* TODO: use BooleanList from COMMON/src/General_Types.ttcn */
+private type record of boolean my_BooleanList;
+
+private function f_vty_msc_allow_attach(TELNETasp_PT pt, my_BooleanList allow_attach_list)
+{
+	var charstring config := f_vty_transceive_ret(pt, "show running-config");
+
+	for (var integer msc_nr := 0; msc_nr < sizeof(allow_attach_list); msc_nr := msc_nr+1) {
+		if (f_strstr(config, "\nmsc " & int2str(msc_nr) & "\n") < 0) {
+			/* There is no 'msc N' for this msc_nr in the running config, so don't create an empty msc by
+			 * stepping into that config node. */
+			log("msc ", msc_nr, " is not configured, skipping");
+			continue;
+		}
+		f_vty_enter_cfg_msc(pt, msc_nr);
+		if (allow_attach_list[msc_nr]) {
+			/* strict := false: ignore if osmo-bsc does not support this config option (latest build) */
+			f_vty_transceive(pt, "allow-attach", strict := false);
+		} else {
+			f_vty_transceive(pt, "no allow-attach", strict := false);
+		}
+		f_vty_transceive(pt, "exit");
+		f_vty_transceive(pt, "exit");
+	}
+}
+
+/* global initialization function
+ * \param nr_bts Number of BTSs we should start/bring up
+ * \param handler_mode Start an RSL_Emulation_CT component (true) or not (false).
+ * \param nr_msc Number of virtual MSCs to bring up to connect to osmo-bsc.
+ */
+function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false, boolean allow_osmux := false,
+		integer nr_msc := 1, float guard_timeout := 30.0) runs on test_CT {
+	var integer bssap_idx;
+
+	if (g_initialized) {
+		return;
+	}
+	g_initialized := true;
+
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	f_init_vty("VirtMSC");
+	if (mp_enable_osmux_test) {
+		f_vty_allow_osmux(allow_osmux);
+	}
+
+	var my_BooleanList allow_attach := { false, false, false };
+	f_init_statsd("VirtMSC", vc_STATSD, mp_test_ip, mp_bsc_statsd_port);
+
+	for (bssap_idx := 0; bssap_idx < nr_msc; bssap_idx := bssap_idx+1) {
+		allow_attach[bssap_idx] := true;
+		/* Call a function of our 'parent component' RAN_Adapter_CT to start the
+		 * MSC-side BSSAP emulation */
+		if (handler_mode) {
+			var RanOps ranops := MSC_RanOps;
+			ranops.use_osmux := g_osmux_enabled;
+			f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", ranops);
+			connect(self:SCCPLITE_IPA_CTRL, g_bssap[bssap_idx].vc_RAN:CTRL_CLIENT);
+			f_ran_adapter_start(g_bssap[bssap_idx]);
+		} else {
+			f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", omit);
+			connect(self:BSSAP, g_bssap[bssap_idx].vc_SCCP:SCCP_SP_PORT);
+			f_ran_adapter_start(g_bssap[bssap_idx]);
+			f_legacy_bssap_reset();
+		}
+	}
+
+	if (mp_enable_lcs_tests) {
+		if (handler_mode) {
+			f_bssap_le_adapter_init(g_bssap_le, mp_bssap_le_cfg, "VirtSMLC", SMLC_BssapLeOps);
+		} else {
+			f_bssap_le_adapter_init(g_bssap_le, mp_bssap_le_cfg, "VirtSMLC", omit);
+			connect(self:BSSAP_LE, g_bssap_le.vc_SCCP:SCCP_SP_PORT);
+		}
+		f_bssap_le_adapter_start(g_bssap_le);
+	}
+
+	/* start the test with exactly all enabled MSCs allowed to attach */
+	f_vty_msc_allow_attach(BSCVTY, allow_attach);
+
+	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
+
+	f_init_mgcp("VirtMSC");
+
+	for (var integer i := 0; i < nr_bts; i := i+1) {
+		f_init_bts(i, handler_mode);
+	}
+}
+
+function f_init_bts(integer bts_idx := 0, boolean handler_mode := false)
+runs on test_CT {
+	/* wait until osmo-bts-omldummy has respawned */
+	f_wait_oml(bts_idx, "degraded", 5.0);
+
+	/* start RSL connection */
+	f_ipa_rsl_start(bts[bts_idx].rsl, mp_bsc_ip, mp_bsc_rsl_port, bts_idx, handler_mode);
+	/* wait until BSC tells us "connected" */
+	f_wait_oml(bts_idx, "connected", 5.0);
+}
+
+/* expect to receive a RSL message matching a specified template on a given BTS / stream */
+function f_exp_ipa_rx(integer bts_nr, template (present) RSL_Message t_rx, float t_secs := 2.0, IpaStreamId sid := IPAC_PROTO_RSL_TRX0)
+runs on test_CT return RSL_Message {
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	timer T := t_secs;
+
+	T.start;
+	alt {
+	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(t_rx, sid)) -> value rx_rsl_ud {
+		T.stop;
+		}
+	[] IPA_RSL[bts_nr].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout expecting ", t_rx);
+		mtc.stop;
+		}
+	}
+	return rx_rsl_ud.rsl;
+}
+
+/* helper function to transmit RSL on a given BTS/stream */
+function f_ipa_tx(integer bts_nr, template (value) RSL_Message t_tx, IpaStreamId sid := IPAC_PROTO_RSL_TRX0)
+runs on test_CT {
+	IPA_RSL[bts_nr].send(ts_ASP_RSL_UD(t_tx, sid));
+}
+
+
+
+testcase TC_init_vamos() runs on test_CT {
+	f_init(1);
+
+	f_ctrl_get_exp(IPA_CTRL, "msc_connection_status", "connected");
+	f_shutdown_helper();
+}
+
+control {
+	execute( TC_init_vamos() );
+}
+
+}
