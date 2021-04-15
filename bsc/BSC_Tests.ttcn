@@ -1747,7 +1747,6 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 			   boolean expect_rr_chan_rel := true,
 			   boolean expect_rll_rel_req := true,
 			   boolean handle_rll_rel := true,
-			   boolean is_csfb := false,
 			   template CellSelIndValue expect_cells := omit,
 			   template RR_Cause expect_rr_cause := ?
 			   ) runs on test_CT {
@@ -1767,7 +1766,7 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 		got_deact_sacch := true;
 		repeat;
 	}
-	[is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE_CellSelectInd))) -> value ud {
+	[not istemplatekind(expect_cells, "omit")] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE_CellSelectInd))) -> value ud {
 		got_rr_chan_rel := true;
 
 		if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
@@ -1801,7 +1800,7 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 		}
 		repeat;
 	}
-	[not is_csfb] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) -> value ud {
+	[istemplatekind(expect_cells, "omit")] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) -> value ud {
 		got_rr_chan_rel := true;
 
 		if (not istemplatekind(expect_rr_cause, "omit")) {
@@ -1877,7 +1876,62 @@ testcase TC_chan_rel_hard_clear() runs on test_CT {
 	f_shutdown_helper();
 }
 
-/* Test behavior of channel release after Clear Command with CSFB indicator from MSC */
+function f_TC_chan_rel_last_eutran_plmn_hard_clear(boolean tx_csfb_ind) runs on test_CT {
+	var BSSAP_N_DATA_ind rx_di;
+	var DchanTuple dt;
+
+	f_init(1);
+
+	dt := f_est_dchan('23'O, 23, '00010203040506'O);
+	/* Send CommonID with some random PLMN (BSC doesn't take it into account
+	/* yet when generating the EUTRAN neigh list in RR CHannel Release) */
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_CommonId('001019876543210'H, '323454'O)));
+
+	/* Instruct BSC to clear channel */
+	var BssmapCause cause := 0;
+	if (tx_csfb_ind) {
+		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommandCSFB(cause)));
+	} else {
+		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+	}
+
+	/* expect Clear Complete from BSC on A */
+	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete)) {
+		/* release the SCCP connection */
+		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
+	}
+
+	/* 1 neighbor is added by default in osmo-bts.cfg and
+	   SystemInformationConfig_default, use that: */
+	var template CellSelIndValue exp_cells := f_tr_rr_chan_rel_earfcns(1);
+
+	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := exp_cells);
+	f_shutdown_helper();
+}
+
+/* Test behavior of RR Channel rRelease after Clear Command without CSFB indicator
+   from MSC, previously receiving any CommonID containing the "Last Used E-UTRAN
+   PLMN Id". According to spec (3GPP TS 48.008 sec 3.1.30) that's the bit requesting
+   EUTRAN neighbor list sent later on by BSC in RR Channel, so receiving CSFB
+   Indicator or not shouldn't matter at all. */
+testcase TC_chan_rel_last_eutran_plmn_hard_clear_no_csfb() runs on test_CT {
+	f_TC_chan_rel_last_eutran_plmn_hard_clear(false);
+}
+
+/* Test behavior of RR Channel rRelease after Clear Command with CSFB indicator from
+   MSC, previously receiving any CommonID containing the "Last Used E-UTRAN PLMN
+   Id". According to spec (3GPP TS 48.008 sec 3.1.30) that's the bit requesting
+   EUTRAN neighbor list sent later on by BSC in RR Channel. */
+testcase TC_chan_rel_last_eutran_plmn_hard_clear_csfb() runs on test_CT {
+	f_TC_chan_rel_last_eutran_plmn_hard_clear(true);
+}
+
+/* Test behavior of RR Channel Release after Clear Command with CSFB indicator from
+   MSC, without receiving any CommonID containing the "Last Used E-UTRAN PLMN
+   Id". According to spec (TS 48.008 version 16.0.0 Release 16 "3.2.1.21") the
+   CSFB Indicator should not be used anymore, and hence, there should be no
+   EUTRAN neighbor list sent by BSC in RR Channel release since no CommonId with
+   Last Used E-UTRAN PLMN Id" IE was sent for this conn. */
 testcase TC_chan_rel_hard_clear_csfb() runs on test_CT {
 	var BSSAP_N_DATA_ind rx_di;
 	var DchanTuple dt;
@@ -1896,7 +1950,7 @@ testcase TC_chan_rel_hard_clear_csfb() runs on test_CT {
 		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 	}
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, is_csfb := true);
+	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2322,8 +2376,7 @@ function f_test_si2quater(integer total_earfcns, template SystemInformationConfi
 			BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 		}
 
-		f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, is_csfb := true,
-				  expect_cells := expect_cells);
+		f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := expect_cells);
 	}
 
 	for (var integer i := 1; i < total_earfcns; i := i + 1) {
@@ -8453,6 +8506,8 @@ control {
 	execute( TC_chan_rel_rll_rel_ind() );
 	execute( TC_chan_rel_conn_fail() );
 	execute( TC_chan_rel_hard_clear() );
+	execute( TC_chan_rel_last_eutran_plmn_hard_clear_no_csfb() );
+	execute( TC_chan_rel_last_eutran_plmn_hard_clear_csfb() );
 	execute( TC_chan_rel_hard_clear_csfb() );
 	execute( TC_chan_rel_hard_rlsd() );
 	execute( TC_chan_rel_hard_rlsd_ms_dead() );
