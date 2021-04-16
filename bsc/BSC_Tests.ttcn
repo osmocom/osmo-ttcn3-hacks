@@ -1501,15 +1501,16 @@ function f_gen_ass_req(boolean osmux_enabled := false, integer bssap_idx := 0, c
 	return ass_cmd;
 }
 
-function f_gen_handover_req(integer bssap_idx := 0, charstring aoip_tla := "1.2.3.4") return PDU_BSSAP {
+function f_gen_handover_req(integer bssap_idx := 0, charstring aoip_tla := "1.2.3.4",
+			    template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit) return PDU_BSSAP {
 	var PDU_BSSAP ho_req;
 	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
 		var BSSMAP_IE_AoIP_TransportLayerAddress tla :=
 			valueof(f_ts_BSSMAP_IE_AoIP_TLA(aoip_tla, 2342));
-		ho_req := valueof(ts_BSSMAP_HandoverRequest(omit, tla));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(omit, tla, oldToNewBSSIEs := oldToNewBSSIEs));
 	} else {
 		var BSSMAP_IE_CircuitIdentityCode cic := valueof(ts_BSSMAP_IE_CIC(0,1));
-		ho_req := valueof(ts_BSSMAP_HandoverRequest(cic, omit));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(cic, omit, oldToNewBSSIEs := oldToNewBSSIEs));
 	}
 	return ho_req;
 }
@@ -5107,6 +5108,8 @@ private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
 	 * on the lchan even before we get a chance to evaluate the BSSMAP Handover Request ACK. So we
 	 * need to assume that osmo-bsc will activate TS 1 and already set up this lchan's RSL emulation
 	 * before we get started. */
+	var template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit;
+	var template PDU_ML3_NW_MS exp_rr_rel_tmpl := tr_RRM_RR_RELEASE;
 	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
 	f_rslem_register(0, new_chan_nr);
 	g_chan_nr := new_chan_nr;
@@ -5116,8 +5119,14 @@ private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
 	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
 	activate(as_Media());
 
+	if (not istemplatekind(g_pars.last_used_eutran_plmn, "omit")) {
+		oldToNewBSSIEs := f_ts_BSSMAP_oldToNewBSSIEs(ts_BSSMAP_LastUsedEUTRANPLMNId(g_pars.last_used_eutran_plmn));
+		exp_rr_rel_tmpl := tr_RRM_RR_RELEASE_CellSelectInd;
+	}
+
 	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
-				     f_gen_handover_req(aoip_tla := g_pars.host_aoip_tla)));
+				     f_gen_handover_req(aoip_tla := g_pars.host_aoip_tla,
+							oldToNewBSSIEs := oldToNewBSSIEs)));
 	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
 
 	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
@@ -5162,6 +5171,8 @@ private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
 				enc_PDU_ML3_MS_NW(l3_tx)));
 
 	BSSAP.receive(tr_BSSMAP_HandoverComplete);
+
+	f_perform_clear(RSL, exp_rr_rel_tmpl);
 	setverdict(pass);
 }
 function f_tc_ho_into_this_bsc_main(TestHdlrParams pars) runs on test_CT {
@@ -5183,7 +5194,6 @@ function f_tc_ho_into_this_bsc_main(TestHdlrParams pars) runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:completed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
 }
 
 testcase TC_ho_into_this_bsc() runs on test_CT {
@@ -5195,6 +5205,18 @@ testcase TC_ho_into_this_bsc() runs on test_CT {
 testcase TC_ho_into_this_bsc_tla_v6() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	pars.host_aoip_tla := "::6";
+	f_tc_ho_into_this_bsc_main(pars);
+	f_shutdown_helper();
+}
+
+/* Similar to TC_ho_into_this_bsc, but when in SRVCC, HO Req contains "Old BSS
+   to New BSS Information" IE with "Last Used E-UTRAN PLMN Id", whihch, when the
+   channel is later released (RR CHannel Release), should trigger inclusion of
+   IE "Cell Selection Indicator after Release of all TCH and SDCCH" with E-UTRAN
+   neighbors. */
+testcase TC_srvcc_eutran_to_geran() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	pars.last_used_eutran_plmn := '323454'O;
 	f_tc_ho_into_this_bsc_main(pars);
 	f_shutdown_helper();
 }
@@ -6472,9 +6494,10 @@ testcase TC_assignment_verify_ms_power_params_ie() runs on test_CT {
 template MobileIdentityLV ts_MI_TMSI_NRI_LV(integer nri_v, integer nri_bitlen := 10) :=
 	ts_MI_TMSI_LV(tmsi := f_gen_tmsi(suffix := 0, nri_v := nri_v, nri_bitlen := nri_bitlen));
 
-private function f_expect_lchan_rel(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
+private function f_expect_lchan_rel(RSL_DCHAN_PT rsl, template PDU_ML3_NW_MS exp_rr_rel_tmpl := tr_RRM_RR_RELEASE)
+runs on MSC_ConnHdlr {
 	interleave {
-	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {
+	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch exp_rr_rel_tmpl)) {
 			f_logp(BSCVTY, "Got RSL RR Release");
 		}
 	[] rsl.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {
@@ -6488,11 +6511,12 @@ private function f_expect_lchan_rel(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
 	}
 }
 
-private function f_perform_clear(RSL_DCHAN_PT rsl) runs on MSC_ConnHdlr {
+private function f_perform_clear(RSL_DCHAN_PT rsl, template PDU_ML3_NW_MS exp_rr_rel_tmpl := tr_RRM_RR_RELEASE)
+runs on MSC_ConnHdlr {
 	f_logp(BSCVTY, "MSC instructs BSC to clear channel");
 	BSSAP.send(ts_BSSMAP_ClearCommand(0));
 	interleave {
-	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {
+	[] rsl.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch exp_rr_rel_tmpl)) {
 			f_logp(BSCVTY, "Got RSL RR Release");
 		}
 	[] rsl.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {
@@ -8645,6 +8669,7 @@ control {
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
 		execute( TC_ho_into_this_bsc_tla_v6() );
 	}
+	execute( TC_srvcc_eutran_to_geran() );
 	execute( TC_ho_in_fail_msc_clears() );
 	execute( TC_ho_in_fail_msc_clears_after_ho_detect() );
 	execute( TC_ho_in_fail_no_detect() );
