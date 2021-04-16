@@ -589,7 +589,8 @@ type record TestHdlrParams {
 	charstring	host_aoip_tla,
 	TestHdlrParamsMSCPool mscpool,
 	boolean		media_mgw_offer_ipv6,
-	OCT3		last_used_eutran_plmn optional
+	OCT3		last_used_eutran_plmn optional,
+	boolean		expect_channel_mode_modify
 };
 
 /* Note: Do not use valueof() to get a value of this template, use
@@ -625,7 +626,8 @@ template (value) TestHdlrParams t_def_TestHdlrPars := {
 		l3_info := omit
 	},
 	media_mgw_offer_ipv6 := true,
-	last_used_eutran_plmn := omit
+	last_used_eutran_plmn := omit,
+	expect_channel_mode_modify := false
 }
 
 function f_create_chan_and_exp() runs on MSC_ConnHdlr {
@@ -784,7 +786,9 @@ type record AssignmentState {
 	boolean assignment_done,
 	RslChannelNr old_chan_nr,
 	/* Modify related bits */
+	PDU_ML3_NW_MS rr_channel_mode_modify_msg optional,
 	boolean rr_modify_seen,
+	RSL_Message rsl_mode_modify_msg optional,
 	boolean modify_done
 }
 
@@ -796,7 +800,9 @@ template (value) AssignmentState ts_AssignmentStateInit := {
 	old_lchan_rll_rel_req_seen := false,
 	assignment_done := false,
 	old_chan_nr := -,
+	rr_channel_mode_modify_msg := omit,
 	rr_modify_seen := false,
+	rsl_mode_modify_msg := omit,
 	modify_done := false
 }
 
@@ -908,6 +914,7 @@ altstep as_modify(inout AssignmentState st) runs on MSC_ConnHdlr {
 		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
 		log("Rx L3 from net: ", l3);
 		if (ischosen(l3.msgs.rrm.channelModeModify)) {
+			st.rr_channel_mode_modify_msg := l3;
 			f_rsl_reply(ts_RRM_ModeModifyAck(l3.msgs.rrm.channelModeModify.channelDescription,
 							 l3.msgs.rrm.channelModeModify.channelMode), rsl);
 			st.rr_modify_seen := true;
@@ -915,6 +922,7 @@ altstep as_modify(inout AssignmentState st) runs on MSC_ConnHdlr {
 		repeat;
 		}
 	[st.voice_call and st.rr_modify_seen] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
+		st.rsl_mode_modify_msg := rsl;
 		RSL.send(ts_RSL_MODE_MODIFY_ACK(g_chan_nr));
 		st.modify_done := true;
 		repeat;
@@ -1144,6 +1152,7 @@ runs on MSC_ConnHdlr {
 		 * channel, we must now check if the mode of the current
 		 * channel is compatible. If not we expect the BSC to modify
 		 * the mode */
+		st.is_assignment := false;
 		exp_modify := f_channel_needs_modify(BSCVTY, ass_cmd.pdu.bssmap.assignmentRequest.channelType, g_chan_nr);
 	}
 
@@ -1216,6 +1225,39 @@ runs on MSC_ConnHdlr {
 	log("g_media ", g_media);
 	if (not isbound(bssap)) {
 		mtc.stop;
+	}
+
+	if (exp_modify) {
+		/* Verify that the RR Channel Mode Modify and RSL MODE MODIFY message asked for the expected channel
+		 * mode. */
+		/* TODO: more precisely expect the different types of speech? */
+		var OCT1 rr_channel_mode := st.rr_channel_mode_modify_msg.msgs.rrm.channelModeModify.channelMode.mode;
+
+		if (st.voice_call and rr_channel_mode == '00'O) {
+			setverdict(fail, "f_establish_fully(): Expected RR Channel Mode Modify",
+				   " to a speech mode, but got channelMode == ", rr_channel_mode);
+			mtc.stop;
+		} else if (not st.voice_call and rr_channel_mode != '00'O) {
+			setverdict(fail, "f_establish_fully(): Expected RR Channel Mode Modify",
+				   " to signalling mode, but got channelMode == ", rr_channel_mode);
+			mtc.stop;
+		}
+
+		var RSL_IE_Body chan_mode_ie;
+		if (not f_rsl_find_ie(st.rsl_mode_modify_msg, RSL_IE_CHAN_MODE, chan_mode_ie)) {
+			setverdict(fail, "RSL MODE MODIFY message lacks a Channel Mode IE");
+			mtc.stop;
+		}
+		var RSL_SpeechDataInd rsl_spd_ind := chan_mode_ie.chan_mode.spd_ind;
+		if (st.voice_call and rsl_spd_ind != RSL_SPDI_SPEECH) {
+			setverdict(fail, "f_establish_fully(): Expected RSL MODE MODIFY",
+				   " to a speech mode, but got spd_ind == ", rsl_spd_ind);
+			mtc.stop;
+		} else if (not st.voice_call and rsl_spd_ind != RSL_SPDI_SIGN) {
+			setverdict(fail, "f_establish_fully(): Expected RSL MODE MODIFY",
+				   " to signalling mode, but got spd_ind == ", rsl_spd_ind);
+			mtc.stop;
+		}
 	}
 
 	/* When the BSC detects that LCLS is possible it will cross the
