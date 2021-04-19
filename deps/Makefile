@@ -76,8 +76,9 @@ OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
-# In order to keep local changes in the repository of a dependency, set its commit to the
-# name of a local branch here (e.g. 'master').
+# Do not put references to branches here, except for local testing: this breaks the caching
+# logic of docker containers, which only invalidate their cached ttcn3 dependencies if this
+# file changed.
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		f086e78d74defa044d864f17adaad9433fedc961
 titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-11-gd4b7a6d
@@ -127,8 +128,8 @@ titan.TestPorts.TCPasp_commit=			R.9.A-5-g2c91bc6
 titan.TestPorts.TELNETasp_commit=		873fe539642542cd9a901c208f1ec11c6d2f5387
 titan.TestPorts.UDPasp_commit=			c20d77a34f288dd70dd4aaa30e520778876e9336
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-13-gd34ab71
-titan.TestPorts.USB_commit=			master
-osmo-uecups_commit=				master
+titan.TestPorts.USB_commit=			4c742e931aae66c0046cebfe3c1de4618b6f9ffc
+osmo-uecups_commit=				8362efef7c6fa341eb947a75786878e0685767b7
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
