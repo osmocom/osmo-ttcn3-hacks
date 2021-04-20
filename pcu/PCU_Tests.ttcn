@@ -1418,6 +1418,108 @@ testcase TC_n3101_max_t3169() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+
+/* Verify after N3103_MAX is reached, T3169 is started and upon timeout TBF is
+   freed and no longer available. Trigger it by sending a few UL blocks CTRL ACKING
+   the final UL ACK sent at us. */
+testcase TC_n3103_max_t3169() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var BTS_PDTCH_Block data_msg;
+	var RlcmacDlBlock dl_block;
+	var uint32_t sched_fn;
+	var template (value) TsTrxBtsNum nr;
+	var template RlcmacDlBlock exp_ul_ack;
+	var template UlAckNackGprs exp_ul_ack_sub;
+	var GprsMS ms;
+	const integer N3103_MAX := 2; /* N3103 is usually somewhere 2-5 */
+	var integer N3103 := 0;
+	timer T_3169 := 1.0;
+
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	info_ind.n3103 := N3103_MAX;
+	info_ind.t3169 := 1;
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	f_ms_tx_ul_data_block_multi(ms, 5);
+	exp_ul_ack_sub := tr_UlAckNackGprs(*, tr_AckNackDescription('1'B), *);
+	exp_ul_ack := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi, exp_ul_ack_sub);
+
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[N3103 < N3103_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   exp_ul_ack)) -> value data_msg {
+		if (not f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			setverdict(fail, "Unexpected DL BLOCK has no RRBP: ", data_msg.dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		N3103 := N3103 + 1;
+		if (N3103 == N3103_MAX) {
+			/* At this point in time (N3103_MAX reached), PCU is
+			 * moving the TBF to RELEASE state so no data/ctrl for
+			 * it is tx'ed, hence the dummy blocks: */
+			T_3169.start;
+		}
+		repeat;
+	}
+	[N3103 >= N3103_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   exp_ul_ack)) -> value data_msg {
+		setverdict(fail, "Unexpected UL ACK/NACK after reaching N3103_MAX");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	[] as_ms_rx_ignore_dummy(ms, nr);
+	[T_3169.running] T_3169.timeout {
+		log("T_3169 timeout");
+		/* Done in alt, wait for pending RTS initiated previously in
+		 * above case before continuing (expect /* Dummy block): */
+		BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						tr_RLCMAC_DUMMY_CTRL));
+		}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	/* Now that T3169 has expired, establishing a Ul TBF should provide same
+	 * USFs as per previous TBF since they were freed at expiration time: */
+	var uint3_t old_usf[8] := ms.ul_tbf.usf;
+	var uint5_t old_tfi := ms.ul_tbf.tfi;
+	f_ms_establish_ul_tbf(ms);
+	if (old_tfi != ms.ul_tbf.tfi) {
+		setverdict(fail, "Unexpected TFI change: ", ms.ul_tbf.tfi, " vs exp ", old_tfi);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	for (var integer i := 0; i < 8; i := i +1) {
+		if (ms.ul_tbf.usf[i] != old_usf[i]) {
+			setverdict(fail, "Unexpected USF change: ", ms.ul_tbf.usf[i], " vs exp ", old_usf[i]);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify that a Downlink TBF is kept available until T3191 fires, at which
  * point the TBF is no longer available. In order to get to start of T3191, we
  * have to wait for x2031 since that marks the IDLE TBF time, that is, the delay
@@ -5667,6 +5769,7 @@ control {
 	execute( TC_mcs_max_dl() );
 	execute( TC_t3169() );
 	execute( TC_n3101_max_t3169() );
+	execute( TC_n3103_max_t3169() );
 	execute( TC_x2031_t3191() );
 	execute( TC_zero_x2031_t3191() );
 	execute( TC_t3193() );
