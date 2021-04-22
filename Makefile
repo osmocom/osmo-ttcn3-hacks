@@ -28,6 +28,7 @@ SUBDIRS= \
 	mme \
 	msc \
 	ns \
+	pcap-client \
 	pcu \
 	pgw \
 	remsim \

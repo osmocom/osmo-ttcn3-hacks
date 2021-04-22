@@ -1,0 +1,212 @@
+module OPCAP_CLIENT_Tests {
+
+import from OPCAP_Adapter all;
+import from OPCAP_Types all;
+import from OPCAP_Templates all;
+
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from Osmocom_Types all;
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+import from Socket_API_Definitions all;
+
+type record IpPort {
+	charstring ip,
+	integer udp_port
+};
+
+modulepar {
+	/* local IP address listening for OPCAP connections */
+	charstring mp_local_opcap_ip := "127.0.0.1";
+	/* local TCP base port for inbound OPCAP connections */
+	integer mp_local_opcap_port := 5000;
+
+	/* IP + port for simulating user traffic */
+	IpPort mp_traffic_a := { "127.0.0.23", 44423 };
+	IpPort mp_traffic_b := { "127.0.0.42", 44442 };
+};
+
+type component test_CT extends OPCAP_Adapter_CT {
+	timer g_Tguard := 30.0;
+
+	port TELNETasp_PT VTY;
+
+	/* port to generate IP traffic that may or may not be captured */
+	port IPL4asp_PT IP;
+	var integer g_traffic_conn_id[2];
+};
+
+private altstep as_Tguard() runs on test_CT {
+[] g_Tguard.timeout {
+	setverdict(fail, "global guard timeout");
+	mtc.stop;
+	}
+}
+
+/* initialize one of the OPCAP servers, wait for client to connect */
+private function f_init_one_srv(integer idx, template (present) uint32_t linktype) runs on test_CT {
+	/* start guard timer */
+	activate(as_Tguard());
+	g_Tguard.start;
+	log("Waiting for client-", idx, " connection...");
+	/* wait for connection */
+	f_bind(mp_local_opcap_ip, mp_local_opcap_port+idx, idx);
+	f_wait_client_connect(idx);
+	/* wait for file header */
+	f_opcap_exp(tr_OPCAP_FILE_HDR(linktype), idx);
+};
+
+
+/* global initialization */
+private function f_init() runs on test_CT {
+	map(self:VTY, system:VTY);
+	f_vty_set_prompts(VTY);
+	f_vty_transceive(VTY, "enable");
+
+	map(self:IP, system:IP);
+	var IPL4asp_Types.Result res
+
+	/* 0 -> 1 */
+	res := f_IPL4_connect(IP, mp_traffic_b.ip, mp_traffic_b.udp_port,
+			      mp_traffic_a.ip, mp_traffic_a.udp_port, -1, { udp:={} });
+	g_traffic_conn_id[0] := res.connId;
+
+	/* 1 -> 0 */
+	res := f_IPL4_connect(IP, mp_traffic_a.ip, mp_traffic_a.udp_port,
+			      mp_traffic_b.ip, mp_traffic_b.udp_port, -1, { udp:={} });
+	g_traffic_conn_id[1] := res.connId;
+}
+
+/* generate user traffic from A -> B */
+function f_trafic_pkt_ab(octetstring payload) runs on test_CT {
+	IP.send(ASP_Send:{g_traffic_conn_id[0], omit, payload})
+	IP.receive(ASP_RecvFrom:{g_traffic_conn_id[1], ?, ?, ?, ?, { udp:={} }, ?, payload});
+}
+
+/* generate user traffic from B -> A */
+function f_trafic_pkt_ba(octetstring payload) runs on test_CT {
+	IP.send(ASP_Send:{g_traffic_conn_id[1], omit, payload})
+	IP.receive(ASP_RecvFrom:{g_traffic_conn_id[0], ?, ?, ?, ?, { udp:={} }, ?, payload});
+}
+
+/* expect a specified UDP payload on the OPCAP connection 'idx' */
+function f_opcap_exp_udp(octetstring udp_payload, integer idx) runs on test_CT {
+	var octetstring rx_tail;
+	var integer udp_payload_len, rx_pdu_len;
+	var OPCAP_PDU rx_pdu;
+
+	udp_payload_len := lengthof(udp_payload);
+
+	/* sadly I couldn't figure out how to create an octetstring template
+	 * for 'match an octetstring ending in 'udp_payload' */
+	rx_pdu := f_opcap_exp(tr_OPCAP_PKT(?), idx);
+	rx_pdu_len := lengthof(rx_pdu.u.packet.payload);
+	rx_tail := substr(rx_pdu.u.packet.payload, rx_pdu_len - udp_payload_len, udp_payload_len);
+	if (rx_tail != udp_payload) {
+		log("captured UDP payload: ", rx_tail, " but expected: ", udp_payload);
+		setverdict(fail);
+	} else {
+		setverdict(pass);
+	}
+}
+
+/* create an additional pcap-store-connection via the VTY */
+function f_vty_create_addl_connection(integer idx) runs on test_CT
+{
+	f_vty_config3(VTY, { "client", "pcap-store-connectio second-" & int2str(idx) },
+			{ "server ip " & mp_local_opcap_ip,
+			  "server port " & int2str(mp_local_opcap_port + idx),
+			  "connect" }
+			);
+}
+
+
+
+/* wait for inbound client connection and reception of link header */
+testcase TC_connect_rx_hdr() runs on test_CT
+{
+	f_init();
+	f_init_one_srv(0, ?);
+	setverdict(pass);
+}
+
+/* check if client connection is re-started after a close */
+testcase TC_reconnect(integer idx := 0) runs on test_CT
+{
+	f_init();
+	f_init_one_srv(idx, ?);
+	f_sleep(2.0);
+
+	log("Disconnecting client-", idx);
+	f_disconnect(idx);
+
+	f_wait_client_connect(idx);
+	f_opcap_exp(tr_OPCAP_FILE_HDR(?), idx);
+	setverdict(pass);
+}
+
+/* capture a packet that's within the filter */
+testcase TC_capture() runs on test_CT
+{
+	f_init();
+	f_init_one_srv(0, ?);
+
+	for (var integer i := 0; i < 10; i := i + 1) {
+		var octetstring udp_payload;
+
+		/* we assume 1400 is low enough to avoid IP fragmentation */
+		udp_payload := f_rnd_octstring(f_rnd_int(1400));
+		f_trafic_pkt_ab(udp_payload);
+
+		f_opcap_exp_udp(udp_payload, 0);
+	}
+}
+
+/* wait for inbound client connections and reception of link header */
+testcase TC_multi_connect_rx_hdr() runs on test_CT
+{
+	f_init();
+	f_init_one_srv(0, ?);
+	f_vty_create_addl_connection(1);
+	f_init_one_srv(1, ?);
+	setverdict(pass);
+}
+
+/* ensure a packet that's within the filter is sent to secondary clients */
+testcase TC_multi_capture() runs on test_CT
+{
+	f_init();
+	f_init_one_srv(0, ?);
+	f_vty_create_addl_connection(1);
+	f_init_one_srv(1, ?);
+
+	for (var integer i := 0; i < 10; i := i + 1) {
+		var octetstring udp_payload;
+
+		/* we assume 1400 is low enough to avoid IP fragmentation */
+		udp_payload := f_rnd_octstring(f_rnd_int(1400));
+		f_trafic_pkt_ab(udp_payload);
+
+		/* expect packet to arrive on both simulated servers */
+		f_opcap_exp_udp(udp_payload, 0);
+		f_opcap_exp_udp(udp_payload, 1);
+	}
+}
+
+/* TODO: ensure a packet outside the filter is dropped */
+/* TODO: capture of truncated packet */
+/* TODO: stall the receive window */
+/* TODO: different link type (ethernet, not SLL) */
+
+
+control {
+	execute( TC_connect_rx_hdr() );
+	execute( TC_reconnect() );
+	execute( TC_capture() );
+	execute( TC_multi_connect_rx_hdr() );
+	execute( TC_multi_capture() );
+};
+
+
+};
