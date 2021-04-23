@@ -96,7 +96,8 @@ type record UlTbf {
 	uint3_t			usf[8],
 	boolean			is_egprs,
 	uint14_t		bsn,
-	CodingScheme		tx_cs_mcs
+	CodingScheme		tx_cs_mcs,
+	GsmFrameNumber		start_time_fn
 };
 
 type record GprsMS {
@@ -160,7 +161,8 @@ template (value) UlTbf t_UlTbf_def := {
 	usf := { USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED, USF_UNUSED },
 	is_egprs := false,
 	bsn := 0,
-	tx_cs_mcs := CS_1
+	tx_cs_mcs := CS_1,
+	start_time_fn := 0
 };
 
 type component MS_BTS_IFACE_CT {
@@ -233,6 +235,12 @@ function f_trxnr2arfcn(uint3_t trx_nr) return GsmArfcn {
 	return mp_base_arfcn + trx_nr;
 }
 
+/* 3GPP TS 44.018  10.5.2.38 Starting Time */
+function f_tbf_starting_time_2_fn_mod_42432(TbfStartingTime st)
+runs on MS_BTS_IFACE_CT return GsmFrameNumber {
+	return 51 * ((st.t3 - st.t2) mod 26) + st.t3 + 51 * 26 * st.t1;
+}
+
 function f_ultbf_new_from_rr_imm_ass(in GsmRrMessage rr_imm_ass)
 runs on MS_BTS_IFACE_CT return UlTbf {
 	var UlTbf ul_tbf := valueof(t_UlTbf_def);
@@ -254,8 +262,11 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 			ul_tbf.tfi := ul_tbf.ass.ccch.dynamic.tfi_assignment;
 			ul_tbf.tx_cs_mcs := f_rlcmac_block_ChCodingCommand2cs_mcs(ul_tbf.ass.ccch.dynamic.ch_coding_cmd);
 			ul_tbf.usf[tn_allocated] := ul_tbf.ass.ccch.dynamic.usf;
+			if (ul_tbf.ass.ccch.dynamic.tbf_starting_time_present == '1'B) {
+				ul_tbf.start_time_fn := f_tbf_starting_time_2_fn_mod_42432(ul_tbf.ass.ccch.dynamic.tbf_starting_time);
+			}
 		} else if (match(ul_tbf.ass.ccch, tr_PacketUlSglAssign)) {
-			/* Nothing to do here  yet */
+			ul_tbf.start_time_fn := f_tbf_starting_time_2_fn_mod_42432(ul_tbf.ass.ccch.single.tbf_starting_time);
 		}
 	} else if (match(rr_imm_ass, tr_IMM_TBF_ASS(dl := false, rest := tr_IaRestOctets_EGPRSULAss(?)))) {
 		ul_tbf.ass.ccch_egprs := rr_imm_ass.payload.imm_ass.rest_octets.lh.egprs_ul;
@@ -265,7 +276,11 @@ runs on MS_BTS_IFACE_CT return UlTbf {
 			ul_tbf.tfi := ul_tbf.ass.ccch_egprs.dynamic.tfi_assignment;
 			ul_tbf.tx_cs_mcs := f_rlcmac_block_EgprsChCodingCommand2cs_mcs(ul_tbf.ass.ccch_egprs.dynamic.egprs_ch_coding_cmd);
 			ul_tbf.usf[tn_allocated] := ul_tbf.ass.ccch_egprs.dynamic.usf;
+			if (ul_tbf.ass.ccch_egprs.dynamic.tbf_starting_time_present == '1'B) {
+				ul_tbf.start_time_fn := f_tbf_starting_time_2_fn_mod_42432(ul_tbf.ass.ccch_egprs.dynamic.tbf_starting_time);
+			}
 		} else if (match(ul_tbf.ass.ccch_egprs, tr_EgprsUlAssMultiblock)) {
+			ul_tbf.start_time_fn := f_tbf_starting_time_2_fn_mod_42432(ul_tbf.ass.ccch_egprs.multiblock.tbf_starting_time);
 			/* Nothing to do here yet */
 		}
 	} else {
@@ -661,7 +676,7 @@ runs on MS_BTS_IFACE_CT {
 
 /* Send random payload for last "num_blocks" blocks in Ul TBF (ending with CV=0). */
 function f_ms_tx_ul_data_block_multi(inout GprsMS ms, integer num_blocks := 1, boolean with_tlli := false,
-				     template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
+				     uint32_t fn := 0, template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum)
 runs on MS_BTS_IFACE_CT return octetstring {
 	var octetstring total_payload := ''O;
 	var uint32_t payload_fill_len := f_ultbf_payload_fill_length(ms.ul_tbf, with_tlli, 0);
@@ -673,7 +688,12 @@ runs on MS_BTS_IFACE_CT return octetstring {
 		if (cv > g_bs_cv_max) {
 			cv := 15;
 		}
-		f_ms_tx_ul_data_block(ms, payload, cv := cv, with_tlli := with_tlli, nr := nr);
+		if (i == 1) {
+			/* We use FN on i=0 to jump to wanted FN time, then simply submit on next
+			 * available frame (fn=0) */
+			fn := 0;
+		}
+		f_ms_tx_ul_data_block(ms, payload, cv := cv, with_tlli := with_tlli, fn := fn, nr := nr);
 		total_payload := total_payload & payload;
 	}
 	return total_payload;
