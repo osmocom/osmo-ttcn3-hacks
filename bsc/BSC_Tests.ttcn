@@ -8671,6 +8671,93 @@ testcase TC_refuse_chan_act_to_vamos() runs on test_CT {
 	}
 }
 
+private function f_TC_reassignment_codec(charstring id) runs on MSC_ConnHdlr {
+	/* First fully set up a speech lchan */
+	f_TC_assignment_codec(id);
+
+	/* Trigger re-assignment to another lchan */
+	var AssignmentState assignment_st := valueof(ts_AssignmentStateInit);
+
+	/* Re-Assignment should tell the MGW endpoint the new lchan's RTP address and port, so expecting to see exactly
+	 * one MDCX on MGCP. */
+	g_media.mgcp_conn[0].mdcx_seen_exp := g_media.mgcp_conn[0].mdcx_seen_exp + 1;
+
+	/* The new lchan will see all-new IPAC_CRCX and IPAC_MDCX messages telling the BTS the same RTP address and port
+	 * as the old lchan used. */
+	g_media.bts.ipa_crcx_seen := false;
+	g_media.bts.ipa_mdcx_seen := false;
+
+	/* Send different BTS side RTP port number for the new lchan */
+	g_media.bts.bts.port_nr := 4223;
+
+	f_rslem_register(0, valueof(ts_RslChanNr_Bm(2))); /* <-- FIXME: can we somehow infer the timeslot that will be used? */
+
+	/* Trigger re-assignment. */
+	f_vty_transceive(BSCVTY, "bts 0 trx 0 timeslot " & int2str(g_chan_nr.tn) & " sub-slot 0 assignment");
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] as_assignment(assignment_st);
+	[] as_Media();
+	[] T.timeout {
+			break;
+		}
+	}
+
+	if (not assignment_st.assignment_done) {
+		setverdict(fail, "Assignment did not complete");
+		mtc.stop;
+	}
+
+	f_check_mgcp_expectations()
+	setverdict(pass);
+
+	f_sleep(2.0);
+	log("show lchan summary: ", f_vty_transceive_ret(BSCVTY, "show lchan summary"));
+
+	/* Instruct BSC to clear channel */
+	var BssmapCause cause := 0;
+	BSSAP.send(ts_BSSMAP_ClearCommand(cause));
+	interleave {
+	[] MGCP.receive(tr_DLCX) {}
+	[] MGCP.receive(tr_DLCX) {}
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, decmatch tr_RRM_RR_RELEASE)) {}
+	[] RSL.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {}
+	[] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL)) {
+			RSL.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearComplete) {
+			BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+		}
+	}
+
+	f_sleep(0.5);
+}
+
+testcase TC_reassignment_fr() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_ctrs_bsc_and_bts_init();
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	vc_conn := f_start_handler(refers(f_TC_reassignment_codec), pars);
+	vc_conn.done;
+
+	/* from f_establish_fully() */
+	f_ctrs_bsc_and_bts_add(0, "assignment:attempted");
+	f_ctrs_bsc_and_bts_add(0, "assignment:completed");
+	/* from re-assignment */
+	f_ctrs_bsc_and_bts_add(0, "assignment:attempted");
+	f_ctrs_bsc_and_bts_add(0, "assignment:completed");
+	f_ctrs_bsc_and_bts_verify();
+	f_shutdown_helper();
+}
+
 
 control {
 	/* CTRL interface testing */
@@ -8935,6 +9022,8 @@ control {
 
 	execute( TC_refuse_chan_act_to_vamos() );
 	execute( TC_refuse_mode_modif_to_vamos() );
+
+	execute( TC_reassignment_fr() );
 }
 
 }
