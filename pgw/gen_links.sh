@@ -32,6 +32,14 @@ DIR=$BASEDIR/titan.ProtocolModules.UDP/src
 FILES="UDP_EncDec.cc  UDP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.NS_v7.3.0/src
+FILES="NS_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
+FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
@@ -50,7 +58,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn PAP_Types.ttcn "
-FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Templates.ttcn "
+FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Templates.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 FILES+="DNS_Helpers.ttcn "

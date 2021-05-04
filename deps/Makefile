@@ -15,6 +15,7 @@
 
 ECLIPSEGITHUB:=https://github.com/eclipse
 ECLIPSEGIT2:=https://git.eclipse.org/r/titan
+ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
@@ -51,7 +52,6 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolEmulations.M3UA \
 			titan.ProtocolModules.SUA \
 			titan.ProtocolModules.SDP \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
-			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
 			titan.ProtocolModules.LLC_v7.1.0 \
@@ -60,6 +60,8 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolEmulations.M3UA \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0
+
+ECLIPSEGITLAB_REPOS=	titan.ProtocolModules.GTP_v13.5.0
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
@@ -73,7 +75,7 @@ OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.TestPorts.AF_PACKET \
 			osmo-uecups
 
-ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
+ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(ECLIPSEGITLAB_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # Do not put references to branches here, except for local testing: this breaks the caching
@@ -87,7 +89,7 @@ titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb
 titan.ProtocolModules.BSSMAP_commit=		24f967b2f77bfdd2e6eabf1e82fa76239095f772
 titan.ProtocolModules.DNS_commit=		R.7.B
 titan.ProtocolModules.GRE_commit=		R.2.A-5-g654c446
-titan.ProtocolModules.GTP_v13.5.0_commit=	R.2.A-5-ge120ace
+titan.ProtocolModules.GTP_v13.5.0_commit=	54219599037626c675610d3a44433d01af264fbb
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A-5-g85cb124
 titan.ProtocolModules.ICMP_commit=		e49d9fb9f7de637b4bf4803dc6b6e911a8661640
 titan.ProtocolModules.ICMPv6_commit=		46f4d9b6e1e3c794294a92588401a81e4881dd27
@@ -186,6 +188,9 @@ $(foreach dir,$(ECLIPSEGITHUB_REPOS), \
 
 $(foreach dir,$(ECLIPSEGIT2_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(ECLIPSEGIT2))))
+
+$(foreach dir,$(ECLIPSEGITLAB_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(ECLIPSEGITLAB))))
 
 $(foreach dir,$(OSMOGITHUB_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(OSMOGITHUB))))
