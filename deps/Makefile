@@ -51,7 +51,6 @@ ECLIPSEGIT2_REPOS=	titan.ProtocolEmulations.M3UA \
 			titan.ProtocolModules.SUA \
 			titan.ProtocolModules.SDP \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
-			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ISUP_Q.762 \
 			titan.ProtocolModules.LLC_v7.1.0 \
@@ -65,7 +64,8 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.TestPorts.UDPasp \
 			titan.ProtocolEmulations.SCCP \
-			titan.ProtocolModules.BSSGP_v13.0.0
+			titan.ProtocolModules.BSSGP_v13.0.0 \
+			titan.ProtocolModules.GTP_v13.5.0
 
 OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.ProtocolModules.BSSMAP \
@@ -87,7 +87,7 @@ titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb
 titan.ProtocolModules.BSSMAP_commit=		24f967b2f77bfdd2e6eabf1e82fa76239095f772
 titan.ProtocolModules.DNS_commit=		R.7.B
 titan.ProtocolModules.GRE_commit=		R.2.A-5-g654c446
-titan.ProtocolModules.GTP_v13.5.0_commit=	R.2.A-5-ge120ace
+titan.ProtocolModules.GTP_v13.5.0_commit=	ed0c58b7875bf5ac9c7c37bb4429012e565ba67a
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A-5-g85cb124
 titan.ProtocolModules.ICMP_commit=		e49d9fb9f7de637b4bf4803dc6b6e911a8661640
 titan.ProtocolModules.ICMPv6_commit=		46f4d9b6e1e3c794294a92588401a81e4881dd27

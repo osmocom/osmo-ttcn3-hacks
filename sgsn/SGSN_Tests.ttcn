@@ -66,6 +66,7 @@ modulepar {
 	integer mp_hlr_port := 4222;
 	charstring mp_ggsn_ip := "127.0.0.103";
 	integer mp_echo_interval := 5; /* in seconds. Only used in test enabling g_use_echo  */
+	charstring mp_sgsn_gtp_ip := "127.0.0.10";
 
 	NSConfigurations mp_nsconfig := {
 		{
@@ -179,6 +180,7 @@ type component test_CT {
 
 	/* used by RIM related test */
 	port BSSGP_PT RIM[NUM_GB];
+	port GTPEM_PT GTPC;
 
 	var GTP_Emulation_CT vc_GTP;
 
@@ -224,6 +226,12 @@ type record BSSGP_ConnHdlrPars {
 	SCCP_PAR_Address sccp_addr_local optional,
 	SCCP_PAR_Address sccp_addr_peer optional
 };
+
+/* Passed in RAN-INFO message from emulated neighbor using RIM */
+const octetstring si1_default := '198fb100000000000000000000000000007900002b'O;
+const octetstring si3_default := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
+const octetstring si13_default := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
+const octetstring si_default := si1_default & si3_default & si13_default;
 
 private function f_cellid_to_RAI(in BssgpCellId cell_id) return RoutingAreaIdentificationV {
 	/* mcc_mnc is encoded as of 24.008 10.5.5.15 */
@@ -3207,16 +3215,11 @@ testcase TC_bssgp_rim_single_report() runs on test_CT {
 
 	/* Now also emulate also the response as well and send it back on GB interface #1. Expect the result on
 	 * GB interface #0 */
-	var octetstring si1 := '198fb100000000000000000000000000007900002b'O;
-	var octetstring si3 := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
-	var octetstring si13 := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
-	var octetstring si := si1 & si3 & si13;
-
 	res_cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
 						     ts_RIM_Sequence_Number(2),
 						     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
 						     ts_RIM_Protocol_Version_Number(1),
-						     tsu_ApplContainer_or_ApplErrContainer_NACC(tsu_ApplContainer_NACC(g_gb[0].cfg.bvc[0].cell_id, false, 3, si)),
+						     tsu_ApplContainer_or_ApplErrContainer_NACC(tsu_ApplContainer_NACC(g_gb[0].cfg.bvc[0].cell_id, false, 3, si_default)),
 						     omit);
 	bssgp_rim_pdu := ts_PDU_BSSGP_RAN_INFORMATION(ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, src_addr),
 									    ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
@@ -3235,6 +3238,108 @@ testcase TC_bssgp_rim_single_report() runs on test_CT {
 		}
 	[] T.timeout {
 		setverdict(fail, "No BSSGP RIM PDU received");
+		mtc.stop;
+		}
+	}
+
+	f_cleanup();
+}
+
+testcase TC_rim_eutran_to_geran() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	/* connect RIM related port */
+	connect(vc_GTP:CLIENT_DEFAULT, self:GTPC);
+
+	var GtpPeer peer := {
+		connId := 1,
+		remName := mp_sgsn_gtp_ip,
+		remPort := GTP1C_PORT
+	}
+
+	var template (value) RIM_Routing_Address_GTPC gtpc_dst_addr, gtpc_src_addr;
+	var template (value) RAN_Information_Request_RIM_Container_GTPC gtpc_rim_req_cont;
+	var template (value) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_bssgp_cont;
+	var template (value) Gtp1cUnitdata gtpc_pdu;
+
+	gtpc_dst_addr := t_GTPC_RIM_Routing_Address_cid(g_gb[1].cfg.bvc[0].cell_id);
+	gtpc_src_addr := t_GTPC_RIM_Routing_Address_enbid(g_gb[1].cfg.bvc[0].cell_id, tac := 3, gnbid := '12345678123456'O);
+
+	gtpc_rim_req_cont := ts_GTPC_RAN_Information_Request_RIM_Container(ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+									ts_GTPC_RIM_Sequence_Number(1),
+									ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+									ts_GTPC_RIM_Protocol_Version_Number(1),
+									tsu_GTPC_RAN_Information_Request_Application_Container_NACC(g_gb[1].cfg.bvc[0].cell_id),
+									omit);
+	gtpc_bssgp_cont := ts_GTPC_RAN_Information_Request(ts_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+							   ts_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+							   gtpc_rim_req_cont);
+	gtpc_pdu := ts_GTPC_RANInfoRelay(peer, ts_RANTransparentContainer_RAN_INFO_REQ(gtpc_bssgp_cont));
+	GTPC.send(gtpc_pdu);
+
+	var template RIM_Routing_Address bssgp_dst_addr, bssgp_src_addr;
+	var template PDU_BSSGP bssgp_rim_pdu_expect;
+	bssgp_dst_addr := t_RIM_Routing_Address_cid(g_gb[1].cfg.bvc[0].cell_id);
+	bssgp_src_addr := t_RIM_Routing_Address_enbid(g_gb[1].cfg.bvc[0].cell_id, tac := 3, gnbid := '12345678123456'O);
+	bssgp_rim_pdu_expect := tr_RAN_INFORMATION_REQUEST(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, bssgp_dst_addr),
+							   tr_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, bssgp_src_addr),
+							   tr_RAN_Information_Request_RIM_Container);
+	timer T := 2.0;
+	T.start;
+	alt {
+	[] RIM[1].receive(bssgp_rim_pdu_expect) {
+		setverdict(pass);
+		T.stop;
+		}
+	[] RIM[1].receive {
+		setverdict(fail, "Unexpected BSSGP RIM PDU received");
+		}
+	[] T.timeout {
+		setverdict(fail, "No BSSGP RIM PDU received");
+		mtc.stop;
+		}
+	}
+
+	/* Now also emulate also the response as well and send it back on GB
+	   interface #1. Expect the result on * GTPC */
+	var template RAN_Information_RIM_Container res_cont;
+	var template PDU_BSSGP bssgp_rim_pdu;
+	res_cont := ts_RAN_Information_RIM_Container(ts_RIM_Application_Identity(RIM_APP_ID_NACC),
+						     ts_RIM_Sequence_Number(2),
+						     ts_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+						     ts_RIM_Protocol_Version_Number(1),
+						     tsu_ApplContainer_or_ApplErrContainer_NACC(tsu_ApplContainer_NACC(g_gb[1].cfg.bvc[0].cell_id, false, 3, si_default)),
+						     omit);
+	bssgp_rim_pdu := ts_PDU_BSSGP_RAN_INFORMATION(ts_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, bssgp_src_addr),
+						      ts_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, bssgp_dst_addr),
+						      res_cont);
+	RIM[1].send(bssgp_rim_pdu);
+
+	var template RAN_Information_RIM_Container_GTPC rim_cont;
+	var template PDU_BSSGP_RAN_INFORMATION_GTPC gtpc_bssgp_cont_ack;
+	var template Gtp1cUnitdata gtpc_pdu_exp;
+	rim_cont := tr_GTPC_RAN_Information_RIM_Container(ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+							  ts_GTPC_RIM_Sequence_Number(2),
+							  ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+							  ts_GTPC_RIM_Protocol_Version_Number(1),
+							  tru_GTPC_ApplContainer_or_ApplErrContainer_NACC(tru_GTPC_ApplContainer_NACC(g_gb[1].cfg.bvc[0].cell_id, false, 3, si_default)),
+							  omit);
+	gtpc_bssgp_cont_ack := tr_GTPC_RAN_Information(tr_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+						       tr_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+						       rim_cont);
+	gtpc_pdu_exp := tr_GTPC_RANInfoRelay(peer, tr_RANTransparentContainer_RAN_INFO(gtpc_bssgp_cont_ack));
+
+	T.start;
+	alt {
+	[] GTPC.receive(gtpc_pdu_exp) {
+		setverdict(pass);
+		T.stop;
+		}
+	[] GTPC.receive {
+		setverdict(fail, "Unexpected GTPC RIM PDU received");
+		}
+	[] T.timeout {
+		setverdict(fail, "No GTPC RIM PDU received");
 		mtc.stop;
 		}
 	}
@@ -3436,6 +3541,7 @@ control {
 	execute( TC_paging_ps() );
 
 	execute( TC_bssgp_rim_single_report() );
+	execute( TC_rim_eutran_to_geran() );
 
 	execute( TC_cell_change_different_rai_ci_attach() );
 	execute( TC_cell_change_different_rai_ci_data() );
