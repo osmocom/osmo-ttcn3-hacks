@@ -1270,6 +1270,110 @@ testcase TC_mcs_max_dl() runs on RAW_PCU_Test_CT {
 	f_dl_data_exp_cs(f_rlcmac_block_int2cs_mcs(g_mcs_max_dl, true), bssgp_ms_racap_egprs_def);
 }
 
+/* Verify PCU drops TBF after some time of inactivity. */
+testcase TC_t3141() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+	var GprsMS ms;
+	var uint3_t rx_usf;
+	timer T_3141 := 1.0;
+	var boolean ul_tbf_usf_req := false;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	/* Only use 1 PDCH to simplify test: */
+	f_PCUIF_PDCHMask_set(info_ind, '00000001'B, 0);
+	f_PCUIF_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	f_vty_config2(PCUVTY, {"pcu"}, "timer T3141 1");
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish a one-phase access Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	T_3141.start;
+
+	/* Now we wait for PCU to transmit our USF */
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+
+	alt {
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   ?)) -> value data_msg {
+		if (ms.ul_tbf.usf[valueof(nr.ts_nr)] == USF_UNUSED) {
+			setverdict(fail, "Unexpected ts_nr ", valueof(nr.ts_nr), " without USF allocated");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+		if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+			/* PCU requests our USF, transmit WITHOUT tlli to avoid contention resolution success */
+			ul_tbf_usf_req := true;
+			f_ms_tx_ul_data_block(ms, f_rnd_octstring(10), cv := 15, with_tlli := false, fn := f_next_pdch_block(data_msg.raw.fn))
+		} else if (rx_usf == USF_UNUSED) {
+			if (data_msg.raw.fn >= ms.ul_tbf.start_time_fn) {
+				if (ul_tbf_usf_req) {
+					/* TBF was dropped by T3141, success */
+					setverdict(pass);
+					break;
+				} else {
+					log("PCU never requested USF, unexpected");
+					f_shutdown(__BFILE__, __LINE__);
+				}
+			} /* else: Keep waiting for TBF to be active by network */
+		} else {
+			log("PCU requests ", rx_usf, ", we have ", ms.ul_tbf.usf[valueof(nr.ts_nr)]);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		/* Make sure we don't receive a Ul ACK/NACK with TLLI set: */
+		if (match(data_msg.dl_block,
+			  tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+				  		     tr_UlAckNackGprs(tlli := ?,
+								      acknack_desc := ?,
+								      rel99 := *))))
+		{
+			log("Received UL ACK/NACK with TLLI set");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] T_3141.timeout {
+		log("T_3141 expired but TBF is still active, unexpected");
+		f_shutdown(__BFILE__, __LINE__);
+		}
+	[] BTS.receive {
+		/* We should never receive non-dummy messages, aka UL ACK/NACK,
+		 * because we never sent the TLLI to the PCU */
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Validate what happens when RACH to get UL TBF and then PCU receives no UL
  * data. It should end up in N3101 reaching N3101_MAX and finally triggering
  * T3169. See OS#5033 */
@@ -5758,6 +5862,7 @@ control {
 	execute( TC_mcs_max_ul() );
 	execute( TC_mcs_initial_dl() );
 	execute( TC_mcs_max_dl() );
+	execute( TC_t3141() );
 	execute( TC_n3101_max_t3169() );
 	execute( TC_n3103_max_t3169() );
 	execute( TC_x2031_t3191() );
