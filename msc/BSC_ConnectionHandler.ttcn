@@ -12,6 +12,7 @@
 
 module BSC_ConnectionHandler {
 
+import from TCCOpenSecurity_Functions all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from Native_Functions all;
@@ -111,7 +112,7 @@ type record BSC_ConnHdlrPars {
 };
 
 /* get a one-octet bitmaks of supported algorithms based on Classmark information */
-function f_alg_mask_from_cm(BSSMAP_IE_ClassmarkInformationType2 cm2) return OCT1 {
+function f_alg_mask_from_cm(BSSMAP_IE_ClassmarkInformationType2 cm2, template (omit) BSSMAP_IE_ClassmarkInformationType3 cm3 := omit) return OCT1 {
 	var BIT8 res := '00000001'B;	/* A5/0 always supported */
 
 	if (cm2.a5_1 == '0'B) {
@@ -123,7 +124,12 @@ function f_alg_mask_from_cm(BSSMAP_IE_ClassmarkInformationType2 cm2) return OCT1
 	if (cm2.classmarkInformationType2_oct5.a5_3 == '1'B) {
 		res := res or4b '00001000'B;
 	}
-	/* TODO: CM3 for A5/4 and beyond */
+	if (not istemplatekind(cm3, "omit")) {
+		var BSSMAP_IE_ClassmarkInformationType3 v := valueof(cm3);
+		var BIT8 tmp := oct2bit(v.classmark3ValuePart[0]) and4b '00001111'B;
+		res := res or4b (tmp << 4);
+	}
+
 	return bit2oct(res);
 }
 
@@ -153,6 +159,15 @@ function f_alg_from_mask(OCT1 mask_in) return integer {
 		}
 	}
 	return -1;
+}
+
+/* return true for A5/x supported by OCT1 bitmask */
+function f_alg_supported_by_mask(OCT1 mask_in, integer whicha5) return boolean {
+	var BIT8 mask := oct2bit(mask_in);
+	if (mask and4b ('00000001'B << whicha5) != '00000000'B) {
+		return true;
+	}
+	return false;
 }
 
 /* altstep for the global guard timer */
@@ -420,6 +435,7 @@ var GSUP_IE auth_tuple;
 								g_pars.vec.autn,
 								g_pars.vec.res));
 		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+		g_pars.vec.kc := f_auth3g_kc();
 	} else {
 		g_pars.vec := f_gen_auth_vec_2g();
 		auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
@@ -532,15 +548,49 @@ function f_expect_common_id() runs on BSC_ConnHdlr
 	}
 }
 
+function f_auth3g_kc() runs on BSC_ConnHdlr return OCT8 {
+	var integer i;
+	var octetstring res := g_pars.vec.ck[0] xor4b g_pars.vec.ck[0 + 8] xor4b g_pars.vec.ik[0] xor4b g_pars.vec.ik[0 + 8];
+	for (i := 1; i < 8; i := i + 1) {
+		var octetstring a := g_pars.vec.ck[i] xor4b g_pars.vec.ck[i + 8] xor4b g_pars.vec.ik[i] xor4b g_pars.vec.ik[i + 8];
+		res := res & a;
+	}
+
+	return res;
+}
+
+
 function f_mm_common() runs on BSC_ConnHdlr
 {
 	f_mm_auth();
 	if (g_pars.ran_is_geran) {
 		if (g_pars.net.expect_ciph) {
-			var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2);
+			var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2, g_pars.cm3);
 			var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
+			var boolean has_a54 := f_alg_supported_by_mask(a5_intersect, 4);
+
+			var PDU_BSSAP pdu;
 			alt {
-			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) {
+				[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) -> value pdu {
+				var PDU_BSSMAP_CipherModeCommand ciphmodcmd := pdu.pdu.bssmap.cipherModeCommand;
+				if (g_pars.use_umts_aka and has_a54) {
+					var OCT32 fulloutput := f_calculate_HMAC_SHA256(g_pars.vec.ck & g_pars.vec.ik, '32'O, 32);
+					var OCT16 kc128 := substr(fulloutput, 0, 16);
+					if (not ispresent(ciphmodcmd.kC128)) {
+						setverdict(fail, "kc128 missing in CiphModCmd");
+						mtc.stop;
+					}
+					if (ciphmodcmd.kC128.kC128_Value != kc128) {
+						setverdict(fail, "kc128 wrong in CiphModCmd?!", kc128);
+						mtc.stop;
+					}
+				} else {
+					if (ispresent(ciphmodcmd.kC128)) {
+						setverdict(fail, "kc128 present in CiphModCmd, but should not exist!");
+						mtc.stop;
+					}
+				}
+
 				var OCT1 a5_chosen := f_best_alg_from_mask(a5_intersect);
 				var integer a5_nr := f_alg_from_mask(a5_chosen);
 				BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(a5_nr+1, 1)));
@@ -548,6 +598,10 @@ function f_mm_common() runs on BSC_ConnHdlr
 			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
 				setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
 				mtc.stop;
+				}
+			[] BSSAP.receive(tr_BSSMAP_ClassmarkRequest) {
+				BSSAP.send(ts_BSSMAP_ClassmarkUpd(g_pars.cm2, g_pars.cm3))
+				repeat;
 				}
 			}
 			/* FIXME: Send the best available algorithm */
