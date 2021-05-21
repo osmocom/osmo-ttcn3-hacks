@@ -13,25 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ECLIPSEGITHUB:=https://github.com/eclipse
-ECLIPSEGIT2:=https://git.eclipse.org/r/titan
 ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
-ECLIPSEGITHUB_REPOS=	titan.Libraries.TCCUsefulFunctions \
+ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
+			titan.ProtocolEmulations.M3UA \
+			titan.ProtocolModules.BSSAPP_v7.3.0 \
+			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
 			titan.ProtocolModules.DNS \
+			titan.ProtocolModules.GRE \
+			titan.ProtocolModules.GTP_v13.5.0 \
+			titan.ProtocolModules.GTPv2_v13.7.0 \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
+			titan.ProtocolModules.ISUP_Q.762 \
 			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
+			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.M3UA \
+			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
 			titan.ProtocolModules.UDP \
 			titan.ProtocolModules.RTP \
-			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
+			titan.ProtocolModules.M2PA \
+			titan.ProtocolModules.ROSE \
+			titan.ProtocolModules.SCTP \
+			titan.ProtocolModules.SDP \
+			titan.ProtocolModules.SUA \
+			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
+			titan.ProtocolModules.NS_v7.3.0 \
+			titan.ProtocolModules.SGsAP_13.2.0 \
+			titan.ProtocolModules.SNDCP_v7.0.0 \
 			titan.TestPorts.Common_Components.Socket-API \
 			titan.TestPorts.Common_Components.Abstract_Socket \
 			titan.TestPorts.HTTPmsg \
@@ -43,25 +58,6 @@ ECLIPSEGITHUB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.TELNETasp \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
-
-ECLIPSEGIT2_REPOS=	titan.ProtocolEmulations.M3UA \
-			titan.ProtocolModules.GRE \
-			titan.ProtocolModules.M2PA \
-			titan.ProtocolModules.ROSE \
-			titan.ProtocolModules.SCTP \
-			titan.ProtocolModules.SUA \
-			titan.ProtocolModules.SDP \
-			titan.ProtocolModules.BSSAPP_v7.3.0 \
-			titan.ProtocolModules.GTPv2_v13.7.0 \
-			titan.ProtocolModules.ISUP_Q.762 \
-			titan.ProtocolModules.LLC_v7.1.0 \
-			titan.ProtocolModules.MobileL3_v13.4.0 \
-			titan.ProtocolModules.NAS_EPS_15.2.0.1 \
-			titan.ProtocolModules.NS_v7.3.0 \
-			titan.ProtocolModules.SGsAP_13.2.0 \
-			titan.ProtocolModules.SNDCP_v7.0.0
-
-ECLIPSEGITLAB_REPOS=	titan.ProtocolModules.GTP_v13.5.0
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
@@ -75,7 +71,7 @@ OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
 			titan.TestPorts.AF_PACKET \
 			osmo-uecups
 
-ALL_REPOS=$(ECLIPSEGITHUB_REPOS) $(ECLIPSEGIT2_REPOS) $(ECLIPSEGITLAB_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
+ALL_REPOS=$(ECLIPSEGITLAB_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # Do not put references to branches here, except for local testing: this breaks the caching
@@ -182,12 +178,6 @@ else
 	@rm -rf $(1)
 endif
 endef
-
-$(foreach dir,$(ECLIPSEGITHUB_REPOS), \
-	$(eval $(call GIT_template,$(dir),$(ECLIPSEGITHUB))))
-
-$(foreach dir,$(ECLIPSEGIT2_REPOS), \
-	$(eval $(call GIT_template,$(dir),$(ECLIPSEGIT2))))
 
 $(foreach dir,$(ECLIPSEGITLAB_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(ECLIPSEGITLAB))))
