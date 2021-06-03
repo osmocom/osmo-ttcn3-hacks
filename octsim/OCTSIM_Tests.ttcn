@@ -1,0 +1,238 @@
+module OCTSIM_Tests {
+
+import from Osmocom_Types all;
+import from General_Types all;
+import from Misc_Helpers all;
+
+import from USB_PortType all;
+import from USB_Types all;
+import from USB_Templates all;
+import from USB_Component all;
+import from USB_PortTypes all;
+
+import from CCID_Types all;
+import from CCID_Templates all;
+import from CCID_Emulation all;
+
+import from SIMTRACE_Types all;
+import from SIMTRACE_Templates all;
+import from SIMTRACE_Emulation all;
+
+modulepar {
+	charstring mp_cardem_usb_path := "1-2";
+	integer mp_cardem_usb_interface := 0;
+	USB_Device_Match mp_ccid_usb_dev_match := { vid_pid := { vid := '076b'H, pid := '6622'H } };
+}
+
+type component test_CT extends Slot_CT {
+	var ST_Emulation_CT vc_ST;
+	port ST_USER_PT ST;
+	port ST_USER_PT ST_IRQ;
+
+	var CCID_Emulation_CT vc_CCID;
+};
+
+private template (value) USB_IF_Params ts_UsbPars_path(charstring path, uint8_t if_nr) := {
+	usb_dev_match := {
+		path := {
+			path := path
+		}
+	},
+	usb_if_nr := if_nr
+}
+
+private function f_init(integer slot_nr := 0) runs on test_CT
+{
+	g_slot_nr := slot_nr;
+
+	var USB_IF_Params st_usb_pars;
+	st_usb_pars := valueof(ts_UsbPars_path(mp_cardem_usb_path, mp_cardem_usb_interface));
+	vc_ST := ST_Emulation_CT.create("ST");
+	map(vc_ST:USB, system:USB);
+	connect(vc_ST:INOUT, self:ST);
+	connect(vc_ST:IRQ, self:ST_IRQ);
+	vc_ST.start(SIMTRACE_Emulation.main(st_usb_pars));
+
+	/* remove the virtual card */
+	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(0));
+
+	/* TODO: set the ATR */
+
+	/* Enable the use of the IRQ endpoint to report status updates */
+	f_st_xceive(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true)),
+		    tr_SIMTRACE_CEMU_CONFIG(tr_FeatureFlags(true)))
+
+
+	var CCID_Emulation_Params cep := { usb_dev_match := mp_ccid_usb_dev_match };
+	vc_CCID := CCID_Emulation_CT.create("CCID");
+	map(vc_CCID:USB, system:USB);
+	connect(vc_CCID:SLOT[slot_nr], self:CCID);
+        vc_CCID.start(CCID_Emulation.main(cep));
+	CCID.receive(CCID_Emulation_Event:{up_down:=CCID_EVENT_UP});
+
+	//activate(as_Tguard);
+	//g_Tguard.start;
+
+	/* we want to start ind powered-off state */
+	f_ccid_power_off(?);
+}
+
+function f_st_drain() runs on test_CT {
+	timer T := 0.1;
+	T.start;
+	alt {
+	[] ST.receive {
+		log("Drained msg from INOUT");
+		repeat;
+		}
+	[] ST_IRQ.receive {
+		log("Drained msg from IRQ");
+		repeat;
+		}
+	[] T.timeout { }
+	}
+}
+
+
+function f_st_xceive(template (value) SIMTRACE_PDU tx, template (present) SIMTRACE_PDU exp_rx)
+runs on test_CT return SIMTRACE_PDU {
+	var SIMTRACE_PDU rx;
+	timer T := 5.0;
+
+	ST.send(tx);
+	T.start;
+	alt {
+	[] ST.receive(exp_rx) -> value rx {
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", exp_rx);
+		mtc.stop;
+		}
+	}
+	return rx;
+}
+
+private altstep as_ccid_any() runs on test_CT {
+	var CCID_PDU pdu;
+	[] CCID.receive(CCID_PDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected CCID ", pdu);
+		self.stop;
+		}
+	[] CCID.receive {
+		setverdict(fail, "Received unexpected non-CCID");
+		self.stop;
+		}
+}
+
+/* transceive a CCID command (send 'tx' on OUT; expect 'rx' on IN) */
+private function f_ccid_xceive(template (value) CCID_PDU tx, template (present) CCID_PDU exp_rx)
+runs on test_CT return CCID_PDU {
+	var CCID_PDU pdu;
+
+	tx.hdr.bSlot := g_slot_nr;
+	exp_rx.hdr.bSlot := g_slot_nr;
+
+	CCID.send(tx);
+	alt {
+	[] CCID.receive(exp_rx) -> value pdu {
+		return pdu;
+		}
+	[] as_ccid_any();
+	}
+	return pdu;
+}
+
+private altstep as_st_irq_wait_flags(template (present) CardEmu_StatusFlags exp_flags) runs on test_CT {
+var SIMTRACE_PDU rx_st;
+[] ST_IRQ.receive(tr_SIMTRACE_CEMU_STATUS(flags := exp_flags)) {
+	log("Expected flags received, continuing ", exp_flags);
+	}
+[] ST_IRQ.receive(tr_SIMTRACE_CEMU_STATUS) -> value rx_st {
+	log("Ignoring non-matching flags of ", rx_st);
+	repeat;
+	}
+}
+
+private template (present) CardEmu_DataFlags tr_cef_tpdu_hdr :=
+		tr_CardEmu_DataFlags(false, false, false, tpdu_hdr := true);
+
+/* transceive a TPDU, either with e rx data part, or a tx data part */
+function f_xceive(octetstring apdu, octetstring sw := '9000'O, boolean rx := true) runs on test_CT {
+	var octetstring apdu_hdr := substr(apdu, 0, 5);
+	var octetstring pb := substr(apdu, 1, 1);
+	var octetstring data := substr(apdu, 5, lengthof(apdu)-5);
+
+	CCID.send(ts_CCID_XfrBlock(g_slot_nr, apdu));
+	ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_cef_tpdu_hdr, apdu_hdr));
+	if (rx) {
+		/* transmit procedure byte and wait for remainder */
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_rx:=true), pb));
+		/* expect reader to transmit the remaining data */
+		ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_CardEmu_DataFlags(final:=true), data));
+		/* respond with status word */
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(final:=true), sw));
+		/* expect reader to receive status word */
+		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := sw));
+	} else {
+		/* FIXmE: doesn't work yet! */
+		/* transmit procedure byte and remainder */
+		var octetstring tx := data;
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true), pb & data));
+		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true, final:=true), sw));
+		/* expect reader to receive status word */
+		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := tx));
+	}
+	setverdict(pass);
+}
+
+
+testcase TC_test() runs on test_CT
+{
+	var template (present) CardEmu_StatusFlags exp_flags;
+	var CCID_PDU rx_ccid;
+
+	f_init();
+	f_st_drain();
+
+	f_sleep(1.0);
+
+	/* insert the virtual card */
+	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(1));
+
+	//f_ccid_xceive(ts_CCID_GetSlotStatus(0, g_slot_nr), tr_CCID_SlotStatus(slot := g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK(?)));
+
+	rx_ccid := f_ccid_power_on();
+
+	if (false) {
+		/* FIXME: why does this only work on the first time after powering both devices? */
+		f_sleep(1.0);
+		/* wait for status with RESET active */
+		exp_flags := tr_CardEmu_StatusFlags(reset_active := true, clk_active := true, vcc_present := true);
+		as_st_irq_wait_flags(exp_flags);
+	}
+
+	/* wait for status with RESET inactive/released */
+	exp_flags := tr_CardEmu_StatusFlags(reset_active := false, clk_active := true, vcc_present := true);
+	as_st_irq_wait_flags(exp_flags);
+
+	if (not match(rx_ccid, tr_CCID_DataBlock(data := '3B8080811FC759'O))) {
+		setverdict(fail, "Unexpected ATR on CCID side: ", rx_ccid.u.DataBlock.abData);
+	}
+
+	for (var integer i := 0; i < 100; i := i+1) {
+		f_xceive('a0a40004023f00'O);
+	}
+	/* doesn't work yet */
+	//f_xceive('a0a40004023f00'O, rx:=false);
+	f_sleep(2.0);
+}
+
+
+
+control {
+	execute( TC_test() );
+}
+
+
+}

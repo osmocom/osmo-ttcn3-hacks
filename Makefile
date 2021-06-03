@@ -39,6 +39,7 @@ SUBDIRS= \
 	mme \
 	msc \
 	ns \
+	octsim \
 	pcap-client \
 	pcu \
 	pcrf \
