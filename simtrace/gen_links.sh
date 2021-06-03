@@ -15,6 +15,7 @@ gen_links $DIR $FILES
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
+FILES+="SIMTRACE_Types.ttcn SIMTRACE_Templates.ttcn SIMTRACE_Emulation.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
