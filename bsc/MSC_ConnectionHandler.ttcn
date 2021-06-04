@@ -590,7 +590,8 @@ type record TestHdlrParams {
 	TestHdlrParamsMSCPool mscpool,
 	boolean		media_mgw_offer_ipv6,
 	OCT3		last_used_eutran_plmn optional,
-	boolean		expect_channel_mode_modify
+	boolean		expect_channel_mode_modify,
+	uint3_t		expect_tsc optional
 };
 
 /* Note: Do not use valueof() to get a value of this template, use
@@ -627,17 +628,23 @@ template (value) TestHdlrParams t_def_TestHdlrPars := {
 	},
 	media_mgw_offer_ipv6 := true,
 	last_used_eutran_plmn := omit,
-	expect_channel_mode_modify := false
+	expect_channel_mode_modify := false,
+	expect_tsc := omit
 }
 
 function f_create_chan_and_exp() runs on MSC_ConnHdlr {
 	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
 	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
 	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	if (not istemplatekind(g_pars.expect_tsc, "omit")) {
+		tsc := g_pars.expect_tsc;
+	}
 
 	f_create_bssmap_exp(l3_enc);
 	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
-	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn);
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
 }
 
 function f_rsl_send_l3(template PDU_ML3_MS_NW l3, template (omit) RslLinkId link_id := omit,
@@ -859,6 +866,14 @@ private function f_check_chan_act(AssignmentState st, RSL_Message chan_act) runs
 
 }
 
+private function rr_chan_desc_tsc(ChannelDescription2_V cd2)
+	return uint3_t
+{
+	var uint3_t tsc := oct2int(cd2.octet3);
+	tsc := tsc / 32; /* shl 5 */
+	return tsc;
+}
+
 altstep as_assignment(inout AssignmentState st) runs on MSC_ConnHdlr {
 	var RSL_Message rsl;
 	[not st.rr_ass_cmpl_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
@@ -867,6 +882,16 @@ altstep as_assignment(inout AssignmentState st) runs on MSC_ConnHdlr {
 		if (ischosen(l3.msgs.rrm.assignmentCommand)) {
 			var RslChannelNr new_chan_nr;
 			var GsmArfcn arfcn;
+
+			if (not istemplatekind(g_pars.expect_tsc, "omit")) {
+				var uint3_t got_tsc := rr_chan_desc_tsc(l3.msgs.rrm.assignmentCommand.descrOf1stChAfterTime);
+				if (not match(got_tsc, g_pars.expect_tsc)) {
+					setverdict(fail, "RR Assignment: unexpected TSC in Channel Description: expected ",
+						   g_pars.expect_tsc, " got ", got_tsc);
+					mtc.stop;
+				}
+			}
+
 			f_ChDesc2RslChanNr(l3.msgs.rrm.assignmentCommand.descrOf1stChAfterTime,
 					   new_chan_nr, arfcn);
 			/* FIXME: Determine TRX NR by ARFCN, instead of hard-coded TRX0! */
@@ -1263,6 +1288,32 @@ runs on MSC_ConnHdlr {
 			setverdict(fail, "f_establish_fully(): Expected RSL MODE MODIFY",
 				   " to signalling mode, but got spd_ind == ", rsl_spd_ind);
 			mtc.stop;
+		}
+
+		if (not istemplatekind(g_pars.expect_tsc, "omit")) {
+			var uint3_t got_tsc := rr_chan_desc_tsc(st.rr_channel_mode_modify_msg.msgs.rrm.channelModeModify.channelDescription);
+			if (not match(got_tsc, g_pars.expect_tsc)) {
+				setverdict(fail, "RR Channel Mode Modify: unexpected TSC in Channel Description: expected ",
+					   g_pars.expect_tsc, " got ", got_tsc);
+				mtc.stop;
+			}
+		}
+
+	} else {
+		/* not exp_modify, so this did a Channel Activate */
+
+		/* Check the TSC */
+		if (not istemplatekind(g_pars.expect_tsc, "omit")) {
+			var RSL_Message chan_act := f_rslem_get_last_act(RSL_PROC, 0, g_chan_nr);
+			var RSL_IE_Body ie;
+			if (f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, ie)) {
+				var uint3_t got_tsc := ie.chan_ident.ch_desc.v.tsc;
+				if (not match(got_tsc, g_pars.expect_tsc)) {
+					setverdict(fail, "RSL CHANnel ACTIVation: unexpected TSC in Channel Description: expected ",
+						   g_pars.expect_tsc, " got ", got_tsc);
+					mtc.stop;
+				}
+			}
 		}
 	}
 
