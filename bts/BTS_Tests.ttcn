@@ -119,6 +119,17 @@ modulepar {
 	TrxPars mp_trx_pars; /* see BTS_Tests.default */
 	/* default Training Sequence Code */
 	GsmTsc mp_tsc_def := 7;
+	/* Default interference boundaries in osmo-bsc (in dBm):
+	 *   0(-85) X1(-91) X2(-97) X3(-103) X4(-109) X5(-115)
+	 * Default interference level reported by fake_trx.py:
+	 *    0: -109 >= -85 dBm (no)
+	 *   X1: -109 >= -91 dBm (no)
+	 *   X2: -109 >= -97 dBm (no)
+	 *   X3: -109 >= -103 dBm (no)
+	 *   X4: -109 >= -109 dBm (yes)
+	 *   X5: -109 >= -115 dBm (no)
+	 * So all channels should be in band 4. */
+	uint3_t mp_interf_band := 4;
 }
 
 type record of RslChannelNr ChannelNrs;
@@ -6776,6 +6787,61 @@ testcase TC_rsl_modify_encr() runs on test_CT {
 	f_testmatrix_each_chan(pars, refers(f_TC_rsl_modify_encr));
 }
 
+/* Verify RF RESource INDication messages (periodically sent over the RSL) */
+private function f_TC_rsl_rf_resource_ind(template RSL_ResourceInfo info)
+runs on test_CT {
+	const IpaStreamId sid := IPAC_PROTO_RSL_TRX0;
+	var ASP_RSL_Unitdata ud;
+	timer T;
+
+	/* Intave is 6 SACCH periods by default */
+	var float Tval := int2float(6 * 480) / 1000.0 + 0.5;
+
+	T.start(Tval);
+	alt {
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND(info), sid)) {
+		setverdict(pass);
+		}
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_RF_RES_IND(?), sid)) -> value ud {
+		setverdict(fail, "RF RESource INDication mismatch: ", ud.rsl);
+		}
+	[] RSL_CCHAN.receive { repeat; }
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout waiting for RF RESource INDication");
+		}
+	}
+}
+testcase TC_rsl_rf_resource_ind() runs on test_CT {
+	var RSL_ResourceInfo info := { };
+
+	f_init(trx_nr := 0);
+
+	f_init_l1ctl();
+	f_l1_tune(L1CTL);
+
+	/* g_AllChannels contains all logical channels */
+	for (var integer i := 0; i < lengthof(g_AllChannels); i := i + 1) {
+		var RslChannelNr chan_nr := g_AllChannels[i];
+
+		/* FIXME: osmo-bts does not report for Osmocom style dynamic timeslots */
+		if (mp_trx_pars[0].ts[chan_nr.tn].config == GSM_PCHAN_TCHH_TCHF_PDCH)
+			{ continue; }
+
+		info := info & { valueof(ts_RSL_ResourceInfoItem(chan_nr, mp_interf_band)) };
+	}
+
+	/* Align to the first interference report */
+	f_TC_rsl_rf_resource_ind(?);
+
+	/* Test 4 consecutive messages */
+	for (var integer i := 0; i < 4; i := i + 1) {
+		f_TC_rsl_rf_resource_ind(info);
+	}
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 /* Test unencrypted channel activation followed by explicit ENCR CMD later */
 private function f_TC_encr_cmd(charstring id) runs on ConnHdlr {
 	/* L3 payload doesn't matter, as it is passed transparently */
@@ -7356,6 +7422,7 @@ control {
 	execute( TC_rsl_chan_initial_ms_pwr() );
 	execute( TC_rsl_chan_initial_ta() );
 	execute( TC_rsl_modify_encr() );
+	execute( TC_rsl_rf_resource_ind() );
 	execute( TC_conn_fail_crit() );
 	execute( TC_paging_imsi_80percent() );
 	execute( TC_paging_tmsi_80percent() );
