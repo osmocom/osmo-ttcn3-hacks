@@ -25,16 +25,24 @@ import from NS_Provider_IPL4 all;
 import from NS_Provider_FR all;
 #endif
 
+type record PerIPProvider {
+	NS_Provider_IPL4_CT vc_NSP_IP,
+	charstring local_ip,
+	PortNumber local_udp_port
+}
+
 public type component RAW_NS_CT {
 	/* UDP port towards the bottom (IUT) */
 	port NS_PROVIDER_PT NSCP[4];
-	var NS_Provider_IPL4_CT vc_NSP_IP[4];
+	var PerIPProvider ip_prov[4];
+	port NSPIP_PROC_PT NSPIP_PROC;
 #ifdef NS_EMULATION_FR
 	var NS_Provider_FR_CT vc_NSP_FR[4];
 #endif
 	var NSConfiguration g_nsconfig;
 	timer g_T_guard;
 	var boolean g_handle_rx_alive := false;
+	var boolean rawns_initialized := false;
 }
 
 public altstep as_Tguard() runs on RAW_NS_CT {
@@ -42,6 +50,21 @@ public altstep as_Tguard() runs on RAW_NS_CT {
 		setverdict(fail, "Timeout of T_guard");
 		mtc.stop;
 		}
+}
+
+function f_find_ip_provider(NSVCConfigurationIP nsip_config)
+runs on RAW_NS_CT return integer {
+	for (var integer idx := 0; idx < sizeof(ip_prov); idx := idx+1) {
+		if (ip_prov[idx].vc_NSP_IP == null) {
+			continue;
+		}
+
+		if (ip_prov[idx].local_ip == nsip_config.local_ip and
+			ip_prov[idx].local_udp_port == nsip_config.local_udp_port) {
+			return idx;
+		}
+	}
+	return -1;
 }
 
 function f_init_ns_codec(NSConfiguration ns_config, integer idx := 0, float guard_secs := 60.0, charstring id := testcasename()) runs on RAW_NS_CT {
@@ -52,31 +75,58 @@ function f_init_ns_codec(NSConfiguration ns_config, integer idx := 0, float guar
 		activate(as_Tguard());
 	}
 
+	if (not rawns_initialized) {
+		for (var integer i := 0; i < sizeof(ip_prov); i := i+1) {
+			ip_prov[i].vc_NSP_IP := null;
+		}
+		rawns_initialized := true;
+	}
+
 	if (not isbound(g_nsconfig)) {
 		g_nsconfig := ns_config;
 	}
 
 	if (ischosen(ns_config.nsvc[idx].provider.ip)) {
-		/* Connect the UDP socket */
-		vc_NSP_IP[idx] := NS_Provider_IPL4_CT.create(id & "-provIP");
-		connect(self:NSCP[idx], vc_NSP_IP[idx]:NSE);
-		vc_NSP_IP[idx].start(NS_Provider_IPL4.main(ns_config.nsvc[idx], ns_config, id));
+		var integer prov_idx := f_find_ip_provider(ns_config.nsvc[idx].provider.ip);
+		/* Connect the UDP socket
+		 * check if NS_Provider_IPL4_CT is already created
+		 * add list of vc_NSP_IP with entries of source ip/port
+		 * add a NSVC to it */
+		if (prov_idx == -1) {
+			for (prov_idx := 0; prov_idx < sizeof(ip_prov); prov_idx := prov_idx+1) {
+				if (ip_prov[prov_idx].vc_NSP_IP == null) {
+					break;
+				}
+			}
+			if (prov_idx > sizeof(ip_prov)) {
+				/* TODO: error !! */
+			}
+			ip_prov[prov_idx].local_ip := ns_config.nsvc[idx].provider.ip.local_ip;
+			ip_prov[prov_idx].local_udp_port := ns_config.nsvc[idx].provider.ip.local_udp_port;
+			ip_prov[prov_idx].vc_NSP_IP := NS_Provider_IPL4_CT.create(id & "-provIP" & int2str(prov_idx));
+			connect(self:NSPIP_PROC, ip_prov[prov_idx].vc_NSP_IP:PROC);
+			ip_prov[prov_idx].vc_NSP_IP.start(NS_Provider_IPL4.main(ns_config.nsvc[idx], ns_config, id));
+		}
+		var integer port_idx := f_nspip_add_nsvc2(ip_prov[prov_idx].vc_NSP_IP, ns_config.nsvc[idx].provider.ip.remote_ip, ns_config.nsvc[idx].provider.ip.remote_udp_port);
+		connect(self:NSCP[idx], ip_prov[prov_idx].vc_NSP_IP:NSVC[port_idx]);
+		/* the NS_PROV_LINK_STATUS_UP is not sent by the NS_Provider_IPL4 because we connect the port manual */
 #ifdef NS_EMULATION_FR
 	} else if (ischosen(ns_config.nsvc[idx].provider.fr)) {
 		vc_NSP_FR[idx] := NS_Provider_FR_CT.create(id & "-provFR");
 		connect(self:NSCP[idx], vc_NSP_FR[idx]:NSE);
 		vc_NSP_FR[idx].start(NS_Provider_FR.main(ns_config.nsvc[idx], ns_config, id));
+		NSCP[idx].receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP});
 #endif
 	} else {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unsupported NS provider");
 	}
-
-	NSCP[idx].receive(NS_Provider_Evt:{link_status:=NS_PROV_LINK_STATUS_UP});
 }
 
 function f_clean_ns_codec() runs on RAW_NS_CT {
-	for (var integer i := 0; i < lengthof(vc_NSP_IP); i := i + 1) {
-		vc_NSP_IP[i].stop;
+	for (var integer i := 0; i < lengthof(ip_prov); i := i + 1) {
+		if (ip_prov[i].vc_NSP_IP != null) {
+			ip_prov[i].vc_NSP_IP.stop;
+		}
 	}
 #ifdef NS_EMULATION_FR
 	for (var integer i := 0; i < lengthof(vc_NSP_FR); i := i + 1) {

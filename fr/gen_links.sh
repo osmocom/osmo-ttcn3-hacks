@@ -47,7 +47,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc GSM_Types.ttcn Osmocom_Types.ttcn "
-FILES+="NS_Provider_IPL4.ttcn NS_Provider_FR.ttcn NS_Emulation.ttcnpp "
+FILES+="RAW_NS.ttcnpp NS_Provider_IPL4.ttcn NS_Provider_FR.ttcn NS_Emulation.ttcnpp "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 FILES+="LLC_Templates.ttcn "
 gen_links $DIR $FILES

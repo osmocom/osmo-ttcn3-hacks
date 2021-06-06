@@ -27,6 +27,7 @@ module NS_Provider_IPL4 {
 
 import from Misc_Helpers all;
 import from NS_Emulation all;
+import from RAW_NS all;
 import from NS_Types all;
 
 import from IPL4asp_Types all;
@@ -42,6 +43,7 @@ type component NS_Provider_IPL4_CT extends NS_Provider_CT {
 
 	/* per-NSVC ports and state */
 	port NS_PROVIDER_PT NSVC[NUM_MAX_NSVC];
+	var boolean g_nsvc_bound[NUM_MAX_NSVC];
 	var PerNsvcState g_nsvc[NUM_MAX_NSVC];
 
 	/* management port via which  */
@@ -54,31 +56,35 @@ type record PerNsvcState {
 	NSVC_CT	vc_nsvc
 };
 
-signature NSPIP_add_nsvc(charstring remote_ip, PortNumber remote_port, NSVC_CT vc_nsvc);
-signature NSPIP_del_nsvc(charstring remote_ip, PortNumber remote_port);
+signature NSPIP_add_nsvc(charstring remote_ip, PortNumber remote_port, NSVC_CT vc_nsvc) return integer;
+signature NSPIP_del_nsvc(charstring remote_ip, PortNumber remote_port) return integer;
 
 type port NSPIP_PROC_PT procedure {
 	inout NSPIP_add_nsvc, NSPIP_del_nsvc;
 } with { extension "internal" };
 
 /* add a new NSVC to the provider */
-private function f_nsvc_add(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT
+private function f_nsvc_add(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT return integer
 {
 	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
-		if (g_nsvc[i].vc_nsvc == null) {
+		if (g_nsvc_bound[i] == false) {
 			g_nsvc[i] := nsvc;
-			connect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
-			NSVC[i].send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_UP});
-			return;
+			g_nsvc_bound[i] := true;
+			if (isbound(nsvc.vc_nsvc) and nsvc.vc_nsvc != null) {
+				connect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
+				NSVC[i].send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_UP});
+			}
+			return i;
 		}
 	}
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Overflow of g_nsvc array"));
+	return -1;
 }
 
-private function f_nsvc_del(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT
+private function f_nsvc_del(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT return integer
 {
 	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
-		if (g_nsvc[i].vc_nsvc != null and
+		if (g_nsvc_bound[i] and
 		    g_nsvc[i].remote_ip == nsvc.remote_ip and
 		    g_nsvc[i].remote_port == nsvc.remote_port) {
 			g_nsvc[i] := {
@@ -86,19 +92,23 @@ private function f_nsvc_del(PerNsvcState nsvc) runs on NS_Provider_IPL4_CT
 				remote_port := -,
 				vc_nsvc := null
 			}
+			g_nsvc_bound[i] := false;
 			NSVC[i].send(NS_Provider_Evt:{link_status := NS_PROV_LINK_STATUS_DOWN});
-			disconnect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
-			return;
+			if (isbound(g_nsvc[i].vc_nsvc) and g_nsvc[i].vc_nsvc != null) {
+				disconnect(self:NSVC[i], nsvc.vc_nsvc:NSCP);
+			}
+			return i;
 		}
 	}
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("attempt to delete unknown NSVC"));
+	return -1;
 }
 
 private function f_get_nsvc_idx(charstring remote_ip, PortNumber remote_port)
 runs on NS_Provider_IPL4_CT return integer
 {
 	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
-		if (g_nsvc[i].vc_nsvc != null and
+		if (g_nsvc_bound[i] and
 		    g_nsvc[i].remote_ip == remote_ip and g_nsvc[i].remote_port == remote_port) {
 			return i;
 		}
@@ -109,6 +119,7 @@ runs on NS_Provider_IPL4_CT return integer
 function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id) runs on NS_Provider_IPL4_CT {
 	for (var integer i := 0; i < sizeof(g_nsvc); i := i+1) {
 		g_nsvc[i].vc_nsvc := null;
+		g_nsvc_bound[i] := false;
 	}
 
 	/* in order to support any number of NSVC on this endpoiint, we only bind the socket
@@ -182,12 +193,14 @@ function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id)
 
 	/* procedure port to add/remove NSVCs from this provider */
 	[] PROC.getcall(NSPIP_add_nsvc:{?,?,?}) -> param (remote_ip, remote_port, vc_nsvc) sender vc_caller {
-		f_nsvc_add(PerNsvcState:{remote_ip, remote_port, vc_nsvc});
-		PROC.reply(NSPIP_add_nsvc:{remote_ip, remote_port, vc_nsvc}) to vc_caller;
+		var integer idx;
+		idx := f_nsvc_add(PerNsvcState:{remote_ip, remote_port, vc_nsvc});
+		PROC.reply(NSPIP_add_nsvc:{remote_ip, remote_port, vc_nsvc} value idx) to vc_caller;
 		}
 	[] PROC.getcall(NSPIP_del_nsvc:{?,?}) -> param (remote_ip, remote_port) sender vc_caller {
-		f_nsvc_del(PerNsvcState:{remote_ip, remote_port});
-		PROC.reply(NSPIP_del_nsvc:{remote_ip, remote_port}) to vc_caller;
+		var integer idx;
+		idx := f_nsvc_del(PerNsvcState:{remote_ip, remote_port});
+		PROC.reply(NSPIP_del_nsvc:{remote_ip, remote_port} value idx) to vc_caller;
 		}
 
 	} /* alt */
@@ -197,9 +210,20 @@ function main(NSVCConfiguration config, NSConfiguration nsconfig, charstring id)
 
 function f_nspip_add_nsvc(NS_Provider_IPL4_CT vc_ipep, charstring remote_ip, PortNumber remote_port, NSVC_CT vc_nsvc)
 runs on NS_CT {
+	var integer idx := -1;
 	NSPIP_PROC.call(NSPIP_add_nsvc:{remote_ip, remote_port, vc_nsvc}) to vc_ipep {
-		[] NSPIP_PROC.getreply(NSPIP_add_nsvc:{?,?,?});
+		[] NSPIP_PROC.getreply(NSPIP_add_nsvc:{?,?,?}) -> value idx;
 	}
+}
+
+function f_nspip_add_nsvc2(NS_Provider_IPL4_CT vc_ipep, charstring remote_ip, PortNumber remote_port)
+runs on RAW_NS_CT return integer {
+	var integer idx := -1;
+	NSPIP_PROC.call(NSPIP_add_nsvc:{remote_ip, remote_port, null}) to vc_ipep {
+		[] NSPIP_PROC.getreply(NSPIP_add_nsvc:{?,?,?}) -> value idx;
+	}
+
+	return idx;
 }
 
 } /* module */
