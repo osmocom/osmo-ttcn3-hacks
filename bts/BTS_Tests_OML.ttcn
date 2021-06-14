@@ -16,6 +16,13 @@ import from Osmocom_Types all;
 import from AbisOML_Types all;
 import from IPA_Emulation all;
 import from IPA_Types all;
+import from Misc_Helpers all;
+
+import from PCUIF_Types all;
+import from PCUIF_CodecPort all;
+import from PCUIF_CodecPort all;
+
+import from BTS_Tests all;
 
 const integer NUM_TRX := 8;
 
@@ -43,6 +50,8 @@ modulepar {
 	uint8_t mp_air_timer := 100;
 	uint8_t mp_ny1 := 10;
 	uint8_t mp_bsic := 63;
+
+	charstring mp_pcu_socket := PCU_SOCK_DEFAULT;
 };
 
 /* BSC side OML component */
@@ -52,8 +61,17 @@ type component BSC_OML_CT {
 	/* Port for OML */
 	port IPA_OML_PT OML;
 	var uint8_t g_bts_nr := 0;
+
 	/* Port for Abis/Osmo/PCU */
 	port IPA_OSMO_PCU_PT IPA_OSMO_PCU;
+	/* PCU Interface of BTS */
+	port PCUIF_CODEC_PT PCU;
+	var integer g_pcu_conn_id;
+	/* Last PCU INFO IND we received */
+	var PCUIF_Message g_pcu_last_info;
+
+	/* As rxed by Get Attributes Response NM_ATT_MANUF_ID IE, see f_oml_getattr() */
+	var bitstring g_bts_features;
 
 	/* global test case guard timer */
 	timer T_oml_guard := 60.0;
@@ -112,6 +130,27 @@ function f_init_oml(charstring id) runs on BSC_OML_CT {
 	activate(as_IPA_evt());
 }
 
+private function f_init_pcu(PCUIF_CODEC_PT pt, charstring id,
+			    out integer pcu_conn_id, out PCUIF_Message pcu_last_info) {
+	timer T := 2.0;
+	var PCUIF_send_data sd;
+
+	if (mp_pcu_socket == "") {
+		pcu_conn_id := -1;
+		return;
+	}
+	map(self:PCU, system:PCU);
+	pcu_conn_id := f_pcuif_connect(pt, mp_pcu_socket);
+
+	T.start;
+	alt {
+	[] as_pcu_info_ind(pt, pcu_conn_id, pcu_last_info);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for PCU INFO_IND");
+		}
+	}
+	pt.send(t_SD_PCUIF(pcu_conn_id, ts_PCUIF_TXT_IND(0, PCU_VERSION, testcasename())));
+}
 
 /* Perform an "OPSTART" procedure with the speciifed MO" */
 private function f_oml_opstart(template (value) OML_FOM_ObjectClass obj_class,
@@ -232,7 +271,7 @@ runs on BSC_OML_CT {
 }
 
 /* Perform a "SET BTS ATTRIBUTES" procedure with the BTS */
-private function f_oml_bts_attr()
+private function f_oml_bts_setattr()
 runs on BSC_OML_CT {
 	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
 	var template (value) OML_FOM_IE_List ies := {
@@ -290,12 +329,15 @@ private function f_oml_send_exp_no_resp(template (value) OML_PDU tx, charstring 
 	}
 }
 
-private function f_oml_exp_rx(template OML_PDU exp_rx, charstring err_msg) runs on BSC_OML_CT
+private function f_oml_exp_rx(template OML_PDU exp_rx, charstring err_msg)
+	runs on BSC_OML_CT return OML_PDU
 {
+	var OML_PDU rx;
 	timer T := 5.0;
+
 	T.start;
 	alt {
-	[] OML.receive(exp_rx) {
+	[] OML.receive(exp_rx) -> value rx {
 		setverdict(pass);
 		}
 	[] OML.receive { repeat; }
@@ -303,6 +345,7 @@ private function f_oml_exp_rx(template OML_PDU exp_rx, charstring err_msg) runs 
 		setverdict(fail, "Timeout waiting for ", err_msg);
 		}
 	}
+	return rx;
 }
 
 /* Send an OML message and expect a failure event report in response */
@@ -351,7 +394,23 @@ private function f_oml_send_exp_nack(template (value) OML_PDU tx, template OML_F
 }
 
 
+private function f_oml_getattr(template OML_PDU exp_rx := tr_OML_GetAttributesResponse(NM_OC_BTS, ?, ?)) runs on BSC_OML_CT
+{
+	var OML_FOM_ObjectInstance obj_inst := valueof(ts_OML_ObjectInstance(g_bts_nr, 255, 255));
+	var OML_FOM_IE_Type attr_li[2] := { NM_ATT_MANUF_ID, NM_ATT_SW_CONFIG };
+	var octetstring req_attr := ''O;
+	for (var integer i := 0; i < lengthof(attr_li); i := i + 1) {
+		req_attr := req_attr & int2oct(enum2int(attr_li[i]), 1);
+	}
+	var OML_PDU cmd := valueof(ts_OML_GetAttributes(NM_OC_BTS, obj_inst, req_attr));
 
+	OML.send(cmd);
+	var OML_PDU rx := f_oml_exp_rx(exp_rx, "BTS GetAttributes Response");
+
+	var OML_FOM_IE_Body ie_ari := f_OML_FOM_get_ie(rx.u.fom, NM_ATT_GET_ARI);
+	var OML_FOM_IE_Body manuf_id := f_OML_FOM_IE_List_get_ie(ie_ari.ari.ies, NM_ATT_MANUF_ID);
+	g_bts_features := oct2bit(manuf_id.other.payload);
+}
 
 
 
@@ -539,7 +598,7 @@ testcase TC_bts_opstart() runs on BSC_OML_CT {
 	[] OML.receive { repeat; }
 	}
 
-	f_oml_bts_attr();
+	f_oml_bts_setattr();
 	f_oml_opstart(obj_class, obj_inst, false, NM_OPSTATE_ENABLED);
 }
 
@@ -616,6 +675,71 @@ testcase TC_ipa_rsl_connect_nack() runs on BSC_OML_CT {
 	}
 }
 
+/* Make sure that the IUT sends RSL Connect NACK when the remote is not reachable. */
+testcase TC_ipa_osmo_pcu_anr_fwd() runs on BSC_OML_CT {
+	var PCUIF_send_data pcu_sd_msg;
+	var PCUIF_Message msg_rx;
+	timer T := 2.0;
+
+	f_init_oml(testcasename());
+	f_init_pcu(PCU, testcasename(), g_pcu_conn_id, g_pcu_last_info);
+	f_oml_getattr();
+
+	log("BTS Features:", g_bts_features);
+	if (lengthof(g_bts_features) < 21 or g_bts_features[20] != '1'B) {
+		setverdict(fail, "Feature ABIS_OSMO_PCU not supported!");
+	}
+
+	IPA_OSMO_PCU.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP));
+	IPA_OSMO_PCU.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_RESP));
+	IPA_OSMO_PCU.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK));
+
+	var PCUIF_CellDescriptionList cell_list := {
+		{3, 2, 880}, {3, 1, 880}, {3, 1, 887}
+	};
+	var PCUIF_CellDescriptionList zeroed_val := {{0, 0, 0}};
+	for (var integer i := 3; i < 80; i := i + 1) {
+		cell_list := cell_list & zeroed_val;
+	}
+
+	IPA_OSMO_PCU.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list));
+	T.start;
+	alt {
+	[] PCU.receive(t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list))) {
+		setverdict(pass);
+		}
+	[] PCU.receive(PCUIF_send_data:?) -> value pcu_sd_msg {
+		setverdict(fail, "Unexpected message received: ", pcu_sd_msg.data, " vs exp: ",
+			   t_SD_PCUIF(g_pcu_conn_id, tr_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list)));
+	}
+	[] T.timeout { setverdict(fail, "Timeout waiting for ANR request on PCU inteface");}
+	}
+	T.stop;
+
+	var PCUIF_CellDescriptionList cell_list_resp := {
+		{3, 2, 880}, {3, 1, 880}, {3, 1, 887}
+	};
+	var PCUIF_RxLevList rxlev_list := { 40, 255, 34 };
+	for (var integer i := 3; i < 32; i := i + 1) {
+		cell_list_resp := cell_list_resp & zeroed_val;
+		rxlev_list := rxlev_list & {0};
+	}
+	/* Send back the response: */
+	PCU.send(t_SD_PCUIF(g_pcu_conn_id, ts_PCUIF_ANR_CNF(0, lengthof(cell_list_resp), cell_list_resp, rxlev_list)))
+	T.start;
+	alt {
+	[] IPA_OSMO_PCU.receive(tr_PCUIF_ANR_CNF(0, lengthof(cell_list_resp), cell_list_resp, rxlev_list)) {
+		setverdict(pass);
+		}
+	[] IPA_OSMO_PCU.receive(PCUIF_Message:?) -> value msg_rx {
+		setverdict(fail, "Unexpected message received: ", msg_rx, " vs exp: ",
+			   tr_PCUIF_ANR_CNF(0, lengthof(cell_list_resp), cell_list_resp, rxlev_list));
+	}
+	[] T.timeout { setverdict(fail, "Timeout waiting for ANR request on BSC inteface");}
+	}
+	setverdict(pass);
+}
+
 
 control {
 	execute( TC_wrong_mdisc() );
@@ -634,6 +758,8 @@ control {
 	execute( TC_ts_opstart_noattr() );
 	execute( TC_initial_state_reports() );
 	execute( TC_ipa_rsl_connect_nack() );
+
+	execute( TC_ipa_osmo_pcu_anr_fwd() );
 }
 
 /* BTS:
