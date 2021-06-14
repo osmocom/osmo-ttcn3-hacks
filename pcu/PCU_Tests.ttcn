@@ -22,6 +22,7 @@ import from General_Types all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 import from GSM_RR_Types all;
+import from GSM_SystemInformation all;
 
 import from Osmocom_VTY_Functions all;
 import from TELNETasp_PortType all;
@@ -5898,6 +5899,538 @@ testcase TC_rim_ran_info_req_single_rep_no_si() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+
+/* Test ANR procedure: fully successful procedure on a DL TBF */
+testcase TC_anr_dl_tbf_success() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block, dl_block2;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn, dl_fn, poll_fn;
+	var GprsMS ms;
+	var template RlcmacDlCtrlMsg meas_order_reset_tmpl;
+	var template RlcmacDlCtrlMsg meas_order_tmpl;
+	var template NCFrequencyList nc_freq_list_tmpl;
+	var template RepeatedAddFrequencyItemList add_freq_list_tmpl;
+	var template (value) NCMeasurementReport meas_rep;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, omit));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, poll_fn, ?, ?);
+
+	var PCUIF_CellDescriptionList cell_list := {
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 2, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(1, 1, 883)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 887))
+	};
+	var PCUIF_CellDescriptionList cell_list_req := cell_list;
+	f_PCUIF_CellDescriptionList_expand(cell_list_req, 96);
+	BTS.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list_req));
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block2, dl_fn);
+	/* TODO: verify proper DL TFI in PKT MEAS ORDER, see first param below */
+	meas_order_reset_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, 0, 0, ts_NCMeasurementParametersRESET);
+	if (not match(dl_block2, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block2);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* ACK the first data block, without FinalAckIndicator because we recieve no FBI on DL data. */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '0'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, poll_fn));
+
+	/* ACK the meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block2.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* After ACKing the reset, we get proper Meas Order modifying GSM
+	 * Neighbour Cell List through NC Freq List */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	add_freq_list_tmpl := { tr_RepeatedAddFrequencyItem(880, 11),
+				tr_RepeatedAddFrequencyItem(880, 19),
+				tr_RepeatedAddFrequencyItem(883, 9),
+				tr_RepeatedAddFrequencyItem(887, 11)};
+	nc_freq_list_tmpl := tr_NCFrequencyList(omit, add_freq_list_tmpl);
+	meas_order_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, 0, 0,
+							  tr_NCMeasurementParameters(NC_1, ?, ?, ?, nc_freq_list_tmpl));
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* These show that the DL TBF is kept open while waiting for ANR to be resolved */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Now we submit the Packet Meas Report */
+	meas_rep := ts_NCMeasurementReport('0'B /* NC1 */,  40,
+					   { ts_NCMeasurement(0, int2bit(11, 6), 55),
+					     /* Deliverately don't present report for [1]<880,19>: emulate not found */
+					     /* Deliverately don't present report for [2]<883,9>: emulate not found */
+					     ts_NCMeasurement(3, int2bit(11, 6), 60) })
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_MEAS_REPORT(ms.tlli, meas_rep))));
+
+	var PCUIF_RxLevList rxlev_list := {55, 255, 255, 60 };
+	f_PCUIF_CellDescriptionList_expand(cell_list, 32);
+	f_PCUIF_RxLevList_expand(rxlev_list, 32);
+	BTS.receive(tr_PCUIF_ANR_CNF(0, 4, cell_list, rxlev_list));
+
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* ACK the Pkt Meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* ANR procedure is done, nothing more to be sent from PCU on UL TBF: */
+	while (true) {
+		f_rx_rlcmac_dl_block(dl_block, dl_fn);
+		if (match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+			continue;
+		}
+		if (dl_block.data.mac_hdr.hdr_ext.fbi) {
+			log("Received FINAL_ACK");
+			ms.dl_tbf.acknack_desc.final_ack := '1'B;
+		}
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, dl_fn));
+		}
+		if (ms.dl_tbf.acknack_desc.final_ack == '1'B) {
+			break;
+		}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Test ANR procedure: fully successful procedure on a DL TBF. SI2 sent to PCU
+ * contains some cells in ANR_Req and some are not there */
+testcase TC_anr_dl_tbf_success_si2_partial() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block, dl_block2;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn, dl_fn, poll_fn;
+	var GprsMS ms;
+	var template RlcmacDlCtrlMsg meas_order_reset_tmpl;
+	var template RlcmacDlCtrlMsg meas_order_tmpl;
+	var template NCFrequencyList nc_freq_list_tmpl;
+	var template FreqIndexList rm_freq_index;
+	var template RepeatedAddFrequencyItemList add_freq_list_tmpl;
+	var template (value) NCMeasurementReport meas_rep;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, omit));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, poll_fn, ?, ?);
+
+	/* First transmit SI2 on the PCU, which contains BA(list): */
+	var bitstring arfcn_mask := f_pad_bit(''B, 1024, '0'B);
+	/* Add ARFCN 20,100,101 to BA(list) */
+	arfcn_mask[20] := '1'B;
+	arfcn_mask[100] := '1'B;
+	arfcn_mask[101] := '1'B;
+	var SystemInformation si := {
+		header := valueof(ts_RrHeader(SYSTEM_INFORMATION_TYPE_2, 22)),
+		payload := {
+			si2 := { bcch_freq_list := f_gen_NeighbourCellDescription(arfcn_mask),
+				 ncc_permitted := '11111111'B,
+				 rach_control := valueof(ts_RachControlParameters)
+			}
+		}
+	};
+	var octetstring si2_enc := enc_SystemInformationNoPad(si);
+	var template PCUIF_Message si2_data_ind := ts_PCUIF_DATA_IND(0, 0, 0, 0, PCU_IF_SAPI_BCCH, si2_enc, 0, 0, 0, 0, 0);
+	BTS.send(si2_data_ind);
+
+	var PCUIF_CellDescriptionList cell_list := {
+		/* ARFCN 20 (idx=0) and 101 (idx=2) are left out on purpose, we check they are removed later */
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 100)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 2, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(1, 1, 883)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 887))
+	};
+	var PCUIF_CellDescriptionList cell_list_req := cell_list;
+	f_PCUIF_CellDescriptionList_expand(cell_list_req, 96);
+	BTS.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list_req));
+
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block2, dl_fn);
+	/* TODO: verify proper UL TFI in PKT MEAS ORDER, see first param below */
+	meas_order_reset_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, 0, 0, ts_NCMeasurementParametersRESET);
+	if (not match(dl_block2, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block2);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* ACK the first data block, without FinalAckIndicator because we recieve no FBI on DL data. */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '0'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, poll_fn));
+
+	/* ACK the meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block2.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* After ACKing the reset, we get proper Meas Order modifying GSM
+	 * Neighbour Cell List through NC Freq List */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	rm_freq_index := { 0 /*ARFCN=20*/,
+			   2 /*ARFCN=101*/ };
+	add_freq_list_tmpl := { tr_RepeatedAddFrequencyItem(880, 11),
+				tr_RepeatedAddFrequencyItem(880, 19),
+				tr_RepeatedAddFrequencyItem(883, 9),
+				tr_RepeatedAddFrequencyItem(887, 11)};
+	nc_freq_list_tmpl := tr_NCFrequencyList(rm_freq_index, add_freq_list_tmpl);
+	meas_order_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, 0, 0,
+							  tr_NCMeasurementParameters(NC_1, ?, ?, ?, nc_freq_list_tmpl));
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Now we submit the Packet Meas Report */
+	meas_rep := ts_NCMeasurementReport('0'B /* NC1 */,  40,
+					   { ts_NCMeasurement(1, int2bit(11, 6), 30),
+					     ts_NCMeasurement(3, int2bit(11, 6), 55),
+					     /* Deliverately don't present report for [4]<880,19>: emulate not found */
+					     /* Deliverately don't present report for [5]<883,9>: emulate not found */
+					     ts_NCMeasurement(6, int2bit(11, 6), 60) })
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_MEAS_REPORT(ms.tlli, meas_rep))));
+
+	var PCUIF_RxLevList rxlev_list := {30, 55, 255, 255, 60 };
+	f_PCUIF_CellDescriptionList_expand(cell_list, 32);
+	f_PCUIF_RxLevList_expand(rxlev_list, 32);
+	BTS.receive(tr_PCUIF_ANR_CNF(0, 5, cell_list, rxlev_list));
+
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* ACK the meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* ANR procedure is done, nothing more to be sent from PCU on UL TBF: */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Test ANR procedure: Similar to TC_anr_dl_tbf_success_si2_partial, but with
+   longer NC FREQ LIST requiring several PKT meas Order messages. */
+testcase TC_anr_dl_tbf_success_si2_partial_multi_measorder() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block, dl_block2;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn, poll_fn, dl_fn;
+	var GprsMS ms;
+	var template RlcmacDlCtrlMsg meas_order_reset_tmpl;
+	var template RlcmacDlCtrlMsg meas_order_tmpl;
+	var template NCFrequencyList nc_freq_list_tmpl;
+	var template FreqIndexList rm_freq_index;
+	var template RepeatedAddFrequencyItemList add_freq_list_tmpl;
+	var template (value) NCMeasurementReport meas_rep;
+	var template NCMeasurementParameters nc_meas_param_tmpl;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* First transmit SI2 on the PCU, which contains BA(list): */
+	/* Add ARFCN 1..21 to BA(list) */
+	var bitstring arfcn_mask := f_pad_bit('01111111111111111111111'B, 1024, '0'B);
+	var SystemInformation si := {
+		header := valueof(ts_RrHeader(SYSTEM_INFORMATION_TYPE_2, 22)),
+		payload := {
+			si2 := { bcch_freq_list := f_gen_NeighbourCellDescription(arfcn_mask),
+				 ncc_permitted := '11111111'B,
+				 rach_control := valueof(ts_RachControlParameters)
+			}
+		}
+	};
+	var octetstring si2_enc := enc_SystemInformationNoPad(si);
+	var template PCUIF_Message si2_data_ind := ts_PCUIF_DATA_IND(0, 0, 0, 0, PCU_IF_SAPI_BCCH, si2_enc, 0, 0, 0, 0, 0);
+	BTS.send(si2_data_ind);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, omit));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, poll_fn, ?, ?);
+
+	var PCUIF_CellDescriptionList cell_list := {
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 100)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 2, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(1, 1, 883)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 887))
+	};
+	var PCUIF_CellDescriptionList cell_list_req := cell_list;
+	f_PCUIF_CellDescriptionList_expand(cell_list_req, 96);
+	BTS.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list_req));
+
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block2, dl_fn);
+	/* TODO: verify proper UL TFI in PKT MEAS ORDER, see first param below */
+	meas_order_reset_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, 0, 0, ts_NCMeasurementParametersRESET);
+	if (not match(dl_block2, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block2);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* ACK the first data block, without FinalAckIndicator because we recieve no FBI on DL data. */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '0'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, poll_fn));
+
+	/* ACK the meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block2.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* After ACKing the reset, we get proper Meas Order modifying GSM
+	 * Neighbour Cell List through NC Freq List */
+	for (var integer i := 0; i < 3; i := i + 1) {
+		f_rx_rlcmac_dl_block(dl_block, dl_fn);
+		select (i) {
+		case (0) {
+			rm_freq_index := { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+			add_freq_list_tmpl := omit;
+			}
+		case (1) {
+			rm_freq_index := { 16, 17, 18, 19, 20, 21 };
+			add_freq_list_tmpl := { tr_RepeatedAddFrequencyItem(100, 11),
+						tr_RepeatedAddFrequencyItem(880, 11),
+						tr_RepeatedAddFrequencyItem(880, 19),
+						tr_RepeatedAddFrequencyItem(883, 9)};
+			}
+		case (2) {
+			rm_freq_index := omit;
+			add_freq_list_tmpl := { tr_RepeatedAddFrequencyItem(887, 11)};
+			}
+		}
+		nc_freq_list_tmpl := tr_NCFrequencyList(rm_freq_index, add_freq_list_tmpl);
+		if (i == 0) {
+			nc_meas_param_tmpl := tr_NCMeasurementParameters(NC_1, ?, ?, ?, nc_freq_list_tmpl);
+		} else {
+			nc_meas_param_tmpl := tr_NCMeasurementParameters(NC_1, omit, omit, omit, nc_freq_list_tmpl);
+		}
+		meas_order_tmpl := tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, i, 2, nc_meas_param_tmpl);
+		if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_tmpl))) {
+			setverdict(fail, "Rx unexpected DL block: ", dl_block);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Now we submit the Packet Meas Report */
+	meas_rep := ts_NCMeasurementReport('0'B /* NC1 */,  40,
+					   { ts_NCMeasurement(22, int2bit(11, 6), 30) })
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(valueof(ts_RlcMacUlCtrl_PKT_MEAS_REPORT(ms.tlli, meas_rep))));
+
+	var PCUIF_RxLevList rxlev_list := {30, 255, 255, 255, 255 };
+	f_PCUIF_CellDescriptionList_expand(cell_list, 32);
+	f_PCUIF_RxLevList_expand(rxlev_list, 32);
+	BTS.receive(tr_PCUIF_ANR_CNF(0, 5, cell_list, rxlev_list));
+
+	/* Verify Packet Measurement Order (reset GSM Neighbour Cell List) is received */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+	if (not match(dl_block, tr_RLCMAC_DL_CTRL(?, meas_order_reset_tmpl))) {
+		setverdict(fail, "Rx unexpected DL block: ", dl_block);
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	/* ACK the meas order (reset) */
+	sched_fn := f_rrbp_ack_fn(dl_fn, dl_block.ctrl.mac_hdr.rrbp);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	/* ANR procedure is done, nothing more to be sent from PCU on UL TBF: */
+	f_rx_rlcmac_dl_block(dl_block, dl_fn);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Test ANR procedure: MS is not selected if only UL TBF is available (DL TBF is
+ * required since it's the only we can keep open from PCU) */
+testcase TC_anr_ul_tbf() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resoultion) and make sure it is ACKED fine */
+	f_ms_tx_ul_data_block_multi(ms, 1, with_tlli := true, fn := ms.ul_tbf.start_time_fn);
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	acknack_tmpl := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+						   tr_UlAckNackGprs(ms.tlli,
+								    tr_AckNackDescription(final_ack := '1'B)))
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn, acknack_tmpl);
+
+	/* TBF is to be finished, so no ANR procedure should be starting on this MS */
+	var PCUIF_CellDescriptionList cell_list := {
+		valueof(ts_PCUIF_CellDescriptionV(3, 2, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 880)),
+		valueof(ts_PCUIF_CellDescriptionV(3, 1, 887))
+	};
+	var PCUIF_CellDescriptionList cell_list_req := cell_list;
+	f_PCUIF_CellDescriptionList_expand(cell_list_req, 96);
+	BTS.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list_req));
+
+	/* Verify no Packet Measurement Order is received */
+	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	/* ACK the ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Test ANR procedure: MS is not selected for measurements if its TBF is already finished */
+testcase TC_anr_dl_tbf_finished() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn, poll_fn, dl_fn;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename());
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, omit));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, poll_fn, ?, ?);
+
+	/* ACK the first data block, without FinalAckIndicator because we recieve no FBI on DL data. */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '0'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+			 f_dl_block_ack_fn(dl_block, poll_fn));
+
+	/* Wait until the FBI bit is sent, then attempt ANR REQUEST, it should avoid selecting the current DL TBF: */
+	while (true) {
+		f_rx_rlcmac_dl_block(dl_block, dl_fn);
+		if (match(dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+			continue;
+		}
+		if (dl_block.data.mac_hdr.hdr_ext.fbi) {
+			log("Received FINAL_ACK");
+			ms.dl_tbf.acknack_desc.final_ack := '1'B;
+			/* TBF is to be finished, so no ANR procedure should be starting on this MS */
+			var PCUIF_CellDescriptionList cell_list := {
+				valueof(ts_PCUIF_CellDescriptionV(3, 2, 880)),
+				valueof(ts_PCUIF_CellDescriptionV(3, 1, 880)),
+				valueof(ts_PCUIF_CellDescriptionV(3, 1, 887))
+			};
+			var PCUIF_CellDescriptionList cell_list_req := cell_list;
+			f_PCUIF_CellDescriptionList_expand(cell_list_req, 96);
+			BTS.send(ts_PCUIF_ANR_REQ(0, lengthof(cell_list), cell_list_req));
+		}
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, dl_fn));
+		}
+		if (ms.dl_tbf.acknack_desc.final_ack == '1'B) {
+			/* Verify no Packet Measurement Order is received */
+			f_rx_rlcmac_dl_block(dl_block, dl_fn);
+			if (match(dl_block, tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_MEAS_ORDER(?, ?, ?, ?)))) {
+				setverdict(fail, "Rx unexpected PKT MEAS ORDER: ", dl_block);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			break;
+		}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -5999,6 +6532,12 @@ control {
 	execute( TC_rim_ran_info_req_single_rep() );
 	execute( TC_rim_ran_info_req_single_rep_eutran() );
 	execute( TC_rim_ran_info_req_single_rep_no_si() );
+
+	execute( TC_anr_dl_tbf_success() );
+	execute( TC_anr_dl_tbf_success_si2_partial() );
+	execute( TC_anr_dl_tbf_success_si2_partial_multi_measorder() );
+	execute( TC_anr_dl_tbf_finished() );
+	execute( TC_anr_ul_tbf() );
 }
 
 }
