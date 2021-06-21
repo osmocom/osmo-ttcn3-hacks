@@ -713,12 +713,65 @@ function f_chipher_mode_bssmap_to_rsl(OCT1 alg_bssmap) return RSL_AlgId
 	}
 }
 
+function f_verify_encr_info(RSL_Message rsl) runs on MSC_ConnHdlr {
+	var RSL_IE_Body encr_info;
+	var RSL_AlgId alg_rsl;
+	var template octetstring expect_kc;
+
+	/* If no encryption is enabled, then make sure there is no RSL_IE_ENCR_INFO */
+	if (not ispresent(g_pars.encr)) {
+		if (f_rsl_find_ie(rsl, RSL_IE_ENCR_INFO, encr_info)) {
+			setverdict(fail, "Found Encryption IE, but expected no encryption in ", rsl.msg_type);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+			return;
+		}
+		setverdict(pass);
+		return;
+	}
+
+	/* RSL uses a different representation of the encryption algorithm,
+	 * so we need to convert first */
+	alg_rsl := f_chipher_mode_bssmap_to_rsl(g_pars.encr.enc_alg);
+
+	if (alg_rsl == RSL_ALG_ID_A5_4 and ispresent(g_pars.encr.enc_kc128)) {
+		expect_kc := g_pars.encr.enc_kc128;
+	} else if (alg_rsl == RSL_ALG_ID_A5_0) {
+		/* When A5/0 is chosen, no encryption is active, so technically, no key is needed. However, 3GPP TS
+		 * 48.058 9.3.7 Encryption Information stays quite silent about presence or absence of a key for A5/0.
+		 * The only thing specified is how to indicate the length of the key; the possibility that the key may
+		 * be zero length is not explicitly mentioned. So it seems that we should always send the key along,
+		 * even for A5/0. Still, let's also allow a zero length key for A5/0. */
+		expect_kc := (g_pars.encr.enc_key, ''O);
+	} else {
+		expect_kc := g_pars.encr.enc_key;
+	}
+	log("for encryption algo ", alg_rsl, " expect kc = ", expect_kc);
+
+	if (not f_rsl_find_ie(rsl, RSL_IE_ENCR_INFO, encr_info)) {
+		if (alg_rsl == RSL_ALG_ID_A5_0) {
+			/* For A5/0, encryption is not active. It is fine to omit the Encryption Information in this
+			 * case. Note that the first channel may see an RSL Encryption Command with A5/0 indicated, and
+			 * a subsequent handover may activate a new channel without any Encryption Information. */
+			setverdict(pass);
+			return;
+		}
+		setverdict(fail, "Missing Encryption Information IE in ", rsl.msg_type);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		return;
+	}
+
+	if (not match(encr_info, tr_EncrInfo(alg_rsl, expect_kc))) {
+		setverdict(fail, "Unexpected Kc in Encryption Information IE in ", rsl.msg_type);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		return;
+	}
+	setverdict(pass);
+}
+
 function f_cipher_mode(TestHdlrEncrParams enc, boolean exp_fail := false)
 runs on MSC_ConnHdlr {
 	var PDU_BSSAP bssap;
 	var RSL_Message rsl;
-	var RSL_AlgId alg_rsl;
-	var template octetstring expect_kc;
 
 	if (isvalue(enc.enc_kc128)) {
 		BSSAP.send(ts_BSSMAP_CipherModeCmdKc128(enc.enc_alg, enc.enc_key, valueof(enc.enc_kc128)));
@@ -726,39 +779,14 @@ runs on MSC_ConnHdlr {
 		BSSAP.send(ts_BSSMAP_CipherModeCmd(enc.enc_alg, enc.enc_key));
 	}
 
-	/* RSL uses a different representation of the encryption algorithm,
-	 * so we need to convert first */
-	alg_rsl := f_chipher_mode_bssmap_to_rsl(enc.enc_alg);
-
-	if (alg_rsl == RSL_ALG_ID_A5_4 and ispresent(enc.enc_kc128)) {
-		expect_kc := enc.enc_kc128;
-	} else if (alg_rsl == RSL_ALG_ID_A5_0) {
-		/* When A5/0 is chosen, no encryption is active, so technically, no key is needed. However, 3GPP TS
-		 * 48.058 9.3.7 Encryption Information stays quite silent about presence or absence of a key for A5/0.
-		 * The only thing specified is how to indicate the length of the key; the possibility that the key may
-		 * be zero length is not explicitly mentioned. So it seems that we should always send the key along,
-		 * even for A5/0. Still, let's also allow a zero length key for A5/0. */
-		expect_kc := (enc.enc_key, ''O);
-	} else {
-		expect_kc := enc.enc_key;
-	}
-	log("for encryption algo ", alg_rsl, " expect kc = ", expect_kc);
-
 	alt {
 	/* RSL/UE Side */
-	[] RSL.receive(tr_RSL_ENCR_CMD(g_chan_nr, ?, alg_rsl, ?)) -> value rsl {
+	[] RSL.receive(tr_RSL_ENCR_CMD(g_chan_nr)) -> value rsl {
 		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[3].body.l3_info.payload);
 		log("Rx L3 from net: ", l3);
 
-		var RSL_IE_Body encr_info;
-		if (not f_rsl_find_ie(rsl, RSL_IE_ENCR_INFO, encr_info)) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Missing Encryption IE in RSL ENCR CMD");
-		} else {
-			if (not match(encr_info, tr_EncrInfo(alg_rsl, expect_kc))) {
-				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-							"Unexpected Kc in Encryption IE in RSL ENCR CMD");
-			}
-		}
+		f_verify_encr_info(rsl);
+
 		if (ischosen(l3.msgs.rrm.cipheringModeCommand)) {
 			f_rsl_reply(ts_RRM_CiphModeCompl, rsl);
 		}
@@ -769,6 +797,7 @@ runs on MSC_ConnHdlr {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected Cipher Mode Complete");
 		} else {
 			setverdict(pass);
+			var RSL_AlgId alg_rsl := f_chipher_mode_bssmap_to_rsl(g_pars.encr.enc_alg);
 			if (oct2int(bssap.pdu.bssmap.cipherModeComplete.chosenEncryptionAlgorithm.algorithmIdentifier) != enum2int(alg_rsl)) {
 				setverdict(fail, "Unexpected Encryption Algorithm ID in BSSMAP Cipher Mode Complete");
 			}
