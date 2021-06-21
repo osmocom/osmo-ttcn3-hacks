@@ -1507,15 +1507,38 @@ function f_gen_ass_req(boolean osmux_enabled := false, integer bssap_idx := 0, c
 }
 
 function f_gen_handover_req(integer bssap_idx := 0, charstring aoip_tla := "1.2.3.4",
-			    template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit) return PDU_BSSAP {
+			    template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit,
+			    template (omit) TestHdlrEncrParams enc := omit) return PDU_BSSAP {
 	var PDU_BSSAP ho_req;
+
+	var BSSMAP_IE_EncryptionInformation encryptionInformation :=
+		valueof(ts_BSSMAP_IE_EncrInfo('0000000000000000'O,'01'O));
+	var template BSSMAP_IE_ChosenEncryptionAlgorithm chosenEncryptionAlgorithm := omit;
+	var template BSSMAP_IE_KC128 kc128 := omit;
+	if (ispresent(enc)) {
+		var TestHdlrEncrParams v_enc := valueof(enc);
+		encryptionInformation := valueof(ts_BSSMAP_IE_EncrInfo(v_enc.enc_key, v_enc.enc_alg));
+		chosenEncryptionAlgorithm := valueof(
+			ts_BSSMAP_IE_ChosenEncryptionAlgorithm(int2oct(enum2int(
+				f_chipher_mode_bssmap_to_rsl(v_enc.enc_alg)), 1)));
+		if (ispresent(v_enc.enc_kc128)) {
+			kc128 := ts_BSSMAP_IE_Kc128(v_enc.enc_kc128);
+		}
+	}
+
 	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
 		var BSSMAP_IE_AoIP_TransportLayerAddress tla :=
 			valueof(f_ts_BSSMAP_IE_AoIP_TLA(aoip_tla, 2342));
-		ho_req := valueof(ts_BSSMAP_HandoverRequest(omit, tla, oldToNewBSSIEs := oldToNewBSSIEs));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(omit, tla, oldToNewBSSIEs := oldToNewBSSIEs,
+							    encryptionInformation := encryptionInformation,
+							    chosenEncryptionAlgorithm := chosenEncryptionAlgorithm,
+							    kC128 := kc128));
 	} else {
 		var BSSMAP_IE_CircuitIdentityCode cic := valueof(ts_BSSMAP_IE_CIC(0,1));
-		ho_req := valueof(ts_BSSMAP_HandoverRequest(cic, omit, oldToNewBSSIEs := oldToNewBSSIEs));
+		ho_req := valueof(ts_BSSMAP_HandoverRequest(cic, omit, oldToNewBSSIEs := oldToNewBSSIEs,
+							    encryptionInformation := encryptionInformation,
+							    chosenEncryptionAlgorithm := chosenEncryptionAlgorithm,
+							    kC128 := kc128));
 	}
 	return ho_req;
 }
@@ -5285,7 +5308,8 @@ private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToN
 
 	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc,
 				     f_gen_handover_req(aoip_tla := g_pars.host_aoip_tla,
-							oldToNewBSSIEs := oldToNewBSSIEs)));
+							oldToNewBSSIEs := oldToNewBSSIEs,
+							enc := g_pars.encr)));
 	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
 
 	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
@@ -5294,6 +5318,9 @@ private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToN
 	var octetstring ho_command_str;
 
 	BSSAP.receive(tr_BSSMAP_HandoverRequestAcknowledge(?)) -> value rx_bssap;
+
+	/* we're sure that the channel activation is done now, verify the encryption parameters in it */
+	f_verify_encr_info(f_rslem_get_last_act(RSL_PROC, 0, g_chan_nr));
 
 	ho_command_str := rx_bssap.pdu.bssmap.handoverRequestAck.layer3Information.layer3info;
 	log("Received L3 Info in HO Request Ack: ", ho_command_str);
@@ -5373,6 +5400,29 @@ testcase TC_ho_into_this_bsc() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	f_tc_ho_into_this_bsc_main(pars);
 	f_shutdown_helper();
+}
+
+function f_tc_ho_into_this_bsc_a5(OCT1 encr_alg) runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	pars.encr := valueof(t_EncrParams(encr_alg, f_rnd_octstring(8), f_rnd_octstring(16)));
+	f_tc_ho_into_this_bsc_main(pars);
+	f_shutdown_helper();
+}
+
+testcase TC_ho_into_this_bsc_a5_0() runs on test_CT {
+	f_tc_ho_into_this_bsc_a5('01'O);
+}
+
+testcase TC_ho_into_this_bsc_a5_1() runs on test_CT {
+	f_tc_ho_into_this_bsc_a5('02'O);
+}
+
+testcase TC_ho_into_this_bsc_a5_3() runs on test_CT {
+	f_tc_ho_into_this_bsc_a5('08'O);
+}
+
+testcase TC_ho_into_this_bsc_a5_4() runs on test_CT {
+	f_tc_ho_into_this_bsc_a5('10'O);
 }
 
 testcase TC_ho_into_this_bsc_tla_v6() runs on test_CT {
@@ -9117,6 +9167,10 @@ control {
 	execute( TC_ho_out_fail_no_result_after_ho_cmd() );
 
 	execute( TC_ho_into_this_bsc() );
+	execute( TC_ho_into_this_bsc_a5_0() );
+	execute( TC_ho_into_this_bsc_a5_1() );
+	execute( TC_ho_into_this_bsc_a5_3() );
+	execute( TC_ho_into_this_bsc_a5_4() );
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
 		execute( TC_ho_into_this_bsc_tla_v6() );
 	}
