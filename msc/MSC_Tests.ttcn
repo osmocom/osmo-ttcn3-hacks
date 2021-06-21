@@ -5992,10 +5992,24 @@ private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) run
 	/* The target cell 017-017 LAC 1 is configured to be a remote MSC of name "msc-017-017-1".
 	 * This MSC tries to reach the other MSC via GSUP. */
 
+	var template BSSMAP_IE_EncryptionInformation encryptionInformation;
+	var template BSSMAP_IE_ChosenEncryptionAlgorithm chosenEncryptionAlgorithm;
+	var template BSSMAP_IE_KC128 kC128;
+	var OCT1 a5_perm_alg;
+	f_get_expected_encryption(encryptionInformation, chosenEncryptionAlgorithm, kC128, a5_perm_alg);
+	var template PDU_BSSAP expect_ho_request := tr_BSSMAP_HandoverRequest(encryptionInformation, chosenEncryptionAlgorithm, kC128);
+
 	var octetstring remote_msc_name := '6D73632D3031372D3031372D3100'O; /* "msc-017-017-1\0" as octetstring */
 	var GSUP_PDU prep_ho_req;
-	GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_HANDOVER_REQUEST,
-				pars.imsi, destination_name := remote_msc_name)) -> value prep_ho_req;
+	alt {
+	[] GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_HANDOVER_REQUEST,
+				pars.imsi, destination_name := remote_msc_name,
+				an_apdu := t_GSUP_AN_APDU(OSMO_GSUP_AN_PROTO_48006, decmatch expect_ho_request))) -> value prep_ho_req;
+	[] GSUP.receive(tr_GSUP_E_AN_APDU(OSMO_GSUP_MSGT_E_PREPARE_HANDOVER_REQUEST)) {
+		setverdict(fail, "Wrong OSMO_GSUP_MSGT_E_PREPARE_HANDOVER_REQUEST message received");
+		mtc.stop;
+		}
+	}
 
 	var GSUP_IeValue source_name_ie;
 	f_gsup_find_ie(prep_ho_req, OSMO_GSUP_SOURCE_NAME_IE, source_name_ie);
@@ -6006,7 +6020,8 @@ private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) run
 	var octetstring rr_ho_cmd_enc := enc_PDU_ML3_NW_MS(rr_ho_cmd);
 	var PDU_BSSAP ho_req_ack := valueof(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
 					aoIPTransportLayer := omit,
-					speechCodec := ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+					speechCodec := ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}),
+					chosenEncryptionAlgorithm := chosenEncryptionAlgorithm));
 	GSUP.send(ts_GSUP_E_PrepareHandoverResult(
 				pars.imsi,
 				ho_number,
@@ -6142,7 +6157,18 @@ private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) run
 				));
 
 	/* MSC asks local BSS to prepare Handover to it */
-	BSSAP.receive(tr_BSSMAP_HandoverRequest);
+	f_get_expected_encryption(encryptionInformation, chosenEncryptionAlgorithm, kC128, a5_perm_alg);
+	expect_ho_request := tr_BSSMAP_HandoverRequest(encryptionInformation, chosenEncryptionAlgorithm, kC128);
+	var PDU_BSSAP ho_request;
+	alt {
+	[] BSSAP.receive(expect_ho_request);
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequest) -> value ho_request {
+		log("Error: Wrong handoverRequest received. Expected: ", expect_ho_request,
+		    " got ", ho_request);
+		setverdict(fail, "Wrong handoverRequest received");
+		mtc.stop;
+		}
+	}
 
 	/* Make sure the new BSSAP conn continues with the correct N_SD sequence numbers */
 	f_bssmap_continue_after_n_sd(last_n_sd);
@@ -6153,7 +6179,8 @@ private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) run
 	var BSSMAP_IE_AoIP_TransportLayerAddress tla :=
 		valueof(f_ts_BSSMAP_IE_AoIP_TLA(cpars.bss_rtp_ip, cpars.bss_rtp_port));
 	BSSAP.send(ts_BSSMAP_HandoverRequestAcknowledge(rr_ho_cmd_enc, lengthof(rr_ho_cmd_enc),
-							tla, ts_BSSMAP_IE_SpeechCodec({ts_CodecFR})));
+							tla, ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}),
+							chosenEncryptionAlgorithm := chosenEncryptionAlgorithm));
 
 	/* HandoverCommand goes out via remote MSC-I */
 	var GSUP_PDU prep_subsq_ho_res;
@@ -6190,14 +6217,39 @@ private function f_tc_ho_inter_msc_out(charstring id, BSC_ConnHdlrPars pars) run
 
 	setverdict(pass);
 }
-testcase TC_ho_inter_msc_out() runs on MTC_CT {
+function f_tc_ho_inter_msc_out_a5(integer a5_n) runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
 	f_init(1);
 
 	var BSC_ConnHdlrPars pars := f_init_pars(54);
+	pars.net.expect_ciph := a5_n > 0;
+	pars.net.expect_auth := pars.net.expect_ciph;
+	pars.net.kc_support := bit2oct('00000001'B << a5_n);
+	pars.cm2.classmarkInformationType2_oct5.a5_3 := '1'B;
+	pars.cm2.classmarkInformationType2_oct5.a5_2 := '0'B;
+	pars.cm2.classmarkInformationType2_oct5.cm3 := '1'B;
+	pars.cm3 := valueof(ts_CM3_default);
+	pars.use_umts_aka := true;
+
+	if (a5_n > 0) {
+		f_vty_config(MSCVTY, "network", "authentication required");
+	}
+	f_vty_config(MSCVTY, "network", "encryption a5 " & int2str(a5_n));
 
 	vc_conn := f_start_handler_with_pars(refers(f_tc_ho_inter_msc_out), pars, 0);
 	vc_conn.done;
+}
+testcase TC_ho_inter_msc_out() runs on MTC_CT {
+	f_tc_ho_inter_msc_out_a5(0);
+}
+testcase TC_ho_inter_msc_out_a5_1() runs on MTC_CT {
+	f_tc_ho_inter_msc_out_a5(1);
+}
+testcase TC_ho_inter_msc_out_a5_3() runs on MTC_CT {
+	f_tc_ho_inter_msc_out_a5(3);
+}
+testcase TC_ho_inter_msc_out_a5_4() runs on MTC_CT {
+	f_tc_ho_inter_msc_out_a5(4);
 }
 testcase TC_ho_inter_msc_out_ipv6() runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
@@ -6683,6 +6735,9 @@ control {
 	execute( TC_ho_inter_bsc_ipv6() );
 
 	execute( TC_ho_inter_msc_out() );
+	execute( TC_ho_inter_msc_out_a5_1() );
+	execute( TC_ho_inter_msc_out_a5_3() );
+	execute( TC_ho_inter_msc_out_a5_4() );
 	execute( TC_ho_inter_msc_out_ipv6() );
 
 	execute( TC_lu_imsi_auth_tmsi_check_imei() );
