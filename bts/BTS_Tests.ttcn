@@ -3551,6 +3551,18 @@ private type record PagingTestCfg {
 	boolean combined_ccch,
 	integer bs_ag_blks_res,
 	float load_factor,
+	/* Mix in a paging request through the PCU socket for every Nth (ps_load_modulus)
+	 * paging command that is issued via RSL. */
+	integer ps_load_modulus,
+	/* Wait until the paging queue inside the BTS is congested before starting to add
+	 * pagings via the PCU socket (0 = disabled) */
+	boolean ps_wait_cong,
+	/* Maximum time to wait until the paging queue is drained at the end of the test.
+	 * This usually takes about 15s (size: 200, ~ 13 per s -> 15s), it is recommended
+	 * to set this value to 18s, however the draining process may take significantly
+	 * longer when the queue contains paging requests for PS as those are implemented
+	 * as immediate assignments and require an entire MAC block alone. */
+	float queue_drain_timeout,
 	boolean exp_load_ind,
 	boolean exp_overload,
 	boolean use_tmsi
@@ -3560,20 +3572,34 @@ private type record PagingTestState {
 	integer num_paging_sent,
 	integer num_paging_rcv_msgs,
 	integer num_paging_rcv_ids,
-	integer num_overload
+	integer num_overload,
+	/* When free space inside the paging queue reaches more than 2 thirds
+	 * of its capacity cong_detected is set to true. */
+	boolean cong_detected
 }
 
 /* Helper function for paging related testing */
 private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTestState {
-	f_init();
+	/* Using the PCU socket affects the timing of the paging processing. We only
+	 * activate the PCU socket if we do paging load tests that include additional
+	 * paging load that is introduced through the PCU socket. */
+	if (cfg.ps_load_modulus > 0) {
+		f_init_with_pcuif();
+	} else {
+		f_init();
+	}
 	f_init_l1ctl();
 	f_l1_tune(L1CTL);
+
+	var octetstring imm_ass := f_rnd_octstring(23);
+	var ASP_RSL_Unitdata load_ind;
 
 	var PagingTestState st := {
 		num_paging_sent := 0,
 		num_paging_rcv_msgs := 0,
 		num_paging_rcv_ids := 0,
-		num_overload := 0
+		num_overload := 0,
+		cong_detected := false
 	};
 
 	var float max_pch_blocks_per_sec := f_pch_block_rate_est(cfg.combined_ccch, cfg.bs_ag_blks_res);
@@ -3604,8 +3630,18 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 		[not cfg.exp_overload]  RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND(0))) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected PCH Overload");
 			}
-		[cfg.exp_load_ind] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND)) {
+		[cfg.exp_load_ind] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND)) -> value load_ind {
 			log("Rx LOAD_IND");
+
+			/* Detect paging congestion: The logic inside the BTS will diagnose the
+			 * paging queue as congested when the fill state is more than 66% (which
+			 * is two thirds fill state, or approx. 66 of 200 paging slots. When a
+			 * paging congestion is detected pagings that are issued through the PCU
+			 * socket (PS) are dropped in order to prefer the CS related pagings. */
+			if (load_ind.rsl.ies[1].body.paging_load < 66) {
+				st.cong_detected := true;
+			}
+
 			/* FIXME: analyze/verify interval + contents */
 			repeat;
 			}
@@ -3614,6 +3650,8 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 		/* check if paging requests arrive on Um side */
 		[] as_l1_count_paging(st.num_paging_rcv_msgs, st.num_paging_rcv_ids, cfg);
 		[] L1CTL.receive { repeat; }
+		/* Only relevant when testing including with PCU sock connected */
+		[] PCU.receive { repeat; }
 		[] T_itv.timeout {
 			/* Send paging cmds based on elapsed time */
 			var integer new_sent := f_min(pkt_total, float2int(T_total.read * pch_blocks_per_sec) + 1);
@@ -3629,6 +3667,13 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 
 				/* Send RSL PAGING COMMAND */
 				RSL_CCHAN.send(ts_ASP_RSL_UD(ts_RSL_PAGING_CMD(mi, st.num_paging_sent mod 4)));
+
+				/* Add additional pagings through the PCU socket interface. */
+				if (cfg.ps_load_modulus > 0 and st.num_paging_sent mod cfg.ps_load_modulus == 0) {
+					if (st.cong_detected == true or cfg.ps_wait_cong == false) {
+						f_PCUIF_tx_imm_ass_pch(PCU, g_pcu_conn_id, imm_ass, '123459987'H, wait_for_cnf := false);
+					}
+				}
 
 				st.num_paging_sent := st.num_paging_sent + 1;
 			}
@@ -3650,19 +3695,20 @@ private function f_TC_paging(PagingTestCfg cfg) runs on test_CT return PagingTes
 		}
 	}
 
-	/* wait for max 18s for paging queue to drain (size: 200, ~ 13 per s -> 15s) */
-	timer T_wait := 18.0;
+	timer T_wait := cfg.queue_drain_timeout
 	T_wait.start;
 	alt {
 	[] as_l1_count_paging(st.num_paging_rcv_msgs, st.num_paging_rcv_ids, cfg);
 	[] L1CTL.receive { repeat; }
 	/* 65535 == empty paging queue, we can terminate*/
 	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND(65535))) { }
-	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND)) { repeat; }
+	[] RSL_CCHAN.receive(tr_ASP_RSL_UD(tr_RSL_PAGING_LOAD_IND)) -> value load_ind { repeat; }
 	/* ignore other RSL messages like RF RESource INDication */
 	[] RSL_CCHAN.receive { repeat; }
+	/* Only relevant when testing including with PCU sock connected */
+	[] PCU.receive { repeat; }
 	[] T_wait.timeout {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Waiting for empty paging queue");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Waiting for paging queue, last detected fill state: ", load_ind.rsl.ies[1].body.paging_load));
 		}
 	}
 
@@ -3681,6 +3727,9 @@ testcase TC_paging_imsi_80percent() runs on test_CT {
 		combined_ccch := true,
 		bs_ag_blks_res := si3.payload.si3.ctrl_chan_desc.bs_ag_blks_res,
 		load_factor := 0.8,
+		ps_load_modulus := 0,
+		ps_wait_cong := false,
+		queue_drain_timeout := 18.0,
 		exp_load_ind := true,
 		exp_overload := false,
 		use_tmsi := false
@@ -3705,6 +3754,9 @@ testcase TC_paging_tmsi_80percent() runs on test_CT {
 		combined_ccch := true,
 		bs_ag_blks_res := si3.payload.si3.ctrl_chan_desc.bs_ag_blks_res,
 		load_factor := 0.8,
+		ps_load_modulus := 0,
+		ps_wait_cong := false,
+		queue_drain_timeout := 18.0,
 		exp_load_ind := true,
 		exp_overload := false,
 		use_tmsi := true
@@ -3729,6 +3781,9 @@ testcase TC_paging_imsi_200percent() runs on test_CT {
 		combined_ccch := true,
 		bs_ag_blks_res := si3.payload.si3.ctrl_chan_desc.bs_ag_blks_res,
 		load_factor := 2.0,
+		ps_load_modulus := 0,
+		ps_wait_cong := false,
+		queue_drain_timeout := 18.0,
 		exp_load_ind := true,
 		exp_overload := true,
 		use_tmsi := false
@@ -3755,6 +3810,9 @@ testcase TC_paging_tmsi_200percent() runs on test_CT {
 		combined_ccch := true,
 		bs_ag_blks_res := si3.payload.si3.ctrl_chan_desc.bs_ag_blks_res,
 		load_factor := 2.0,
+		ps_load_modulus := 0,
+		ps_wait_cong := false,
+		queue_drain_timeout := 18.0,
 		exp_load_ind := true,
 		exp_overload := true,
 		use_tmsi := true
@@ -3770,6 +3828,38 @@ testcase TC_paging_tmsi_200percent() runs on test_CT {
 	}
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
+
+/* Same as above, but with additional paging load created by PS pagings that
+ * are issued through the PCU socket. The additional load is introduced when
+ * the paging queue is already two thirds full. Since the BTS implements a
+ * prioritization logic that drops the pagings from the PCU under in those
+ * congestive sitautions the behaviour on the PS side is expected to be
+ * unaffected and match the behavior of TC_paging_imsi_200percent() */
+testcase TC_paging_imsi_200percent_with_ps() runs on test_CT {
+	var SystemInformation si3 := valueof(ts_SI3_default);
+	var PagingTestCfg cfg := {
+		combined_ccch := true,
+		bs_ag_blks_res := si3.payload.si3.ctrl_chan_desc.bs_ag_blks_res,
+		load_factor := 2.0,
+		ps_load_modulus := 16,
+		ps_wait_cong := true,
+		queue_drain_timeout := 18.0,
+		exp_load_ind := true,
+		exp_overload := true,
+		use_tmsi := false
+	};
+	var PagingTestState st := f_TC_paging(cfg);
+	/* We expect about 80-85% to pass, given that we can fill the paging buffer of 200
+	 * slots and will fully drain that buffer before returning */
+	var template integer tpl := (st.num_paging_sent*78/100 .. st.num_paging_sent *85/100);
+	if (not match(st.num_paging_rcv_ids, tpl)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Expected ", tpl, " pagings but have ", st.num_paging_rcv_ids));
+	} else {
+		setverdict(pass);
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 
 
 /***********************************************************************
@@ -7502,6 +7592,7 @@ control {
 	execute( TC_ipa_crcx_sdcch_not_active() );
 
 	if (mp_pcu_socket != "") {
+		execute( TC_paging_imsi_200percent_with_ps() );
 		execute( TC_pcu_act_req() );
 		execute( TC_pcu_act_req_wrong_ts() );
 		execute( TC_pcu_act_req_wrong_bts() );
