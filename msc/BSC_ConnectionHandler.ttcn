@@ -560,44 +560,61 @@ function f_auth3g_kc(AuthVector vec) return OCT8 {
 	return res;
 }
 
+function f_get_expected_encryption(
+	out template BSSMAP_IE_EncryptionInformation encryptionInformation,
+	out template BSSMAP_IE_ChosenEncryptionAlgorithm chosenEncryptionAlgorithm,
+	out template BSSMAP_IE_KC128 kC128,
+	out OCT1 a5_perm_alg) runs on BSC_ConnHdlr
+{
+	var OCT1 a5_ms := f_alg_mask_from_cm(g_pars.cm2, g_pars.cm3);
+	a5_perm_alg := g_pars.net.kc_support and4b a5_ms;
+
+	if (not g_pars.net.expect_ciph) {
+		encryptionInformation := *;
+		chosenEncryptionAlgorithm := *;
+		kC128 := *;
+		return;
+	}
+
+	encryptionInformation := tr_BSSMAP_IE_EncrInfo(g_pars.vec.kc, a5_perm_alg);
+
+	var OCT1 chosen_alg := int2oct(f_alg_from_mask(f_best_alg_from_mask(a5_perm_alg)) + 1, 1);
+	chosenEncryptionAlgorithm := tr_BSSMAP_IE_ChosenEncryptionAlgorithm(chosen_alg);
+
+	if (g_pars.use_umts_aka and f_alg_supported_by_mask(a5_perm_alg, 4)) {
+		/* A5/4 is permitted, expecting kc128 to be present */
+		var OCT32 full_sha256 := f_calculate_HMAC_SHA256(g_pars.vec.ck & g_pars.vec.ik, '32'O, 32);
+		var OCT16 expect_kc128 := substr(full_sha256, 0, 16);
+		kC128 := tr_BSSMAP_IE_Kc128(expect_kc128);
+	} else {
+		kC128 := omit
+	}
+}
+
 
 function f_mm_common() runs on BSC_ConnHdlr
 {
 	f_mm_auth();
 	if (g_pars.ran_is_geran) {
 		if (g_pars.net.expect_ciph) {
-			var OCT1 a5_net := f_alg_mask_from_cm(g_pars.cm2, g_pars.cm3);
-			var OCT1 a5_intersect := g_pars.net.kc_support and4b a5_net;
-			var boolean has_a54 := f_alg_supported_by_mask(a5_intersect, 4);
+			var template BSSMAP_IE_EncryptionInformation encryptionInformation;
+			var template BSSMAP_IE_ChosenEncryptionAlgorithm chosenEncryptionAlgorithm;
+			var template BSSMAP_IE_KC128 kC128;
+			var OCT1 a5_perm_alg;
+			f_get_expected_encryption(encryptionInformation, chosenEncryptionAlgorithm, kC128, a5_perm_alg);
 
 			var PDU_BSSAP pdu;
+			var template PDU_BSSAP expect_ciph_mode_cmd := tr_BSSMAP_CipherModeCmd2(encryptionInformation, kC128);
 			alt {
-				[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(a5_intersect, g_pars.vec.kc)) -> value pdu {
-				var PDU_BSSMAP_CipherModeCommand ciphmodcmd := pdu.pdu.bssmap.cipherModeCommand;
-				if (g_pars.use_umts_aka and has_a54) {
-					var OCT32 fulloutput := f_calculate_HMAC_SHA256(g_pars.vec.ck & g_pars.vec.ik, '32'O, 32);
-					var OCT16 kc128 := substr(fulloutput, 0, 16);
-					if (not ispresent(ciphmodcmd.kC128)) {
-						setverdict(fail, "kc128 missing in CiphModCmd");
-						mtc.stop;
-					}
-					if (ciphmodcmd.kC128.kC128_Value != kc128) {
-						setverdict(fail, "kc128 wrong in CiphModCmd?!", kc128);
-						mtc.stop;
-					}
-				} else {
-					if (ispresent(ciphmodcmd.kC128)) {
-						setverdict(fail, "kc128 present in CiphModCmd, but should not exist!");
-						mtc.stop;
-					}
-				}
-
-				var OCT1 a5_chosen := f_best_alg_from_mask(a5_intersect);
+			[] BSSAP.receive(expect_ciph_mode_cmd) -> value pdu {
+				var OCT1 a5_chosen := f_best_alg_from_mask(a5_perm_alg);
 				var integer a5_nr := f_alg_from_mask(a5_chosen);
 				BSSAP.send(ts_BSSMAP_CipherModeCompl(int2oct(a5_nr+1, 1)));
 				}
-			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd(?, g_pars.vec.kc)) {
-				setverdict(fail, "Wrong ciphering algorithm mask in CiphModCmd");
+			[] BSSAP.receive(tr_BSSMAP_CipherModeCmd2) -> value pdu {
+				log("Error: Ciphering Mode Command with unexpected content. Expected: ",
+				    expect_ciph_mode_cmd, "  got: ", pdu);
+				setverdict(fail, "Ciphering Mode Command with unexpected content.");
 				mtc.stop;
 				}
 			[] BSSAP.receive(tr_BSSMAP_ClassmarkRequest) {
