@@ -6824,6 +6824,71 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Test Osmocom dyn TS SDCCH8 activation / deactivation when SDCCH fails at BTS */
+testcase TC_dyn_ts_sdcch8_act_nack() runs on test_CT {
+	var RSL_Message rsl_unused, rsl_msg;
+	var DchanTuple dt;
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	var GsmRrMessage rr;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 6, "TCH/F_TCH/H_SDCCH8_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr pdch_chan_nr := valueof(t_RslChanNr_PDCH(6));
+
+	log("TCH/F_TCH/H_SDCCH8_PDCH pchan starts out in disabled mode:");
+	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, NONE_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr, ?));
+
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_sleep(1.0);
+	log("TCH/F_TCH/H_SDCCH8_PDC requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
+	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
+
+	/* Fill TS0 SDCCH channels (NOTE: only 3 SDCCH/4 channels are available
+	 * on CCCH+SDCCH4+CBCH) */
+	var integer i;
+	for (i := 0; i < 3; i := i + 1) {
+		dt := f_est_dchan('23'O, i, '00010203040506'O);
+	}
+
+	/* Now the dyn ts is selected. First PDCH is released, then sdcch chan is activated */
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(pdch_chan_nr));
+	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
+
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	dt.rsl_chan_nr := rsl_msg.ies[0].body.chan_nr;
+
+	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, SDCCH8_MODE);
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(dt.rsl_chan_nr, RSL_ERR_EQUIPMENT_FAIL));
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	rr := dec_GsmRrMessage(rsl_msg.ies[1].body.full_imm_ass_info.payload);
+	if (rr.header.message_type != IMMEDIATE_ASSIGNMENT_REJECT) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected reject");
+	}
+
+	/* FIXME? Currently the TS stays in state BORKEN: */
+
+	/* The BSC will switch the TS back to PDCH once the only lchan using it is released: */
+	/* rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr, ?));
+	 * f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	 * f_sleep(1.0);
+	 * f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE)
+	 */
+
+	/* clean up config */
+	f_ts_set_chcomb(0, 0, 6, "PDCH");
+
+	f_shutdown_helper();
+}
+
 testcase TC_chopped_ipa_ping() runs on test_CT {
 	const Integers bsc_ipa_ports := {mp_bsc_rsl_port, mp_bsc_oml_port, mp_bsc_ctrl_port};
 	for (var integer i := 0; i < lengthof(bsc_ipa_ports); i := i + 1) {
@@ -9269,6 +9334,7 @@ control {
 	execute( TC_dyn_pdch_osmo_act_deact() );
 	execute( TC_dyn_pdch_osmo_act_nack() );
 	execute( TC_dyn_ts_sdcch8_act_deact() );
+	execute( TC_dyn_ts_sdcch8_act_nack() );
 
 	execute( TC_chopped_ipa_ping() );
 	execute( TC_chopped_ipa_payload() );
