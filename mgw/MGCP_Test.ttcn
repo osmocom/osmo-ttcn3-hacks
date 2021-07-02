@@ -30,6 +30,10 @@ module MGCP_Test {
 	import from IP_Types all;
 	import from Osmocom_VTY_Functions all;
 	import from TELNETasp_PortType all;
+	import from StatsD_Types all;
+	import from StatsD_CodecPort all;
+	import from StatsD_CodecPort_CtrlFunct all;
+	import from StatsD_Checker all;
 
 	const charstring c_mgw_domain := "mgw";
 	const charstring c_mgw_ep_rtpbridge := "rtpbridge/";
@@ -37,7 +41,7 @@ module MGCP_Test {
 	/* any variables declared in the component will be available to
 	 * all functions that 'run on' the named component, similar to
 	 * class members in C++ */
-	type component dummy_CT {
+	type component dummy_CT extends StatsD_ConnHdlr {
 		port MGCP_CODEC_PT MGCP;
 		var boolean initialized := false;
 		var ConnectionId g_mgcp_conn_id := -1;
@@ -50,6 +54,8 @@ module MGCP_Test {
 		port OsmuxEM_CTRL_PT OsmuxEM;
 
 		port TELNETasp_PT MGWVTY;
+
+		var StatsD_Checker_CT vc_STATSD;
 	};
 
 	function get_next_trans_id() runs on dummy_CT return MgcpTransId {
@@ -71,6 +77,8 @@ module MGCP_Test {
 		charstring mp_remote_ipv6 := "::1";
 		PortNumber mp_local_rtp_port_base := 10000;
 		PortNumber mp_local_osmux_port := 1985;
+		PortNumber mp_mgw_statsd_port := 8125;
+		charstring mp_test_ip := "127.0.0.1";
 	}
 
 	private function f_vty_enable_osmux(boolean osmux_on) runs on dummy_CT {
@@ -141,6 +149,11 @@ module MGCP_Test {
 				f_osmuxem_init(vc_OsmuxEM);
 				connect(vc_OsmuxEM:CTRL, self:OsmuxEM);
 			}
+
+			f_init_statsd("VirtCallAgent", vc_STATSD, mp_test_ip, mp_mgw_statsd_port);
+			connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+			f_statsd_reset();
 		}
 
 		if (isvalue(ep)) {
@@ -1043,25 +1056,52 @@ module MGCP_Test {
 
 	/* test valid wildcarded DLCX */
 	testcase TC_dlcx_wildcarded() runs on dummy_CT {
-		 /* Note: A wildcarded DLCX is specified, but our MGW does not
-		  * support this feature so we expect the MGW to reject the
-		  * request */
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
 		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "*@" & c_mgw_domain;
+		const integer n_endpoints := 31;
+		var integer i;
+		var MgcpCallId call_id := '1234'H;
+		var StatsDExpects expect;
+		f_init(ep);
+
+		/* Allocate a few endpoints */
+		for (i := 0; i < n_endpoints; i := i+1) {
+			cmd := ts_CRCX(get_next_trans_id(), ep, "recvonly", call_id);
+			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK);
+		}
+
+		expect := {
+			{ name := "TTCN3.trunk.virtual-0.common.endpoints.used", mtype := "g", min := n_endpoints, max := n_endpoints}
+		};
+		f_statsd_expect(expect);
+
+		/* Send wildcarded DLCX */
 		var template MgcpResponse rtmpl := {
 			line := {
-				code := "507",
+				code := "200",
 				string := ?
 			},
 			params:= { },
 			sdp := omit
 		};
+		cmd := ts_DLCX(get_next_trans_id(), ep);
+		mgcp_transceive_mgw(cmd, rtmpl);
 
-		f_init(ep);
+		/* The stats reporter collects multiple samples during the reporting interval and
+		 * reports the highest back to the user. This means we will not immediately get
+		 * the 0 endpoints but an intermediate result instead. */
+		expect := {
+			{ name := "TTCN3.trunk.virtual-0.common.endpoints.used", mtype := "g", min := 0, max := n_endpoints}
+		};
+		f_statsd_expect(expect);
 
-		cmd := ts_DLCX(get_next_trans_id(), ep, '41234'H);
-		resp := mgcp_transceive_mgw(cmd, rtmpl);
+		/* The second interval must resturn a result with 0 endpoints in use. */
+		expect := {
+			{ name := "TTCN3.trunk.virtual-0.common.endpoints.used", mtype := "g", min := 0, max := 0}
+		};
+		f_statsd_expect(expect);
+
 		setverdict(pass);
 	}
 
