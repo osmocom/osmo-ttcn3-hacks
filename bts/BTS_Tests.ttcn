@@ -44,6 +44,7 @@ import from IPA_Types all;
 import from IPA_Emulation all;
 import from IPA_Testing all;
 import from RSL_Emulation all;
+import from RTP_Emulation all;
 
 import from IPL4asp_Types all;
 import from TRXC_Types all;
@@ -93,6 +94,8 @@ modulepar {
 	integer mp_ctrl_port := 4238;
 	charstring mp_bsc_ctrl_ip := "127.0.0.1";
 	integer mp_bsc_ctrl_port := 4249;
+	charstring mp_rtpem_bind_ip := "127.0.0.1";
+	integer mp_rtpem_bind_port := 6766;
 	integer mp_tolerance_rxqual := 1;
 	integer mp_tolerance_rxlev := 3;
 	integer mp_tolerance_timing_offset_256syms := 0;
@@ -205,6 +208,10 @@ type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 
 	/* PCU Interface of BTS */
 	port PCUIF_CODEC_PT PCU;
+
+	var RTP_Emulation_CT vc_RTPEM;
+	port RTPEM_CTRL_PT RTPEM_CTRL;
+	port RTPEM_DATA_PT RTPEM_DATA;
 }
 
 private function f_init_rsl(charstring id) runs on test_CT {
@@ -2283,6 +2290,60 @@ private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies 
 	}
 
 	g_first_meas_res := true;
+}
+
+/* Initialize and start the RTP emulation component for a ConnHdlr */
+friend function f_rtpem_activate(inout octetstring payload,
+				 RtpemConfig cfg := c_RtpemDefaultCfg,
+				 RtpemMode mode := RTPEM_MODE_BIDIR)
+runs on ConnHdlr {
+	/* Step 0: initialize, connect and start the emulation component */
+	vc_RTPEM := RTP_Emulation_CT.create(testcasename() & "-RTPEM");
+	map(vc_RTPEM:RTP, system:RTP);
+	map(vc_RTPEM:RTCP, system:RTCP);
+	connect(vc_RTPEM:CTRL, self:RTPEM_CTRL);
+	connect(vc_RTPEM:DATA, self:RTPEM_DATA);
+	vc_RTPEM.start(RTP_Emulation.f_main());
+
+	/* Step 1: configure the RTP parameters */
+	var integer payload_len := 0;
+	var octetstring hdr := ''O;
+
+	select (g_pars.chan_mode) {
+	case (tr_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM1)) /* TCH/FS */
+		{ payload_len := 33; hdr := 'D0'O; }
+	case (tr_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM1)) /* TCH/HS */
+		{ payload_len := 15; hdr := '00'O; }
+	case (tr_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM2)) /* TCH/EFS */
+		{ payload_len := 31; hdr := 'C0'O; }
+	case else { /* FIXME: also handle TCH/AFS and TCH/AHS */
+		setverdict(fail, "Unhandled RSL channel mode := ", g_pars.chan_mode);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* Pad the payload to conform the expected length */
+	payload := f_pad_oct(hdr & payload, payload_len, '00'O);
+	cfg.tx_fixed_payload := payload;
+	f_rtpem_configure(RTPEM_CTRL, cfg);
+
+	/* Step 2: bind the RTP emulation to the configured address */
+	var PortNumber rtpem_bind_port := mp_rtpem_bind_port;
+	f_rtpem_bind(RTPEM_CTRL, mp_rtpem_bind_ip, rtpem_bind_port);
+
+	/* Step 3: send CRCX with the configured address/port to the IUT */
+	var RSL_Message rsl_pdu := f_rsl_transceive_ret(
+		ts_RSL_IPA_CRCX(g_chan_nr, f_inet_addr(mp_rtpem_bind_ip), rtpem_bind_port),
+		tr_RSL_IPA_CRCX_ACK(g_chan_nr, ?, ?, ?),
+		"IPA CRCX ACK");
+
+	/* Step 4: connect to the IUT's address/port parsed from CRCX ACK */
+	var HostName local_addr := f_inet_ntoa(rsl_pdu.ies[2].body.ipa_local_ip);
+	var PortNumber local_port := rsl_pdu.ies[3].body.ipa_local_port;
+	f_rtpem_connect(RTPEM_CTRL, local_addr, local_port);
+
+	/* Step 5: set the given RTP emulation mode */
+	f_rtpem_mode(RTPEM_CTRL, mode);
 }
 
 /* establish DChan, verify existance + contents of measurement reports */
