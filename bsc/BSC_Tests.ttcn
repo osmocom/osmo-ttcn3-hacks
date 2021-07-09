@@ -605,6 +605,7 @@ type component test_CT extends CTRL_Adapter_CT {
 	var SystemInformationConfig_list g_system_information := {};
 }
 
+type record of charstring phys_chan_configs;
 modulepar {
 	/* IP address at which the BSC can be reached */
 	charstring mp_bsc_ip := "127.0.0.1";
@@ -653,6 +654,18 @@ modulepar {
 			sio := '83'O,
 			rctx := 3
 		}
+	};
+
+	/* Must match per BTS config in osmo-bsc.cfg */
+	phys_chan_configs phys_chan_config := {
+		"CCCH+SDCCH4+CBCH",
+		"TCH/F",
+		"TCH/F",
+		"TCH/F",
+		"TCH/F",
+		"TCH/F",
+		"PDCH",
+		"PDCH"
 	};
 
 	BSSAP_LE_Configuration mp_bssap_le_cfg := {
@@ -6619,6 +6632,14 @@ runs on test_CT {
 	f_vty_transceive(BSCVTY, "end");
 }
 
+
+private function f_ts_reset_chcomb(integer bts_nr) runs on test_CT {
+	var integer i;
+	for (i := 0; i < 8; i := i + 1) {
+		f_ts_set_chcomb(bts_nr, 0, i, phys_chan_config[i]);
+	}
+}
+
 private const charstring TCHF_MODE := "TCH/F mode";
 private const charstring TCHH_MODE := "TCH/H mode";
 private const charstring PDCH_MODE := "PDCH mode";
@@ -6871,6 +6892,83 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 
 	/* clean up config */
 	f_ts_set_chcomb(0, 0, 6, "PDCH");
+
+	f_shutdown_helper();
+}
+
+/* Test Osmocom dyn TS SDCCH8 activation / deactivation: If activating dyn TS as
+   SDCCH8 would end up in having no free TCH, then BSC should decide to activate
+   it as TCH directly instead. SYS#5309. */
+testcase TC_dyn_ts_sdcch8_tch_call_act_deact() runs on test_CT {
+	var RSL_Message rsl_unused, rsl_msg;
+	var DchanTuple dt;
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	var integer i;
+
+	/* change Timeslot 6 before f_init() starts RSL */
+	f_init_vty();
+	for (i := 1; i < 8; i := i + 1) {
+		if (i == 6) {
+			f_ts_set_chcomb(0, 0, i, "TCH/F_TCH/H_SDCCH8_PDCH");
+		} else {
+			f_ts_set_chcomb(0, 0, i, "PDCH");
+		}
+	}
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	var RslChannelNr pdch_chan_nr := valueof(t_RslChanNr_PDCH(6));
+
+	log("TCH/F_TCH/H_SDCCH8_PDCH pchan starts out in disabled mode:");
+	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, NONE_MODE);
+	/* The BSC will activate the dynamic PDCH by default, so confirm that */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr, ?));
+
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_sleep(1.0);
+	log("TCH/F_TCH/H_SDCCH8_PDC requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
+	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
+
+	/* Fill TS0 SDCCH channels (NOTE: only 3 SDCCH/4 channels are available
+	 * on CCCH+SDCCH4+CBCH) */
+	for (i := 0; i < 3; i := i + 1) {
+		dt := f_est_dchan('23'O, i, '00010203040506'O);
+	}
+
+	/* Now the dyn ts is selected. First PDCH is released, then TCH chan is activated */
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(pdch_chan_nr));
+	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
+
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	dt.rsl_chan_nr := rsl_msg.ies[0].body.chan_nr;
+
+	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, TCHH_MODE);
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, 2342));
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, TCHH_MODE);
+
+	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), '1234'O));
+	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3('1234'O))) -> value rx_c_ind;
+	dt.sccp_conn_id := rx_c_ind.connectionId;
+	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
+
+	/* Instruct BSC to clear channel */
+	var BssmapCause cause := 0;
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+	f_exp_chan_rel_and_clear(dt, 0);
+
+	/* The BSC will switch the TS back to PDCH once the only lchan using it is released: */
+	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr, ?));
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_sleep(1.0);
+	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
+
+	/* clean up config */
+	f_ts_reset_chcomb(0);
+	/* TODO: clean up other channels? */
 
 	f_shutdown_helper();
 }
@@ -9413,6 +9511,7 @@ control {
 	execute( TC_dyn_pdch_osmo_act_deact() );
 	execute( TC_dyn_pdch_osmo_act_nack() );
 	execute( TC_dyn_ts_sdcch8_act_deact() );
+	execute (TC_dyn_ts_sdcch8_tch_call_act_deact() );
 	execute( TC_dyn_ts_sdcch8_act_nack() );
 
 	execute( TC_chopped_ipa_ping() );
