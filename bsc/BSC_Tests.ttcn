@@ -9434,6 +9434,141 @@ testcase TC_reassignment_fr() runs on test_CT {
 	f_shutdown_helper();
 }
 
+const charstring REEST_LOST_CONNECTION := "REEST_LOST_CONNECTION";
+const charstring REEST_CLEAR := "REEST_CLEAR";
+const charstring REEST_CLEAR_DONE := "REEST_CLEAR_DONE";
+
+/* CM Re-Establishment, 3GPP TS 24.008 4.5.1.6.
+ * The MS <-> BTS loses radio connection, MS shows up on second BTS and asks for CM Re-Establishment.
+ * BSC should establish a separate A conn for the same MS, the original A conn is then cleared by
+ * the MSC as the CM Re-Establishment is handled.
+ *
+ * MS      bts0       bts1     bsc    msc  test-component
+ *  |<----->|<----------------->|<-0-->|   _1  Establish channel on bts 0
+ *  |                                  |   _1  wait a bit, to settle down
+ *  |<-x x--|                          |   _1  "lose connection"
+ *  |                                  |   REEST_LOST_CONNECTION
+ *  |----------------->|------->|--1-->|   _2  new A-conn: Chan Rqd, Imm Ass, Compl L3 with CM Re-Establishment Req
+ *  |                                  |   REEST_CLEAR
+ *  |                           |<-0---|   _1  Clear Command on first A-conn
+ *  |                           |--0-->|   _1  Clear Complete
+ *  |       |<----------------->|      |   _1  Release first channel
+ *  |                                  |   REEST_CLEAR_DONE
+ *  |<-----------------|<-------|<-1---|   _2  Chan Activ, Assignment Command
+ *  |<-----------------|<-------|<-1---|   _2  Clear Command, Release
+ *
+ */
+private function f_tc_cm_reestablishment_1(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(ass_cmd, exp_compl);
+
+	/* The original channel loses connection, MS attemts CM Re-Establishment on another cell, see
+	 * f_tc_cm_reestablishment_2(). This established channel stays active until MSC sends a Clear Command. The time
+	 * when exactly that happens is determined by f_tc_cm_reestablishment_2(). */
+	f_sleep(2.0);
+	COORD.send(REEST_LOST_CONNECTION);
+
+	alt {
+	[] COORD.receive(REEST_CLEAR);
+	[] RSL.receive(tr_RSL_DEACT_SACCH(g_chan_nr)) {
+			setverdict(fail, "Unexpected channel release");
+			mtc.stop;
+		}
+	[] RSL.receive(tr_RSL_RF_CHAN_REL(g_chan_nr)) {
+			setverdict(fail, "Unexpected channel release");
+			mtc.stop;
+		}
+	}
+	f_perform_clear()
+	f_expect_dlcx_conns();
+	COORD.send(REEST_CLEAR_DONE);
+}
+
+private function f_tc_cm_reestablishment_2(charstring id) runs on MSC_ConnHdlr {
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+
+	/* The MS lost the connection on the first channel, now establishes another one */
+	COORD.receive(REEST_LOST_CONNECTION);
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_REESTABL_REQ(mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+
+	f_create_bssmap_exp(l3_enc);
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn);
+	BSSAP.receive(tr_BSSMAP_ComplL3(l3_enc));
+
+	/* MSC got the CM Re-Establishment request and first off clears the previous conn. */
+	COORD.send(REEST_CLEAR);
+	COORD.receive(REEST_CLEAR_DONE);
+
+	f_sleep(2.0);
+
+	/* Answer the CM Re-Establishment with an Assignment Command. */
+	var template PDU_BSSAP expect_assignment_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	var AssignmentState st := valueof(ts_AssignmentStateInit);
+	st.voice_call := true;
+	st.is_assignment := true;
+
+	var ExpectCriteria mgcpcrit := {
+		connid := omit,
+		endpoint := omit,
+		transid := omit
+	};
+	f_create_mgcp_expect(mgcpcrit);
+
+	f_rslem_dchan_queue_enable();
+
+	BSSAP.send(ass_cmd);
+
+	var PDU_BSSAP bssap;
+
+	alt {
+	[] as_assignment(st);
+	[] as_Media();
+	[st.assignment_done] BSSAP.receive(expect_assignment_compl) {
+			break;
+		}
+	}
+
+	f_sleep(3.0);
+
+	f_logp(BSCVTY, "f_tc_cm_reestablishment_2 clearing");
+	f_perform_clear();
+	f_expect_dlcx_conns();
+}
+
+testcase TC_cm_reestablishment() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.imsi := pars1.imsi;
+	pars2.media_nr := 2;
+
+	f_init(2, true, guard_timeout := 40.0);
+	f_sleep(1.0);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_tc_cm_reestablishment_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_tc_cm_reestablishment_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_shutdown_helper();
+}
 
 control {
 	/* CTRL interface testing */
@@ -9722,6 +9857,8 @@ control {
 	execute( TC_refuse_mode_modif_to_vamos() );
 
 	execute( TC_reassignment_fr() );
+
+	execute( TC_cm_reestablishment() );
 }
 
 }
