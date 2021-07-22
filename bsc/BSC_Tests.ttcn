@@ -4517,6 +4517,108 @@ testcase TC_assignment_codec_req_fr_hr() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* request a signalling channel with all SDCCH exhausted, it is expected that a TCH will be selected */
+private function f_TC_assignment_sdcch_exhausted_req_signalling(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	g_pars.ra := '02'O; /* RA containing reason=LU */
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+	f_create_bssmap_exp(l3_enc);
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
+
+	/* we should now have a COMPL_L3 at the MSC */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ComplL3);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+}
+testcase TC_assignment_sdcch_exhausted_req_signalling() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true);
+	f_sleep(1.0);
+	f_disable_all_sdcch();
+	vc_conn := f_start_handler(refers(f_TC_assignment_sdcch_exhausted_req_signalling));
+	vc_conn.done;
+	f_enable_all_sdcch();
+	f_shutdown_helper();
+}
+
+/* Request a signalling channel with all SDCCH exhausted, it is
+   expected that no TCH will be selected for signalling and assigment will fail
+   because it's dictated by VTY config */
+testcase TC_assignment_sdcch_exhausted_req_signalling_tch_forbidden() runs on test_CT {
+	var RSL_Message rsl_unused, rsl_msg;
+	var GsmRrMessage rr;
+	f_init(1, false);
+	f_sleep(1.0);
+	f_vty_allow_tch_for_signalling(false, 0);
+	f_disable_all_sdcch();
+
+	/* RA containing reason=LU */
+	f_ipa_tx(0, ts_RSL_CHAN_RQD('02'O, 2342));
+	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	rr := dec_GsmRrMessage(rsl_msg.ies[1].body.full_imm_ass_info.payload);
+	if (rr.header.message_type != IMMEDIATE_ASSIGNMENT_REJECT) {
+		setverdict(fail, "Expected reject");
+	}
+
+	f_vty_allow_tch_for_signalling(true, 0);
+	f_enable_all_sdcch();
+	f_shutdown_helper();
+}
+
+/* Request a voice channel with all SDCCH exhausted, it is
+ * expected that TCH channel will be allocated since the VTY option is only
+ * aimed at signalling requests */
+private function f_TC_assignment_sdcch_exhausted_req_voice_tch_forbidden(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	g_pars.ra := '43'O; /* RA containing reason=originating speech call*/
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+	f_create_bssmap_exp(l3_enc);
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
+
+	/* we should now have a COMPL_L3 at the MSC */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ComplL3);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+}
+testcase TC_assignment_sdcch_exhausted_req_voice_tch_forbidden() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_allow_tch_for_signalling(false, 0);
+	f_disable_all_sdcch();
+
+	vc_conn := f_start_handler(refers(f_TC_assignment_sdcch_exhausted_req_voice_tch_forbidden));
+	vc_conn.done;
+
+	f_vty_allow_tch_for_signalling(true, 0);
+	f_enable_all_sdcch();
+	f_shutdown_helper();
+}
+
 testcase TC_assignment_osmux() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	var MSC_ConnHdlr vc_conn;
@@ -7829,6 +7931,19 @@ private function f_vty_allow_srvcc_fast_return(boolean allow, integer bts_nr) ru
 	f_vty_transceive(BSCVTY, "exit");
 }
 
+/* Allow/Forbid TCH for signalling if SDCCH exhausted on a given BTS via VTY */
+private function f_vty_allow_tch_for_signalling(boolean allow, integer bts_nr) runs on test_CT {
+	f_vty_enter_cfg_bts(BSCVTY, bts_nr);
+	if (allow) {
+		f_vty_transceive(BSCVTY, "channel allocator allow-tch-for-signalling 1");
+	} else {
+		f_vty_transceive(BSCVTY, "channel allocator allow-tch-for-signalling 0");
+	}
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+	f_vty_transceive(BSCVTY, "exit");
+}
+
 /* Begin assignmet procedure and send an EMERGENCY SETUP (RR) */
 private function f_assignment_emerg_setup() runs on MSC_ConnHdlr {
 	var PDU_ML3_MS_NW emerg_setup;
@@ -9408,6 +9523,9 @@ control {
 	execute( TC_assignment_codec_hr_exhausted_req_fr_hr() );
 	execute( TC_assignment_codec_req_hr_fr() );
 	execute( TC_assignment_codec_req_fr_hr() );
+	execute( TC_assignment_sdcch_exhausted_req_signalling() );
+	execute( TC_assignment_sdcch_exhausted_req_signalling_tch_forbidden() );
+	execute( TC_assignment_sdcch_exhausted_req_voice_tch_forbidden() );
 
 	execute( TC_assignment_osmux() );
 
