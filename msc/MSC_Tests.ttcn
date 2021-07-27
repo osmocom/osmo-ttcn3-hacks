@@ -6641,6 +6641,119 @@ testcase TC_lu_and_expire_while_paging() runs on MTC_CT {
 	vc_conn.done;
 }
 
+const charstring REEST_LOST_CONNECTION := "REEST_LOST_CONNECTION";
+const charstring REEST_CLEARED := "REEST_CLEARED";
+
+friend function f_tc_call_re_establishment_1(charstring id, BSC_ConnHdlrPars pars)
+  runs on BSC_ConnHdlr {
+	f_init_handler(pars, t_guard := 30.0);
+
+	f_perform_lu();
+
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	f_mo_call_establish(cpars);
+	f_sleep(3.0);
+	COORD.send(REEST_LOST_CONNECTION);
+	COORD.send(cpars);
+	f_expect_clear(verify_vlr_cell_id := false);
+	COORD.send(REEST_CLEARED);
+}
+
+friend function f_tc_call_re_establishment_2(charstring id, BSC_ConnHdlrPars pars)
+  runs on BSC_ConnHdlr {
+	f_init_handler(pars, t_guard := 30.0);
+	var CallParameters cpars;
+
+	COORD.receive(REEST_LOST_CONNECTION);
+	COORD.receive(tr_CallParams) -> value cpars;
+
+	f_gsup_change_connhdlr(hex2str(g_pars.imsi));
+	f_create_smpp_expect(hex2str(pars.msisdn));
+
+	/* The MS has lost the first channel and decides to show up on a new conn (on a nearby neighbor cell) to ask for
+	 * CM Re-Establishment. Send a Complete Layer 3 to osmo-msc with a CM Re-Establishment Request. */
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_REESTABL_REQ(mi));
+	f_cl3_or_initial_ue(l3_info);
+
+	/* At this point the other test component should receive the Clear Command for the first A connection. */
+
+	/* This new connection continues with Authentication... */
+	f_mm_common();
+
+	/* ...and with Assignment of a voice channel. */
+	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass :=
+		f_tr_BSSMAP_IE_AoIP_TLA(cpars.mgw_conn_1.mgw_rtp_ip, ?);
+	BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass));
+	/* By this Assignment Request, the CM Re-Establishment Request is implicitly accepted. */
+
+	/* Send Assignment Complete from BSC */
+	var template BSSMAP_IE_AoIP_TransportLayerAddress tla;
+	tla := f_ts_BSSMAP_IE_AoIP_TLA(cpars.bss_rtp_ip, cpars.bss_rtp_port);
+	var BSSMAP_IE_SpeechCodec codec;
+	codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
+
+	/* Make really sure the other component is done with its MGCP */
+	COORD.receive(REEST_CLEARED);
+
+	/* Transfer state for this call over to this test component so we can resolve MNCC and MGCP in this function. */
+	f_mncc_change_connhdlr(cpars.mncc_callref);
+	f_mgcp_change_connhdlr(cpars.mgcp_ep);
+
+	/* osmo-msc may redirect the MGW endpoint to the newly allocated channel.
+	 * Apparently osmo-msc currently also sends an MDCX to the CN side, just repeating the same configuration that
+	 * is already in use. This test accepts any number of or even lack of MDCX. */
+	var default ack_mdcx := activate(as_mgcp_ack_all_mdcx(cpars));
+
+	BSSAP.send(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+	/* The call has been fully re-established.
+	 * Let a bit of time pass before hanging up, for everything to settle. */
+	f_sleep(3.0);
+
+	deactivate(ack_mdcx);
+
+	/* Hang up the call and clear the new, second A connection */
+	var default ack_dlcx := activate(as_mgcp_ack_all_dlcx(cpars));
+
+	/* CC release. This is the proper MS initiated release sequence as shown by
+	 * https://git.osmocom.org/osmo-msc/tree/doc/sequence_charts/voice_call_full.msc?id=e53ecde83e4fb2470209e818e9ad76a2d6a19190
+	 * f_call_hangup() seems a bit mixed up, so here a "proper" sequence. Fix of f_call_hangup() pending. */
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_DISC(cpars.transaction_id, '0'B, '0000000'B)));
+	MNCC.receive(tr_MNCC_DISC_ind(cpars.mncc_callref));
+	MNCC.send(ts_MNCC_REL_req(cpars.mncc_callref, valueof(ts_MNCC_cause(23))));
+	BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_RELEASE(cpars.transaction_id)));
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_CC_REL_COMPL(cpars.transaction_id, '0'B)));
+	MNCC.receive(tr_MNCC_REL_cnf(cpars.mncc_callref, cause := *));
+
+	/* BSSAP clear */
+	interleave {
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		BSSAP.send(ts_BSSMAP_ClearComplete);
+		}
+	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	}
+
+	f_sleep(1.0);
+	deactivate(ack_dlcx);
+}
+
+testcase TC_call_re_establishment() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn1;
+	var BSC_ConnHdlr vc_conn2;
+	f_init();
+
+	var BSC_ConnHdlrPars pars1 := f_init_pars(91);
+	var BSC_ConnHdlrPars pars2 := pars1;
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_tc_call_re_establishment_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_tc_call_re_establishment_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+}
+
 control {
 	execute( TC_cr_before_reset() );
 	execute( TC_lu_imsi_noauth_tmsi() );
@@ -6799,6 +6912,8 @@ control {
 	execute( TC_lu_and_expire_while_paging() );
 	execute( TC_paging_response_imsi_unknown() );
 	execute( TC_paging_response_tmsi_unknown() );
+
+	execute( TC_call_re_establishment() );
 }
 
 
