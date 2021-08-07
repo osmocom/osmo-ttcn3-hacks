@@ -9574,6 +9574,136 @@ testcase TC_cm_reestablishment() runs on test_CT {
 	f_shutdown_helper();
 }
 
+function f_exp_ipa_rx_nonfatal(integer bts_nr, template (present) RSL_Message t_rx, float t_secs := 2.0,
+			       IpaStreamId sid := IPAC_PROTO_RSL_TRX0, boolean ignore_other_rx := true)
+runs on test_CT return template (omit) RSL_Message {
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	timer T := t_secs;
+
+	T.start;
+	alt {
+	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(t_rx, sid)) -> value rx_rsl_ud {
+		T.stop;
+		}
+	[ignore_other_rx] IPA_RSL[bts_nr].receive { repeat; }
+	[not ignore_other_rx] IPA_RSL[bts_nr].receive {
+			log("f_exp_ipa_rx_nonfatal(): Got different message than ", t_rx);
+			T.stop;
+			return omit;
+		}
+	[] T.timeout {
+			return omit;
+		}
+	}
+	return rx_rsl_ud.rsl;
+}
+
+private function f_vty_set_imm_ass(TELNETasp_PT pt, BtsNr bts_nr := 0, charstring imm_ass_setting := "post-chan-ack") {
+	f_vty_enter_cfg_bts(pt, bts_nr);
+	f_vty_transceive(pt, "immediate-assignment " & imm_ass_setting);
+	f_vty_transceive(pt, "exit");
+	f_vty_transceive(pt, "exit");
+	f_vty_transceive(pt, "exit");
+}
+
+private function f_verify_imm_ass(RSL_Message imm_ass, template uint8_t ra := ?, template GsmFrameNumber fn := ?,
+				  template RslChannelNr chan_nr := ?)
+{
+	var RSL_IE_Body full_imm_ass_info;
+	if (not f_rsl_find_ie(imm_ass, RSL_IE_FULL_IMM_ASS_INFO, full_imm_ass_info)) {
+		setverdict(fail, "RSL Full Immediate Assign Info IE is absent");
+		mtc.stop;
+	}
+
+	var GsmRrMessage rr_imm_ass := dec_GsmRrMessage(full_imm_ass_info.full_imm_ass_info.payload);
+	var template GsmRrMessage expect_imm_ass := tr_IMM_ASS(ra := ra,
+							       fn := fn,
+							       ch_desc := tr_ChanDescH0(chan_nr),
+							       page_mode := ?);
+	if (not match(rr_imm_ass, expect_imm_ass)) {
+		log("Error: expected ", expect_imm_ass, " got ", rr_imm_ass);
+		setverdict(fail, "Failed to match Immediate Assignment");
+		mtc.stop;
+	}
+}
+
+testcase TC_imm_ass_post_chan_ack() runs on test_CT {
+	var RSL_Message chan_act;
+	var RSL_Message imm_ass;
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	/* (should be the default anyway, just to make things clear) */
+	f_vty_set_imm_ass(BSCVTY, 0, "post-chan-ack");
+
+	/* RA containing reason=LU */
+	var GsmFrameNumber fn := 2342;
+	var uint8_t ra := 2;
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+
+	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+
+	/* First send the Chan Act ACK */
+	var RslChannelNr chan_nr := chan_act.ies[0].body.chan_nr;
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn + 10));
+
+	/* Then expect the Immediate Assignment, after we ACKed the chan act */
+	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+
+	f_verify_imm_ass(imm_ass, ra, fn, chan_nr);
+
+	/* Check that the lchan is working */
+	var octetstring l3 := '00010203040506'O;
+	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
+	BSSAP.send(ts_BSSAP_CONNECT_res(rx_c_ind.connectionId));
+
+	f_sleep(1.0);
+	f_shutdown_helper();
+}
+
+testcase TC_imm_ass_pre_chan_ack() runs on test_CT {
+	var RSL_Message chan_act;
+	var RSL_Message imm_ass;
+
+	f_init(1, false);
+	f_sleep(1.0);
+
+	f_vty_set_imm_ass(BSCVTY, 0, "pre-chan-ack");
+
+	/* RA containing reason=LU */
+	var GsmFrameNumber fn := 2342;
+	var uint8_t ra := 2;
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+
+	/* (set bts 0 cfg back to default) */
+	f_vty_set_imm_ass(BSCVTY);
+
+	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	var RslChannelNr chan_nr := chan_act.ies[0].body.chan_nr;
+
+	/* *FIRST* expect the Immediate Assignment, before we ACK the chan act */
+	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_verify_imm_ass(imm_ass, ra, fn, chan_nr);
+
+	/* Only now send the Chan Act ACK */
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+
+	/* Check that the lchan is working */
+	var octetstring l3 := '00010203040506'O;
+	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
+	BSSAP.send(ts_BSSAP_CONNECT_res(rx_c_ind.connectionId));
+
+	f_sleep(1.0);
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -9863,6 +9993,9 @@ control {
 	execute( TC_reassignment_fr() );
 
 	execute( TC_cm_reestablishment() );
+
+	execute( TC_imm_ass_post_chan_ack() );
+	execute( TC_imm_ass_pre_chan_ack() );
 }
 
 }
