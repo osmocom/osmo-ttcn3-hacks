@@ -7691,6 +7691,75 @@ testcase TC_speech_rtp_tchh() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+private function f_TC_early_immediate_assignment(charstring id) runs on ConnHdlr {
+	var GsmFrameNumber fn;
+	var ChannelDescription ch_desc;
+	var integer ra := 23;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* Send RACH request and wait for ChanReq */
+	fn := f_rach_req_wait_chan_rqd(ra);
+
+	/* The BSC already sends the Immediate Assignment, before the channel is active.
+	 * (Also before the Channel Activation, even. I tried to write this test so that we first send the Chan Act and then the IMM
+	 * ASS, but osmo-bts-trx responds so fast that the Chan Activ ACK comes back even before titan dispatches the
+	 * IMM ASS. So move the IMM ASS even before the Chan Activ.) */
+	if (g_pars.fhp.enabled) {
+		ch_desc := valueof(ts_ChanDescH1(g_pars.chan_nr, g_pars.fhp.maio_hsn, g_pars.tsc));
+	} else {
+		ch_desc := valueof(ts_ChanDescH0(g_pars.chan_nr, mp_trx_pars[0].arfcn, g_pars.tsc));
+	}
+	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.fhp.ma_map));
+	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
+
+	/* Do not expect the Immediate Assignment to show up on MS side yet. Even give it one second before the BSC
+	 * requests Chan Activ, to make sure the RR IMM ASS is held back. */
+	var L1ctlDlMessage dl;
+	var GsmRrMessage rr;
+
+	var template GsmRrMessage rr_imm_ass := tr_IMM_ASS(ra, fn);
+	rr_imm_ass.payload.imm_ass.ded_or_tbf := ?;
+	rr_imm_ass.payload.imm_ass.pkt_chan_desc := *;
+	rr_imm_ass.payload.imm_ass.chan_desc := *;
+
+	timer T := 1.0;
+	T.start;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_PCH_AGCH(0))) -> value dl {
+			rr := dec_GsmRrMessage(dl.payload.data_ind.payload);
+			if (match(rr, rr_imm_ass)) {
+				setverdict(fail, "Expected IMM ASS to be delayed until Chan Act ACK, but it was passed to the MS immediately");
+				mtc.stop;
+			} else {
+				repeat;
+			}
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout;
+	}
+	RSL.send(ts_RSL_CHAN_ACT(g_chan_nr, g_pars.chan_mode, t_RSL_IE_ActType_IA));
+	RSL.receive(tr_RSL_CHAN_ACT_ACK(g_chan_nr));
+
+	/* Now expect the IMM ASS on Um */
+	f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
+	setverdict(pass);
+
+	/* Release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+}
+
+testcase TC_early_immediate_assignment() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := valueof(t_Pars(t_RslChanNr_Bm(1), ts_RSL_ChanMode_SIGN));
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_early_immediate_assignment), pars);
+	vc_conn.done;
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 /* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
 /*	protocol error as per 44.006 */
 /*	link layer failure (repetition of I-frame N200 times without ACK */
@@ -7889,6 +7958,8 @@ control {
 	execute( TC_speech_no_rtp_tchh() );
 	execute( TC_speech_rtp_tchf() );
 	execute( TC_speech_rtp_tchh() );
+
+	execute( TC_early_immediate_assignment() );
 }
 
 
