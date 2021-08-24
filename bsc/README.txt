@@ -62,7 +62,7 @@ x supported/unsupported/invalid ciphers
 
 x no response to CHAN ACT
 x CONN FAIL IND from BTS
-** verify counter increment of BTS_CTR_CHAN_RF_FAIL
+xx verify counter increment of BTS_CTR_CHAN_RF_FAIL
 * no (or late?) response to RF CHAN REL
 * no (or late?) response to RLL RELEASE REQ
 x RLL messages on not-activated channels
