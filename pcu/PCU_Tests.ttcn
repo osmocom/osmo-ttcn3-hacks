@@ -69,7 +69,7 @@ modulepar {
 	charstring mp_pcu_statsd_ip := "127.0.0.1";
 	integer mp_pcu_statsd_port := 8125;
 
-	charstring mp_ctrl_neigh_ip := "127.0.0.1";
+	charstring mp_ctrl_neigh_ip := ""; /* Use new PCUIF over IPA multiplex for Neigh Addr Resolution */
 	integer mp_ctrl_neigh_port := 4248;
 
 	boolean mp_osmo_pcu_newer_than_0_9_0 := true; /* Drop after OsmoPCU > 0.9.0 was released */
@@ -4391,10 +4391,35 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
+private function f_handle_nacc_rac_ci_query(PCUIF_info_ind info_ind, GsmArfcn req_arfcn, uint6_t req_bsic,
+					   boolean answer := true, boolean use_old_ctrl_iface := false)
+runs on RAW_PCU_Test_CT {
+	if (use_old_ctrl_iface == true) {
+		f_ipa_ctrl_wait_link_up();
+		var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+					    int2str(info_ind.lac) & "." &
+					    int2str(info_ind.cell_id) & "." &
+					    int2str(req_arfcn) & "." &
+					    int2str(req_bsic);
+		if (answer) {
+			f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+		} else {
+			f_ctrl_exp_get(IPA_CTRL, ctrl_var, omit);
+		}
+	} else {
+		var PCUIF_Message pcu_msg;
+		BTS.receive(tr_PCUIF_NEIGH_ADDR_REQ(0, info_ind.lac, info_ind.cell_id, req_arfcn, req_bsic)) -> value pcu_msg;
+		if (answer) {
+			BTS.send(ts_PCUIF_NEIGH_ADDR_CNF(0, pcu_msg.u.container.u.neigh_addr_req, 0, 23, 43, 0, 423, 2, 5));
+		}
+	}
+}
+
 /* Start NACC from MS side */
 private function f_outbound_nacc_success(inout GprsMS ms, PCUIF_info_ind info_ind,
 					 boolean exp_rac_ci_query := true, boolean exp_si_query := true,
-					 boolean skip_final_ctrl_ack := false)
+					 boolean skip_final_ctrl_ack := false,
+					 boolean use_old_ctrl_iface := false)
 runs on RAW_PCU_Test_CT {
 	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
 	var RlcmacDlBlock dl_block;
@@ -4408,13 +4433,7 @@ runs on RAW_PCU_Test_CT {
 
 	if (exp_rac_ci_query == true) {
 		/* osmo-pcu should now ask for resolution: */
-		f_ipa_ctrl_wait_link_up();
-		var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-					    int2str(info_ind.lac) & "." &
-					    int2str(info_ind.cell_id) & "." &
-					    int2str(req_arfcn) & "." &
-					    int2str(req_bsic);
-		f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+		f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	}
 
 	if (exp_si_query == true) {
@@ -4443,9 +4462,12 @@ testcase TC_nacc_outbound_success() runs on RAW_PCU_Test_CT {
 	var PollFnCtx pollctx;
 	var GprsMS ms;
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4469,7 +4491,7 @@ testcase TC_nacc_outbound_success() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
 
 	/* Start NACC from MS side */
-	f_outbound_nacc_success(ms, info_ind);
+	f_outbound_nacc_success(ms, info_ind, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
@@ -4481,9 +4503,12 @@ testcase TC_nacc_outbound_success_no_ctrl_ack() runs on RAW_PCU_Test_CT {
 	var RlcmacDlBlock dl_block;
 	var uint32_t sched_fn;
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4507,7 +4532,7 @@ testcase TC_nacc_outbound_success_no_ctrl_ack() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
 
 	/* Start NACC from MS side, avoid sending final CTRL ACK */
-	f_outbound_nacc_success(ms, info_ind, skip_final_ctrl_ack := true);
+	f_outbound_nacc_success(ms, info_ind, skip_final_ctrl_ack := true, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	/* Wait until we receive something non-dummy */
 	dl_block := f_skip_dummy(0, sched_fn);
@@ -4530,9 +4555,12 @@ testcase TC_nacc_outbound_success_twice() runs on RAW_PCU_Test_CT {
 	var GprsMS ms;
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
 	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4558,10 +4586,10 @@ testcase TC_nacc_outbound_success_twice() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
 
 	/* Start NACC from MS side */
-	f_outbound_nacc_success(ms, info_ind);
+	f_outbound_nacc_success(ms, info_ind, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	/* First NACC procedure is done, let's try to start a new one now that previous queries are cached: */
-	f_outbound_nacc_success(ms, info_ind, false, false);
+	f_outbound_nacc_success(ms, info_ind, false, false, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
@@ -4574,9 +4602,12 @@ testcase TC_nacc_outbound_success_twice_nocache() runs on RAW_PCU_Test_CT {
 	var GprsMS ms;
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
 	var template (value) RlcmacUlCtrlMsg cell_chf_notif;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4602,14 +4633,14 @@ testcase TC_nacc_outbound_success_twice_nocache() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
 
 	/* Start NACC from MS side */
-	f_outbound_nacc_success(ms, info_ind);
+	f_outbound_nacc_success(ms, info_ind, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	/* CTRL client should have disconnected from us */
 	f_ipa_ctrl_wait_link_down();
 	/* wait for cache entries to time out */
 	f_sleep(2.0);
 	/* First NACC procedure is done, let's try to start a new one now that previous queries have timed out: */
-	f_outbound_nacc_success(ms, info_ind);
+	f_outbound_nacc_success(ms, info_ind, use_old_ctrl_iface := use_old_ctrl_iface);
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
@@ -4680,9 +4711,12 @@ testcase TC_nacc_outbound_rac_ci_resolve_timeout() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4710,14 +4744,8 @@ testcase TC_nacc_outbound_rac_ci_resolve_timeout() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
 	/* we receive RAC+CI resolution request, but we never answer to it, timeout should occur */
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, omit);
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, false, use_old_ctrl_iface);
 
 	/* Wait until we receive something non-dummy */
 	dl_block := f_skip_dummy(0, sched_fn);
@@ -4780,7 +4808,7 @@ testcase TC_nacc_outbound_rac_ci_resolve_fail_parse_response() runs on RAW_PCU_T
 				    int2str(info_ind.cell_id) & "." &
 				    int2str(req_arfcn) & "." &
 				    int2str(req_bsic);
-	/* we receive RAC+CI resolution request and we send incorrectlt formated response */
+	/* we receive RAC+CI resolution request and we send incorrectly formated response */
 	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "foobar-error");
 
 	/* Wait until we receive something non-dummy */
@@ -4808,6 +4836,7 @@ testcase TC_nacc_outbound_si_resolve_timeout() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 	var BssgpCellId src := valueof(ts_BssgpCellId(ts_RAI(ts_LAI(f_enc_BcdMccMnc(info_ind.mcc, info_ind.mnc, info_ind.mnc_3_digits == 1), /* '262F42'H */
 								    info_ind.lac),
 							     info_ind.rac),
@@ -4819,8 +4848,10 @@ testcase TC_nacc_outbound_si_resolve_timeout() runs on RAW_PCU_Test_CT {
 	var template RIM_Routing_Address src_addr := t_RIM_Routing_Address_cid(src);
 	var template RIM_Routing_Address dst_addr := t_RIM_Routing_Address_cid(dst);
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4848,13 +4879,7 @@ testcase TC_nacc_outbound_si_resolve_timeout() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 
 	/* RIM procedure: */
 	RIM.receive(tr_RAN_INFORMATION_REQUEST(tr_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, dst_addr),
@@ -4886,11 +4911,16 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup() runs on RAW_PCU_Test_CT {
 	var RlcmacDlBlock dl_block;
 	var uint32_t sched_fn;
 	var CtrlMessage rx_ctrl;
+	var charstring ctrl_var;
+	var PCUIF_Message pcu_msg;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -4918,23 +4948,38 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl;
+	if (use_old_ctrl_iface) {
+		f_ipa_ctrl_wait_link_up();
+		ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+			    int2str(info_ind.lac) & "." &
+			    int2str(info_ind.cell_id) & "." &
+			    int2str(req_arfcn) & "." &
+			    int2str(req_bsic);
+		IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl;
+	} else {
+		BTS.receive(tr_PCUIF_NEIGH_ADDR_REQ(0, info_ind.lac, info_ind.cell_id, req_arfcn, req_bsic)) -> value pcu_msg;
+	}
+
 	/* Before receiving CTRL response, MS retransmits Pkt cell Chg Notif */
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 	f_sleep(0.2); /* let some time to avoid race conditons between CTRL and RLCMAC */
-	IPA_CTRL.send(ts_CtrlMsgGetRepl(rx_ctrl.cmd.id, valueof(ctrl_var), valueof("023-43-423-2-5")));
+
+	if (use_old_ctrl_iface) {
+		IPA_CTRL.send(ts_CtrlMsgGetRepl(rx_ctrl.cmd.id, valueof(ctrl_var), valueof("023-43-423-2-5")));
+	} else {
+		BTS.send(ts_PCUIF_NEIGH_ADDR_CNF(0, pcu_msg.u.container.u.neigh_addr_req, 0, 23, 43, 0, 423, 2, 5));
+	}
+
 	timer T := 2.0;
 	T.start;
 	alt {
 	[] as_outbound_nacc_rim_resolve(info_ind, do_repeat := true);
-	[] IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl {
+	[use_old_ctrl_iface] IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl {
 		setverdict(fail, "Received unexpected CTRL resolution after duplicate Pkt Cell Change Notification:", rx_ctrl);
+		f_shutdown(__BFILE__, __LINE__);
+		}
+	[not use_old_ctrl_iface] BTS.receive(tr_PCUIF_NEIGH_ADDR_REQ(0, info_ind.lac, info_ind.cell_id, req_arfcn, req_bsic)) -> value pcu_msg {
+		setverdict(fail, "Received unexpected PCUIF resolution after duplicate Pkt Cell Change Notification:", pcu_msg);
 		f_shutdown(__BFILE__, __LINE__);
 		}
 	[] T.timeout {
@@ -4971,9 +5016,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup2() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5001,13 +5049,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup2() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	as_outbound_nacc_rim_resolve(info_ind, do_answer := false);
 	/* Before receiving RIM response, MS retransmits Pkt cell Chg Notif */
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
@@ -5054,9 +5096,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup3() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5084,13 +5129,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup3() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5125,9 +5164,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup4() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5155,13 +5197,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup4() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5195,9 +5231,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup5() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5225,13 +5264,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_dup5() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5264,11 +5297,16 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice() runs on RAW_PCU_Test_CT {
 	var RlcmacDlBlock dl_block;
 	var uint32_t sched_fn;
 	var CtrlMessage rx_ctrl;
+	var charstring ctrl_var;
+	var PCUIF_Message pcu_msg;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5296,25 +5334,28 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl;
+	if (use_old_ctrl_iface) {
+		f_ipa_ctrl_wait_link_up();
+		ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
+			    int2str(info_ind.lac) & "." &
+			    int2str(info_ind.cell_id) & "." &
+			    int2str(req_arfcn) & "." &
+			    int2str(req_bsic);
+		IPA_CTRL.receive(tr_CtrlMsgGet(?, ctrl_var)) -> value rx_ctrl;
+	} else {
+		BTS.receive(tr_PCUIF_NEIGH_ADDR_REQ(0, info_ind.lac, info_ind.cell_id, req_arfcn, req_bsic)) -> value pcu_msg;
+	}
 	/* Before receiving CTRL response, MS retransmits Pkt cell Chg Notif with different tgt arfcn */
 	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 	f_sleep(0.2); /* let some time to avoid race conditons between CTRL and RLCMAC */
-	IPA_CTRL.send(ts_CtrlMsgGetRepl(rx_ctrl.cmd.id, valueof(ctrl_var), valueof("023-43-423-2-5")));
+	if (use_old_ctrl_iface) {
+		IPA_CTRL.send(ts_CtrlMsgGetRepl(rx_ctrl.cmd.id, valueof(ctrl_var), valueof("023-43-423-2-5")));
+	} else {
+		BTS.send(ts_PCUIF_NEIGH_ADDR_CNF(0, pcu_msg.u.container.u.neigh_addr_req, 0, 23, 43, 0, 423, 2, 5));
+	}
 	/* We should now receive a 2nd CTRL request with the new ARFCN+BSIC */
-	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-		    int2str(info_ind.lac) & "." &
-		    int2str(info_ind.cell_id) & "." &
-		    int2str(req_arfcn + 1) & "." &
-		    int2str(req_bsic + 1);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
 
 	/* And finally everything continues as usual with RIN procedure */
 	as_outbound_nacc_rim_resolve(info_ind);
@@ -5349,9 +5390,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice2() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5379,13 +5423,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice2() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	as_outbound_nacc_rim_resolve(info_ind, do_answer := false);
 	/* Before receiving RIM response, MS retransmits Pkt cell Chg Notif with different tgt cell: */
 	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
@@ -5394,12 +5432,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice2() runs on RAW_PCU_Test_CT {
 	f_outbound_nacc_rim_tx_resp(info_ind);
 
 	/* As a result, CTRL + RIM resolution for new tgt cell should now be done: */
-	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-		    int2str(info_ind.lac) & "." &
-		    int2str(info_ind.cell_id) & "." &
-		    int2str(req_arfcn + 1) & "." &
-		    int2str(req_bsic + 1);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
 
 	/* And finally everything continues as usual with RIN procedure */
 	as_outbound_nacc_rim_resolve(info_ind);
@@ -5434,9 +5467,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice3() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5464,13 +5500,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice3() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5480,12 +5510,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice3() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* It should trigger RAC_CI resolution to start again: */
-	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-			int2str(info_ind.lac) & "." &
-			int2str(info_ind.cell_id) & "." &
-			int2str(req_arfcn + 1) & "." &
-			int2str(req_bsic + 1);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 	/* Transmit SI back to MS */
@@ -5515,9 +5540,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice4() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5545,13 +5573,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice4() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5562,16 +5584,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice4() runs on RAW_PCU_Test_CT {
 	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
+	/* It should trigger RAC_CI resolution to start again: */
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
+
 	/* PCU TBF NACC state changed, so we should next receive a dummy block: */
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block, nr := f_ms_tx_TsTrxBtsNum(ms));
 
-	/* It should trigger RAC_CI resolution to start again: */
-	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-			int2str(info_ind.lac) & "." &
-			int2str(info_ind.cell_id) & "." &
-			int2str(req_arfcn + 1) & "." &
-			int2str(req_bsic + 1);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 	/* Transmit SI back to MS */
@@ -5601,9 +5619,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice5() runs on RAW_PCU_Test_CT {
 	var CtrlMessage rx_ctrl;
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5631,13 +5652,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice5() runs on RAW_PCU_Test_CT {
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -5655,21 +5670,32 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_twice5() runs on RAW_PCU_Test_CT {
 	cell_chf_notif := ts_RlcMacUlCtrl_PKT_CELL_CHG_NOTIF(ms.ul_tbf.tfi, req_arfcn + 1, req_bsic + 1);
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
+	/* It should trigger RAC_CI resolution to start again: */
+	/* When using new PCUIF interface for resolution, we must
+	 * PCUIF.receive() here since that's the first message in the PCUIF
+	 * queue that PCU will have sent. Calling other functions doing
+	 * PCUIF.receive() (like f_ms_tx_ul_block() below) will make them fail
+	 * due to unexpected message receive. */
+	if (not use_old_ctrl_iface) {
+		f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
+	}
+
 	/* PKT CELL CHG CONTINUE ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
 	if (dl_block.ctrl.mac_hdr.rrbp_valid) {
 		sched_fn := f_rrbp_ack_fn(sched_fn, dl_block.ctrl.mac_hdr.rrbp);
 		f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
 	}
+
+	/* When using CTRL interface, we must schedule the ACK before (see
+	 * above) blocking here waiting for the resoltion, otherwise we'll be
+	 * too late scheduling by the time the resolution is done. */
+	if (use_old_ctrl_iface) {
+		f_handle_nacc_rac_ci_query(info_ind, req_arfcn + 1, req_bsic + 1, true, use_old_ctrl_iface);
+	}
+
 	/* PCU TBF NACC state changed, so we should next receive a dummy block: */
 	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
 
-	/* It should trigger RAC_CI resolution to start again: */
-	ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-			int2str(info_ind.lac) & "." &
-			int2str(info_ind.cell_id) & "." &
-			int2str(req_arfcn + 1) & "." &
-			int2str(req_bsic + 1);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 	/* Transmit SI back to MS */
@@ -5700,9 +5726,12 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_unassigned_dl_tbf() runs on RAW_PCU
 	var GsmArfcn req_arfcn := 862;
 	var uint6_t req_bsic := 43;
 	var octetstring data := f_rnd_octstring(10);
+	var boolean use_old_ctrl_iface := mp_ctrl_neigh_ip != "";
 
-	/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
-	f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	if (use_old_ctrl_iface) {
+		/* Initialize osmo-bsc emulation neighbor resolution CTRL port */
+		f_ipa_ctrl_start_server(mp_ctrl_neigh_ip, mp_ctrl_neigh_port);
+	}
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -5730,13 +5759,7 @@ testcase TC_nacc_outbound_pkt_cell_chg_notif_unassigned_dl_tbf() runs on RAW_PCU
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(cell_chf_notif), 0, nr := f_ms_tx_TsTrxBtsNum(ms));
 
 	/* osmo-pcu should now ask for resolution: */
-	f_ipa_ctrl_wait_link_up();
-	var charstring ctrl_var := "neighbor_resolve_cgi_ps_from_lac_ci." &
-				    int2str(info_ind.lac) & "." &
-				    int2str(info_ind.cell_id) & "." &
-				    int2str(req_arfcn) & "." &
-				    int2str(req_bsic);
-	f_ctrl_exp_get(IPA_CTRL, ctrl_var, "023-43-423-2-5");
+	f_handle_nacc_rac_ci_query(info_ind, req_arfcn, req_bsic, true, use_old_ctrl_iface);
 	/* RIM procedure: */
 	as_outbound_nacc_rim_resolve(info_ind);
 
@@ -6122,9 +6145,7 @@ control {
 	execute( TC_nacc_outbound_success_no_ctrl_ack() );
 	execute( TC_nacc_outbound_success_twice() );
 	execute( TC_nacc_outbound_success_twice_nocache() );
-	execute( TC_nacc_outbound_rac_ci_resolve_conn_refused() );
 	execute( TC_nacc_outbound_rac_ci_resolve_timeout() );
-	execute( TC_nacc_outbound_rac_ci_resolve_fail_parse_response() );
 	execute( TC_nacc_outbound_si_resolve_timeout() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_dup() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_dup2() );
@@ -6137,6 +6158,10 @@ control {
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice4() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_twice5() );
 	execute( TC_nacc_outbound_pkt_cell_chg_notif_unassigned_dl_tbf() );
+	if (mp_ctrl_neigh_ip != "") { /* PCU using old CTRL neigh addr resolution iface */
+		execute( TC_nacc_outbound_rac_ci_resolve_conn_refused() );
+		execute( TC_nacc_outbound_rac_ci_resolve_fail_parse_response() );
+	}
 
 	execute( TC_rim_ran_info_req_single_rep() );
 	execute( TC_rim_ran_info_req_single_rep_eutran() );
