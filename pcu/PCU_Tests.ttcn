@@ -6070,6 +6070,101 @@ testcase TC_stat_pdch_avail_occ() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Test stats for available and occupied PDCHs, for MS which is not known by
+ * the PCU (e.g. because it was forgotten due to no interaction, and old DL
+ * data arrives from SGSN) */
+function f_tc_stat_pdch_avail_occ_ms_not_known(boolean egprs) runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default);
+	const BssgpBvci bvci := mp_gb_cfg.bvc[0].bvci;
+
+	/* Ensure a deterministic slot allocation of 1 PDCH with MS class 1 */
+	const MultislotCap_GPRS_BSSGP bssgp_mscap_gprs := {
+		gprsmultislotclass := '00001'B,
+		gprsextendeddynalloccap := '0'B
+	};
+	const MultislotCap_EGPRS_BSSGP bssgp_mscap_egprs := {
+		egprsmultislotclass := '00001'B,
+		egprsextendeddynalloccap := '0'B
+	};
+	template (value) MSRadioAccessCapabilityV_BSSGP bssgp_ms_racap_gprs := {
+		valueof(ts_RaCapRec_BSSGP('0001'B /* E-GSM */, bssgp_mscap_gprs, omit)) };
+	template (value) MSRadioAccessCapabilityV_BSSGP bssgp_ms_racap_egprs := {
+		valueof(ts_RaCapRec_BSSGP('0001'B /* E-GSM */, bssgp_mscap_gprs, bssgp_mscap_egprs)) };
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Only the 4 first TRX are enabled, each with 2 PDCHs. */
+	f_PCUIF_PDCHMask_set(info_ind, '00000011'B, 0);
+	f_PCUIF_PDCHMask_set(info_ind, '00001100'B, 1);
+	f_PCUIF_PDCHMask_set(info_ind, '11000000'B, 2);
+	f_PCUIF_PDCHMask_set(info_ind, '00110000'B, 3);
+	f_PCUIF_PDCHMask_set(info_ind, '00000000'B, (4 .. 7));
+
+	/* Allocate 1 GprsMS instance */
+	f_init_gprs_ms(1);
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Reset stats */
+	f_statsd_reset();
+
+	/* Establish BSSGP */
+	f_bssgp_establish();
+
+	/* 8 PDCHs available, 0 occupied */
+	var StatsDExpects expect := {
+		{ name := "TTCN3.bts.0.pdch.available", mtype := "g", min := 8, max := 8 },
+		{ name := "TTCN3.bts.0.pdch.occupied", mtype := "g", min := 0, max := 0 },
+		{ name := "TTCN3.bts.0.pdch.occupied.gprs", mtype := "g", min := 0, max := 0 },
+		{ name := "TTCN3.bts.0.pdch.occupied.egprs", mtype := "g", min := 0, max := 0 }
+	};
+	f_statsd_expect(expect);
+
+	var GprsMS ms := g_ms[0]; /* We only use first MS in this test */
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	var octetstring data := f_rnd_octstring(1400);
+	if (egprs) {
+		BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, bssgp_ms_racap_egprs));
+	} else {
+		BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, bssgp_ms_racap_gprs));
+	}
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+
+	/* 1 PDCH occupied */
+	if (egprs) {
+		expect := {
+			{ name := "TTCN3.bts.0.pdch.available", mtype := "g", min := 8, max := 8 },
+			{ name := "TTCN3.bts.0.pdch.occupied", mtype := "g", min := 1, max := 1 },
+			{ name := "TTCN3.bts.0.pdch.occupied.gprs", mtype := "g", min := 0, max := 0 },
+			{ name := "TTCN3.bts.0.pdch.occupied.egprs", mtype := "g", min := 1, max := 1 }
+		};
+	} else {
+		expect := {
+			{ name := "TTCN3.bts.0.pdch.available", mtype := "g", min := 8, max := 8 },
+			{ name := "TTCN3.bts.0.pdch.occupied", mtype := "g", min := 1, max := 1 },
+			{ name := "TTCN3.bts.0.pdch.occupied.gprs", mtype := "g", min := 1, max := 1 },
+			{ name := "TTCN3.bts.0.pdch.occupied.egprs", mtype := "g", min := 0, max := 0 }
+		};
+	}
+	f_statsd_expect(expect);
+
+	/* Clean up */
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+testcase TC_stat_pdch_avail_occ_ms_not_known_gprs() runs on RAW_PCU_Test_CT {
+	f_tc_stat_pdch_avail_occ_ms_not_known(false);
+}
+testcase TC_stat_pdch_avail_occ_ms_not_known_egprs() runs on RAW_PCU_Test_CT {
+	f_tc_stat_pdch_avail_occ_ms_not_known(true);
+}
+
 control {
 	execute( TC_pcuif_suspend() );
 	execute( TC_pcuif_suspend_active_tbf() );
@@ -6180,6 +6275,8 @@ control {
 	execute (TC_pdch_energy_saving() );
 
 	execute( TC_stat_pdch_avail_occ() );
+	execute( TC_stat_pdch_avail_occ_ms_not_known_gprs() );
+	execute( TC_stat_pdch_avail_occ_ms_not_known_egprs() );
 }
 
 }
