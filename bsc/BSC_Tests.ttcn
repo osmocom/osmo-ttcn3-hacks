@@ -75,8 +75,30 @@ import from GSM_SystemInformation all;
 import from GSM_RestOctets all;
 import from TCCConversion_Functions all;
 
+type record of integer integer_list;
+
 const integer NUM_BTS := 3;
 const integer NUM_BTS_CFG := 4; /* we have 4 BTS in the osmo-bsc.cfg (for inter-BSC HO tests) but use only 3 */
+
+/* Nr of TRX configured for bts[idx] */
+const integer_list BTS_NUM_TRX := {
+	1,
+	1,
+	2,
+	1
+};
+const integer NUM_TRX_CONNECTED := 4;
+const integer NUM_TRX_CFG := 5;
+
+function num_trx_for_num_bts(integer num_bts := NUM_BTS) return integer
+{
+	var integer num_trx := 0;
+	for (var integer i := 0; i < num_bts; i := i + 1) {
+		num_trx := num_trx + BTS_NUM_TRX[i];
+	}
+	return num_trx;
+}
+
 const integer NUM_MSC := 3;
 const float T3101_MAX := 12.0;
 
@@ -567,9 +589,9 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* Array of per-BTS state */
 	var BTS_State bts[NUM_BTS];
 	/* RSL common Channel Port (for RSL_Emulation) */
-	port RSL_CCHAN_PT RSL_CCHAN[NUM_BTS];
+	port RSL_CCHAN_PT RSL_CCHAN[NUM_TRX_CONNECTED];
 	/* array of per-BTS RSL test ports */
-	port IPA_RSL_PT IPA_RSL[NUM_BTS];
+	port IPA_RSL_PT IPA_RSL[NUM_TRX_CONNECTED];
 	port IPA_CODEC_PT IPA; /* Required for compilation of TC_rsl_unknown_unit_id() */
 	/* CTRL muxed over IPA in SCCPlite conn BSC<->MSC (or BSC-NAT) */
 	port IPA_CTRL_PT SCCPLITE_IPA_CTRL;
@@ -871,31 +893,33 @@ type record IPA_Client {
  *  \param clnt IPA_Client for which to establish
  *  \param bsc_host IP address / hostname of the BSC
  *  \param bsc_port TCP port number of the BSC
- *  \param i number identifying this BTS
+ *  \param bts_i number identifying this BTS
+ *  \param trx_i number identifying the TRX nr
  *  \param handler_mode Start an RSL_Emulation_CT component (true) or not (false) */
-function f_ipa_rsl_start(inout IPA_Client clnt, charstring bsc_host, PortNumber bsc_port, integer i,
-			 boolean handler_mode := false)
+function f_ipa_rsl_start(inout IPA_Client clnt, charstring bsc_host, PortNumber bsc_port, integer bts_i,
+			 boolean handler_mode := false, integer trx_i := 0)
 runs on test_CT {
 	timer T := 10.0;
+	var integer rsl_i := bts_i + trx_i;
 
-	clnt.id := "IPA" & int2str(i) & "-RSL";
+	clnt.id := "IPA" & int2str(bts_i) & "-" & int2str(trx_i) & "-RSL";
 	clnt.vc_IPA := IPA_Emulation_CT.create(clnt.id & "-IPA");
 	clnt.ccm_pars := c_IPA_default_ccm_pars;
 	clnt.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
-	clnt.ccm_pars.unit_id := int2str(1234+i) & "/0/0";
+	clnt.ccm_pars.unit_id := int2str(1234+bts_i) & "/0/0" & int2str(trx_i);
 	if (handler_mode) {
 		clnt.vc_RSL := RSL_Emulation_CT.create(clnt.id & "-RSL");
-		connect(clnt.vc_RSL:CCHAN_PT, self:RSL_CCHAN[i]);
+		connect(clnt.vc_RSL:CCHAN_PT, self:RSL_CCHAN[rsl_i]);
 	}
 
 	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
 	if (handler_mode) {
 		connect(clnt.vc_IPA:IPA_RSL_PORT, clnt.vc_RSL:IPA_PT);
 	} else {
-		connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[i]);
+		connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[rsl_i]);
 	}
 
-	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", 10000+i, clnt.ccm_pars));
+	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", 10000 + bts_i + 10 * trx_i, clnt.ccm_pars));
 	if (handler_mode) {
 		clnt.vc_RSL.start(RSL_Emulation.main());
 		return;
@@ -904,12 +928,12 @@ runs on test_CT {
 	/* wait for IPA RSL link to connect and send ID ACK */
 	T.start;
 	alt {
-	[] IPA_RSL[i].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK)) {
+	[] IPA_RSL[rsl_i].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK)) {
 		T.stop;
-		IPA_RSL[i].send(ts_ASP_RSL_UD(ts_RSL_PAGING_LOAD_IND(23)));
+		IPA_RSL[rsl_i].send(ts_ASP_RSL_UD(ts_RSL_PAGING_LOAD_IND(23)));
 		}
-	[] IPA_RSL[i].receive(ASP_IPA_Event:?) { repeat }
-	[] IPA_RSL[i].receive { repeat }
+	[] IPA_RSL[rsl_i].receive(ASP_IPA_Event:?) { repeat }
+	[] IPA_RSL[rsl_i].receive { repeat }
 	[] T.timeout {
 		setverdict(fail, "Timeout RSL waiting for ASP_IPA_EVENT_ID_ACK");
 		mtc.stop;
@@ -1176,6 +1200,9 @@ runs on test_CT {
 
 	/* start RSL connection */
 	f_ipa_rsl_start(bts[bts_idx].rsl, mp_bsc_ip, mp_bsc_rsl_port, bts_idx, handler_mode);
+	if (BTS_NUM_TRX[bts_idx] > 1) {
+		f_ipa_rsl_start(bts[bts_idx].rsl1, mp_bsc_ip, mp_bsc_rsl_port, bts_idx, handler_mode, trx_i := 1);
+	}
 	/* wait until BSC tells us "connected" */
 	f_wait_oml(bts_idx, "connected", 5.0);
 }
@@ -2828,12 +2855,13 @@ testcase TC_stat_num_msc_connected_3() runs on test_CT {
 /* Verify correct stats on the number of configured and connected MSCs */
 private function f_tc_stat_num_bts_connected_msc_connhdlr(integer expect_num_bts_connected) runs on MSC_ConnHdlr {
 	g_pars := f_gen_test_hdlr_pars();
+	var integer num_trx_connected := num_trx_for_num_bts(expect_num_bts_connected);
 	var StatsDExpects expect := {
 		{ name := "TTCN3.bsc.0.num_bts.oml_connected", mtype := "g", min := expect_num_bts_connected, max := NUM_BTS_CFG },
 		{ name := "TTCN3.bsc.0.num_bts.all_trx_rsl_connected", mtype := "g", min := expect_num_bts_connected, max := expect_num_bts_connected },
 		{ name := "TTCN3.bsc.0.num_bts.total", mtype := "g", min := NUM_BTS_CFG, max := NUM_BTS_CFG },
-		{ name := "TTCN3.bsc.0.num_trx.rsl_connected", mtype := "g", min := expect_num_bts_connected, max := expect_num_bts_connected },
-		{ name := "TTCN3.bsc.0.num_trx.total", mtype := "g", min := NUM_BTS_CFG, max := NUM_BTS_CFG }
+		{ name := "TTCN3.bsc.0.num_trx.rsl_connected", mtype := "g", min := num_trx_connected, max := num_trx_connected },
+		{ name := "TTCN3.bsc.0.num_trx.total", mtype := "g", min := NUM_TRX_CFG, max := NUM_TRX_CFG }
 	};
 	f_statsd_expect(expect);
 }
@@ -2849,30 +2877,32 @@ private function f_tc_stat_num_bts_connected_test_ct(void_fn tc_fn, integer nr_b
 	/* Also verify stat exposed on CTRL interface */
 	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_bts:all_trx_rsl_connected", int2str(nr_bts));
 	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_bts:total", int2str(NUM_BTS_CFG));
-	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:rsl_connected", int2str(nr_bts));
-	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:total", int2str(NUM_BTS_CFG));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:rsl_connected", int2str(num_trx_for_num_bts(nr_bts)));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:total", int2str(NUM_TRX_CFG));
 
 	/* Verify rf_states exposed on CTRL interface */
 	var charstring expect_net_rf_states := "";
-	for (var integer i := 0; i < NUM_BTS_CFG; i := i + 1) {
-		var charstring expect_bts_rf_states := int2str(i) & ",0,";
-		if (i < NUM_BTS) {
-			/* In these tests, OML for the first NUM_BTS are always connected via osmo-bts-omldummy */
-			expect_bts_rf_states := expect_bts_rf_states & "operational,unlocked,";
-		} else {
-			/* For remaining i < NUM_BTS_CFG, OML is not connected, i.e. inoperational */
-			expect_bts_rf_states := expect_bts_rf_states & "inoperational,locked,";
+	for (var integer bts_i := 0; bts_i < NUM_BTS_CFG; bts_i := bts_i + 1) {
+		var charstring expect_bts_rf_states := "";
+		for (var integer trx_i := 0; trx_i < BTS_NUM_TRX[bts_i]; trx_i := trx_i + 1) {
+			expect_bts_rf_states := expect_bts_rf_states & int2str(bts_i) & "," & int2str(trx_i) & ",";
+			if (bts_i < NUM_BTS) {
+				/* In these tests, OML for the first NUM_BTS are always connected via osmo-bts-omldummy */
+				expect_bts_rf_states := expect_bts_rf_states & "operational,unlocked,";
+			} else {
+				/* For remaining bts_i < NUM_BTS_CFG, OML is not connected, bts_i.e. inoperational */
+				expect_bts_rf_states := expect_bts_rf_states & "inoperational,locked,";
+			}
+			/* The RF policy is still global in osmo-bsc, bts_i.e. always "on" */
+			expect_bts_rf_states := expect_bts_rf_states & "on,";
+			if (bts_i < nr_bts) {
+				/* For BTS where RSL is connected, the RSL state will be "up" */
+				expect_bts_rf_states := expect_bts_rf_states & "rsl-up;";
+			} else {
+				expect_bts_rf_states := expect_bts_rf_states & "rsl-down;";
+			}
 		}
-		/* The RF policy is still global in osmo-bsc, i.e. always "on" */
-		expect_bts_rf_states := expect_bts_rf_states & "on,";
-		if (i < nr_bts) {
-			/* For BTS where RSL is connected, the RSL state will be "up" */
-			expect_bts_rf_states := expect_bts_rf_states & "rsl-up;";
-		} else {
-			expect_bts_rf_states := expect_bts_rf_states & "rsl-down;";
-		}
-
-		f_ctrl_get_exp(IPA_CTRL, "bts." & int2str(i) & ".rf_states", expect_bts_rf_states);
+		f_ctrl_get_exp(IPA_CTRL, "bts." & int2str(bts_i) & ".rf_states", expect_bts_rf_states);
 		expect_net_rf_states := expect_net_rf_states & expect_bts_rf_states;
 	}
 	f_ctrl_get_exp(IPA_CTRL, "rf_states", expect_net_rf_states);
