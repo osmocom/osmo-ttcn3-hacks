@@ -397,6 +397,7 @@ testcase TC_pcuif_suspend() runs on RAW_PCU_Test_CT {
 /* Make sure TBF is released and no data is sent for in after reciving a Suspend Request from that MS. See OS#4761 */
 testcase TC_pcuif_suspend_active_tbf() runs on RAW_PCU_Test_CT {
 	var octetstring ra_id := enc_RoutingAreaIdentification(mp_gb_cfg.bvc[0].cell_id.ra_id);
+	var BTS_PDTCH_Block data_msg;
 	var RlcmacDlBlock dl_block;
 	var octetstring data := f_rnd_octstring(10);
 	var uint32_t sched_fn;
@@ -454,9 +455,17 @@ testcase TC_pcuif_suspend_active_tbf() runs on RAW_PCU_Test_CT {
 
 	/* Make sure we don't receive data for that TBF since it was released
 	 * before. Also check our TBF is not polled for UL. */
-	f_rx_rlcmac_dl_block_exp_dummy(dl_block);
-	if (dl_block.ctrl.mac_hdr.usf != USF_UNUSED) {
-		setverdict(fail, "Unexpected USF ", dl_block.ctrl.mac_hdr.usf);
+	f_pcuif_rx_data_req_pdtch(data_msg);
+	if (mp_osmo_pcu_newer_than_0_9_0 and data_msg.dl_block == omit) {
+		/* IDLE block, expected on new PCU versions */
+	} else if (not mp_osmo_pcu_newer_than_0_9_0 and match(data_msg.dl_block, tr_RLCMAC_DUMMY_CTRL())) {
+		/* Dummy RLCMAC block, expected on older PCU versions */
+		if (data_msg.dl_block.ctrl.mac_hdr.usf != USF_UNUSED) {
+			setverdict(fail, "Unexpected USF ", data_msg.dl_block.ctrl.mac_hdr.usf);
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	} else {
+		setverdict(fail, "Unexpected dl_block", data_msg.dl_block);
 		f_shutdown(__BFILE__, __LINE__);
 	}
 
@@ -583,7 +592,7 @@ testcase TC_ta_idle_dl_tbf_ass() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
-/* Verify that the PCU generates valid PTCCH/D messages
+/* Verify that the PCU generates idle blocks in PTCCH/D
  * while neither Uplink nor Downlink TBF is established. */
 testcase TC_ta_ptcch_idle() runs on RAW_PCU_Test_CT {
 	var BTS_PTCCH_Block pcu_msg;
@@ -599,10 +608,20 @@ testcase TC_ta_ptcch_idle() runs on RAW_PCU_Test_CT {
 
 	T.start(5.0);
 	alt {
-	/* Make sure the message is encoded correctly
-	 * TODO: do we expect all TA values to be equal '1111111'B? */
-	[] as_rx_ptcch(pcu_msg, tr_PTCCHDownlinkMsg);
-
+	[] BTS.receive(tr_PCUIF_DATA_PTCCH(0,
+					   tr_PCUIF_DATA(0, 7, sapi := PCU_IF_SAPI_PTCCH),
+					   omit)) {
+		if (not mp_osmo_pcu_newer_than_0_9_0) {
+			setverdict(fail, "Expected PTCCH/D block instead of IDLE block");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+	[] as_rx_ptcch(pcu_msg, tr_PTCCHDownlinkMsg) {
+		if (mp_osmo_pcu_newer_than_0_9_0) {
+			setverdict(fail, "Expected IDLE block instead of PTCCH/D block");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+	}
 	[] BTS.receive(PCUIF_Message:?) { repeat; }
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for a PTCCH/D block");
@@ -1886,6 +1905,7 @@ testcase TC_n3105_max_t3195() runs on RAW_PCU_Test_CT {
 	var integer N3105 := 0;
 	timer T_3195 := 1.0;
 	var integer num_poll_recv := 0;
+	var template RlcmacDlBlock dl_block_exp;
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -1947,7 +1967,7 @@ testcase TC_n3105_max_t3195() runs on RAW_PCU_Test_CT {
 		repeat;
 	}
 	/* At this point in time (N3105_MAX reached), PCU already moved TBF to
-	 * RELEASE state so no data for it is tx'ed, hence the dummy blocks:
+	 * RELEASE state so no data for it is tx'ed, hence the dummy/idle blocks:
 	 */
 	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
 					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
@@ -1964,14 +1984,33 @@ testcase TC_n3105_max_t3195() runs on RAW_PCU_Test_CT {
 					  block_nr := nr.blk_nr));
 		repeat;
 	}
+	[mp_osmo_pcu_newer_than_0_9_0 and N3105 == N3105_MAX]
+		BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						omit)) -> value data_msg {
+		/* We may already receive idle blocks before our own TTCN3 timer
+		 * triggers due to the TBF being released. Keep going until our T_3195 triggers. */
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
 	[T_3195.running] T_3195.timeout {
 		log("T_3195 timeout");
 		/* Done in alt, wait for pending RTS initiated previously in
-		 * above case before continuing (expect /* Dummy block): */
+		 * above case before continuing (expect empty blocks on new
+		 * versions, Dummy block on older versions): */
+		if (mp_osmo_pcu_newer_than_0_9_0) {
+			dl_block_exp := omit;
+		} else {
+			dl_block_exp := tr_RLCMAC_DUMMY_CTRL;
+		}
 		BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
 						tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
-						tr_RLCMAC_DUMMY_CTRL));
-		}
+						dl_block_exp));
+	}
 	[] BTS.receive {
 		setverdict(fail, "Unexpected BTS message");
 		f_shutdown(__BFILE__, __LINE__);
@@ -5968,12 +6007,13 @@ testcase TC_rim_ran_info_req_single_rep_no_si() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
-/* Verify TRX!=C0 don't schedule rlcmac blocks if no TBF attached to it. See OS#4772, SYS#4919 */
+/* Verify PCU schedule idle blocks (len=0) if no TBF attached to it. See OS#4772, SYS#4919 */
 testcase TC_pdch_energy_saving() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind;
 	var template (value) TsTrxBtsNum nr;
 	var RlcmacDlBlock dl_block;
 	var BTS_PDTCH_Block data_msg;
+	var integer ts;
 	timer T;
 
 	/* Initialize NS/BSSGP side */
@@ -5991,25 +6031,30 @@ testcase TC_pdch_energy_saving() runs on RAW_PCU_Test_CT {
 	/* Establish BSSGP connection to the PCU */
 	f_bssgp_establish();
 
-	/* Verify C0 gets always dummy blocks: */
-	nr := ts_TsTrxBtsNum(ts_nr := 7, trx_nr := 0, bts_nr := 0, blk_nr := 0);
-	f_rx_rlcmac_dl_block_exp_dummy(dl_block, nr := nr);
+	for (ts := 0; ts < 2; ts := ts + 1) {
+		nr := ts_TsTrxBtsNum(ts_nr := 7, trx_nr := ts, bts_nr := 0, blk_nr := 0);
 
-	/* TRX1 doesn't send dummy blocks when not needed, in order to honour energy saving: */
-	nr.trx_nr := 1;
-	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)), block_nr := nr.blk_nr));
-	T.start(0.5);
-	alt {
-	[] as_rx_fail_dummy(nr);
-	[] BTS.receive {
-		setverdict(fail, "Unexpected block from BTS");
-		f_shutdown(__BFILE__, __LINE__);
-	}
-	[] T.timeout {
-		setverdict(pass);
-	}
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)), block_nr := nr.blk_nr));
+		T.start(0.5);
+		alt {
+		[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						   omit)) -> value data_msg {
+			setverdict(pass);
+			T.stop;
+		}
+		[] as_rx_fail_dummy(nr);
+		[] BTS.receive {
+			setverdict(fail, "Unexpected block from BTS");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+		[] T.timeout {
+			setverdict(fail, "Expected IDLE block from BTS");
+			f_shutdown(__BFILE__, __LINE__);
+		}
+		}
 	}
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
