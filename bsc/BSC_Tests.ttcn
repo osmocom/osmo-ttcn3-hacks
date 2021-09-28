@@ -10155,6 +10155,95 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Reproduce a segfault happening when the SDCCH (primary) lchan is lost in-between a TCH Channel Activ and its Channel
+ * Activ Ack (SYS#5627). */
+private function f_TC_lost_sdcch_during_assignment(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		ass_cmd.pdu.bssmap.assignmentRequest.codecList := g_pars.ass_codec_list;
+	}
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType :=
+				f_BSSMAP_chtype_from_codec(g_pars.ass_codec_list.codecElements[0]);
+
+	var BSSMAP_FIELD_CodecType codecType;
+	codecType := valueof(ass_cmd.pdu.bssmap.assignmentRequest.codecList.codecElements[0].codecType);
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, codecType);
+
+	/* First establish a signalling lchan */
+	f_create_chan_and_exp();
+	f_rslem_dchan_queue_enable();
+
+	/* we should now have a COMPL_L3 at the MSC */
+	var template PDU_BSSAP exp_l3_compl;
+	exp_l3_compl := tr_BSSMAP_ComplL3()
+	if (g_pars.aoip == false) {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := omit;
+	} else {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := ?;
+	}
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(exp_l3_compl);
+	[] BSSAP.receive(tr_BSSMAP_ComplL3) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Received non-matching COMPLETE LAYER 3 INFORMATION");
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	activate(as_Media_mgw());
+
+	var RslChannelNr chan_nr := { u := { ch0 := RSL_CHAN_NR_Bm_ACCH }, tn := 1 };
+	f_rslem_register(0, chan_nr);
+
+	f_rslem_set_auto_chan_act_ack(RSL_PROC, false);
+	BSSAP.send(ass_cmd);
+
+
+	/* Wait for the Channel Activ for the TCH channel */
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	RSL.receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV), sid := ?)) -> value rx_rsl_ud;
+
+	/* make the original SDCCH disappear */
+	RSL.send(ts_RSL_REL_IND(g_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+
+	/* and ACK the TCH channel activation. This caused a segfault up to OsmoBSC 1.7.0 (SYS#5627) */
+	RSL.send(ts_ASP_RSL_UD(ts_RSL_CHAN_ACT_ACK(chan_nr, 23), rx_rsl_ud.streamId));
+
+	interleave {
+	[] BSSAP.receive(tr_BSSMAP_AssignmentFail);
+	[] BSSAP.receive(tr_BSSMAP_ClearRequest);
+	}
+
+	BSSAP.send(ts_BSSMAP_ClearCommand(0));
+	BSSAP.receive(tr_BSSMAP_ClearComplete);
+	BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+
+	var MgcpCommand mgcp;
+	MGCP.receive(tr_DLCX()) -> value mgcp {
+			MGCP.send(ts_DLCX_ACK2(mgcp.line.trans_id));
+		};
+
+	f_sleep(0.5);
+}
+testcase TC_lost_sdcch_during_assignment() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	vc_conn := f_start_handler(refers(f_TC_lost_sdcch_during_assignment), pars);
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -10462,6 +10551,8 @@ control {
 	execute( TC_imm_ass_pre_ts_ack_dyn_ts() );
 
 	execute( TC_ctrl_trx_rf_locked() );
+
+	execute( TC_lost_sdcch_during_assignment() );
 }
 
 }
