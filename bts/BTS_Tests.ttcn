@@ -2232,13 +2232,7 @@ private function f_l1ctl_est_dchan(L1CTL_PT pt, ConnHdlrPars pars) {
 
 /* Establish dedicated channel: L1CTL + RSL side */
 private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies := {}) runs on ConnHdlr {
-	var GsmFrameNumber fn;
-	var ImmediateAssignment imm_ass;
 	var ChannelDescription ch_desc;
-	var integer ra := 23;
-
-	/* Send RACH request and wait for ChanReq */
-	fn := f_rach_req_wait_chan_rqd(ra);
 
 	/* Activate channel on BTS side */
 	f_rsl_chan_act(g_pars.chan_mode, encr_enable, more_ies);
@@ -2250,21 +2244,9 @@ private function f_est_dchan(boolean encr_enable := false, RSL_IE_List more_ies 
 		ch_desc := valueof(ts_ChanDescH0(g_pars.chan_nr, mp_trx_pars[0].arfcn, g_pars.tsc));
 	}
 
-	/* Send IMM.ASS via CCHAN */
-	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.fhp.ma_map));
-	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
-
-	/* receive IMM.ASS on MS side */
-	var ImmediateAssignment ia_um;
-	ia_um := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
-
-	/* Make sure that IMM.ASS contains hopping parameters (if enabled) */
-	if (ch_desc.h != ia_um.chan_desc.h) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Hopping parameters mismatch");
-	}
-
 	/* enable dedicated mode */
-	f_L1CTL_DM_EST_REQ_IA(L1CTL, ia_um, ma := g_pars.fhp.ma);
+	f_l1ctl_est_dchan(L1CTL, g_pars);
+
 	/* enable encryption, if requested */
 	if (encr_enable) {
 		var uint8_t alg_id := f_alg_id_to_l1ctl(g_pars.encr.alg_id);
@@ -7909,6 +7891,65 @@ testcase TC_early_immediate_assignment() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+private function f_TC_est_dchan(charstring id) runs on ConnHdlr {
+	var integer ra := oct2int(f_rnd_ra_cs());
+	var ChannelDescription ch_desc;
+
+	/* Tune the MS to BCCH */
+	f_l1_tune(L1CTL);
+
+	/* Send RACH request and wait for ChanReq */
+	var GsmFrameNumber fn := f_rach_req_wait_chan_rqd(ra);
+
+	/* Activate channel on the BTS side */
+	f_rsl_chan_act(g_pars.chan_mode);
+
+	/* Craft channel description (with or without frequency hopping parameters) */
+	if (g_pars.fhp.enabled) {
+		ch_desc := valueof(ts_ChanDescH1(g_pars.chan_nr, g_pars.fhp.maio_hsn, g_pars.tsc));
+	} else {
+		ch_desc := valueof(ts_ChanDescH0(g_pars.chan_nr, mp_trx_pars[0].arfcn, g_pars.tsc));
+	}
+
+	/* Send IMM.ASS via CCHAN */
+	var GsmRrMessage rr_msg := valueof(ts_IMM_ASS(ra, fn, 0, ch_desc, g_pars.fhp.ma_map));
+	RSL.send(ts_RSL_IMM_ASSIGN(enc_GsmRrMessage(rr_msg)));
+
+	/* Receive IMM.ASS on the MS side */
+	var ImmediateAssignment imm_ass := f_L1CTL_WAIT_IMM_ASS(L1CTL, ra, fn);
+
+	/* Match the Channel Description IE in received IMM.ASS */
+	if (not match(imm_ass.chan_desc, ch_desc)) {
+		setverdict(fail, "Channel Description IE does not match");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* Tune the MS to a dedicated channel indicated in the IMM.ASS */
+	f_L1CTL_DM_EST_REQ_IA(L1CTL, imm_ass, g_pars.fhp.ma);
+
+	/* Expect SACCH frames on Downlink */
+	L1CTL.clear;
+	f_exp_sacch(true);
+
+	/* We're done, deactivate and release */
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rsl_chan_deact();
+}
+testcase TC_est_dchan() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+
+	f_init();
+
+	for (var integer i := 0; i < sizeof(g_AllChannels); i := i + 1) {
+		pars := valueof(t_Pars(g_AllChannels[i], ts_RSL_ChanMode_SIGN));
+		vc_conn := f_start_handler(refers(f_TC_est_dchan), pars);
+		vc_conn.done;
+	}
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 /* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
 /*	protocol error as per 44.006 */
 /*	link layer failure (repetition of I-frame N200 times without ACK */
@@ -7940,6 +7981,7 @@ testcase TC_early_immediate_assignment() runs on test_CT {
 */
 
 control {
+	execute( TC_est_dchan() );
 	execute( TC_chan_act_stress() );
 	execute( TC_chan_act_react() );
 	execute( TC_chan_deact_not_active() );
