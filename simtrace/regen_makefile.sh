@@ -1,6 +1,13 @@
 #!/bin/sh
 
-FILES="*.ttcn USB_PT.cc Native_FunctionDefs.cc "
+FILES="
+	*.ttcn
+	Native_FunctionDefs.cc
+	USB_PT.cc
+"
+
+export CPPFLAGS_TTCN3="
+"
 
 ../regen-makefile.sh SIMTRACE_Tests.ttcn $FILES
 

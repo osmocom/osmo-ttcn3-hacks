@@ -52,7 +52,8 @@ sed -i -e 's/CPPFLAGS = -D$(PLATFORM)/CPPFLAGS = -D$(PLATFORM) -DMAKEDEPEND_RUN 
 sed -i -e 's/-Wall//' Makefile
 
 if [ "x$CPPFLAGS_TTCN3" != "x" ]; then
-	sed -i -e 's/CPPFLAGS_TTCN3 =/CPPFLAGS_TTCN3 = '"$CPPFLAGS_TTCN3"'/' Makefile
+	CPPFLAGS_TTCN3="$(echo "$CPPFLAGS_TTCN3" | tr -d '\n' | tr '\t' ' ')"
+	sed -i -e "s/CPPFLAGS_TTCN3 =/CPPFLAGS_TTCN3 = $CPPFLAGS_TTCN3/" Makefile
 fi
 
 # for TITAN 6.3.0

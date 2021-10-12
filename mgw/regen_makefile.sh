@@ -1,7 +1,28 @@
 #!/bin/sh
 
-FILES="*.ttcn *.ttcnpp IPA_CodecPort_CtrlFunctDef.cc SDP_EncDec.cc *.c MGCP_CodecPort_CtrlFunctDef.cc IPL4asp_PT.cc IPL4asp_discovery.cc TCCConversion.cc TCCInterface.cc RTP_EncDec.cc RTP_CodecPort_CtrlFunctDef.cc OSMUX_CodecPort_CtrlFunctDef.cc IuUP_EncDec.cc Native_FunctionDefs.cc TELNETasp_PT.cc IP_EncDec.cc StatsD_CodecPort_CtrlFunctdef.cc "
+FILES="
+	*.c
+	*.ttcn
+	*.ttcnpp
+	IPA_CodecPort_CtrlFunctDef.cc
+	IPL4asp_PT.cc
+	IPL4asp_discovery.cc
+	IP_EncDec.cc
+	IuUP_EncDec.cc
+	MGCP_CodecPort_CtrlFunctDef.cc
+	Native_FunctionDefs.cc
+	OSMUX_CodecPort_CtrlFunctDef.cc
+	RTP_CodecPort_CtrlFunctDef.cc
+	RTP_EncDec.cc
+	SDP_EncDec.cc
+	StatsD_CodecPort_CtrlFunctdef.cc
+	TCCConversion.cc
+	TCCInterface.cc
+	TELNETasp_PT.cc
+"
 
-export CPPFLAGS_TTCN3="-DIPA_EMULATION_CTRL"
+export CPPFLAGS_TTCN3="
+	-DIPA_EMULATION_CTRL
+"
 
 ../regen-makefile.sh MGCP_Test.ttcn $FILES
