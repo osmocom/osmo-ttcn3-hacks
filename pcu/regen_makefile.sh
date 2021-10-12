@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=PCU_Tests
+
 FILES="
 	*.ttcn
 	*.ttcnpp
@@ -22,4 +24,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 "
 
-../regen-makefile.sh PCU_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

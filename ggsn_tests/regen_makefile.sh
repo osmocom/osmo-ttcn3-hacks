@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=GGSN_Tests
+
 FILES="
 	*.ttcn
 	BSSGP_EncDec.cc
@@ -21,4 +23,4 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh GGSN_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

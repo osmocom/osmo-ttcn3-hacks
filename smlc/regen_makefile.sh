@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN=SMLC_Tests.ttcn
+NAME=SMLC_Tests
 
 FILES="
 	*.c
@@ -32,4 +32,4 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh $MAIN $FILES
+../regen-makefile.sh -e $NAME $FILES

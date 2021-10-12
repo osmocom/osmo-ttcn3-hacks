@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=SCCP_Tests
+
 FILES="
 	*.ttcn
 	*.ttcnpp
@@ -22,4 +24,4 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh SCCP_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=L1CTL_Test
+
 FILES="
 	*.ttcn
 	L1CTL_PortType_CtrlFunctDef.cc
@@ -11,4 +13,4 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh L1CTL_Test.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

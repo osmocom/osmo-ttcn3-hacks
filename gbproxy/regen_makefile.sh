@@ -1,5 +1,7 @@
 #!/bin/bash
 
+NAME=GBProxy_Tests
+
 FILES="
 	*.ttcn
 	*.ttcnpp
@@ -30,6 +32,6 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh GBProxy_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
 
 sed -i -i 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lsctp/' Makefile

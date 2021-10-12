@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=Test
+
 FILES="
 	*.ttcn
 	IPL4_GSMTAP_CtrlFunctDef.cc
@@ -13,4 +15,4 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh Test.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

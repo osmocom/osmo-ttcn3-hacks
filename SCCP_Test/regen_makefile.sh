@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN=SCCP_Testcases.ttcn
+NAME=SCCP_Testcases
 
 FILES="
 	*.ttcn
@@ -10,4 +10,4 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh $MAIN $FILES
+../regen-makefile.sh -e $NAME $FILES

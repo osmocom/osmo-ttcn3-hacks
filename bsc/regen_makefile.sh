@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN=BSC_Tests.ttcn
+NAME=BSC_Tests
 
 FILES="
 	*.c
@@ -34,4 +34,4 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh $MAIN $FILES
+../regen-makefile.sh -e $NAME $FILES

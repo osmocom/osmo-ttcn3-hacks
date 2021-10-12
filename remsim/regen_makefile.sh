@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=REMSIM_Tests
+
 FILES="
 	*.asn
 	*.ttcn
@@ -25,7 +27,7 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 "
 
-../regen-makefile.sh REMSIM_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
 
 # required for forkpty(3) used by PIPEasp
 sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile

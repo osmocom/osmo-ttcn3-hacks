@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=BTS_Tests
+
 FILES="
 	*.ttcn
 	*.ttcnpp
@@ -26,4 +28,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_RSL
 "
 
-../regen-makefile.sh BTS_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

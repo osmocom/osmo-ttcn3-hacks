@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN=Selftest.ttcn
+NAME=Selftest
 
 FILES="
 	*.ttcn
@@ -19,4 +19,4 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh $MAIN $FILES
+../regen-makefile.sh -e $NAME $FILES

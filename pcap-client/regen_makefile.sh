@@ -1,5 +1,7 @@
 #!/bin/bash
 
+NAME=OPCAP_CLIENT_Tests
+
 FILES="
 	*.ttcn
 	IPL4asp_PT.cc
@@ -14,4 +16,4 @@ FILES="
 
 export CPPFLAGS_TTCN3=""
 
-../regen-makefile.sh OPCAP_CLIENT_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

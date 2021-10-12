@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=MME_Tests
+
 FILES="
 	*.asn
 	*.c
@@ -24,6 +26,6 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh MME_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
 
 sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode -lgnutls/' Makefile

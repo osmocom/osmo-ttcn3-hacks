@@ -1,5 +1,7 @@
 #!/bin/bash
 
+NAME=CBC_Tests
+
 FILES="
 	*.asn
 	*.ttcn
@@ -23,6 +25,6 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh CBC_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
 
 sed -i -e 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lfftranscode/' Makefile

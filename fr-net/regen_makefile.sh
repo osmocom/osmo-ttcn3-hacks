@@ -1,5 +1,7 @@
 #!/bin/bash
 
+NAME=FRNET_Tests
+
 FILES="
 	*.ttcn
 	*.ttcnpp
@@ -18,4 +20,4 @@ export CPPFLAGS_TTCN3="
 	-DNS_EMULATION_FR
 "
 
-../regen-makefile.sh FRNET_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

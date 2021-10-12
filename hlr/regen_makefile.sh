@@ -1,6 +1,6 @@
 #!/bin/sh
 
-MAIN="HLR_Tests.ttcn"
+NAME=HLR_Tests
 
 FILES="
 	*.asn
@@ -24,4 +24,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 "
 
-../regen-makefile.sh $MAIN $FILES
+../regen-makefile.sh -e $NAME $FILES

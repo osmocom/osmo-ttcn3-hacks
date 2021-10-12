@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=SIP_Tests
+
 FILES="
 	*.c
 	*.ttcn
@@ -24,4 +26,4 @@ export CPPFLAGS_TTCN3="
 	-DRAN_EMULATION_CTRL
 "
 
-../regen-makefile.sh SIP_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES

@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=MSC_Tests
+
 FILES="
 	*.asn
 	*.c
@@ -42,6 +44,6 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh MSC_Tests.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
 
 sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode -lssl/' Makefile

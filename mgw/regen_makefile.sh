@@ -1,5 +1,7 @@
 #!/bin/sh
 
+NAME=MGCP_Test
+
 FILES="
 	*.c
 	*.ttcn
@@ -25,4 +27,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 "
 
-../regen-makefile.sh MGCP_Test.ttcn $FILES
+../regen-makefile.sh -e $NAME $FILES
