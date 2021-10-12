@@ -2,6 +2,7 @@
 
 FILES="
 	*.ttcn
+	BSSGP_EncDec.cc
 	DIAMETER_CodecPort_CtrlFunctDef.cc
 	DIAMETER_EncDec.cc
 	GTPC_EncDec.cc
