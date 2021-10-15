@@ -3097,6 +3097,141 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Test scenario where MS wants to request a new TBF once the current one is
+ * ending, by means of sending a Packet Resource Request on ul slot provided by
+ * last Pkt Ul ACK's RRBP. new Pkt Ul Ass is never confirmed by the MS in this test.
+ * See 3GPP TS 44.060 sec 9.3.2.4.2 "Non-extended uplink TBF mode" */
+testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+	const integer N3105_MAX := 2;
+	var integer N3105 := 0;
+	timer T_3195 := 1.0 + 0.5; /* 0.5: extra offset since we cannot match exactly */
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	/* Speedup test: */
+	info_ind.n3105 := N3105_MAX;
+	info_ind.t3195 := 1;
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resoultion) and make sure it is ACKED fine */
+	f_ms_tx_ul_data_block_multi(ms, 1, with_tlli := true, fn := ms.ul_tbf.start_time_fn);
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	acknack_tmpl := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+						   tr_UlAckNackGprs(ms.tlli,
+								    tr_AckNackDescription(final_ack := '1'B),
+								    tr_UlAckNackGprsAdditionsRel99(tbf_est := true)))
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn, acknack_tmpl);
+
+	/* TODO: verify TBF_EST and FinalACK are both '1' above */
+
+	/* Send PACKET RESOURCE REQUEST to request a new UL TBF */
+	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, omit)), sched_fn);
+
+	/* Now Keep ignoring the Pkt Ul Ass on PACCH: */
+	/* Now we go on receiving DL data and not answering RRBP: */
+	nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[not T_3195.running] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_UL_PACKET_ASS)) -> value data_msg {
+		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			log("Ignoring RRBP N3105 ", N3105);
+			N3105 := N3105 + 1;
+		}
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	/* At this point in time (N3105_MAX reached), PCU already moved TBF to
+	 * RELEASE state so no data for it is tx'ed, hence the dummy blocks:
+	 */
+	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL)) -> value data_msg {
+		if (not T_3195.running) {
+			T_3195.start;
+		}
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   omit)) -> value data_msg {
+		/* We may already receive idle blocks before our own TTCN3 timer
+		 * triggers due to the TBF being released. Keep going until our T_3195 triggers. */
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	/* We receive Dummy blocks in between Pkt Ul Ass while PCU waits for us to ack it */
+	[not T_3195.running] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DUMMY_CTRL)) -> value data_msg {
+		log("Ignoring Dummy block FN ", data_msg.raw.fn);
+		nr := ts_TsTrxBtsNum;
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[T_3195.running] T_3195.timeout {
+		log("T_3195 timeout");
+		/* Done in alt, wait for pending RTS initiated previously in
+		 * above case before continuing (expect nothing to be sent since there's no active TBF): */
+		BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						omit));
+		}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Test CS paging over the BTS<->PCU socket.
  * When a (class B or C, not A) MS has an active TBF (or is on the PDCH), the MS can not react on CS paging over CCCH.
  * Paging should be send on the PACCH.
@@ -6288,6 +6423,7 @@ control {
 	execute( TC_dl_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_tbf_reestablish_with_pkt_resource_req() );
+	execute( TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() );
 
 	execute( TC_multiplex_dl_gprs_egprs() );
 
