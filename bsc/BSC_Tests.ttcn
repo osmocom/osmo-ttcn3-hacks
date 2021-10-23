@@ -1672,6 +1672,37 @@ runs on test_CT return DchanTuple {
 	return dt;
 }
 
+/* Like f_est_dchan(), but for the first lchan of a dynamic timeslot: first ACK the deactivation of PDCH. */
+function f_est_dchan_dyn(OCT1 ra, GsmFrameNumber fn, octetstring l3)
+runs on test_CT return DchanTuple {
+	var BSSAP_N_CONNECT_ind rx_c_ind;
+	var DchanTuple dt;
+
+	/* Send CHAN RQD */
+	var RSL_Message rx_rsl;
+	f_ipa_tx(0, ts_RSL_CHAN_RQD(ra, fn));
+
+	/* The dyn TS first deactivates PDCH */
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	dt.rsl_chan_nr := rx_rsl.ies[0].body.chan_nr;
+	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	dt.rsl_chan_nr := rx_rsl.ies[0].body.chan_nr;
+
+	/* Now activates the signalling channel */
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, fn+10));
+	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+
+	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+
+	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
+	dt.sccp_conn_id := rx_c_ind.connectionId;
+	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
+
+	return dt;
+}
+
 /* expect RF CAN REL from BTS, acknowledge it and clear the MSC side */
 private function f_exp_chan_rel_and_clear(DchanTuple dt, integer bts_nr := 0) runs on test_CT {
 	var RSL_Message rx_rsl;
@@ -7241,6 +7272,53 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Validate all 8 subslots of a dynamics TS configured as SDCCH8 are used */
+testcase TC_dyn_ts_sdcch8_all_subslots_used() runs on test_CT {
+	var ASP_RSL_Unitdata rsl_ud;
+	var integer i;
+	var integer chreq_total, chreq_nochan;
+
+	f_init_vty();
+	for (i := 1; i < 8; i := i + 1) {
+		if (i == 2) {
+			f_ts_set_chcomb(0, 0, i, "TCH/F_TCH/H_SDCCH8_PDCH");
+		} else {
+			f_ts_set_chcomb(0, 0, i, "PDCH");
+		}
+	}
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1);
+
+	/* The dyn TS want to activate PDCH mode, ACK that. */
+	var RslChannelNr chan_nr;
+	chan_nr := valueof(t_RslChanNr_PDCH(2));
+	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr, ?));
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+
+	f_sleep(1.0);
+
+	/* Exhaust all dedicated SDCCH lchans.
+	/* GSM 44.018 Table 9.1.8.2:
+	 * RA = '13'O -> Establishment cause = 0001xxxx (MS dual rate capable and asks for "SDCCH").
+	 */
+	for (i := 0; i < NUM_SDCCH_PER_BTS; i := i+1) {
+		f_est_dchan('13'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* Only the dyn TS is still available. Its first lchan gets converted to SDCCH8 */
+	f_est_dchan_dyn('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	/* Also occupy the seven other SDCCH of the dyn TS */
+	for (i := 0; i < 7; i := i+1) {
+		f_est_dchan('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* clean up config */
+	f_ts_reset_chcomb(0);
+
+	f_shutdown_helper();
+}
+
 /* Test Osmocom dyn TS SDCCH8 activation / deactivation: If activating dyn TS as
    SDCCH8 would end up in having no free TCH, then BSC should decide to activate
    it as TCH directly instead. SYS#5309. */
@@ -10517,6 +10595,7 @@ control {
 	execute( TC_dyn_pdch_osmo_act_nack() );
 	if (mp_enable_dyn_sdcch8_test) {
 		execute( TC_dyn_ts_sdcch8_act_deact() );
+		execute( TC_dyn_ts_sdcch8_all_subslots_used() );
 		execute( TC_dyn_ts_sdcch8_tch_call_act_deact() );
 		execute( TC_dyn_ts_sdcch8_act_nack() );
 	}
