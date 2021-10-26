@@ -1642,6 +1642,8 @@ type record DchanTuple {
 	RslChannelNr rsl_chan_nr
 }
 
+type record of DchanTuple DchanTuples;
+
 /* Send CHAN RQD and wait for allocation; acknowledge it */
 private function f_chreq_act_ack(OCT1 ra := '23'O, GsmFrameNumber fn := 23)
 runs on test_CT return RslChannelNr {
@@ -10393,6 +10395,156 @@ testcase TC_lost_sdcch_during_assignment() runs on test_CT {
 	f_shutdown_helper();
 }
 
+const CounterNameVals counternames_bsc_bts_all_available_allocated := {
+	{ "all_allocated:sdcch", 0 },
+	{ "all_allocated:static_sdcch", 0 },
+	{ "all_allocated:tch", 0 },
+	{ "all_allocated:static_tch", 0 }
+}
+
+private function f_all_allocated_expect_counter_change(charstring_list expect_changed) runs on test_CT
+{
+	/* Make sure counters settle first */
+	f_sleep(1.0);
+
+	/* Take a baseline of counters */
+	f_ctrs_bsc_and_bts_init(1, counternames_bsc_bts_all_available_allocated);
+
+	/* Elapse some time so that we see changes in counters, hopefully where expected */
+	f_sleep(2.0);
+
+	/* Get new counters */
+	var charstring_list all_changed := {};
+	all_changed := all_changed & f_counter_name_vals_get_changed_n(IPA_CTRL, "bsc", g_ctr_bsc);
+	all_changed := all_changed & f_counter_name_vals_get_changed_n(IPA_CTRL, "bts", g_ctr_bts);
+
+	/* Compare with expectations */
+	var charstring_list all_expect_changed := {};
+	for (var integer i := 0; i < lengthof(expect_changed); i := i + 1) {
+		all_expect_changed := all_expect_changed & { "bsc.0." & expect_changed[i], "bts.0." & expect_changed[i] };
+	}
+	f_counter_name_vals_expect_changed_list(all_changed, all_expect_changed);
+}
+
+testcase TC_ratectr_all_available_allocated() runs on test_CT {
+	var ASP_RSL_Unitdata rsl_ud;
+	var integer i;
+	var integer chreq_total, chreq_nochan;
+
+	f_init(1);
+	f_sleep(1.0);
+
+	/* Exhaust all dedicated SDCCH lchans.
+	/* GSM 44.018 Table 9.1.8.2:
+	 * RA = '13'O -> Establishment cause = 0001xxxx (MS dual rate capable and asks for "SDCCH").
+	 */
+	for (i := 0; i < NUM_SDCCH_PER_BTS; i := i+1) {
+		f_est_dchan('13'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* Since only bts 0 is connected, expecting all_allocated to become true for both bts 0 and the "global" bsc
+	 * level.
+	 * All SDCCH are now occupied. */
+	f_all_allocated_expect_counter_change({"all_allocated:sdcch", "all_allocated:static_sdcch"});
+
+	/* Also fill up all remaining (TCH) channels */
+	for (i := 0; i < NUM_TCHF_PER_BTS + NUM_TCHH_PER_BTS; i := i+1) {
+		f_est_dchan('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* All TCH are now also occupied */
+	f_all_allocated_expect_counter_change({"all_allocated:sdcch", "all_allocated:static_sdcch",
+			"all_allocated:tch", "all_allocated:static_tch"});
+
+	f_shutdown_helper();
+}
+
+testcase TC_ratectr_all_available_allocated_dyn() runs on test_CT {
+	var ASP_RSL_Unitdata rsl_ud;
+	var integer i;
+	var integer chreq_total, chreq_nochan;
+
+	f_init_vty();
+	f_ts_set_chcomb(0, 0, 2, "TCH/F_TCH/H_PDCH");
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+	/* Now we have 3 TCH/F, 1 OSMO_DYN, 1 TCH/H */
+
+	f_init(1, guard_timeout := 60.0);
+	f_sleep(1.0);
+
+	/* The dyn TS wants to activate PDCH mode, ACK that. */
+	var RslChannelNr chan_nr;
+	chan_nr := valueof(t_RslChanNr_PDCH(2));
+	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr, ?));
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+
+	/* Exhaust all dedicated SDCCH lchans.
+	/* GSM 44.018 Table 9.1.8.2:
+	 * RA = '13'O -> Establishment cause = 0001xxxx (MS dual rate capable and asks for "SDCCH").
+	 */
+	for (i := 0; i < NUM_SDCCH_PER_BTS; i := i+1) {
+		f_est_dchan('13'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* The static SDCCH should now be occupied, while still 3x8 dynamic SDCCH potentially remain. So only
+	 * all_allocated:static_sdcch is counted, all_allocated:sdcch remains zero. */
+	f_all_allocated_expect_counter_change({"all_allocated:static_sdcch"});
+
+	/* Request more SDCCH, hence convert the first dyn TS to SDCCH8.
+	 * Will release them later, so remember all the DchanTuples. */
+	var DchanTuples dyn_sddch := {};
+	dyn_sddch := dyn_sddch & { f_est_dchan_dyn('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O) };
+
+	/* Also occupy the seven other SDCCH of the dyn TS */
+	for (i := 0; i < 7; i := i+1) {
+		dyn_sddch := dyn_sddch & { f_est_dchan('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O) };
+	}
+
+	/* Now all dynamic SDCCH are also occupied, so for the first time all_allocated:sdcch will trigger... */
+	f_all_allocated_expect_counter_change({"all_allocated:sdcch", "all_allocated:static_sdcch"});
+
+	/* occupy the remaining TCH, three TCH/F and two TCH/H lchans */
+	for (i := 0; i < 5; i := i+1) {
+		f_est_dchan('33'O, NUM_SDCCH_PER_BTS + i, '00010203040506'O);
+	}
+
+	/* All TCH lchans are now also occupied, both static and dynamic */
+	f_all_allocated_expect_counter_change({"all_allocated:sdcch", "all_allocated:static_sdcch",
+			"all_allocated:tch", "all_allocated:static_tch"});
+
+	/* Starting to release the dyn TS: as soon as the first SDCCH gets released, all_allocated:sdcch stops
+	 * incrementing. */
+	var BssmapCause cause := 0;
+	var DchanTuple dt := dyn_sddch[0];
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+	f_exp_chan_rel_and_clear(dt, 0);
+
+	/* one dyn TS SDCCH is free again, so only the static_sdcch should increment. For tch, both static and dynamic
+	 * count as occupied, so those still both increment. */
+	f_all_allocated_expect_counter_change({"all_allocated:static_sdcch",
+			"all_allocated:tch", "all_allocated:static_tch"});
+
+	/* Release the remaining SDCCH of the dyn TS, so it becomes available as TCH again */
+	for (i := 1; i < lengthof(dyn_sddch); i := i+1) {
+		dt := dyn_sddch[i];
+		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
+		f_exp_chan_rel_and_clear(dt, 0);
+	}
+
+	/* All SDCCH on the dyn TS are released, the dyn TS wants to activate PDCH again */
+	chan_nr := valueof(t_RslChanNr_PDCH(2));
+	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr, ?));
+	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+
+	/* Now all channels are occupied except the dyn TS, so expecting only the static counters to increment */
+	f_all_allocated_expect_counter_change({"all_allocated:static_sdcch", "all_allocated:static_tch"});
+
+	/* clean up config */
+	f_ts_reset_chcomb(0);
+
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -10701,6 +10853,9 @@ control {
 	execute( TC_imm_ass_pre_ts_ack_dyn_ts() );
 
 	execute( TC_ctrl_trx_rf_locked() );
+
+	execute( TC_ratectr_all_available_allocated() );
+	execute( TC_ratectr_all_available_allocated_dyn() );
 
 	execute( TC_lost_sdcch_during_assignment() );
 }
