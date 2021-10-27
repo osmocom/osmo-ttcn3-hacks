@@ -9,7 +9,7 @@ static int mncc_sock_version = MNCC_SOCK_VERSION;
 
 BOOLEAN set__MNCC__version(INTEGER const& version)
 {
-	if (version != 6 && version != 7)
+	if (version != 7)
 		return false;
 	mncc_sock_version = version;
 	return true;
@@ -195,46 +195,27 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		ret_val = ret_val & in.u().data().data();
 		break;
 	case MNCC__MsgUnion::ALT_rtp:
-		switch (mncc_sock_version) {
-		case 6:
-			struct gsm_mncc_rtp_mncc6 rtp_old;
-			memset(&rtp_old, 0, sizeof(rtp_old));
-			rtp_old.msg_type = in.msg__type();
-			rtp_old.callref = in.u().rtp().callref();
-			ttcn_buffer.put_string(in.u().rtp().ip());
-			if (!in.u().rtp().is__ipv6()) {
-				memcpy(&rtp_old.ip, ttcn_buffer.get_data(), sizeof(struct in_addr));
-				rtp_old.ip = ntohl(rtp_old.ip);
-			} /* else: ipv6 not supported in MNCCv6 */
-			rtp_old.port = in.u().rtp().rtp__port();
-			rtp_old.payload_type = in.u().rtp().payload__type();
-			rtp_old.payload_msg_type = in.u().rtp().payload__msg__type();
-			ret_val = OCTETSTRING(sizeof(rtp_old), (uint8_t *) &rtp_old);
-			break;
-		case 7:
-			struct gsm_mncc_rtp rtp;
-			memset(&rtp, 0, sizeof(rtp));
-			rtp.msg_type = in.msg__type();
-			rtp.callref = in.u().rtp().callref();
-			ttcn_buffer.put_string(in.u().rtp().ip());
-			if (in.u().rtp().is__ipv6()) {
-				// if(in.u().rtp().ip().lengthof() != 16) print error
-				rtp.addr.ss_family = AF_INET6;
-				memcpy(&((struct sockaddr_in6*)&rtp.addr)->sin6_addr, ttcn_buffer.get_data(),
-				       sizeof(struct in6_addr));
-				((struct sockaddr_in6*)&rtp.addr)->sin6_port = htons(in.u().rtp().rtp__port());
-			} else {
-				// if(in.u().rtp().ip().lengthof() != 4) print error
-				rtp.addr.ss_family = AF_INET;
-				memcpy(&((struct sockaddr_in*)&rtp.addr)->sin_addr, ttcn_buffer.get_data(),
-				       sizeof(struct in_addr));
-				((struct sockaddr_in*)&rtp.addr)->sin_port = htons(in.u().rtp().rtp__port());
-			}
-			rtp.payload_type = in.u().rtp().payload__type();
-			rtp.payload_msg_type = in.u().rtp().payload__msg__type();
-			ret_val = OCTETSTRING(sizeof(rtp), (uint8_t *) &rtp);
-			break;
+		struct gsm_mncc_rtp rtp;
+		memset(&rtp, 0, sizeof(rtp));
+		rtp.msg_type = in.msg__type();
+		rtp.callref = in.u().rtp().callref();
+		ttcn_buffer.put_string(in.u().rtp().ip());
+		if (in.u().rtp().is__ipv6()) {
+			// if(in.u().rtp().ip().lengthof() != 16) print error
+			rtp.addr.ss_family = AF_INET6;
+			memcpy(&((struct sockaddr_in6*)&rtp.addr)->sin6_addr, ttcn_buffer.get_data(),
+			       sizeof(struct in6_addr));
+			((struct sockaddr_in6*)&rtp.addr)->sin6_port = htons(in.u().rtp().rtp__port());
+		} else {
+			// if(in.u().rtp().ip().lengthof() != 4) print error
+			rtp.addr.ss_family = AF_INET;
+			memcpy(&((struct sockaddr_in*)&rtp.addr)->sin_addr, ttcn_buffer.get_data(),
+			       sizeof(struct in_addr));
+			((struct sockaddr_in*)&rtp.addr)->sin_port = htons(in.u().rtp().rtp__port());
 		}
+		rtp.payload_type = in.u().rtp().payload__type();
+		rtp.payload_msg_type = in.u().rtp().payload__msg__type();
+		ret_val = OCTETSTRING(sizeof(rtp), (uint8_t *) &rtp);
 		break;
 	case MNCC__MsgUnion::ALT_hello:
 		struct gsm_mncc_hello hello;
@@ -264,7 +245,6 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 	const struct gsm_data_frame *in_data;
 	MNCC__PDU__Data data;
 	const struct gsm_mncc_rtp *in_rtp;
-	const struct gsm_mncc_rtp_mncc6 *in_rtp_old;
 	MNCC__PDU__Rtp rtp;
 	MNCC__MsgUnion u;
 	bool is_ipv6;
@@ -303,40 +283,26 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 	case MNCC_RTP_CREATE:
 	case MNCC_RTP_CONNECT:
 	case MNCC_RTP_FREE:
-		switch (mncc_sock_version) {
-		case 6:
-			struct in_addr inaddr;
-			in_rtp_old = (const struct gsm_mncc_rtp_mncc6 *) in_mncc;
-			inaddr.s_addr = htonl(in_rtp_old->ip);
-			ip = OCTETSTRING(sizeof(struct in_addr),
-					(const unsigned char*)&inaddr);
-			rtp = MNCC__PDU__Rtp(in_rtp_old->callref, false, ip, in_rtp_old->port, in_rtp_old->payload_type,
-					     in_rtp_old->payload_msg_type, in_rtp_old->sdp);
-			u.rtp() = rtp;
-			break;
-		case 7:
-			in_rtp = (const struct gsm_mncc_rtp *) in_mncc;
-			switch (in_rtp->addr.ss_family) {
-			case AF_INET6:
-				is_ipv6 = true;
-				port = ntohs(((struct sockaddr_in6*)&in_rtp->addr)->sin6_port);
-				ip = OCTETSTRING(sizeof(struct in6_addr),
-						(const unsigned char*)&((struct sockaddr_in6*)&in_rtp->addr)->sin6_addr);
+		in_rtp = (const struct gsm_mncc_rtp *) in_mncc;
+		switch (in_rtp->addr.ss_family) {
+		case AF_INET6:
+			is_ipv6 = true;
+			port = ntohs(((struct sockaddr_in6*)&in_rtp->addr)->sin6_port);
+			ip = OCTETSTRING(sizeof(struct in6_addr),
+					(const unsigned char*)&((struct sockaddr_in6*)&in_rtp->addr)->sin6_addr);
 
 			break;
-			case AF_UNSPEC: //RTP_CREATE and RTP_FREE can contain fully zeroed addr
-			case AF_INET:
-				is_ipv6 = false;
-				port = ntohs(((struct sockaddr_in*)&in_rtp->addr)->sin_port);
-				ip = OCTETSTRING(sizeof(struct in_addr),
-						(const unsigned char*)&((struct sockaddr_in*)&in_rtp->addr)->sin_addr);
-				break;
-			}
-			rtp = MNCC__PDU__Rtp(in_rtp->callref, is_ipv6, ip, port, in_rtp->payload_type,
-					     in_rtp->payload_msg_type, in_rtp->sdp);
-			u.rtp() = rtp;
+		case AF_UNSPEC: //RTP_CREATE and RTP_FREE can contain fully zeroed addr
+		case AF_INET:
+			is_ipv6 = false;
+			port = ntohs(((struct sockaddr_in*)&in_rtp->addr)->sin_port);
+			ip = OCTETSTRING(sizeof(struct in_addr),
+					(const unsigned char*)&((struct sockaddr_in*)&in_rtp->addr)->sin_addr);
 			break;
 		}
+		rtp = MNCC__PDU__Rtp(in_rtp->callref, is_ipv6, ip, port, in_rtp->payload_type,
+				     in_rtp->payload_msg_type, in_rtp->sdp);
+		u.rtp() = rtp;
 		break;
 	default:
 		sign.callref() = in_mncc->callref;

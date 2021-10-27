@@ -292,18 +292,6 @@ struct gsm_mncc_hello {
 	uint32_t	lchan_type_offset;
 };
 
-/* Use this one in MNCCv6 */
-struct gsm_mncc_rtp_mncc6 {
-	uint32_t	msg_type;
-	uint32_t	callref;
-	uint32_t        ip;
-	uint16_t        port;
-	uint32_t	payload_type;
-	uint32_t	payload_msg_type;
-
-	char		sdp[1024];
-};
-
 struct gsm_mncc_rtp {
 	uint32_t	msg_type;
 	uint32_t	callref;
