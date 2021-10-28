@@ -184,6 +184,10 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		strncpy(mncc.imsi, in_sig.imsi(), sizeof(mncc.imsi));
 		mncc.lchan_type = in_sig.lchan__type();
 		mncc.lchan_mode = in_sig.lchan__mode();
+		if (in_sig.sdp().is_value()) {
+			const CHARSTRING &sdp = in_sig.sdp();
+			strncpy(&mncc.sdp[0], sdp, sizeof(mncc.sdp));
+		}
 		ret_val = OCTETSTRING(sizeof(mncc), (uint8_t *)&mncc);
 		}
 		break;
