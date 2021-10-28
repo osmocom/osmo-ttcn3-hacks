@@ -230,6 +230,7 @@ enum {
 #define MNCC_F_CCCAP		0x0800
 #define MNCC_F_KEYPAD		0x1000
 #define MNCC_F_SIGNAL		0x2000
+#define MNCC_F_GCR		0x4000
 
 struct gsm_mncc {
 	/* context based information */
@@ -267,7 +268,15 @@ struct gsm_mncc {
 	unsigned char	lchan_type;
 	unsigned char	lchan_mode;
 
-	char		sdp[1024];
+	union {
+		struct {
+			char sdp[1024];
+		} v7;
+		struct {
+			uint8_t gcr[16];
+			char sdp[1024];
+		} v8;
+	};
 };
 
 struct gsm_data_frame {

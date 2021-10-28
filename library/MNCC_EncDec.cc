@@ -9,7 +9,7 @@ static int mncc_sock_version = MNCC_SOCK_VERSION;
 
 BOOLEAN set__MNCC__version(INTEGER const& version)
 {
-	if (version != 7)
+	if (version != 7 && version != 8)
 		return false;
 	mncc_sock_version = version;
 	return true;
@@ -184,9 +184,19 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		strncpy(mncc.imsi, in_sig.imsi(), sizeof(mncc.imsi));
 		mncc.lchan_type = in_sig.lchan__type();
 		mncc.lchan_mode = in_sig.lchan__mode();
+		if (in_sig.gcr().is_value()) {
+			const OCTETSTRING &gcr = in_sig.gcr();
+			if (mncc_sock_version < 8)
+				TTCN_error("GCR is only available since MNCCv8");
+			memcpy(&mncc.v8.gcr[0], gcr, sizeof(mncc.v8.gcr));
+			mncc.fields |= MNCC_F_GCR;
+		}
 		if (in_sig.sdp().is_value()) {
 			const CHARSTRING &sdp = in_sig.sdp();
-			strncpy(&mncc.sdp[0], sdp, sizeof(mncc.sdp));
+			if (mncc_sock_version > 7)
+				strncpy(&mncc.v8.sdp[0], sdp, sizeof(mncc.v8.sdp));
+			else
+				strncpy(&mncc.v7.sdp[0], sdp, sizeof(mncc.v7.sdp));
 		}
 		ret_val = OCTETSTRING(sizeof(mncc), (uint8_t *)&mncc);
 		}
@@ -361,7 +371,13 @@ MNCC__PDU dec__MNCC__PDU(const OCTETSTRING& in)
 		sign.imsi() = CHARSTRING(in_mncc->imsi);
 		sign.lchan__type() = in_mncc->lchan_type;
 		sign.lchan__mode() = in_mncc->lchan_mode;
-		sign.sdp() = in_mncc->sdp;
+		if (mncc_sock_version > 7) {
+			if (in_mncc->fields & MNCC_F_GCR)
+				sign.gcr() = OCTETSTRING(sizeof(in_mncc->v8.gcr), in_mncc->v8.gcr);
+			sign.sdp() = in_mncc->v8.sdp;
+		} else {
+			sign.sdp() = in_mncc->v7.sdp;
+		}
 		u.signal() = sign;
 		break;
 	}
