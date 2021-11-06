@@ -317,7 +317,8 @@ type record ConnHdlrPars {
 
 /* Test-specific parameters */
 friend type union TestSpecUnion {
-	RllTestCase rll
+	RllTestCase rll,
+	TopTestCase top
 }
 
 private template (value) RachControlParameters ts_RachCtrl_default := {
@@ -771,6 +772,43 @@ friend function f_rsl_transceive(template RSL_Message tx, template RSL_Message e
 				 charstring id, boolean ignore_other := false)
 runs on ConnHdlr {
 	var RSL_Message rx := f_rsl_transceive_ret(tx, exp_rx, id, ignore_other);
+}
+
+/* Send the given measurement results to the IUT over the Um interface,
+ * wait for the IUT to receive then and forward over the A-bis/RSL interface. */
+friend function f_transceive_meas_rep(template (value) MeasurementResults meas_res)
+runs on ConnHdlr {
+	var template (value) SacchL1Header l1h;
+	var octetstring l2, l3;
+	timer T;
+
+	/* RR Measurement Report to be sent */
+	var GsmRrL3Message meas_rep := {
+		header := valueof(t_RrL3Header(MEASUREMENT_REPORT)),
+		payload := { meas_rep := { meas_res := valueof(meas_res) } }
+	};
+
+	/* TITAN has weird (and often unusable) padding model, so we pad here manaully */
+	l3 := f_pad_oct(enc_GsmRrL3Message(meas_rep), 18, '00'O);
+	l2 := f_pad_oct(enc_LapdmFrameAB(valueof(ts_LAPDm_AB(0, meas_rep))), 21, '00'O);
+	l1h := ts_SacchL1Header(g_pars.l1_pars.ms_power_level, false,
+				g_pars.l1_pars.ms_actual_ta);
+
+	/* Send RR Measurement Report over the Um interface */
+	L1CTL.send(ts_L1CTL_DATA_REQ_SACCH(g_chan_nr, ts_RslLinkID_SACCH(0), l1h, l2));
+
+	/* Expect MEASurement RESult on the A-bis/RSL interface */
+	T.start(2.0);
+	alt {
+	[] RSL.receive(tr_RSL_MEAS_RES_OSMO(g_chan_nr, l3_info := l3)) {
+		setverdict(pass);
+		}
+	[] RSL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RSL MEASurement RESult");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
 }
 
 friend function f_rsl_chan_act(RSL_IE_ChannelMode mode,
@@ -7956,6 +7994,272 @@ testcase TC_est_dchan() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+private type record TopTestCase {
+	RSL_IE_BS_Power		bs_power,
+	RSL_IE_OSMO_TopAcchCap	top_cap,
+	record of TopTestStep	steps
+};
+private type record TopTestStep {
+	MeasurementResults	meas_res optional,
+	GsmRxLev		overpower_sacch,
+	GsmRxLev		overpower_facch
+};
+
+private function f_rxlev_match(template (present) RslLinkId link_id,
+			       template (present) GsmRxLev rxlev)
+runs on ConnHdlr {
+	var L1ctlDlMessage dl := f_L1CTL_rx_data(L1CTL, g_chan_nr, link_id);
+	if (not match(dl.dl_info.rx_level, rxlev)) {
+		setverdict(fail, "RxLev(", link_id, ") := ", dl.dl_info.rx_level,
+				 " does not match expected RxLev := ", rxlev);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+}
+
+private function f_TC_acch_overpower(charstring id) runs on ConnHdlr {
+	var TopTestCase tc := g_pars.spec.top;
+	var GsmRxLev rxlev_dcch;
+	var L1ctlDlMessage dl;
+
+	/* Wait for Pau ramping to complete */
+	f_sleep(6.0);
+
+	f_l1_tune(L1CTL);
+	L1CTL.clear;
+	RSL.clear;
+
+	/* Measure RxLev(BCCH), calculate RxLev(DCCH) */
+	dl := f_L1CTL_rx_data(L1CTL, t_RslChanNr_BCCH(0));
+	rxlev_dcch := dl.dl_info.rx_level - (tc.bs_power.power_level * 2);
+
+	log("RxLev(BCCH) := ", dl.dl_info.rx_level);
+	log("Expected RxLev(DCCH) := ", rxlev_dcch);
+
+	/* Additional IEs for the CHANnel ACTIVation message */
+	var template (value) RSL_IE_List ies := {
+		/* Employ BS power control in static mode */
+		t_RSL_IE(RSL_IE_MS_POWER, RSL_IE_Body:{
+			bs_power := tc.bs_power
+		}),
+		/* Indicate the given Temporary Overpower capability */
+		t_RSL_IE(RSL_IE_OSMO_TOP_ACCH_CAP, RSL_IE_Body:{
+			top_acch_cap := tc.top_cap
+		})
+	};
+
+	/* Establish a dedicated channel */
+	f_est_dchan(more_ies := valueof(ies));
+
+	/* Give it some time to stabilize */
+	f_sleep(0.480 * 2.0);
+	L1CTL.clear;
+	RSL.clear;
+
+	for (var integer i := 0; i < lengthof(tc.steps); i := i + 1) {
+		var TopTestStep step := tc.steps[i];
+		var GsmRxLev rxlev_facch := rxlev_dcch + step.overpower_facch;
+		var GsmRxLev rxlev_sacch := rxlev_dcch + step.overpower_sacch;
+
+		log("Executing step[", i, "] := ", step);
+
+		/* Send RR Measurement Report (if present) */
+		if (ispresent(step.meas_res)) {
+			f_transceive_meas_rep(step.meas_res);
+			f_sleep(0.480 * 2.0);
+			L1CTL.clear;
+		}
+
+		/* Check RxLev on both FACCH and SACCH */
+		f_rxlev_match(tr_RslLinkID_DCCH(?), rxlev_facch);
+		f_rxlev_match(tr_RslLinkID_SACCH(?), rxlev_sacch);
+
+		setverdict(pass);
+	}
+}
+testcase TC_acch_overpower_rxqual_thresh() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	/* Verify lower and upper RxQual thresholds */
+	var template TopTestCase top := {
+		bs_power := ts_RSL_IE_BS_Power(4), /* 4 x 2dB = 8dB */
+		top_cap := ts_RSL_IE_OSMO_TopAcchCap(4), /* 4dB */
+		steps := {
+			/* Channel established, no overpower */
+			{ meas_res := omit,
+			  overpower_sacch := 0, overpower_facch := 0 },
+
+			/* Worst possible RxQual value, overpower of 4dB */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7),
+			  overpower_sacch := 4, overpower_facch := 4 },
+			/* Worst possible RxQual value, disabling overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 0),
+			  overpower_sacch := 0, overpower_facch := 0 },
+
+			/* Lower threshold not reached, no overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 1),
+			  overpower_sacch := 0, overpower_facch := 0 },
+			/* Lower threshold not reached, no overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 2),
+			  overpower_sacch := 0, overpower_facch := 0 },
+			/* Lower threshold reached, overpower of 4dB */
+			{ meas_res := ts_MeasurementResults(rxq_f := 4),
+			  overpower_sacch := 4, overpower_facch := 4 },
+			/* Upper threshold not reached, keeping overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 3),
+			  overpower_sacch := 4, overpower_facch := 4 },
+			/* Upper threshold reached, disabling overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 2),
+			  overpower_sacch := 0, overpower_facch := 0 }
+		}
+	};
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN,
+			       spec := { top := top }, trx_nr := 1));
+	vc_conn := f_start_handler(refers(f_TC_acch_overpower), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_acch_overpower_rxqual_thresh_dtx() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	/* Verify handling of FULL and SUB values */
+	var template TopTestCase top := {
+		bs_power := ts_RSL_IE_BS_Power(4), /* 4 x 2dB = 8dB */
+		top_cap := ts_RSL_IE_OSMO_TopAcchCap(4), /* 4dB */
+		steps := {
+			/* Channel established, no overpower */
+			{ meas_res := omit,
+			  overpower_sacch := 0, overpower_facch := 0 },
+
+			/* Invalid measurement results, no overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7,
+							    rxq_s := 7,
+							    valid := false),
+			  overpower_sacch := 0, overpower_facch := 0 },
+
+			/* DTXu was in use, no overpower */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7,
+							    rxq_s := 0,
+							    dtx_used := true),
+			  overpower_sacch := 0, overpower_facch := 0 },
+			/* DTXu was in use, overpower of 4 dB */
+			{ meas_res := ts_MeasurementResults(rxq_f := 0,
+							    rxq_s := 7,
+							    dtx_used := true),
+			  overpower_sacch := 4, overpower_facch := 4 }
+		}
+	};
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN,
+			       spec := { top := top }, trx_nr := 1));
+	vc_conn := f_start_handler(refers(f_TC_acch_overpower), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_acch_overpower_always_on_facch() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	/* Overpower is always on, SACCH disabled */
+	var template TopTestCase top := {
+		bs_power := ts_RSL_IE_BS_Power(4), /* 4 x 2dB = 8dB */
+		top_cap := ts_RSL_IE_OSMO_TopAcchCap(overpower := 4, /* 4dB */
+						     rxqual := 0, /* always on */
+						     sacch_enable := false),
+		steps := {
+			/* Channel established, FACCH overpower */
+			{ meas_res := omit,
+			  overpower_sacch := 0, overpower_facch := 4 },
+			/* MS indicates good RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 0),
+			  overpower_sacch := 0, overpower_facch := 4 },
+			/* MS indicates bad RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7),
+			  overpower_sacch := 0, overpower_facch := 4 }
+		}
+	};
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN,
+			       spec := { top := top }, trx_nr := 1));
+	vc_conn := f_start_handler(refers(f_TC_acch_overpower), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_acch_overpower_always_on_sacch() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	/* Overpower is always on, FACCH disabled */
+	var template TopTestCase top := {
+		bs_power := ts_RSL_IE_BS_Power(4), /* 4 x 2dB = 8dB */
+		top_cap := ts_RSL_IE_OSMO_TopAcchCap(overpower := 4, /* 4dB */
+						     rxqual := 0, /* always on */
+						     facch_enable := false),
+		steps := {
+			/* Channel established, SACCH overpower */
+			{ meas_res := omit,
+			  overpower_sacch := 4, overpower_facch := 0 },
+			/* MS indicates good RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 0),
+			  overpower_sacch := 4, overpower_facch := 0 },
+			/* MS indicates bad RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7),
+			  overpower_sacch := 4, overpower_facch := 0 }
+		}
+	};
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN,
+			       spec := { top := top }, trx_nr := 1));
+	vc_conn := f_start_handler(refers(f_TC_acch_overpower), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_acch_overpower_limit() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	/* Overpower higher than current power reduction level (2dB) */
+	var template TopTestCase top := {
+		bs_power := ts_RSL_IE_BS_Power(1), /* 1 x 2dB = 2dB */
+		top_cap := ts_RSL_IE_OSMO_TopAcchCap(overpower := 4, /* 4dB */
+						     rxqual := 0 /* always on */),
+		steps := {
+			/* Channel established, ACCH overpower of 2dB */
+			{ meas_res := omit,
+			  overpower_sacch := 2, overpower_facch := 2 },
+			/* MS indicates good RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 0),
+			  overpower_sacch := 2, overpower_facch := 2 },
+			/* MS indicates bad RxQual, no difference */
+			{ meas_res := ts_MeasurementResults(rxq_f := 7),
+			  overpower_sacch := 2, overpower_facch := 2 }
+		}
+	};
+
+	pars := valueof(t_Pars(t_RslChanNr_Bm(0), ts_RSL_ChanMode_SIGN,
+			       spec := { top := top }, trx_nr := 1));
+	vc_conn := f_start_handler(refers(f_TC_acch_overpower), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 /* test generation of RLL ERR IND based on Um errors (TS 48.058 3.9) */
 /*	protocol error as per 44.006 */
 /*	link layer failure (repetition of I-frame N200 times without ACK */
@@ -8159,6 +8463,12 @@ control {
 	execute( TC_speech_rtp_tchh() );
 
 	execute( TC_early_immediate_assignment() );
+
+	execute( TC_acch_overpower_rxqual_thresh() );
+	execute( TC_acch_overpower_rxqual_thresh_dtx() );
+	execute( TC_acch_overpower_always_on_facch() );
+	execute( TC_acch_overpower_always_on_sacch() );
+	execute( TC_acch_overpower_limit() );
 
 	/* BEWARE: these test cases can potentially break the IUT or cause
 	 * weird/unexpected behavior.  Ensure that they are executed last. */
