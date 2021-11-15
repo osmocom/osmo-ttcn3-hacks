@@ -246,6 +246,15 @@ runs on RAW_PCU_Test_CT {
 	}
 }
 
+private function f_pcuvty_set_timer(integer t, integer val)
+runs on RAW_PCU_Test_CT {
+	if (t >= 0) {
+		f_vty_config2(PCUVTY, {"pcu"}, "timer T" & int2str(t) & " " & int2str(val));
+	} else {
+		f_vty_config2(PCUVTY, {"pcu"}, "timer X" & int2str(t * -1) & " " & int2str(val));
+	}
+}
+
 private function f_init_vty(charstring id, boolean egprs_only) runs on RAW_PCU_Test_CT {
 	map(self:PCUVTY, system:PCUVTY);
 	f_vty_set_prompts(PCUVTY);
@@ -2025,6 +2034,107 @@ testcase TC_n3105_max_t3195() runs on RAW_PCU_Test_CT {
 			 f_dl_block_ack_fn(dl_block, dl_fn));
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Verify configured T3172 is properly transmitted as WAIT_INDICATION in Pkt Access Reject in PACCH. */
+function f_TC_t3172(integer t3172_ms, BIT1 wait_ind_size) runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind;
+	var template IARRestOctets rest;
+	var BIT11 ra11;
+	var GprsMS ms;
+	var octetstring data := f_rnd_octstring(10);
+	var RlcmacDlBlock dl_block;
+	var template RlcmacDlBlock rej_tmpl;
+	var uint32_t dl_fn;
+	var uint32_t sched_fn;
+	var uint8_t wait_ind_val;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	info_ind := valueof(ts_PCUIF_INFO_default);
+
+	/* Only the first TRX is enabled. */
+	f_PCUIF_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+	f_PCUIF_PDCHMask_set(info_ind, '00000001'B, 0);
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	f_pcuvty_set_timer(3172, t3172_ms);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	var EGPRSPktChRequest req := {
+		one_phase := {
+			tag := '0'B,
+			multislot_class := '10101'B,
+			priority := '01'B,
+			random_bits := '101'B
+		}
+	};
+
+	/* We send 7 requests, the IUT gives us all available USFs (0..6) */
+	for (var integer i := 0; i < 7; i := i + 1) {
+		req.one_phase.random_bits := int2bit(f_rnd_int(8), 3);
+		f_TC_egprs_pkt_chan_req(req, tr_IMM_TBF_ASS);
+	}
+
+	/* SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS: */
+	f_sleep(X2002);
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0);
+
+	/* ACK the DL block */
+	f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block, '1'B);
+	f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc, false, ts_ChannelReqDescription()),
+			 f_dl_block_ack_fn(dl_block, dl_fn));
+
+	/* Since all USF are taken, we should receive a Reject: */
+
+	if (wait_ind_size == '0'B) {
+		wait_ind_val := t3172_ms / 1000;
+	} else {
+		wait_ind_val := t3172_ms / 20;
+	}
+	rej_tmpl := tr_RLCMAC_DL_CTRL(?, tr_RlcMacDlCtrl_PKT_ACC_REJ(
+						tr_PacketAccessRejectStruct_TLLI(ms.tlli,
+										 wait_ind_val,
+										 wait_ind_size)));
+	template (value) TsTrxBtsNum nr := ts_TsTrxBtsNum;
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   rej_tmpl));
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+testcase TC_t3172_wait_ind_size0() runs on RAW_PCU_Test_CT {
+	/* size=0 means value is provided in seconds. Due to value being 8
+	 * bit, in the 20ms step case (size=1) the maximum value possible is 20 * 255
+	 * = 5100. Hence, values above it should use size=0 to be able to
+	 * provide values in range. Let's use 6 seconds, 6000ms
+	 */
+	f_TC_t3172(6000, '0'B);
+}
+testcase TC_t3172_wait_ind_size1() runs on RAW_PCU_Test_CT {
+	f_TC_t3172(3000, '1'B);
 }
 
 /* Verify PCU handles correctly Countdown Procedure based on BS_CV_MAX */
@@ -6576,6 +6686,8 @@ control {
 	execute( TC_zero_x2031_t3191() );
 	execute( TC_t3193() );
 	execute( TC_n3105_max_t3195() );
+	execute( TC_t3172_wait_ind_size0() );
+	execute( TC_t3172_wait_ind_size1() );
 	execute( TC_countdown_procedure() );
 	execute( TC_ul_all_sizes() );
 	execute( TC_ul_data_toolong_fills_padding() );
