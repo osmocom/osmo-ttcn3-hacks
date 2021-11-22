@@ -1,0 +1,212 @@
+module Iuh_Emulation {
+
+/* Iuh Emulation, runs on top of Iuh_CodecPort.  It multiplexes/demultiplexes
+ * HNBAP and RUA.
+ *
+ * The Iuh_Emulation.main() function processes Iuh primitives from the Iuh
+ * socket via the Iuh_CodecPort, and dispatches them to HNBAP/RUA ports.
+ *
+ * (C) 2021 by sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from Iuh_CodecPort all;
+import from Iuh_CodecPort_CtrlFunct all;
+import from HNBAP_Types all;
+import from HNBAP_Constants all;
+import from HNBAP_PDU_Contents all;
+import from HNBAP_PDU_Descriptions all;
+import from HNBAP_IEs all;
+import from HNBAP_Templates all;
+import from RUA_Types all;
+import from RUA_Constants all;
+import from RUA_PDU_Contents all;
+import from RUA_PDU_Descriptions all;
+import from RUA_IEs all;
+import from RUA_Templates all;
+import from Iuh_Types all;
+
+import from General_Types all;
+import from Misc_Helpers all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from DNS_Helpers all;
+
+type enumerated IUHEM_EventUpDown {
+	IUHEM_EVENT_DOWN,
+	IUHEM_EVENT_UP
+}
+
+/* an event indicating us whether or not a connection is physically up or down. */
+type union IUHEM_Event {
+	IUHEM_EventUpDown	up_down
+}
+
+type port HNBAP_PT message {
+	inout HNBAP_PDU, IUHEM_Event;
+} with { extension "internal" };
+type port RUA_PT message {
+	inout RUA_PDU, IUHEM_Event;
+} with { extension "internal" };
+
+type component Iuh_Emulation_CT {
+	/* Port facing to the SCTP SUT */
+	port Iuh_CODEC_PT Iuh;
+	/* Port facing to user upper side stack: */
+	port HNBAP_PT HNBAP;
+	port RUA_PT RUA;
+
+	var Iuh_conn_parameters g_pars;
+	var charstring g_Iuh_id;
+	var integer g_self_conn_id := -1;
+	var IPL4asp_Types.ConnectionId g_last_conn_id := -1; /* server only */
+}
+
+type record Iuh_conn_parameters {
+	HostName remote_ip,
+	PortNumber remote_sctp_port,
+	HostName local_ip,
+	PortNumber local_sctp_port
+}
+
+function tr_Iuh_RecvFrom_R(template Iuh_PDU msg)
+runs on Iuh_Emulation_CT return template Iuh_RecvFrom {
+	var template Iuh_RecvFrom mrf := {
+		connId := ?,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+private template (value) SctpTuple ts_SCTP(template (omit) integer ppid := omit) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+private template PortEvent tr_SctpAssocChange := {
+	sctpEvent := {
+		sctpAssocChange := ?
+	}
+}
+private template PortEvent tr_SctpPeerAddrChange := {
+	sctpEvent := {
+		sctpPeerAddrChange := ?
+	}
+}
+
+private function emu_is_server() runs on Iuh_Emulation_CT return boolean {
+	return g_pars.remote_sctp_port == -1
+}
+
+/* Resolve TCP/IP connection identifier depending on server/client mode */
+private function f_iuh_conn_id() runs on Iuh_Emulation_CT
+return IPL4asp_Types.ConnectionId {
+	var IPL4asp_Types.ConnectionId conn_id;
+
+	if (not emu_is_server()) {
+		conn_id := g_self_conn_id;
+	} else {
+		conn_id := g_last_conn_id;
+	}
+
+	if (conn_id == -1) { /* Just to be sure */
+		f_shutdown(__FILE__, __LINE__, fail, "Connection is not established");
+	}
+
+	return conn_id;
+}
+
+function main(Iuh_conn_parameters p, charstring id) runs on Iuh_Emulation_CT {
+	var Result res;
+	g_pars := p;
+	g_Iuh_id := id;
+
+	map(self:Iuh, system:Iuh_CODEC_PT);
+	if (emu_is_server()) {
+		res := Iuh_CodecPort_CtrlFunct.f_IPL4_listen(Iuh, p.local_ip, p.local_sctp_port, { sctp := valueof(ts_SCTP) });
+	} else {
+		res := Iuh_CodecPort_CtrlFunct.f_IPL4_connect(Iuh, p.remote_ip, p.remote_sctp_port,
+								p.local_ip, p.local_sctp_port, -1, { sctp := valueof(ts_SCTP) });
+	}
+	if (not ispresent(res.connId)) {
+		f_shutdown(__FILE__, __LINE__, fail, "Could not connect Iuh socket, check your configuration");
+	}
+	g_self_conn_id := res.connId;
+
+	/* notify user about SCTP establishment */
+	if (p.remote_sctp_port != -1) {
+		HNBAP.send(IUHEM_Event:{up_down:=IUHEM_EVENT_UP});
+	}
+
+	while (true) {
+		var Iuh_RecvFrom mrf;
+		var HNBAP_PDU hnbap_msg;
+		var RUA_PDU rua_msg;
+		var ASP_Event asp_evt;
+
+		alt {
+		/* HNBAP from client: pass on transparently */
+		[] HNBAP.receive(HNBAP_PDU:?) -> value hnbap_msg {
+			/* Pass message through */
+			Iuh.send(t_Iuh_Send_HNBAP(f_iuh_conn_id(), hnbap_msg));
+			}
+		/* RUA from client: pass on transparently */
+		[] RUA.receive(RUA_PDU:?) -> value rua_msg {
+			/* Pass message through */
+			Iuh.send(t_Iuh_Send_RUA(f_iuh_conn_id(), rua_msg));
+			}
+
+		/* Iuh received from peer (HNBGW or HnodeB) */
+		[] Iuh.receive(tr_Iuh_RecvFrom_R(?)) -> value mrf {
+			if (not match(mrf.connId, f_iuh_conn_id())) {
+				f_shutdown(__FILE__, __LINE__, fail, log2str("Received message from unexpected conn_id!", mrf));
+			}
+
+			if (match(mrf, t_Iuh_RecvFrom_HNBAP(?))) {
+				HNBAP.send(mrf.msg.hnbap);
+			} else if (match(mrf, t_Iuh_RecvFrom_RUA(?))) {
+				RUA.send(mrf.msg.rua);
+			} else {
+				/* TODO: special handling, as it contains multiple HNB connection ids */
+				f_shutdown(__FILE__, __LINE__, fail, log2str("UNEXPECTED MESSAGE RECEIVED!", mrf));
+			}
+		}
+		[] Iuh.receive(tr_SctpAssocChange) { }
+		[] Iuh.receive(tr_SctpPeerAddrChange)  { }
+
+		/* server only */
+		[] Iuh.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
+			if (not emu_is_server()) {
+				f_shutdown(__FILE__, __LINE__, fail, log2str("Unexpected event receiver in client mode", asp_evt));
+			}
+			g_last_conn_id := asp_evt.connOpened.connId;
+			log("Established a new Iuh connection (conn_id=", g_last_conn_id, ")");
+
+			HNBAP.send(IUHEM_Event:{up_down:=IUHEM_EVENT_UP}); /* TODO: send g_last_conn_id */
+		}
+
+		[] Iuh.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
+			log("Iuh: Closed");
+			g_self_conn_id := -1;
+			HNBAP.send(IUHEM_Event:{up_down:=IUHEM_EVENT_DOWN});  /* TODO: send asp_evt.connClosed.connId */
+			if (not emu_is_server()) {
+				self.stop;
+			}
+		}
+		}
+	}
+}
+
+}
