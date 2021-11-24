@@ -27,11 +27,19 @@ import from HNBAP_Templates all;
 
 import from Iuh_Emulation all;
 
+import from HNBLLIF_CodecPort all;
+import from HNBLLIF_Types all;
+import from HNBLLIF_Templates all;
+
 /* this component represents a single Iuh connection at the HNBGW. */
 type component HNBGW_ConnHdlr extends StatsD_ConnHdlr {
 	port TELNETasp_PT HNBVTY;
 	port HNBAP_PT HNBAP;
 	port RUA_PT RUA;
+	/* HNBLLIF Interface of HNodeB */
+	port HNBLLIF_CODEC_PT LLSK;
+	var integer g_llsk_conn_id;
+
 	var TestHdlrParams g_pars;
 
 	var boolean g_vty_initialized := false;
@@ -47,12 +55,11 @@ function f_HNBGW_ConnHdlr_init_vty() runs on HNBGW_ConnHdlr {
 }
 
 /* initialize all parameters */
-function f_HNBGW_ConnHdlr_init(TestHdlrParams pars) runs on HNBGW_ConnHdlr {
-	var integer i := 0;
+function f_HNBGW_ConnHdlr_init(charstring id, TestHdlrParams pars) runs on HNBGW_ConnHdlr {
 	var Iuh_Emulation_CT vc_Iuh;
 
 	g_pars := valueof(pars);
-	vc_Iuh := Iuh_Emulation_CT.create("HNBGW" & int2str(i));
+	vc_Iuh := Iuh_Emulation_CT.create(id & "-HNBGW");
 	connect(self:HNBAP, vc_Iuh:HNBAP);
 	connect(self:RUA, vc_Iuh:RUA);
 
@@ -61,18 +68,51 @@ function f_HNBGW_ConnHdlr_init(TestHdlrParams pars) runs on HNBGW_ConnHdlr {
 	iuh_pars.remote_sctp_port := -1;
 	iuh_pars.local_ip := g_pars.hnbgw_addr;
 	iuh_pars.local_sctp_port  := g_pars.hnbgw_port;
-	vc_Iuh.start(Iuh_Emulation.main(iuh_pars, "Iuh" & int2str(i)));
+	vc_Iuh.start(Iuh_Emulation.main(iuh_pars, id & "-Iuh"));
 
 	f_HNBGW_ConnHdlr_init_vty();
+
+	/* Connect to HNB on LLSK and do HELLO ping-pong  */
+	f_start_hnbllif(LLSK, id & "-LLSK", g_pars.hnbllif_sk_path,  g_llsk_conn_id);
+}
+
+
+function f_start_hnbllif(HNBLLIF_CODEC_PT pt, charstring id, charstring hnbllif_sk_path, out integer hnbllif_conn_id) {
+	timer T := 2.0;
+	var HNBLLIF_send_data sd;
+	var HNBLLIF_Message last_hello_cnf;
+	if (hnbllif_sk_path == "") {
+		hnbllif_conn_id := -1;
+		return;
+	}
+	hnbllif_conn_id := f_hnbllif_connect(pt, hnbllif_sk_path);
+
+	T.start;
+	pt.send(t_SD_HNBLLIF(hnbllif_conn_id, ts_HNBLLIF_CTL_HELLO_REQ(HNBLL_IF_SAPI_CTL, HNBLLIF_Types.mp_hnbllif_version)));
+	alt {
+	[] as_hnbllif_hello_cnf(pt, hnbllif_conn_id, last_hello_cnf, HNBLL_IF_SAPI_CTL, HNBLLIF_Types.mp_hnbllif_version);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for HNBLLIF HELLO.REQ SAPI=CTL");
+		}
+	}
+	pt.send(t_SD_HNBLLIF(hnbllif_conn_id, ts_HNBLLIF_CTL_HELLO_REQ(HNBLL_IF_SAPI_IUH, 0)));
+	alt {
+	[] as_hnbllif_hello_cnf(pt, hnbllif_conn_id, last_hello_cnf, HNBLL_IF_SAPI_IUH, 0);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for HNBLLIF HELLO.REQ SAPI=IUH");
+		}
+	}
 }
 
 type record TestHdlrParams {
+	charstring hnbllif_sk_path, /* "" means don't connect */
 	charstring hnbgw_addr,
 	charstring hnodeb_addr,
 	integer hnbgw_port,
 	uint16_t rnc_id,
 	charstring hNB_Identity_Info,
-	OCT3 plmnid,
+	uint16_t mcc,
+	uint16_t mnc,
 	uint32_t cell_identity,
 	uint16_t lac,
 	uint8_t rac,
@@ -82,23 +122,61 @@ type record TestHdlrParams {
 /* Note: Do not use valueof() to get a value of this template, use
  * f_gen_test_hdlr_pars() instead in order to get a configuration. */
 template (value) TestHdlrParams t_def_TestHdlrPars := {
+	hnbllif_sk_path := HNBLL_SOCK_DEFAULT,
 	hnbgw_addr := "127.0.0.1",
 	hnodeb_addr := "127.0.0.1",
 	hnbgw_port := 29169,
 	rnc_id := 23,
 	hNB_Identity_Info := "OsmoHNodeB",
-	plmnid := '00F110'O,
+	mcc := 1,
+	mnc := 1,
 	cell_identity := 1,
 	lac := 2,
 	rac := 3,
 	sac := 4
 }
 
+/* HNBLLIF socket may at any time receive a new INFO.ind */
+altstep as_hnbllif_hello_cnf(HNBLLIF_CODEC_PT pt, integer hnbllif_conn_id,
+				out HNBLLIF_Message last_hello_cnf,
+				template (present) HNBLLIF_Sapi exp_sapi := ?,
+				template (present) uint16_t exp_version := ?) {
+	var HNBLLIF_send_data sd;
+	[] pt.receive(t_SD_HNBLLIF(hnbllif_conn_id, tr_HNBLLIF_CTL_HELLO_CNF(exp_sapi, exp_version))) -> value sd {
+		last_hello_cnf := sd.data;
+		}
+	[] pt.receive(t_SD_HNBLLIF(hnbllif_conn_id, tr_HNBLLIF_CTL_HELLO_CNF(?))) -> value sd {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Invalid API_VERSION received");
+		}
+}
+
+function f_llsk_rx(template (present) HNBLLIF_Message exp_tmpl) runs on HNBGW_ConnHdlr
+return template (present) HNBLLIF_send_data {
+	return t_SD_HNBLLIF(g_llsk_conn_id, exp_tmpl);
+}
+
+function f_llsk_tx(template (value) HNBLLIF_Message tx_msg) runs on HNBGW_ConnHdlr
+return template (value) HNBLLIF_send_data {
+	return ts_SD_HNBLLIF(g_llsk_conn_id, tx_msg);
+}
+
+function f_enc_mcc_mnc(uint16_t mcc_uint, uint16_t mnc_uint) return OCT3 {
+	var hexstring mnc;
+	var hexstring mcc := int2hex(mcc_uint, 3);
+
+	if (mnc_uint < 100) {
+		mnc := int2hex(mnc_uint, 2);
+		return hex2oct(mcc[1] & mcc[0] & 'F'H & mcc[2] & mnc[1] & mnc[0]);
+	} else {
+		mnc := int2hex(mnc_uint, 3);
+		return hex2oct(mcc[1] & mcc[0] & mnc[2] & mcc[2] & mnc[1] & mnc[0]);
+	}
+}
 
 function f_handle_hnbap_hnb_register_req()
 runs on HNBGW_ConnHdlr {
 	HNBAP.receive(tr_HNBAP_HNBRegisterRequest(char2oct(g_pars.hNB_Identity_Info),
-						  g_pars.plmnid,
+						  f_enc_mcc_mnc(g_pars.mcc, g_pars.mnc),
 						  int2bit(g_pars.cell_identity, 28),
 						  int2oct(g_pars.lac, 2),
 						  int2oct(g_pars.rac, 1),

@@ -24,6 +24,7 @@ FILES="
 	TELNETasp_PT.cc
 	HNBAP_EncDec.cc
 	RUA_EncDec.cc
+	UD_PT.cc
 "
 
 export CPPFLAGS_TTCN3="
