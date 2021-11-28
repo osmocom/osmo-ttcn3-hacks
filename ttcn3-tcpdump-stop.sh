@@ -32,6 +32,19 @@ if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi
 
+# Order the SUT to print a talloc report
+if [ "z$OSMO_SUT_HOST" != "z" ] && [ "z$OSMO_SUT_PORT" != "z" ]; then
+	if [ -x "$(command -v osmo_interact_vty.py)" ]; then
+		osmo_interact_vty.py \
+			-H $OSMO_SUT_HOST -p $OSMO_SUT_PORT \
+			-c "en; show talloc-context application full" \
+				> "$TTCN3_PCAP_PATH/$TESTCASE.talloc"
+	else
+		echo "Missing osmo_interact_vty.py from osmo-python-tests!"
+		echo " -> Unable to obtain talloc report from the SUT"
+	fi
+fi
+
 # Wait for up to 2 seconds if we keep receiving traffinc from packet dumper,
 # otherwise we might lose last packets from test.
 i=0
