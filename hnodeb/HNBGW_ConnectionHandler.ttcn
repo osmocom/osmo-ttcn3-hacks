@@ -27,6 +27,9 @@ import from HNBAP_Templates all;
 
 import from Iuh_Emulation all;
 
+import from RTP_Types all;
+import from RTP_Emulation all;
+
 import from HNBLLIF_CodecPort all;
 import from HNBLLIF_Types all;
 import from HNBLLIF_Templates all;
@@ -40,6 +43,9 @@ type component HNBGW_ConnHdlr extends StatsD_ConnHdlr {
 	port HNBLLIF_CODEC_PT LLSK;
 	var integer g_llsk_conn_id;
 
+	var RTP_Emulation_CT vc_RTPEM;
+	port RTPEM_CTRL_PT RTPEM_CTRL;
+	port RTPEM_DATA_PT RTPEM_DATA;
 	var TestHdlrParams g_pars;
 
 	var boolean g_vty_initialized := false;
@@ -102,6 +108,13 @@ function f_start_hnbllif(HNBLLIF_CODEC_PT pt, charstring id, charstring hnbllif_
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for HNBLLIF HELLO.REQ SAPI=IUH");
 		}
 	}
+	pt.send(t_SD_HNBLLIF(hnbllif_conn_id, ts_HNBLLIF_CTL_HELLO_REQ(HNBLL_IF_SAPI_AUDIO, 0)));
+	alt {
+	[] as_hnbllif_hello_cnf(pt, hnbllif_conn_id, last_hello_cnf, HNBLL_IF_SAPI_AUDIO, 0);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for HNBLLIF HELLO.REQ SAPI=AUDIO");
+		}
+	}
 }
 
 type record TestHdlrParams {
@@ -109,6 +122,7 @@ type record TestHdlrParams {
 	charstring hnbgw_addr,
 	charstring hnodeb_addr,
 	integer hnbgw_port,
+	integer hnbgw_rtp_port,
 	uint16_t rnc_id,
 	charstring hNB_Identity_Info,
 	uint16_t mcc,
@@ -126,6 +140,7 @@ template (value) TestHdlrParams t_def_TestHdlrPars := {
 	hnbgw_addr := "127.0.0.1",
 	hnodeb_addr := "127.0.0.1",
 	hnbgw_port := 29169,
+	hnbgw_rtp_port := 9000,
 	rnc_id := 23,
 	hNB_Identity_Info := "OsmoHNodeB",
 	mcc := 1,
@@ -185,6 +200,38 @@ runs on HNBGW_ConnHdlr {
 	HNBAP.send(ts_HNBAP_HNBRegisterAccept(g_pars.rnc_id));
 }
 
+/* Initialize and start the RTP emulation component for a ConnHdlr */
+function f_HNBGW_rtpem_activate(inout octetstring payload,
+				 HostName remote_host,
+				 PortNumber remote_port,
+				 RtpemConfig cfg := c_RtpemDefaultCfg,
+				 RtpemMode mode := RTPEM_MODE_BIDIR)
+runs on HNBGW_ConnHdlr {
+	/* Step 0: initialize, connect and start the emulation component */
+	vc_RTPEM := RTP_Emulation_CT.create(testcasename() & "-RTPEM");
+	map(vc_RTPEM:RTP, system:RTP);
+	map(vc_RTPEM:RTCP, system:RTCP);
+	connect(vc_RTPEM:CTRL, self:RTPEM_CTRL);
+	connect(vc_RTPEM:DATA, self:RTPEM_DATA);
+	vc_RTPEM.start(RTP_Emulation.f_main());
 
+	/* Configure the RTP parameters (TCH/FS). TODO: IuUP */
+	var integer payload_len := 33;
+	var octetstring hdr := 'D0'O;
+
+	/* Pad the payload to conform the expected length */
+	payload := f_pad_oct(hdr & payload, payload_len, '00'O);
+	cfg.tx_fixed_payload := payload;
+	f_rtpem_configure(RTPEM_CTRL, cfg);
+
+	/* Bind the RTP emulation to the configured address */
+	f_rtpem_bind(RTPEM_CTRL, g_pars.hnbgw_addr, g_pars.hnbgw_rtp_port);
+
+	/* Connect to the IUT's address/port parsed from CRCX ACK */
+	f_rtpem_connect(RTPEM_CTRL, remote_host, remote_port);
+
+	/* Set the given RTP emulation mode */
+	f_rtpem_mode(RTPEM_CTRL, mode);
+}
 
 }
