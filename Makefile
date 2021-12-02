@@ -108,3 +108,10 @@ $(foreach dir,$(SUBDIRS), \
 	$(eval $(call DIR_clean_template,$(dir)))	\
 	$(eval $(call DIR_all_template,$(dir)))		\
 	)
+
+.PHONY: tags
+tags:
+	find $(shell pwd) \
+		-type f -name "*.ttcn" -o \
+		-type f -name "*.ttcnpp" | \
+	xargs ctags
