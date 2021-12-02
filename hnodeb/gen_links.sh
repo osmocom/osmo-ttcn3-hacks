@@ -44,6 +44,10 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
+FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library/hnbap
 FILES="HNBAP_CommonDataTypes.asn HNBAP_Constants.asn HNBAP_Containers.asn HNBAP_IEs.asn HNBAP_PDU_Contents.asn HNBAP_PDU_Descriptions.asn "
 FILES+="HNBAP_EncDec.cc  HNBAP_Types.ttcn  HNBAP_Templates.ttcn "
@@ -59,7 +63,7 @@ FILES="HNBLLIF_Types.ttcn HNBLLIF_Templates.ttcn HNBLLIF_CodecPort.ttcn "
 FILES+="Iuh_Types.ttcn Iuh_CodecPort.ttcn Iuh_CodecPort_CtrlFunctDef.cc Iuh_CodecPort_CtrlFunct.ttcn Iuh_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_EncDec.cc IuUP_Emulation.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcn "
-
+FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn IPCP_Types.ttcn GSM_Types.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

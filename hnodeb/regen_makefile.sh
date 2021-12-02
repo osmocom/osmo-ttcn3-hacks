@@ -25,6 +25,9 @@ FILES="
 	HNBAP_EncDec.cc
 	RUA_EncDec.cc
 	UD_PT.cc
+	GTPC_EncDec.cc
+	GTPU_EncDec.cc
+	GTP_CodecPort_CtrlFunctDef.cc
 "
 
 export CPPFLAGS_TTCN3="
