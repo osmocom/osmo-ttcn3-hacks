@@ -1069,6 +1069,117 @@ testcase TC_BVC_bringup() runs on test_CT {
 	f_cleanup();
 }
 
+testcase TC_BVC_bringup_conflicting() runs on test_CT {
+	var float t_guard := 15.0;
+	var BssgpStatusIndication bsi;
+	var integer i;
+
+
+	g_Tguard.start(t_guard);
+	activate(as_gTguard(g_Tguard));
+
+	f_ipa_ctrl_start_client(mp_gbproxy_ip, mp_gbproxy_ctrl_port);
+
+	var BssgpBvcConfigs bvcs := { };
+	for (i := 0; i < lengthof(mp_gbconfigs); i := i+1) {
+		g_pcu[i].cfg := mp_gbconfigs[i];
+		g_pcu[i].cfg.bvc[0].bvci := 23;
+		/* make sure all have a proper create_cb, which cannot be specified in config file */
+		f_fix_create_cb(g_pcu[i].cfg);
+		/* concatenate all the PCU-side BVCs for the SGSN side */
+		bvcs := bvcs & g_pcu[i].cfg.bvc;
+	}
+
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		g_sgsn[i].cfg := {
+			nsei := mp_nsconfig_sgsn[i].nsei,
+			sgsn_role := true,
+			bvc := bvcs
+		}
+	}
+
+	f_init_vty();
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		f_vty_transceive(GBPVTY, "nsvc nsei " & int2str(g_sgsn[i].cfg.nsei) & " force-unconfigured");
+	}
+	for (i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		f_vty_transceive(GBPVTY, "nsvc nsei " & int2str(g_pcu[i].cfg.nsei) & " force-unconfigured");
+		f_vty_transceive(GBPVTY, "delete-gbproxy-peer " & int2str(g_pcu[i].cfg.nsei) & " only-bvc");
+	}
+
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		f_init_gb_sgsn(g_sgsn[i], "GbProxy_Test", i);
+	}
+	f_sleep(4.0);
+	for (i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		f_init_gb_pcu(g_pcu[i], "GbProxy_Test", i);
+	}
+
+	/* wait until all BVC are unblocked on both sides */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] SGSN_MGMT.receive(BssgpStatusIndication:{*, ?, ?}) {
+		repeat;
+		}
+	[] SGSN_MGMT.receive(BssgpResetIndication:?) {
+		repeat;
+		}
+	[] SGSN_MGMT.receive {
+		f_shutdown(__FILE__, __LINE__, fail, "Received unexpected message on SGSN_MGMT");
+		}
+	[] PCU_MGMT.receive(BssgpStatusIndication:{*, ?, BVC_S_UNBLOCKED}) -> value bsi {
+		repeat;
+		}
+	[] PCU_MGMT.receive(BssgpStatusIndication:{*, ?, ?}) {
+		repeat;
+		}
+	[] PCU_MGMT.receive(BssgpResetIndication:{0}) {
+		repeat;
+		}
+	[] PCU_MGMT.receive {
+		f_shutdown(__FILE__, __LINE__, fail, "Received unexpected message on PCU_MGMT");
+		}
+	[] T.timeout {
+		}
+	}
+
+	/* Wait to ensure the gbproxy processed the RESET_ACK messages from the SGSN.
+	 * Otherwise the state might still be WAIT_RESET_ACK */
+	f_sleep(0.2);
+
+	/* Verify BVCs, but ignore conflicting BVCI 23 */
+	/* verify SGSN-side BVC FSM in IUT are UNBLOCKED */
+	for (i := 0; i < lengthof(mp_nsconfig_sgsn); i := i+1) {
+		f_bvc_fsm_ensure_state(mp_nsconfig_sgsn[i].nsei, 0, "UNBLOCKED");
+		/* iterate over list and check all BVCI */
+		for (var integer j := 0; j < lengthof(g_sgsn[i].cfg.bvc); j := j+1) {
+			var BssgpBvci bvci := g_sgsn[i].cfg.bvc[j].bvci;
+			if (bvci == 23) {
+				continue;
+			}
+			f_bvc_fsm_ensure_state(mp_nsconfig_sgsn[i].nsei, bvci, "UNBLOCKED");
+		}
+	}
+	/* verify PCU-side BVC FSM in IUT are UNBLOCKED */
+	for (i := 0; i < lengthof(mp_nsconfig_pcu); i := i+1) {
+		f_bvc_fsm_ensure_state(mp_nsconfig_pcu[i].nsei, 0, "UNBLOCKED");
+		/* iterate over list and check all BVCI */
+		for (var integer j := 0; j < lengthof(g_pcu[i].cfg.bvc); j := j+1) {
+			var BssgpBvci bvci := g_pcu[i].cfg.bvc[j].bvci;
+			if (bvci == 23) {
+				continue;
+			}
+			f_bvc_fsm_ensure_state(mp_nsconfig_pcu[i].nsei, bvci, "UNBLOCKED");
+		}
+	}
+
+	/* re-start guard timer after all BVCs are up, so it only counts the actual test case */
+	g_Tguard.start(t_guard);
+	f_start_handlers(refers(f_TC_BVC_bringup), testcasename(), 51);
+	f_cleanup();
+}
+
 friend function f_bssgp_suspend(integer ran_idx := 0) runs on BSSGP_ConnHdlr return OCT1 {
 	var BssgpBvcConfig bvcc := g_pars.pcu[ran_idx].cfg.bvc[0];
 	timer T := 5.0;
@@ -3592,6 +3703,10 @@ testcase TC_status_ptp_dl_bvci() runs on GlobalTest_CT
 
 control {
 	execute( TC_BVC_bringup() );
+	/* Depends on osmo-gbproxy > 0.2.0 */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_BVC_bringup_conflicting() );
+	}
 	execute( TC_ul_unitdata() );
 	execute( TC_ul_unitdata_pool_failure() );
 	execute( TC_dl_unitdata() );
