@@ -1,11 +1,11 @@
 #!/bin/sh
 
 PIDFILE_PCAP=/tmp/pcap.pid
-TCPDUMP=/usr/sbin/tcpdump
-DUMPCAP=/usr/bin/dumpcap
+TCPDUMP=$(command -v tcpdump)
+DUMPCAP=$(command -v dumpcap)
 
 PIDFILE_NETCAT=/tmp/netcat.pid
-NETCAT=/bin/nc
+NETCAT=$(command -v nc)
 GSMTAP_PORT=4729
 
 TESTCASE=$1
