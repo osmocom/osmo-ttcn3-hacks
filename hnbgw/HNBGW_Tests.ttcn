@@ -1,0 +1,275 @@
+module HNBGW_Tests {
+
+/* Integration Tests for OsmoHNBGW
+ * (C) 2021 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoHNBGW while emulating the hNodeB as well as MSC, SGSN, MGW
+ * See README for more details.
+ */
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+import from StatsD_Checker all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from HNBAP_Templates all;
+import from RUA_IEs all;
+import from RUA_Templates all;
+import from HNBAP_PDU_Descriptions all;
+
+import from Iuh_Emulation all;
+
+import from RANAP_Types all;
+import from RAN_Adapter all;
+
+import from BSSAP_Types all;
+import from RAN_Adapter all;
+import from RAN_Emulation all;
+/*import from BSSAP_LE_Adapter all;
+import from BSSAP_LE_CodecPort all;
+import from BSSAP_LE_Types all;
+import from BSSLAP_Types all;*/
+import from BSSAP_CodecPort all;
+//import from BSSMAP_Templates all;
+import from IPA_Emulation all;
+import from IPA_CodecPort all;
+import from IPA_Types all;
+
+
+import from MGCP_Emulation all;
+import from MGCP_Types all;
+import from MGCP_Templates all;
+import from MGCP_CodecPort all;
+import from SDP_Types all;
+
+modulepar {
+	/* IP address at which the HNodeB can be reached */
+	charstring mp_hnodeb_ip := "127.0.0.1";
+	integer mp_hnodeb_port := -1;
+
+	/* IP address at which the test binds */
+	charstring mp_hnbgw_ip := "127.0.0.1";
+	integer mp_hnbgw_iuh_port := 29169;
+
+	charstring mp_mgw_ip := "127.0.0.1";
+	integer mp_mgw_port := 2427;
+
+	RAN_Configuration mp_msc_cfg := {
+		transport := RANAP_TRANSPORT_IuCS,
+		sccp_service_type := "mtp3_itu",
+		sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" },
+		own_pc := 188,	/* 0.23.4 first MSC emulation */
+		own_ssn := 142,
+		peer_pc := 189, /* 0.23.5 osmo-hnbgw */
+		peer_ssn := 142,
+		sio := '83'O,
+		rctx := 1
+	};
+	RAN_Configuration mp_sgsn_cfg := {
+		transport := RANAP_TRANSPORT_IuCS,
+		sccp_service_type := "mtp3_itu",
+		sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" },
+		own_pc := 185,	/* 0.23.1 first MSC emulation */
+		own_ssn := 142,
+		peer_pc := 189, /* 0.23.5 osmo-hnbgw */
+		peer_ssn := 142,
+		sio := '83'O,
+		rctx := 1
+	};
+}
+
+const hexstring ranap_cm_service_req := '001340400000060003400100000f40060000f11028b6003a40080000f110ffffffff0010400e0d052411035758a605f44e9d4aef004f400300001c0056400500f1100017'H;
+const hexstring ranap_auth_req := '00144032000002001040262505120217dc146aeac56cb5ff6d5fb51f47f19220108ca5a6d0c8110000b9e9272498872764003b400100'H;
+const hexstring ranap_auth_resp := '001440140000010010400d0c0554ccbdd0302104002f3ae4'H;
+const hexstring ranap_paging := '000e401e0000030003400100001740095000010100000000f10040400500b6cf4773'H;
+const hexstring ranap_rab_ass_req := '0000005900000100364052000001003500487824cd80102fa7201a2c0000f44c080a028000514000272028140067400000222814003c40000000503d02000227c03500010a0901a200000000000000000000000000401f4a0000400100'H;
+const hexstring iu_release_compl := '20010003000000'H;
+
+type component test_CT extends CTRL_Adapter_CT {
+	var boolean g_initialized := false;
+
+	var MGCP_Emulation_CT vc_MGCP;
+	var Iuh_Emulation_CT vc_Iuh;
+
+	var RAN_Adapter g_msc;
+	var RAN_Adapter g_sgsn;
+	/* SGSN IuPS missing */
+
+	port TELNETasp_PT HNBGWVTY;
+	port HNBAP_PT HNBAP;
+	port RUA_PT RUA;
+
+	/* global test case guard timer (actual timeout value is set in f_init()) */
+	timer T_guard := 30.0;
+}
+
+/* global altstep for global guard timer; */
+altstep as_Tguard() runs on test_CT {
+	[] T_guard.timeout {
+			setverdict(fail, "Timeout of T_guard");
+			mtc.stop;
+		}
+}
+
+friend function f_logp(TELNETasp_PT pt, charstring log_msg)
+{
+	// log on TTCN3 log output
+	log(log_msg);
+	// log in stderr log
+	f_vty_transceive(pt, "logp lglobal notice TTCN3 f_logp(): " & log_msg);
+}
+
+function f_init_vty(charstring id := "foo") runs on test_CT {
+	if (HNBGWVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:HNBGWVTY, system:HNBGWVTY);
+	f_vty_set_prompts(HNBGWVTY);
+	f_vty_transceive(HNBGWVTY, "enable");
+}
+
+function f_init_mgcp(charstring id) runs on test_CT {
+	id := id & "-MGCP";
+	var MGCPOps ops := {
+		create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(MGCP_Emulation.DummyUnitdataCallback)
+	}
+	var MGCP_conn_parameters pars := {
+		callagent_ip := mp_hnbgw_ip,
+		callagent_udp_port := -1,
+		mgw_ip := mp_mgw_ip,
+		mgw_udp_port := mp_mgw_port,
+		multi_conn_mode := false
+	}
+
+	vc_MGCP := MGCP_Emulation_CT.create(id);
+	map(vc_MGCP:MGCP, system:MGCP_CODEC_PT);
+	vc_MGCP.start(MGCP_Emulation.main(ops, pars, id));
+}
+
+/* global initialization function */
+function f_init(charstring id := "HBGW", float guard_timeout := 30.0) runs on test_CT {
+
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	var Iuh_conn_parameters iuh_pars;
+	iuh_pars.remote_ip := mp_hnbgw_ip;
+	iuh_pars.remote_sctp_port := mp_hnbgw_iuh_port;
+	iuh_pars.local_ip := mp_hnodeb_ip;
+	iuh_pars.local_sctp_port := mp_hnodeb_port;
+	vc_Iuh := Iuh_Emulation_CT.create(id & "-Iuh");
+	connect(self:HNBAP, vc_Iuh:HNBAP);
+	connect(self:RUA, vc_Iuh:RUA);
+
+	vc_Iuh.start(Iuh_Emulation.main(iuh_pars, id & "-Iuh"));
+	f_init_mgcp(id);
+
+	/* MSC */
+	var RanOps ranops := {
+		ranap_create_cb := refers(RAN_Emulation.RanapExpectedCreateCallback),
+		ranap_unitdata_cb := omit,
+		ps_domain := false,
+		decode_dtap := false,
+		role_ms := false,
+		protocol := RAN_PROTOCOL_RANAP,
+		transport := RANAP_TRANSPORT_IuCS,
+		use_osmux := false,
+		sccp_addr_local := omit,
+		sccp_addr_peer := omit
+	};
+	f_ran_adapter_init(g_msc, mp_msc_cfg, "HNBGW_Test", ranops);
+	f_ran_adapter_start(g_msc);
+
+	/* SGSN*/
+
+
+	f_init_vty("VirtHNBGW");
+}
+
+friend function f_shutdown_helper() runs on test_CT {
+	all component.stop;
+	setverdict(pass);
+	mtc.stop;
+}
+
+/*private function f_tc_hnb_register_request(charstring id) runs on HNBGW_ConnHdlr {
+	f_handle_hnbap_hnb_register_req();
+	f_sleep(1.0);
+}*/
+
+testcase TC_hnb_register() runs on test_CT {
+	//var HNBGW_ConnHdlr vc_conn;
+	f_init();
+	HNBAP.send(tr_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
+					'00F110'O,
+					int2bit(1, 28),
+					int2oct(2, 2),
+					int2oct(3, 1),
+					int2oct(4, 2)));
+
+	alt {
+	[] HNBAP.receive(tr_HNBAP_HNBRegisterAccept(?)) {
+		setverdict(pass);
+	}
+	[] HNBAP.receive(IUHEM_Event:?) {
+		repeat;
+	}
+	}
+
+	f_sleep(10.0);
+	f_shutdown_helper();
+}
+
+testcase TC_RAB_Assignment() runs on test_CT {
+	//var HNBGW_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(3.0);
+	HNBAP.send(tr_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
+					'00F110'O,
+					int2bit(1, 28),
+					int2oct(2, 2),
+					int2oct(3, 1),
+					int2oct(4, 2)));
+
+	alt {
+	[] HNBAP.receive(tr_HNBAP_HNBRegisterAccept(?)) {
+		setverdict(pass);
+	}
+	[] HNBAP.receive(IUHEM_Event:?) {
+		repeat;
+	}
+	}
+
+	RUA.send(tr_RUA_Connect(cs_domain, int2bit(23, 24), normal_call, hex2oct(ranap_cm_service_req)));
+	//RANAP.receive();
+
+	f_sleep(2.0);
+	f_shutdown_helper();
+}
+
+control {
+	execute(TC_hnb_register());
+	execute(TC_RAB_Assignment());
+}
+
+}
