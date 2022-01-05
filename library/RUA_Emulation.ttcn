@@ -1,0 +1,400 @@
+module RUA_Emulation {
+
+/* RUA_Emulation runs on top of Iuh_Emulation. It multiplexes/demultiplexes
+ * the individuao connections, so there can be separate TTCN-3 components
+ * handling each of the connections (one connection per UE).
+ *
+ * The RUA_Emulation.main() function processes RUA messages from the Iuh stack
+ * via the RUA_PT, and dispatches them to the per-connection components.
+ *
+ * Outbound RUA connections are initiated by sending a FIXME primitive to the
+ * RUA_Emulation component.
+ *
+ * For each new inbound connection, the RuaOps.create_cb() is called.  It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which that inbound
+ * connection is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle future inbound connection,
+ * it can do so by registering an "expect" with the expected RANAP payload.
+
+ * (C) 2022 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from Iuh_Emulation all;
+
+import from RUA_Templates all;
+//import from RUA_Constants all;
+import from RUA_PDU_Descriptions all;
+import from RUA_IEs all;
+
+import from RANAP_PDU_Descriptions all;
+//import from RANAP_Constants all;
+import from RANAP_IEs all;
+import from RANAP_Types all;
+import from RANAP_Templates all;
+
+modulepar {
+	integer mp_max_context_id := hex2int('FFFFFF'H);
+}
+
+
+/* General "base class" component definition, of which specific implementations
+ * derive themselves by means of the "extends" feature */
+type component RUA_ConnHdlr {
+	port RUA_Conn_PT RUA;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port RUA_Conn_PT message {
+	inout RANAP_PDU,
+	      RUA_Conn_Req,
+	      RUA_Disc_Req,
+	      RUA_Disc_Ind;
+} with { extension "internal" };
+
+type record RUA_Conn_Req {
+	boolean ps_domain,
+	RANAP_PDU ranap
+};
+
+type record RUA_Disc_Req {
+	RANAP_PDU ranap,
+	RUA_IEs.Cause cause
+};
+
+type record RUA_Disc_Ind {
+	RUA_IEs.Cause cause
+};
+
+type bitstring ContextId length(24); // with { variant "FIELDLENGTH(24)" };
+
+/* represents a single RANAP connection over RUA */
+type record ConnectionData {
+	RUA_ConnHdlr	comp_ref,
+	RUA_IEs.CN_DomainIndicator domain,
+	integer		context_id
+}
+
+type component RUA_Emulation_CT {
+	/* port to the bottom side (Iuh) */
+	port RUA_PT RUA;
+
+	/* ports to the upper side (per-connection components) */
+	port RUA_Conn_PT CLIENT;
+
+	/* use 16 as this is also the number of SCCP connections that SCCP_Emulation can handle */
+	var ConnectionData ConnectionTable[16];
+
+	/* pending expected incoming connections */
+	//var ExpectData ExpectTable[8];
+
+	/* tables for mapping inbound unitdata (like paging) */
+	//var ImsiMapping ImsiTable[16];
+
+	/* procedure based port to register for incoming connections */
+	//port RUA_PROC_PT PROC;
+
+	var charstring g_rua_id;
+	var RuaOps g_rua_ops;
+}
+
+type function RanapCreateCallback(ContextId context_id, RUA_IEs.CN_DomainIndicator domain, charstring id)
+runs on RUA_Emulation_CT return RUA_ConnHdlr;
+
+type function RanapUnitdataCallback(RANAP_PDU ranap)
+runs on RUA_Emulation_CT return template RANAP_PDU;
+
+type record RuaOps {
+	RanapCreateCallback create_cb optional,
+	RanapUnitdataCallback unitdata_cb optional
+	//boolean deode_dtap
+	//boolean role_ms
+};
+
+private function f_context_id_known(ContextId context_id)
+runs on RUA_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].context_id == bit2int(context_id)){
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_known(RUA_ConnHdlr client)
+runs on RUA_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* resolve connection ID by component reference */
+private function f_context_id_by_comp(RUA_ConnHdlr client)
+runs on RUA_Emulation_CT return ContextId {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return int2bit(ConnectionTable[i].context_id, 24);
+		}
+	}
+	setverdict(fail, "RAN Connection table not found by component ", client);
+	mtc.stop;
+}
+
+/* resolve ConnectionTable index component reference */
+private function f_idx_by_comp(RUA_ConnHdlr client)
+runs on RUA_Emulation_CT return integer {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].comp_ref == client) {
+			return i;
+		}
+	}
+	setverdict(fail, "RAN Connection table not found by component ", client);
+	mtc.stop;
+}
+
+private function f_gen_context_id()
+runs on RUA_Emulation_CT return ContextId {
+	var ContextId context_id;
+
+	do {
+		context_id := int2bit(float2int(rnd()*int2float(mp_max_context_id)), 24);
+	} while (f_context_id_known(context_id) == true);
+
+	return context_id;
+}
+
+private function f_conn_table_init()
+runs on RUA_Emulation_CT {
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		ConnectionTable[i].comp_ref := null;
+		ConnectionTable[i].context_id := -1;
+	}
+/*
+	for (var integer i := 0; i < sizeof(ImsiTable); i := i+1) {
+		ImsiTable[i].comp_ref := null;
+		ImsiTable[i].imsi := omit;
+		ImsiTable[i].tmsi := 'FFFFFFFF'O;
+	}
+*/
+}
+
+private function f_conn_table_add(RUA_ConnHdlr comp_ref, RUA_IEs.CN_DomainIndicator domain, ContextId context_id)
+runs on RUA_Emulation_CT {
+	var integer int_context_id := bit2int(context_id);
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].context_id == -1) {
+			ConnectionTable[i].comp_ref := comp_ref;
+			ConnectionTable[i].domain := domain;
+			ConnectionTable[i].context_id := int_context_id;
+			log("Added conn table entry ", i, comp_ref, int_context_id);
+			return;
+		}
+	}
+	testcase.stop("RUA Connection table full!");
+}
+
+private function f_conn_table_del(ContextId context_id)
+runs on RUA_Emulation_CT {
+	var integer int_context_id := bit2int(context_id);
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].context_id == int_context_id) {
+			log("Deleted conn table entry ", i,
+			    ConnectionTable[i].comp_ref, int_context_id);
+			ConnectionTable[i].context_id := -1;
+			return
+		}
+	}
+	setverdict(fail, "RUA Connection table attempt to delete non-existant ", int_context_id);
+	mtc.stop;
+}
+
+
+/* resolve component reference by connection ID */
+private function f_comp_by_context_id(ContextId context_id)
+runs on RUA_Emulation_CT return RUA_ConnHdlr {
+	var integer int_context_id := bit2int(context_id);
+	for (var integer i := 0; i < sizeof(ConnectionTable); i := i+1) {
+		if (ConnectionTable[i].context_id == int_context_id) {
+			return ConnectionTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "RUA Connection table not found by RUA Context ID ", int_context_id);
+	mtc.stop;
+}
+
+private function CommonRanapUnitdataCallback(RANAP_PDU ranap)
+runs on RUA_Emulation_CT return template RANAP_PDU {
+	/* TODO: paging */
+	return g_rua_ops.unitdata_cb.apply(ranap);
+}
+
+private function f_handle_userData_RANAP(RUA_ConnHdlr client, RANAP_PDU ranap)
+runs on RUA_Emulation_CT {
+	/* TODO: L3 decoding, if requested */
+	CLIENT.send(ranap) to client;
+}
+
+
+private altstep as_reset_ack() runs on RUA_Emulation_CT {
+	var RUA_PDU rua_clt;
+	[] RUA.receive(tr_RUA_ConnectionlessTransfer(decmatch tr_RANAP_Reset)) -> value rua_clt {
+		var RANAP_PDU rx := dec_RANAP_PDU(rua_clt.initiatingMessage.value_.connectionlessTransfer.protocolIEs[0].value_.rANAP_Message);
+		var RANAP_IEs.CN_DomainIndicator dom;
+		dom := rx.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator;
+		RUA.send(ts_RUA_ConnectionlessTransfer(enc_RANAP_PDU(valueof(ts_RANAP_ResetAck(dom)))));
+	}
+}
+
+private altstep as_main_rua() runs on RUA_Emulation_CT {
+	var RANAP_PDU ranap;
+	var RUA_PDU rua;
+	var octetstring ranap_enc;
+	var ContextId context_id;
+	var RUA_IEs.CN_DomainIndicator domain_ind;
+	var RUA_ConnHdlr vc_conn;
+	var RUA_Conn_Req creq;
+	var RUA_Disc_Req dreq;
+	var RUA_IEs.Cause cause;
+
+	/* RUA -> Client: UNIT-DATA (connectionless RUA) from CN */
+	[] RUA.receive(tr_RUA_ConnectionlessTransfer) -> value rua {
+		ranap := dec_RANAP_PDU(rua.initiatingMessage.value_.connectionlessTransfer.protocolIEs[0].value_.rANAP_Message);
+		var template RANAP_PDU resp;
+		resp := CommonRanapUnitdataCallback(ranap);
+		if (isvalue(resp)) {
+			RUA.send(ts_RUA_ConnectionlessTransfer(enc_RANAP_PDU(valueof(resp))));
+		}
+	}
+
+	/* RUA -> Client: new connection from CN */
+	[] RUA.receive(tr_RUA_Connect) -> value rua {
+		domain_ind := rua.initiatingMessage.value_.connect_.protocolIEs[0].value_.cN_DomainIndicator;
+		context_id := rua.initiatingMessage.value_.connect_.protocolIEs[1].value_.context_ID;
+		ranap_enc := rua.initiatingMessage.value_.connect_.protocolIEs[3].value_.rANAP_Message;
+		ranap := dec_RANAP_PDU(ranap_enc);
+		vc_conn := g_rua_ops.create_cb.apply(context_id, domain_ind, g_rua_id);
+		/* store mapping between client components and RUA contextId */
+		f_conn_table_add(vc_conn, domain_ind, context_id);
+		/* TODO: notify user about incoming connection? */
+		/* handle user payload */
+		f_handle_userData_RANAP(vc_conn, ranap);
+	}
+
+	/* RUA -> Client: connection-oriented data in existing connection */
+	[] RUA.receive(tr_RUA_DirectTransfer) -> value rua {
+		context_id := rua.initiatingMessage.value_.directTransfer.protocolIEs[1].value_.context_ID;
+		vc_conn := f_comp_by_context_id(context_id);
+		ranap_enc := rua.initiatingMessage.value_.directTransfer.protocolIEs[2].value_.rANAP_Message;
+		f_handle_userData_RANAP(vc_conn, dec_RANAP_PDU(ranap_enc));
+	}
+
+	/* RUA -> Client: disconnect of an existing connection */
+	[] RUA.receive(tr_RUA_Disconnect) -> value rua {
+		cause := rua.initiatingMessage.value_.disconnect_.protocolIEs[2].value_.cause;
+		context_id := rua.initiatingMessage.value_.disconnect_.protocolIEs[1].value_.context_ID;
+		vc_conn := f_comp_by_context_id(context_id);
+		/* send contained RANAP message to user */
+		ranap_enc := rua.initiatingMessage.value_.disconnect_.protocolIEs[3].value_.rANAP_Message;
+		f_handle_userData_RANAP(vc_conn, dec_RANAP_PDU(ranap_enc));
+		/* notify user of disconnect */
+		CLIENT.send(RUA_Disc_Ind:{cause});
+		f_conn_table_del(context_id);
+	}
+
+	/* RANAP from client through an existing RANAP connection */
+	[] CLIENT.receive(RANAP_PDU:?) -> value ranap sender vc_conn {
+		var integer idx := f_idx_by_comp(vc_conn);
+		context_id := int2bit(ConnectionTable[idx].context_id, 24);
+		domain_ind := ConnectionTable[idx].domain;
+		RUA.send(ts_RUA_DirectTransfer(domain_ind, context_id, enc_RANAP_PDU(ranap)));
+	}
+
+	/* Disconnect request from client */
+	[] CLIENT.receive(RUA_Disc_Req:?) -> value dreq sender vc_conn {
+		var octetstring enc_ranap := enc_RANAP_PDU(dreq.ranap);
+		var integer idx := f_idx_by_comp(vc_conn);
+		context_id := int2bit(ConnectionTable[idx].context_id, 24);
+		domain_ind := ConnectionTable[idx].domain;
+		RUA.send(ts_RUA_Disconnect(domain_ind, context_id, dreq.cause, enc_ranap));
+		f_conn_table_del(context_id);
+	}
+
+	/* RANAP from client, for a new RANAP connection */
+	[] CLIENT.receive(RUA_Conn_Req:?) -> value creq sender vc_conn {
+		var octetstring enc_ranap := enc_RANAP_PDU(creq.ranap);
+
+		if (f_comp_known(vc_conn) == false) {
+			/* unknown client, create new connection */
+			context_id := f_gen_context_id();
+			if (creq.ps_domain) {
+				domain_ind := ps_domain;
+			} else {
+				domain_ind := cs_domain;
+			}
+
+			f_conn_table_add(vc_conn, domain_ind, context_id);
+			RUA.send(ts_RUA_Connect(domain_ind, context_id, normal_call, enc_ranap));
+		} else {
+			/* known client, send via existing component */
+			context_id := f_context_id_by_comp(vc_conn);
+			RUA.send(ts_RUA_DirectTransfer(domain_ind, context_id, enc_ranap));
+		}
+	}
+
+}
+
+
+
+function f_ranap_reset(RANAP_IEs.CN_DomainIndicator dom) runs on RUA_Emulation_CT {
+	timer T := 5.0;
+
+	var RANAP_PDU tx := valueof(ts_RANAP_Reset(ts_RanapCause_om_intervention,dom));
+	RUA.send(ts_RUA_ConnectionlessTransfer(enc_RANAP_PDU(tx)));
+	T.start;
+	alt {
+	[] RUA.receive(tr_RUA_ConnectionlessTransfer(decmatch tr_RANAP_ResetAck)) {
+		log("RUA-RANAP: Received RESET-ACK in resposne to RESET, we're reay to go!");
+		}
+	[] as_reset_ack();
+	[] RUA.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "RUA-RANAP: Timeout waiting for RESET-ACK after sending RESET");
+		mtc.stop;
+		}
+	}
+}
+
+function main(RuaOps ops, charstring id) runs on RUA_Emulation_CT {
+	g_rua_id := id;
+	g_rua_ops := ops;
+	f_conn_table_init();
+	//f_expect_table_init();
+
+	while (true) {
+		alt {
+		[] as_main_rua();
+
+		/*
+		[] PROC.getcall(RUA_Register:{?,?}) -> param(l3_info, vc_hdlr) {
+			f_create_expect(l3_info, vc_hdlr);
+			PROC.reply(RUA_register:{l3_info, vc_hdlr}) to vc_hdlr;
+			}
+		*/
+		}
+	}
+}
+
+
+}
