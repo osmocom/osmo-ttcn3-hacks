@@ -2463,7 +2463,7 @@ module MGCP_Test {
 		setverdict(pass);
 	}
 
-	/* create two local RTP emulations and pass data in both directions */
+	/* create two local RTP+IuUP emulations and pass data in both directions */
 	function f_tc_two_crcx_mdcx_and_iuup(charstring local_ip_a, charstring remote_ip_a,
 					    charstring local_ip_b, charstring remote_ip_b) runs on dummy_CT {
 		var RtpFlowData flow[2];
@@ -2580,6 +2580,126 @@ module MGCP_Test {
 					   mp_local_ipv4, mp_remote_ipv4);
 	}
 
+	/* create two local emulations (1 RTP, 1 RTP+IuUP) and pass data in both directions */
+	function f_tc_two_crcx_mdcx_and_iuup_rtp(charstring local_ip_a, charstring remote_ip_a,
+					    charstring local_ip_b, charstring remote_ip_b) runs on dummy_CT {
+		var RtpFlowData flow[2];
+		var RtpemStats stats[2];
+		var MgcpResponse resp;
+		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
+		var MgcpCallId call_id := '1227'H;
+		var integer num_pkts_tx[2];
+		var integer temp;
+
+		f_init(ep);
+
+		/* Create the first connection in receive only mode (RNC side, IuUP-Init active) */
+		flow[0] := valueof(t_RtpFlow(local_ip_a, remote_ip_a, 96, "VND.3GPP.IUFP/16000"));
+		flow[0].em.portnr := 10000;
+		flow[0].rtp_cfg := c_RtpemDefaultCfg;
+		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
+		flow[0].rtp_cfg.tx_fixed_payload := '4f28959ffeb80181f5c4e83d176c897b4a4e333298333419a493ca63ded6e0'O;
+		flow[0].rtp_cfg.rx_fixed_payload := '08556d944c71a1a081e7ead204244480000ecd82b81118000097c4794e7740'O; /* flow[1].rtp_cfg.tx_fixed_payload converted AMR-BE-RTP->AMR-IUUP*/
+		flow[0].rtp_cfg.iuup_mode := true;
+		flow[0].rtp_cfg.iuup_tx_init := true;
+		f_flow_create(RTPEM[0], ep, call_id, "recvonly", flow[0], true);
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_RXONLY);
+
+		/* Create the second connection. This connection will be also
+		 * in receive only mode (CN side, regular RTP) */
+		flow[1] := valueof(t_RtpFlow(local_ip_b, remote_ip_b, 112, "AMR/8000"));
+		flow[1].em.portnr := 20000;
+		flow[1].rtp_cfg := c_RtpemDefaultCfg;
+		flow[1].rtp_cfg.tx_payload_type := flow[1].pt;
+		flow[1].rtp_cfg.tx_fixed_payload := '0382155b65131c68682079fab4810911200003b360ae0446000025f11e539dd0'O;
+		flow[1].rtp_cfg.rx_fixed_payload := 'f3d3ca2567ffae00607d713a0f45db225ed2938ccca60ccd066924f298f7b5b8'O; /* flow[0].rtp_cfg.tx_fixed_payload converted AMR-IuUP->AMR-BE-RTP*/
+		flow[1].rtp_cfg.iuup_mode := false;
+		f_flow_create(RTPEM[1], ep, call_id, "recvonly", flow[1], true);
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_RXONLY);
+
+		/* The first leg starts transmitting */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_TXONLY);
+		f_sleep(0.5);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[0].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 0");
+			mtc.stop;
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 1");
+			mtc.stop;
+		}
+
+		/* The second leg starts transmitting a little later */
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_TXONLY);
+		f_sleep(1.0);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[0].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 0");
+			mtc.stop;
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 1");
+			mtc.stop;
+		}
+
+		/* The first leg will now be switched into bidirectional
+		 * mode, but we do not expect any data coming back yet. */
+		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		num_pkts_tx[1] := stats[1].num_pkts_tx;
+		f_flow_modify(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+		f_sleep(0.5);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		if (stats[0].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 0");
+			mtc.stop;
+		}
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+		if (stats[1].num_pkts_rx_err_disabled != 0) {
+			setverdict(fail, "received packets from MGW on recvonly connection 1");
+			mtc.stop;
+		}
+
+		/* When the second leg is switched into bidirectional mode
+		 * as well, then the MGW will connect the two together and
+		 * we should see RTP streams passing through from both ends. */
+		f_rtpem_mode(RTPEM[1], RTPEM_MODE_BIDIR);
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		num_pkts_tx[0] := stats[0].num_pkts_tx;
+		f_flow_modify(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
+		f_sleep(2.0);
+
+		stats[0] := f_rtpem_stats_get(RTPEM[0]);
+		stats[1] := f_rtpem_stats_get(RTPEM[1]);
+
+		temp := stats[0].num_pkts_tx - num_pkts_tx[0] - stats[1].num_pkts_rx;
+		if (temp > 3 or temp < -3) {
+			setverdict(fail, "number of packets not within normal parameters:", temp);
+			mtc.stop;
+		}
+
+		temp := stats[1].num_pkts_tx - num_pkts_tx[1] - stats[0].num_pkts_rx;
+		if (temp > 3 or temp < -3) {
+			setverdict(fail, "number of packets not within normal parameters:", temp);
+			mtc.stop;
+		}
+
+		f_rtpem_stats_err_check(stats[0]);
+		f_rtpem_stats_err_check(stats[1]);
+
+		/* Tear down */
+		f_flow_delete(RTPEM[0]);
+		f_flow_delete(RTPEM[1], ep, call_id);
+		setverdict(pass);
+	}
+	testcase TC_two_crcx_mdcx_and_iuup_rtp() runs on dummy_CT {
+		f_tc_two_crcx_mdcx_and_iuup_rtp(mp_local_ipv4, mp_remote_ipv4,
+					   mp_local_ipv4, mp_remote_ipv4);
+	}
+
 	control {
 		execute(TC_selftest());
 		execute(TC_crcx());
@@ -2655,6 +2775,7 @@ module MGCP_Test {
 		execute(TC_two_crcx_mdcx_and_rtp_osmux_ipv6_ipv4());
 
 		execute(TC_two_crcx_mdcx_and_iuup());
+		execute(TC_two_crcx_mdcx_and_iuup_rtp());
 
 		/* Note: This testcase will trigger an OSMO_ASSERT() bug in
 		 * older versions of osmo-mgw. This eventually leads into
