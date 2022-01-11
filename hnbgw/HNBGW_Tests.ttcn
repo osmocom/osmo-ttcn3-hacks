@@ -15,6 +15,7 @@ module HNBGW_Tests {
 
 import from Misc_Helpers all;
 import from General_Types all;
+import from GSM_Types all;
 import from Osmocom_Types all;
 import from IPL4asp_Types all;
 
@@ -31,31 +32,30 @@ import from Osmocom_VTY_Functions all;
 import from TELNETasp_PortType all;
 
 import from HNBAP_Templates all;
+import from HNBAP_PDU_Descriptions all;
+
 import from RUA_IEs all;
 import from RUA_Templates all;
-import from HNBAP_PDU_Descriptions all;
+import from RUA_Emulation all;
 
 import from Iuh_Emulation all;
 
 import from RANAP_Types all;
+import from RANAP_PDU_Descriptions all;
+import from RANAP_PDU_Contents all;
+import from RANAP_IEs all;
+import from RANAP_Templates all;
+
 import from RAN_Adapter all;
 
-import from BSSAP_Types all;
 import from RAN_Adapter all;
 import from RAN_Emulation all;
-import from BSSAP_CodecPort all;
-import from IPA_Emulation all;
-import from IPA_CodecPort all;
-import from IPA_Types all;
-
 
 import from MGCP_Emulation all;
 import from MGCP_Types all;
 import from MGCP_Templates all;
 import from MGCP_CodecPort all;
 import from SDP_Types all;
-
-import from MSC_ConnHdlr all;
 
 modulepar {
 	/* IP address at which the HNodeB can be reached */
@@ -83,15 +83,67 @@ modulepar {
 	RAN_Configuration mp_sgsn_cfg := {
 		transport := RANAP_TRANSPORT_IuCS,
 		sccp_service_type := "mtp3_itu",
-		sctp_addr := { 23905, "127.0.0.1", 2905, "127.0.0.1" },
-		own_pc := 185,	/* 0.23.1 first MSC emulation */
+		sctp_addr := { 23906, "127.0.0.1", 2905, "127.0.0.1" },
+		own_pc := 185,	/* 0.23.1 first SGSN emulation */
 		own_ssn := 142,
 		peer_pc := 189, /* 0.23.5 osmo-hnbgw */
 		peer_ssn := 142,
 		sio := '83'O,
-		rctx := 1
+		rctx := 2
 	};
 }
+
+function MSC_UnitdataCallback(RANAP_PDU ranap) runs on RAN_Emulation_CT return template RANAP_PDU {
+        // FIXME
+        return ts_RANAP_Reset(ts_RanapCause_om_intervention, cs_domain);
+}
+
+const RanOps MSC_RanOps := {
+        ranap_create_cb := refers(RAN_Emulation.RanapExpectedCreateCallback),
+        ranap_unitdata_cb := refers(MSC_UnitdataCallback),
+        ps_domain := false,
+        decode_dtap := false,
+        role_ms := false,
+        protocol := RAN_PROTOCOL_RANAP,
+        transport := RANAP_TRANSPORT_IuCS,
+        use_osmux := false,
+        sccp_addr_local := omit,
+        sccp_addr_peer := omit
+}
+
+type record TestHdlrParams {
+	integer hnb_idx,
+        hexstring imsi,
+	boolean ps_domain,
+	HnbConfig hnb optional
+};
+
+/* We extend:
+   * RUA_ConnHdlr (for the Iuh side, emulating the HNB)
+   * RAN_ConnHdlr (for the Iu side, emulating the MSC)
+   * MGCP_ConnHdlr (for the MGCP side, emulating the MGW)
+ */
+type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr {
+	var integer g_sccp_conn_id;
+
+	var TestHdlrParams g_pars;
+	timer g_Tguard;
+}
+
+
+const MGCPOps MSC_MGCPOps := {
+        create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
+        unitdata_cb := refers(MGCP_Emulation.DummyUnitdataCallback)
+}
+
+function f_create_ranap_exp(octetstring l3_enc) runs on ConnHdlr {
+        BSSAP_PROC.call(RAN_register:{l3_enc, self}) {
+                [] BSSAP_PROC.getreply(RAN_register:{?, ?}) {};
+        }
+}
+
+
+const integer NUM_HNB := 1;
 
 const hexstring ranap_cm_service_req := '001340400000060003400100000f40060000f11028b6003a40080000f110ffffffff0010400e0d052411035758a605f44e9d4aef004f400300001c0056400500f1100017'H;
 const hexstring ranap_auth_req := '00144032000002001040262505120217dc146aeac56cb5ff6d5fb51f47f19220108ca5a6d0c8110000b9e9272498872764003b400100'H;
@@ -100,20 +152,27 @@ const hexstring ranap_paging := '000e401e000003000340010000174009500001010000000
 const hexstring ranap_rab_ass_req := '0000005900000100364052000001003500487824cd80102fa7201a2c0000f44c080a028000514000272028140067400000222814003c40000000503d02000227c03500010a0901a200000000000000000000000000401f4a0000400100'H;
 const hexstring iu_release_compl := '20010003000000'H;
 
+type record HnbConfig {
+	LocationAreaIdentification lai,
+	integer sac
+}
+
 type component test_CT extends CTRL_Adapter_CT {
 	var boolean g_initialized := false;
 
-	var MGCP_Emulation_CT vc_MGCP;
-	var Iuh_Emulation_CT vc_Iuh;
-
+	/********************* Iu side */
 	var RAN_Adapter g_msc;
 	var RAN_Adapter g_sgsn;
 	/* SGSN IuPS missing */
 
-	port TELNETasp_PT HNBGWVTY;
-	port HNBAP_PT HNBAP;
-	port RUA_PT RUA;
+	/********************* Iuh side */
+	var HnbConfig g_hnb_cfg[NUM_HNB];
+	var Iuh_Emulation_CT vc_Iuh[NUM_HNB];
+	var RUA_Emulation_CT vc_RUA[NUM_HNB];
+	port HNBAP_PT HNBAP[NUM_HNB];
 
+	var MGCP_Emulation_CT vc_MGCP;
+	port TELNETasp_PT HNBGWVTY;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard := 30.0;
 }
@@ -163,25 +222,49 @@ function f_init_mgcp(charstring id) runs on test_CT {
 	vc_MGCP.start(MGCP_Emulation.main(ops, pars, id));
 }
 
-/* global initialization function */
-function f_init(charstring id := "HBGW", float guard_timeout := 30.0) runs on test_CT {
+function f_init_hnodeb(charstring id, integer hnb_idx, RuaOps rua_ops) runs on test_CT {
+	id := id & "-Iuh" & int2str(hnb_idx);
 
-	T_guard.start(guard_timeout);
-	activate(as_Tguard());
-
+	/* Iuh lower layer (RUA/HNBAP demux) */
 	var Iuh_conn_parameters iuh_pars;
 	iuh_pars.remote_ip := mp_hnbgw_ip;
 	iuh_pars.remote_sctp_port := mp_hnbgw_iuh_port;
 	iuh_pars.local_ip := mp_hnodeb_ip;
-	iuh_pars.local_sctp_port := mp_hnodeb_port;
-	vc_Iuh := Iuh_Emulation_CT.create(id & "-Iuh");
-	connect(self:HNBAP, vc_Iuh:HNBAP);
-	connect(self:RUA, vc_Iuh:RUA);
+	iuh_pars.local_sctp_port := mp_hnodeb_port + hnb_idx;
+	vc_Iuh[hnb_idx] := Iuh_Emulation_CT.create(id);
+	connect(self:HNBAP[hnb_idx], vc_Iuh[hnb_idx]:HNBAP);
 
-	vc_Iuh.start(Iuh_Emulation.main(iuh_pars, id & "-Iuh"));
-	f_init_mgcp(id);
+	vc_RUA[hnb_idx] := RUA_Emulation_CT.create(id & "-RUA");
+	connect(vc_RUA[hnb_idx]:RUA, vc_Iuh[hnb_idx]:RUA);
 
-	/* MSC */
+	/* Start Iuh side components */
+	vc_Iuh[hnb_idx].start(Iuh_Emulation.main(iuh_pars, id));
+	vc_RUA[hnb_idx].start(RUA_Emulation.main(rua_ops, id & "-RUA"));
+}
+
+/* global initialization function */
+function f_init(charstring id := "HBGW", float guard_timeout := 30.0) runs on test_CT {
+
+	g_hnb_cfg[0] := {
+		lai := {
+			mcc_mnc := '00101'H,
+			lac := 2342
+		},
+		sac := 55
+	}
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	/* RUA/RANAP emulation on top of lower-layer Iuh */
+	var RuaOps rua_ops := {
+		create_cb := refers(IuhRanapCreateCallback),
+		unitdata_cb := refers(IuhRanapUnitdataCallback)
+	};
+	for (var integer i := 0; i < NUM_HNB; i := i+1) {
+		f_init_hnodeb(testcasename(), i, rua_ops);
+	}
+
+	/* MSC emulation */
 	var RanOps ranops := {
 		ranap_create_cb := refers(RAN_Emulation.RanapExpectedCreateCallback),
 		ranap_unitdata_cb := omit,
@@ -197,9 +280,12 @@ function f_init(charstring id := "HBGW", float guard_timeout := 30.0) runs on te
 	f_ran_adapter_init(g_msc, mp_msc_cfg, "HNBGW_Test", ranops);
 	f_ran_adapter_start(g_msc);
 
-	/* SGSN*/
+	/* SGSN emulation */
+	ranops.ps_domain := true;
+	f_ran_adapter_init(g_sgsn, mp_sgsn_cfg, "HNBGW_Test", ranops);
+	f_ran_adapter_start(g_sgsn);
 
-
+	f_init_mgcp(id);
 	f_init_vty("VirtHNBGW");
 }
 
@@ -209,43 +295,242 @@ friend function f_shutdown_helper() runs on test_CT {
 	mtc.stop;
 }
 
-/*function f_start_handler(void_fn fn, template (omit) TestHdlrParams pars := omit)
-runs on test_CT return MSC_ConnHdlr {
-	return f_start_handler_run(f_start_handler_create(pars), fn, pars);
-}*/
+/* helper function to start all of the simulated hNodeBs */
+function f_start_hnbs() runs on test_CT {
+	for (var integer i:= 0; i < NUM_HNB; i := i+1) {
+		f_hnbap_register(i);
+	}
+}
+
+/***********************************************************************
+ * code running in test_CT, preparing start of per-UE ConnHdlr
+ ***********************************************************************/
+
+/* inbound RUA connection establishment on Iuh side */
+function IuhRanapCreateCallback(ContextId context_id, RUA_IEs.CN_DomainIndicator domain, charstring id)
+runs on RUA_Emulation_CT return RUA_ConnHdlr {
+	log("CreateCallback");
+	return null;
+}
+
+/* inbound RUA connectionless data on Iuh side */
+function IuhRanapUnitdataCallback(RANAP_PDU ranap)
+runs on RUA_Emulation_CT return template RANAP_PDU {
+	log("UnitdataCallback");
+	return omit;
+}
+
+private function f_start_handler_create(TestHdlrParams pars) runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename() & int2str(pars.hnb_idx);
+
+	vc_conn := ConnHdlr.create(id);
+
+	/* Iuh RUA part */
+	connect(vc_conn:RUA, vc_RUA[pars.hnb_idx]:CLIENT);
+
+	if (pars.ps_domain) {
+		/* SGSN side */
+		connect(vc_conn:BSSAP, g_sgsn.vc_RAN:CLIENT);
+		connect(vc_conn:BSSAP_PROC, g_sgsn.vc_RAN:PROC);
+	} else {
+		/* MSC side */
+		connect(vc_conn:BSSAP, g_msc.vc_RAN:CLIENT);
+		connect(vc_conn:BSSAP_PROC, g_msc.vc_RAN:PROC);
+	}
+
+	return vc_conn;
+}
+
+private function f_start_handler_run(ConnHdlr vc_conn, void_fn fn, TestHdlrParams pars) runs on test_CT {
+	var charstring id := testcasename(); // & int2str(pars.ran_idx);
+	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
+	 *  a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
+	pars.hnb := g_hnb_cfg[pars.hnb_idx];
+	vc_conn.start(derefers(fn)(id, pars));
+}
+
+function f_start_handler_with_pars(void_fn fn, template (value) TestHdlrParams pars)
+runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_create(valueof(pars));
+	f_start_handler_run(vc_conn, fn, valueof(pars));
+	return vc_conn;
+}
+
+/***********************************************************************
+ * code running inside per-UE ConnHdlr
+ ***********************************************************************/
+
+type function void_fn(charstring id, TestHdlrParams pars) runs on ConnHdlr;
+
+function f_init_handler(TestHdlrParams pars, float t_guard := 20.0) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+	/* start guard timer and activate it as default */
+	g_Tguard.start(t_guard);
+	activate(as_Tguard_ConnHdlr());
+
+	/* TODO: CTRL? */
+	/* TODO: VTY? */
+}
+
+/* global altstep for global guard timer; */
+private altstep as_Tguard_ConnHdlr() runs on ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Timeout of T_guard");
+		mtc.stop;
+	}
+}
+
+/* send RANAP on Iuh and expect it to show up on Iu */
+function f_iuh2iu(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
+runs on ConnHdlr return RANAP_PDU {
+	var RANAP_PDU rx;
+	timer T := 5.0;
+
+	if (istemplatekind(exp_rx, "omit")) {
+		exp_rx := tx;
+	}
+
+	RUA.send(tx);
+	T.start;
+
+	alt {
+	[] BSSAP.receive(exp_rx) -> value rx {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Iu ", exp_rx);
+		}
+	}
+	return rx;
+}
+
+/* send RANAP on Iuh and expect it to show up on Iu */
+function f_iu2iuh(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
+runs on ConnHdlr return RANAP_PDU {
+	var RANAP_PDU rx;
+	timer T := 5.0;
+
+	if (istemplatekind(exp_rx, "omit")) {
+		exp_rx := tx;
+	}
+
+	BSSAP.send(tx);
+	T.start;
+
+	alt {
+	[] RUA.receive(exp_rx) -> value rx {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Iuh ", exp_rx);
+		}
+	}
+	return rx;
+}
+
+/* send RANAP on Iuh and expect it to show up on Iu */
+function f_iuh2iu_connect(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
+runs on ConnHdlr return RANAP_PDU {
+	var RANAP_PDU rx;
+	timer T := 5.0;
+
+	if (istemplatekind(exp_rx, "omit")) {
+		exp_rx := tx;
+	}
+
+	/* create an expect on the Iu side for the random NAS portion */
+	var template (omit) octetstring nas := f_ranap_extract_l3(valueof(tx));
+	f_ran_register_exp(valueof(nas));
+
+	/* send it via Iuh (creating a RUA connection) */
+	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
+
+	/* expect to receive it on the Iu side */
+	T.start;
+	alt {
+	[] BSSAP.receive(exp_rx) -> value rx {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Iu ", exp_rx);
+		}
+	}
+	return rx;
+}
+
+/* build a RANAP InitialUE based on the TestHdlrParams */
+friend function f_build_initial_ue(TestHdlrParams pars) return RANAP_PDU {
+	var LAI lai := {
+		pLMNidentity := hex2oct(pars.hnb.lai.mcc_mnc),
+		lAC := int2oct(pars.hnb.lai.lac, 2),
+		iE_Extensions := omit
+	};
+	var SAI sai := {
+		pLMNidentity := lai.pLMNidentity,
+		lAC := lai.lAC,
+		sAC := int2oct(pars.hnb.sac, 2),
+		iE_Extensions := omit
+	}
+	var octetstring nas := f_rnd_octstring(10);
+	var IuSignallingConnectionIdentifier sigc_id := int2bit(f_rnd_int(1000), 24);
+	var GlobalRNC_ID grnc_id := {
+		pLMNidentity := lai.pLMNidentity,
+		rNC_ID := 2342
+	}
+
+	if (pars.ps_domain) {
+		var RAC rac := '00'O;
+		return valueof(ts_RANAP_initialUE_PS(lai, rac, sai, nas, sigc_id, grnc_id));
+	} else {
+		return valueof(ts_RANAP_initialUE_CS(lai, sai, nas, sigc_id, grnc_id));
+	}
+}
 
 
-/*private function f_tc_hnb_register_request(charstring id) runs on HNBGW_ConnHdlr {
-	f_handle_hnbap_hnb_register_req();
-	f_sleep(1.0);
-}*/
+/***********************************************************************
+ * HNBAP Testing
+ ***********************************************************************/
 
-testcase TC_hnb_register() runs on test_CT {
-	//var HNBGW_ConnHdlr vc_conn;
-	f_init();
-	HNBAP.send(tr_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
+
+function f_hnbap_register(integer hnb_idx := 0) runs on test_CT
+{
+	HNBAP[hnb_idx].send(tr_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
 					'00F110'O,
-					int2bit(1, 28),
+					int2bit(1 + hnb_idx, 28),
 					int2oct(2, 2),
 					int2oct(3, 1),
 					int2oct(4, 2)));
 
 	alt {
-	[] HNBAP.receive(tr_HNBAP_HNBRegisterAccept(?)) {
+	[] HNBAP[hnb_idx].receive(tr_HNBAP_HNBRegisterAccept(?)) {
 		setverdict(pass);
 	}
-	[] HNBAP.receive(IUHEM_Event:?) {
+	[] HNBAP[hnb_idx].receive(IUHEM_Event:?) {
 		repeat;
 	}
 	}
+}
+
+testcase TC_hnb_register() runs on test_CT {
+	//var HNBGW_ConnHdlr vc_conn;
+	f_init();
+	f_hnbap_register(0);
 
 	f_sleep(10.0);
 	f_shutdown_helper();
 }
 
+/***********************************************************************
+ * RUA / RANAP Testing
+ ***********************************************************************/
+
 testcase TC_RAB_Assignment() runs on test_CT {
 	//var HNBGW_ConnHdlr vc_conn;
 	f_init();
+/*
 	f_sleep(3.0);
 	HNBAP.send(tr_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
 					'00F110'O,
@@ -263,16 +548,90 @@ testcase TC_RAB_Assignment() runs on test_CT {
 	}
 	}
 
-	RUA.send(tr_RUA_Connect(cs_domain, int2bit(23, 24), normal_call, hex2oct(ranap_cm_service_req)));
+	//RUA.send(tr_RUA_Connect(cs_domain, int2bit(23, 24), normal_call, hex2oct(ranap_cm_service_req)));
 	//RANAP.receive();
-
+*/
 	f_sleep(2.0);
 	f_shutdown_helper();
 }
 
+private template (value) TestHdlrParams
+t_pars(integer imsi_suffix, boolean ps_domain := false,integer hnb_idx := 0) := {
+	hnb_idx := hnb_idx,
+	imsi := f_gen_imsi(imsi_suffix),
+	ps_domain := ps_domain,
+	hnb := omit	/* filled in later */
+}
+
+/* Create an Iuh connection; send InitialUE; expect it to appear on new SCCP conenction */
+friend function f_tc_initial_ue(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	f_init_handler(pars);
+	var RANAP_PDU tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+}
+testcase TC_ranap_cs_initial_ue() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1));
+	vc_conn.done;
+}
+testcase TC_ranap_ps_initial_ue() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true));
+	vc_conn.done;
+}
+
+
+/* Create an Iuh connection; send InitialUE; transceive data both directions */
+friend function f_tc_ranap_bidir(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	f_init_handler(pars);
+
+	/* HNB -> MSC: InitialUE */
+	f_iuh2iu_connect(f_build_initial_ue(g_pars));
+
+	/* MSC <- HNB: DirectTransfer */
+	f_iu2iuh(ts_RANAP_DirectTransfer(f_rnd_octstring(10)));
+	/* MSC -> HNB: DirectTransfer */
+	f_iuh2iu(ts_RANAP_DirectTransfer(f_rnd_octstring(10)));
+
+	/* HNB <- MSC:  CommonID */
+	f_iu2iuh(ts_RANAP_CommonId(hex2oct(pars.imsi)));
+}
+testcase TC_ranap_cs_bidir() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), t_pars(3));
+	vc_conn.done;
+}
+testcase TC_ranap_ps_bidir() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), t_pars(4, true));
+	vc_conn.done;
+}
+
+
+
+
 control {
 	execute(TC_hnb_register());
-	execute(TC_RAB_Assignment());
+	execute(TC_ranap_cs_initial_ue());
+	execute(TC_ranap_ps_initial_ue());
+	execute(TC_ranap_cs_bidir());
+	execute(TC_ranap_ps_bidir());
 }
 
 }
