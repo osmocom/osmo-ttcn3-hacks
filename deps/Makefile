@@ -13,12 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FORKEDGITLAB:=https://gitlab.eclipse.org/dwillmannv72
 ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGIT:=git://git.osmocom.org
 
-FORKEDGITLAB_REPOS=	titan.TestPorts.IPL4asp
 ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
@@ -52,6 +50,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.Common_Components.Socket-API \
 			titan.TestPorts.Common_Components.Abstract_Socket \
 			titan.TestPorts.HTTPmsg \
+			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
@@ -116,7 +115,7 @@ titan.TestPorts.AF_PACKET_commit=		0.1-5-g89ebea6
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A-6-gf4380d0
 titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
 titan.TestPorts.HTTPmsg_commit=			R.9.B-4-g9a0dfde
-titan.TestPorts.IPL4asp_commit=			R.30.E-4-gdcf7858
+titan.TestPorts.IPL4asp_commit=			R.30.E-7-g029bccb
 titan.TestPorts.LANL2asp_commit=		R.8.C-3-gb07c265
 titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11
 titan.TestPorts.PCAPasp_commit=			R.8.A-3-g9ad320f
