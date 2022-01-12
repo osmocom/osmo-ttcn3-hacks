@@ -53,16 +53,26 @@ type component RUA_ConnHdlr {
 	port RUA_Conn_PT RUA;
 }
 
-
 /* port between individual per-connection components and this dispatcher */
 type port RUA_Conn_PT message {
 	inout RANAP_PDU,
-	      RUA_Conn_Req;
+	      RUA_Conn_Req,
+	      RUA_Disc_Req,
+	      RUA_Disc_Ind;
 } with { extension "internal" };
 
 type record RUA_Conn_Req {
 	boolean ps_domain,
 	RANAP_PDU ranap
+};
+
+type record RUA_Disc_Req {
+	RANAP_PDU ranap,
+	RUA_IEs.Cause cause
+};
+
+type record RUA_Disc_Ind {
+	RUA_IEs.Cause cause
 };
 
 type bitstring ContextId length(24); // with { variant "FIELDLENGTH(24)" };
@@ -257,6 +267,8 @@ private altstep as_main_rua() runs on RUA_Emulation_CT {
 	var RUA_IEs.CN_DomainIndicator domain_ind;
 	var RUA_ConnHdlr vc_conn;
 	var RUA_Conn_Req creq;
+	var RUA_Disc_Req dreq;
+	var RUA_IEs.Cause cause;
 
 	/* RUA -> Client: UNIT-DATA (connectionless RUA) from CN */
 	[] RUA.receive(tr_RUA_ConnectionlessTransfer) -> value rua {
@@ -277,6 +289,7 @@ private altstep as_main_rua() runs on RUA_Emulation_CT {
 		vc_conn := g_rua_ops.create_cb.apply(context_id, domain_ind, g_rua_id);
 		/* store mapping between client components and RUA contextId */
 		f_conn_table_add(vc_conn, domain_ind, context_id);
+		/* TODO: notify user about incoming connection? */
 		/* handle user payload */
 		f_handle_userData_RANAP(vc_conn, ranap);
 	}
@@ -291,6 +304,15 @@ private altstep as_main_rua() runs on RUA_Emulation_CT {
 
 	/* RUA -> Client: disconnect of an existing connection */
 	[] RUA.receive(tr_RUA_Disconnect) -> value rua {
+		cause := rua.initiatingMessage.value_.disconnect_.protocolIEs[2].value_.cause;
+		context_id := rua.initiatingMessage.value_.disconnect_.protocolIEs[1].value_.context_ID;
+		vc_conn := f_comp_by_context_id(context_id);
+		/* send contained RANAP message to user */
+		ranap_enc := rua.initiatingMessage.value_.disconnect_.protocolIEs[3].value_.rANAP_Message;
+		f_handle_userData_RANAP(vc_conn, dec_RANAP_PDU(ranap_enc));
+		/* notify user of disconnect */
+		CLIENT.send(RUA_Disc_Ind:{cause});
+		f_conn_table_del(context_id);
 	}
 
 	/* RANAP from client through an existing RANAP connection */
@@ -299,6 +321,16 @@ private altstep as_main_rua() runs on RUA_Emulation_CT {
 		context_id := int2bit(ConnectionTable[idx].context_id, 24);
 		domain_ind := ConnectionTable[idx].domain;
 		RUA.send(ts_RUA_DirectTransfer(domain_ind, context_id, enc_RANAP_PDU(ranap)));
+	}
+
+	/* Disconnect request from client */
+	[] CLIENT.receive(RUA_Disc_Req:?) -> value dreq sender vc_conn {
+		var octetstring enc_ranap := enc_RANAP_PDU(dreq.ranap);
+		var integer idx := f_idx_by_comp(vc_conn);
+		context_id := int2bit(ConnectionTable[idx].context_id, 24);
+		domain_ind := ConnectionTable[idx].domain;
+		RUA.send(ts_RUA_Disconnect(domain_ind, context_id, dreq.cause, enc_ranap));
+		f_conn_table_del(context_id);
 	}
 
 	/* RANAP from client, for a new RANAP connection */
