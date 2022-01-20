@@ -1,0 +1,202 @@
+/* PFCP Emulation in TTCN-3
+ *
+ * (C) 2022 sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module PFCP_Emulation {
+
+import from IPL4asp_Types all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from PFCP_Types all;
+import from PFCP_CodecPort all;
+import from PFCP_CodecPort_CtrlFunct all;
+
+/***********************************************************************
+ * Main Emulation Component
+ ***********************************************************************/
+
+const integer PFCP_PORT := 8805;
+
+type enumerated PFCP_Role {
+	CPF,
+	UPF
+};
+
+type record PFCP_Emulation_Cfg {
+	HostName pfcp_bind_ip,
+	PortNumber pfcp_bind_port,
+	HostName pfcp_remote_ip,
+	PortNumber pfcp_remote_port,
+	PFCP_Role role
+};
+
+type component PFCP_Emulation_CT {
+	/* Communication with underlying PFCP CodecPort */
+	port PFCP_PT PFCP;
+
+	/* Communication with Clients */
+	port PFCPEM_PT CLIENT;
+	port PFCPEM_PROC_PT CLIENT_PROC;
+
+	/* Configuration by the user */
+	var PFCP_Emulation_Cfg g_pfcp_cfg;
+
+	/* State */
+	var integer g_pfcp_conn_id;
+	var integer g_recovery_timestamp;
+
+	var PFCPEM_conns g_conns;
+
+	var integer g_next_sequence_nr_state;
+};
+
+private function f_PFCPEM_next_sequence_nr() runs on PFCP_Emulation_CT return integer {
+	g_next_sequence_nr_state := g_next_sequence_nr_state + 1;
+	if (g_next_sequence_nr_state > 16777215) {
+		g_next_sequence_nr_state := 1;
+	}
+	return g_next_sequence_nr_state;
+}
+
+type record PFCPEM_conn {
+	PFCP_ConnHdlr vc_conn,
+	OCT8 seid optional,
+	LIN3_BO_LAST pfcp_msg_sequence_number optional
+};
+
+type record of PFCPEM_conn PFCPEM_conns;
+
+private function f_PFCPEM_conn_by_seid_or_seqnr(OCT8 seid, LIN3_BO_LAST seqnr) runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
+	log("looking for seid ", seid, " seqnr ", seqnr, " in conns ", g_conns);
+	for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
+		if (isbound(g_conns[i].pfcp_msg_sequence_number)
+		    and seqnr == g_conns[i].pfcp_msg_sequence_number) {
+			return g_conns[i].vc_conn;
+		}
+		if (isbound(g_conns[i].seid)
+		    and seid == g_conns[i].seid) {
+			return g_conns[i].vc_conn;
+		}
+	}
+	return null;
+};
+
+private function f_PFCPEM_add_conn(PFCP_ConnHdlr vc_conn) runs on PFCP_Emulation_CT {
+	for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
+		if (g_conns[i].vc_conn == vc_conn) {
+			return;
+		}
+	}
+	/* Not in the list yet, add. */
+	var PFCPEM_conn conn := { vc_conn := vc_conn };
+	g_conns := g_conns & { conn };
+}
+
+private function f_init(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
+	var Result res;
+
+	map(self:PFCP, system:PFCP);
+	res := PFCP_CodecPort_CtrlFunct.f_IPL4_listen(PFCP, cfg.pfcp_bind_ip, cfg.pfcp_bind_port, {udp:={}});
+	g_pfcp_conn_id := res.connId;
+
+	g_recovery_timestamp := f_rnd_int(4294967296);
+	g_pfcp_cfg := cfg;
+
+	g_conns := {};
+
+	g_next_sequence_nr_state := (1 + f_rnd_int(1000)) * 10000;
+}
+
+function main(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
+	var PFCP_ConnHdlr vc_conn;
+	var PFCP_Unitdata ud;
+	var PDU_PFCP pdu;
+
+	f_init(cfg);
+
+	while (true) {
+		alt {
+		[] PFCP.receive(PFCP_Unitdata:?) -> value ud {
+				log("PFCP_Emulation main() PFCP.receive: ", ud);
+				vc_conn := null;
+				if (ud.pdu.s_flag == '1'B) {
+					/* There is a SEID */
+					vc_conn := f_PFCPEM_conn_by_seid_or_seqnr(ud.pdu.seid, ud.pdu.sequence_number);
+				}
+				if (vc_conn != null) {
+					log("found destination ", vc_conn);
+					CLIENT.send(ud.pdu) to vc_conn;
+				} else {
+					log("sending to all conns: ", g_conns);
+					for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
+						CLIENT.send(ud.pdu) to g_conns[i].vc_conn;
+					}
+				}
+			}
+
+		[] CLIENT.receive(PDU_PFCP:?) -> value pdu sender vc_conn {
+				log("PFCP_Emulation main() CLIENT.receive from ", vc_conn, ": ", pdu);
+				if (pdu.sequence_number == 0) {
+					pdu.sequence_number := f_PFCPEM_next_sequence_nr();
+				}
+				ud := {
+					peer := {
+						conn_id := g_pfcp_conn_id,
+						remote_name := g_pfcp_cfg.pfcp_remote_ip,
+						remote_port := g_pfcp_cfg.pfcp_remote_port
+					},
+					pdu := pdu
+				};
+
+				f_PFCPEM_add_conn(vc_conn);
+
+				PFCP.send(ud);
+			}
+
+		[] CLIENT_PROC.getcall(PFCPEM_register:{}) -> sender vc_conn {
+				log("PFCP_Emulation main() CLIENT_PROC.getcall(PFCPEM_register)");
+				f_PFCPEM_add_conn(vc_conn);
+				CLIENT_PROC.reply(PFCPEM_register:{}) to vc_conn;
+			}
+		}
+	}
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+type port PFCPEM_PT message {
+	inout PDU_PFCP;
+} with { extension "internal" };
+
+signature PFCPEM_register();
+
+type port PFCPEM_PROC_PT procedure {
+	inout PFCPEM_register;
+} with { extension "internal" };
+
+/***********************************************************************
+ * Client Compoennt
+ ***********************************************************************/
+
+type component PFCP_ConnHdlr {
+	port PFCPEM_PT PFCP;
+	port PFCPEM_PROC_PT PFCP_PROC;
+	var PFCP_Emulation_CT vc_PFCP;
+};
+
+function f_pfcp_register() runs on PFCP_ConnHdlr {
+	PFCP_PROC.call(PFCPEM_register:{}) {
+		[] PFCP_PROC.getreply(PFCPEM_register:{});
+	}
+}
+
+}

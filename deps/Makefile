@@ -47,6 +47,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.NS_v7.3.0 \
 			titan.ProtocolModules.SGsAP_13.2.0 \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
+			titan.ProtocolModules.PFCP_v15.1.0 \
 			titan.TestPorts.Common_Components.Socket-API \
 			titan.TestPorts.Common_Components.Abstract_Socket \
 			titan.TestPorts.HTTPmsg \
@@ -111,6 +112,7 @@ titan.ProtocolModules.SNDCP_v7.0.0_commit=	R.2.A-5-gd0f0ce6
 titan.ProtocolModules.SUA_commit=		R.5.A-5-gcf1137a
 titan.ProtocolModules.TCP_commit=		R.3.A-5-g39e5f45
 titan.ProtocolModules.UDP_commit=		R.4.A-5-geea8aa3
+titan.ProtocolModules.PFCP_v15.1.0_commit=	d550ad9ddb6f9c823c9a555254cd76cf0e738d18
 titan.TestPorts.AF_PACKET_commit=		0.1-5-g89ebea6
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A-6-gf4380d0
 titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
