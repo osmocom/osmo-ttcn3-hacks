@@ -31,9 +31,14 @@ module GGSN_Tests {
 	import from Osmocom_VTY_Functions all;
 	import from TELNETasp_PortType all;
 
+	import from DIAMETER_Types all;
+	import from DIAMETER_Templates all;
+	import from DIAMETER_Emulation all;
+
 	const integer GTP0_PORT := 3386;
 	const integer GTP1C_PORT := 2123;
 	const integer GTP1U_PORT := 2152;
+	const integer PCRF_PORT := 3868;
 
 	type enumerated GGSN_Impl {
 		GGSN_IMPL_OSMOCOM,
@@ -118,6 +123,11 @@ module GGSN_Tests {
 		port TELNETasp_PT GGSNVTY;
 		var boolean use_gtpu_txseq := false;
 		var boolean g_use_echo := false;
+
+		/* emulated PCRF, used with m_ggsn_impl = GGSN_IMPL_OPEN5GS */
+		var DIAMETER_Emulation_CT vc_DIAMETER;
+		port DIAMETER_PT DIAMETER_UNIT;
+		port DIAMETEREM_PROC_PT DIAMETER_PROC;
 	}
 
 	private function f_init_vty() runs on GT_CT {
@@ -181,6 +191,42 @@ module GGSN_Tests {
 		f_vty_transceive(GGSNVTY, "end");
 	}
 
+	private function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+	runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+		DIAMETER_UNIT.send(msg);
+		return omit;
+	}
+
+	private function f_init_diameter(charstring id) runs on GT_CT {
+		var DIAMETEROps ops := {
+			create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+			unitdata_cb := refers(DiameterForwardUnitdataCallback),
+			raw := true /* handler mode (single component for all IMSI)) */
+		};
+		var DIAMETER_conn_parameters pars := {
+			remote_ip := m_ggsn_ip_gtpc,
+			remote_sctp_port := -1,
+			local_ip := m_bind_ip_gtpc,
+			local_sctp_port := PCRF_PORT,
+			origin_host := "ttcn3ggsntest.localdomain",
+			origin_realm := "localdomain",
+			vendor_app_id := c_DIAMETER_3GPP_Gx_AID
+		};
+		vc_DIAMETER := DIAMETER_Emulation_CT.create(id);
+		map(vc_DIAMETER:DIAMETER, system:DIAMETER_CODEC_PT);
+		connect(vc_DIAMETER:DIAMETER_UNIT, self:DIAMETER_UNIT);
+		connect(vc_DIAMETER:DIAMETER_PROC, self:DIAMETER_PROC);
+		vc_DIAMETER.start(DIAMETER_Emulation.main(ops, pars, id));
+
+		f_diameter_wait_capability(DIAMETER_UNIT);
+		/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdong ping-pongs):
+		 * RFC6733 sec 5.1
+		 * RFC3539 sec 3.4.1 [5]
+		 * https://github.com/freeDiameter/freeDiameter/blob/master/libfdcore/p_psm.c#L49
+		 */
+		f_sleep(1.0);
+	}
+
 	function f_init() runs on GT_CT {
 		if (g_initialized == true) {
 			return;
@@ -208,11 +254,13 @@ module GGSN_Tests {
 			f_init_vty();
 			f_vty_set_gpdu_txseq(use_gtpu_txseq);
 			f_vty_enable_echo_interval(g_use_echo);
+		} else if (m_ggsn_impl == GGSN_IMPL_OPEN5GS) {
+			f_init_diameter(testcasename());
 		}
 	}
 
 	/* Altstep implementing responses to any incoming echo requests */
-	altstep pingpong() runs on GT_CT {
+	private altstep pingpong() runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var Gtp1uUnitdata udu;
 		[g_use_echo] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
@@ -328,6 +376,28 @@ module GGSN_Tests {
 		}
 	}
 
+	private altstep as_DIA_CCR(DCC_NONE_CC_Request_Type req_type) runs on GT_CT {
+		var PDU_DIAMETER rx_dia;
+		[] DIAMETER_UNIT.receive(tr_DIA_CCR(req_type := req_type)) -> value rx_dia {
+			var template (omit) AVP avp;
+			var octetstring sess_id;
+			var AVP_Unsigned32 req_num;
+
+			avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+			sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+			avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_DCC_NONE_CC_Request_Number);
+			req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
+
+			DIAMETER_UNIT.send(ts_DIA_CCA(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id, sess_id,
+						 req_type, req_num));
+		}
+		[] DIAMETER_UNIT.receive(PDU_DIAMETER:?) -> value rx_dia {
+			setverdict(fail, "Received unexpected DIAMETER ", rx_dia);
+			self.stop;
+		}
+	}
+
 	/* send a PDP context activation */
 	function f_pdp_ctx_act(inout PdpContext ctx, OCT1 exp_cause := '80'O) runs on GT_CT {
 		var Gtp1cUnitdata ud;
@@ -339,6 +409,9 @@ module GGSN_Tests {
 						  g_sgsn_ip_c, g_sgsn_ip_u, ctx.msisdn, ctx.pco_req, ctx.ratType, ctx.uli));
 		T_default.start;
 		d := activate(pingpong());
+		if (DIAMETER_PROC.checkstate("Connected")) {
+			as_DIA_CCR(INITIAL_REQUEST);
+		}
 		alt {
 			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, createPDPContextResponse, ctx.teic)) -> value ud {
 				f_handle_create_req(ctx, ud, exp_cause);
@@ -393,6 +466,9 @@ module GGSN_Tests {
 		f_send_gtpc(ts_GTPC_DeletePDP(g_peer_c, g_c_seq_nr, ctx.teic_remote, ctx.nsapi, teardown_ind));
 		T_default.start;
 		d := activate(pingpong());
+		if (DIAMETER_PROC.checkstate("Connected")) {
+			as_DIA_CCR(TERMINATION_REQUEST);
+		}
 		alt {
 			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, expect_teid)) -> value ud {
 				if (ud.gtpc.gtpc_pdu.deletePDPContextResponse.cause.causevalue == expect_causevalue) {

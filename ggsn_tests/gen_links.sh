@@ -52,9 +52,14 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
 FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
+FILES="DIAMETER_EncDec.cc"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn PAP_Types.ttcn "
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Templates.ttcn Osmocom_Gb_Types.ttcn "
+FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
 gen_links $DIR $FILES
 
