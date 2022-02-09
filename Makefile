@@ -65,7 +65,7 @@ default: deps all
 
 .PHONY: deps
 deps:
-	$(MAKE) -C deps
+	$(MAKE) $(PARALLEL_MAKE) -C deps
 
 # deps-update target for backwards compat; now does the same as 'make deps'
 .PHONY: deps-update
