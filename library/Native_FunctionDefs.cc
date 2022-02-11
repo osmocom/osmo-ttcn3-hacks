@@ -76,6 +76,19 @@ CHARSTRING f__inet__hntoa(const OCTETSTRING& in)
 	return CHARSTRING(str);
 }
 
+CHARSTRING f__inet6__ntoa(const OCTETSTRING& in)
+{
+	char buf[INET6_ADDRSTRLEN] = { 0 };
+	TTCN_Buffer ttcn_buffer(in);
+
+	const void *src = (const void *)ttcn_buffer.get_data();
+	const char *str = inet_ntop(AF_INET6, src, buf, sizeof(buf));
+	if (str == NULL)
+		fprintf(stderr, "inet_ntop failed: %s\n", strerror(errno));
+
+	return CHARSTRING((const char *)buf);
+}
+
 CHARSTRING f__str__tolower(const CHARSTRING& in)
 {
 	TTCN_Buffer ttcn_buffer(in);
