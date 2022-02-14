@@ -376,6 +376,22 @@ module GGSN_Tests {
 		}
 	}
 
+	function f_handle_update_req(inout PdpContext ctx, in Gtp1cUnitdata ud, in OCT1 exp_cause := '80'O) runs on GT_CT {
+		var UpdatePDPContextResponseGGSN upr := ud.gtpc.gtpc_pdu.updatePDPContextResponse.updatePDPContextResponseGGSN;
+		if (exp_cause == '80'O and exp_cause == upr.cause.causevalue) {
+			ctx.teid_remote := upr.teidDataI.teidDataI;
+			ctx.teic_remote := upr.teidControlPlane.teidControlPlane;
+			if (ispresent(upr.protConfigOptions)) {
+				ctx.pco_neg := upr.protConfigOptions;
+			}
+			setverdict(pass);
+		} else if (exp_cause != '80'O and exp_cause == upr.cause.causevalue) {
+			setverdict(pass);
+		} else {
+			setverdict(fail);
+		}
+	}
+
 	private altstep as_DIA_CCR(DCC_NONE_CC_Request_Type req_type) runs on GT_CT {
 		var PDU_DIAMETER rx_dia;
 		[] DIAMETER_UNIT.receive(tr_DIA_CCR(req_type := req_type)) -> value rx_dia {
@@ -481,6 +497,34 @@ module GGSN_Tests {
 		deactivate(d);
 		T_default.stop;
 	}
+
+	/* send a Update PdP Context Request, expect Response */
+	function f_pdp_ctx_update(inout PdpContext ctx, OCT1 exp_cause := '80'O, template (omit) OCT4 new_teid := omit, template (omit) OCT4 new_teic := omit) runs on GT_CT {
+		var Gtp1cUnitdata ud;
+		var default d;
+
+		if (not istemplatekind(new_teid, "omit")) {
+			ctx.teid := valueof(new_teid);
+		}
+		if (not istemplatekind(new_teic, "omit")) {
+			ctx.teic := valueof(new_teic);
+		}
+
+		log("sending UpdatePDP");
+		f_send_gtpc(ts_GTPC_UpdatePDP(g_peer_c, ctx.teic_remote, g_c_seq_nr, ctx.imsi, g_restart_ctr,
+						  ctx.teid, ctx.teic, ctx.nsapi, g_sgsn_ip_c, g_sgsn_ip_u,
+						  ctx.pco_req, ctx.ratType, ctx.uli));
+		T_default.start;
+		d := activate(pingpong());
+		alt {
+			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, updatePDPContextResponse, ctx.teic)) -> value ud {
+				f_handle_update_req(ctx, ud, exp_cause);
+			}
+		}
+		deactivate(d);
+		T_default.stop;
+	}
+
 	/* IPv6 router solicitation  fe80::2 -> ff02::2 from 02:88:b5:1f:25:59 */
 	const octetstring c_router_solicit := '6000000000103afffe800000000000000000000000000002ff02000000000000000000000000000285009f2b0000000001010288b51f2559'O;
 	/* IPv6 neighbor solicitation fe80::2 -> ff02::1:ff00:2 from 02:88:b5:1f:25:59 */
@@ -810,7 +854,7 @@ module GGSN_Tests {
 		var Gtp1uUnitdata ud;
 		T_default.start;
 		alt {
-			[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ?)) -> value ud {
+			[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ctx.teid)) -> value ud {
 				if (f_verify_gtpu_txseq(ud.gtpu, use_gtpu_txseq) == false) {
 					setverdict(fail);
 					stop;
@@ -824,6 +868,10 @@ module GGSN_Tests {
 				if (not match(icmp4, expected)) {
 					repeat;
 				}
+			}
+			[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ?)) -> value ud {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Received wrong local TEID");
 			}
 			[] GTPU.receive { setverdict(fail); }
 			[] T_default.timeout { setverdict(fail); }
@@ -1384,6 +1432,48 @@ module GGSN_Tests {
 		f_pdp_ctx_del(ctx, '1'B);
 	}
 
+	/* Validate that SUT updates remote TEIC when requested through UpdatePDPContextRequest */
+	testcase TC_pdp4_act_update_teic() runs on GT_CT {
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		ctx.pco_req := valueof(ts_PCO_IPv4_DNS_CONT);
+		f_pdp_ctx_act(ctx);
+
+		/* UpdatePDPContestRequest changing the local TEIC */
+		var OCT4 new_teic := ctx.teic;
+		new_teic[3] := new_teic[3] xor4b '11'O;
+		f_pdp_ctx_update(ctx, new_teic := new_teic);
+
+		f_pdp_ctx_del(ctx, '1'B);
+	}
+
+	/* Validate that SUT updates remote TEID when requested through UpdatePDPContextRequest */
+	testcase TC_pdp4_act_update_teid() runs on GT_CT {
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		ctx.pco_req := valueof(ts_PCO_IPv4_DNS_CONT);
+		f_pdp_ctx_act(ctx);
+
+		f_PCO_ensure_no_duplicates(ctx.pco_neg);
+		var OCT4 dns1_addr := f_PCO_extract_proto(ctx.pco_neg, '000d'O);
+		var OCT4 saddr := ctx.eua.endUserAddress.endUserAddressIPv4.ipv4_address;
+
+		/* Data is sent (back) to the local TEID established during CreatePDPContext */
+		f_send_gtpu(ctx, f_gen_icmpv4_echo(saddr, dns1_addr));
+		f_wait_icmp4_echo_reply(ctx);
+
+		/* UpdatePDPContestRequest changing the local TEID */
+		var OCT4 new_teid := ctx.teid;
+		new_teid[3] := new_teid[3] xor4b '11'O;
+		f_pdp_ctx_update(ctx, new_teid := new_teid);
+
+		/* Check if we can send data after updating the PDP context. Answer should be sent to the new TEID */
+		f_send_gtpu(ctx, f_gen_icmpv4_echo(saddr, dns1_addr));
+		f_wait_icmp4_echo_reply(ctx);
+
+		f_pdp_ctx_del(ctx, '1'B);
+	}
+
 	/* Test IPv4v6 context activation for dynamic IPv4v6 EUA without DNS request */
 	testcase TC_pdp46_act_deact() runs on GT_CT {
 		f_init();
@@ -1717,6 +1807,8 @@ module GGSN_Tests {
 		execute(TC_pdp4_clients_interact_without_txseq());
 		execute(TC_pdp4_act_deact_with_single_dns());
 		execute(TC_pdp4_act_deact_with_separate_dns());
+		execute(TC_pdp4_act_update_teic());
+		execute(TC_pdp4_act_update_teid());
 
 		execute(TC_pdp6_act_deact());
 		execute(TC_pdp6_act_deact_pcodns());
