@@ -122,7 +122,7 @@ module GGSN_Tests {
 
 		port TELNETasp_PT GGSNVTY;
 		var boolean use_gtpu_txseq := false;
-		var boolean g_use_echo := false;
+		var integer g_use_echo_intval := 0; /* 0 = disabled */
 
 		/* emulated PCRF, used with m_ggsn_impl = GGSN_IMPL_OPEN5GS */
 		var DIAMETER_Emulation_CT vc_DIAMETER;
@@ -180,11 +180,11 @@ module GGSN_Tests {
 			return true;
 	}
 
-	private function f_vty_enable_echo_interval(boolean enable) runs on GT_CT {
+	private function f_vty_enable_echo_interval(integer intval_sec) runs on GT_CT {
 		f_vty_enter_config(GGSNVTY);
 		f_vty_transceive(GGSNVTY, "ggsn ggsn0");
-		if (enable) {
-			f_vty_transceive(GGSNVTY, "echo-interval 5");
+		if (intval_sec > 0) {
+			f_vty_transceive(GGSNVTY, "echo-interval " & int2str(intval_sec));
 		} else {
 			f_vty_transceive(GGSNVTY, "no echo-interval");
 		}
@@ -253,7 +253,7 @@ module GGSN_Tests {
 		if (m_ggsn_impl == GGSN_IMPL_OSMOCOM) {
 			f_init_vty();
 			f_vty_set_gpdu_txseq(use_gtpu_txseq);
-			f_vty_enable_echo_interval(g_use_echo);
+			f_vty_enable_echo_interval(g_use_echo_intval);
 		} else if (m_ggsn_impl == GGSN_IMPL_OPEN5GS) {
 			f_init_diameter(testcasename());
 		}
@@ -263,12 +263,12 @@ module GGSN_Tests {
 	private altstep pingpong() runs on GT_CT {
 		var Gtp1cUnitdata ud;
 		var Gtp1uUnitdata udu;
-		[g_use_echo] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+		[g_use_echo_intval > 0] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
 			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
 			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
 			repeat;
 		};
-		[not g_use_echo] GTPC.receive(tr_GTPC_PING(?)) {
+		[g_use_echo_intval == 0] GTPC.receive(tr_GTPC_PING(?)) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 						"GTP Echo Req rceived but not enabled in VTY");
 		};
@@ -1781,25 +1781,42 @@ module GGSN_Tests {
 	/* Activate PDP context + trigger Recovery procedure through EchoResp */
 	testcase TC_pdp_act_restart_ctr_echo() runs on GT_CT {
 		var Gtp1cUnitdata ud;
-		g_use_echo := true;
+		g_use_echo_intval := 5;
+		timer T_echo;
 		f_init();
 		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
 		f_pdp_ctx_act(ctx);
 
 		/* Wait to receive echo request and send initial Restart counter */
-		GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+		T_echo.start(int2float(g_use_echo_intval) + 1.0);
+		alt {
+		[] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
 			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
 			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
-		};
+			}
+		[] T_echo.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Timeout waiting for ping");
+			}
+		}
+		T_echo.stop;
 
 		/* Wait to receive second echo request and send incremented Restart
 		   counter. This will fake a restarted SGSN, and pdp ctx allocated
 		   should be released by GGSN */
 		g_restart_ctr := int2oct((oct2int(g_restart_ctr) + 1) mod 256, 1);
-		GTPC.receive(tr_GTPC_PING(?)) -> value ud {
+		T_echo.start(int2float(g_use_echo_intval) + 1.0);
+		alt {
+		[] GTPC.receive(tr_GTPC_PING(?)) -> value ud {
 			var uint16_t seq := oct2int(ud.gtpc.opt_part.sequenceNumber);
 			GTPC.send(ts_GTPC_PONG(ud.peer, seq, g_restart_ctr));
-		};
+			}
+		[] T_echo.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Timeout waiting for ping");
+			}
+		}
+		T_echo.stop;
 		f_pdp_ctx_exp_del_req(ctx, omit, true);
 		setverdict(pass);
 	}
