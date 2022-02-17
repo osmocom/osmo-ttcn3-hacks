@@ -24,6 +24,7 @@ SUBDIRS= \
 	gbproxy \
 	ggsn_tests \
 	hlr \
+	hnbgw \
 	hnodeb \
 	mgw \
 	mme \
