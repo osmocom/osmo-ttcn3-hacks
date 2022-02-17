@@ -550,15 +550,83 @@ function f_create_bssmap_exp(octetstring l3_enc) runs on MSC_ConnHdlr {
 }
 
 type record TestHdlrEncrParams {
-	OCT1		enc_alg,
+	/* A mask of multiple encryption algorithms, for Encryption Information IE. */
+	OCT1		enc_alg_permitted,
+	/* Expect this encryption algorithm in Channel Activation from the BSC.
+	 * To expect no encryption, set to '01'O == A5/0. */
+	OCT1		enc_alg_expect,
+	/* In BSSMAP, the Chosen Encryption Algorithm IE that the test sends to the BSC.
+	 * When set to omit, the MSC will not send a Chosen Encryption Algorithm IE. */
+	OCT1		enc_alg_chosen optional,
 	octetstring	enc_key,
 	octetstring	enc_kc128 optional
 };
 
-template (value) TestHdlrEncrParams t_EncrParams(OCT1 alg, octetstring key, template (omit) octetstring kc128 := omit) := {
-	enc_alg := alg,
+template (value) TestHdlrEncrParams t_EncrParams(OCT1 alg_permitted,
+						 octetstring key, template (omit) octetstring kc128 := omit) := {
+	enc_alg_permitted := alg_permitted,
+	enc_alg_expect := alg_permitted, /* <- for compat with tests before enc_alg_expect was added */
+	enc_alg_chosen := alg_permitted, /* <- for compat with tests before enc_alg_chosen was added */
 	enc_key := key,
 	enc_kc128 := kc128
+}
+
+template (value) TestHdlrEncrParams t_EncrParams2(OCT1 alg_permitted,
+						  OCT1 alg_expect,
+						  template(omit) OCT1 alg_chosen,
+						  octetstring key,
+						  template (omit) octetstring kc128 := omit) := {
+	enc_alg_permitted := alg_permitted,
+	enc_alg_expect := alg_expect,
+	enc_alg_chosen := alg_chosen,
+	enc_key := key,
+	enc_kc128 := kc128
+}
+
+/* Convenience for common t_EncrParams2 usage.
+ *
+ * To test a scenario where only A5/3 is permitted:
+ *   f_encr_params('08'O);
+ * To test a scenario where A5/3 is chosen from A5/0,A5/1,A5/3 (1 | 2 | 8 = 11 = 0xb):
+ *   f_encr_params('0b'O, '08'O);
+ * To test the same, but the Chosen Encryption Algorithm IE should reflect A5/1:
+ *   f_encr_params('0b'O, '08'O, '02'O);
+ * To test the same, but the MSC sends no Chosen Encryption Algorithm IE:
+ *   f_encr_params('0b'O, '08'O, omit);
+ *
+ * Set alg_chosen and alg_expect magically when == '00'O:
+ * - enc_alg_expect is set to alg_chosen if present, else to alg_permitted.
+ * - enc_alg_chosen is set to alg_permitted.
+ * When only alg_permitted is given, alg_permitted must reflect only one algorithm, or f_cipher_mode_bssmap_to_rsl()
+ * will fail.
+ * When alg_chosen is passed as omit, the messages from the MSC will not contain a Chosen Encryption Algorithm IE.
+ */
+function f_encr_params(OCT1 alg_permitted, OCT1 alg_expect := '00'O, template (omit) OCT1 alg_chosen := '00'O,
+		       boolean kc128 := false)
+	 return TestHdlrEncrParams
+{
+	if (not istemplatekind(alg_chosen, "omit")) {
+		if (valueof(alg_chosen) == '00'O) {
+			if (alg_expect != '00'O) {
+				alg_chosen := alg_expect;
+			} else {
+				/* In this case, alg_permitted should have only one permitted algo */
+				alg_chosen := alg_permitted;
+			}
+		}
+		if (alg_expect == '00'O) {
+			alg_expect := valueof(alg_chosen);
+		}
+	}
+	if (alg_expect == '00'O) {
+		/* In this case, alg_permitted should have only one permitted algo */
+		alg_expect := valueof(alg_permitted);
+	}
+	var template octetstring kc := omit;
+	if (kc128) {
+		kc := f_rnd_octstring(16);
+	}
+	return valueof(t_EncrParams2(alg_permitted, alg_expect, alg_chosen, f_rnd_octstring(8), kc));
 }
 
 type record TestHdlrParamsLcls {
@@ -588,7 +656,6 @@ type record TestHdlrParams {
 	RSL_IE_Body	expect_mr_conf_ie optional, /* typically present for AMR codecs */
 	bitstring	expect_mr_s0_s7 optional, /* typically present for AMR codecs */
 	TestHdlrEncrParams encr optional,
-	OCT1		encr_exp_enc_alg optional, /* if set, expect a different enc_alg than encr.enc_alg */
 	TestHdlrParamsLcls lcls,
 	SCCP_PAR_Address sccp_addr_msc optional,
 	SCCP_PAR_Address sccp_addr_bsc optional,
@@ -618,7 +685,6 @@ template (value) TestHdlrParams t_def_TestHdlrPars := {
 	expect_mr_conf_ie := omit,
 	expect_mr_s0_s7 := omit,
 	encr := omit,
-	encr_exp_enc_alg := omit,
 	lcls := {
 		gcr := omit,
 		cfg := omit,
@@ -740,22 +806,10 @@ function f_cipher_mode_bssmap_to_rsl(OCT1 alg_bssmap) return RSL_AlgId
 	else if (alg_bssmap == '80'O) {
 		return RSL_ALG_ID_A5_7;
 	} else {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected Encryption Algorithm");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected Encryption Algorithm: " &
+					oct2str(alg_bssmap));
 		return RSL_ALG_ID_A5_0;
 	}
-}
-
-function f_cipher_mode_bssmap_to_rsl_exp_enc_alg() runs on MSC_ConnHdlr return RSL_AlgId
-{
-	var OCT1 enc_alg;
-
-	if (ispresent(g_pars.encr_exp_enc_alg)) {
-		enc_alg := g_pars.encr_exp_enc_alg;
-	} else {
-		enc_alg := g_pars.encr.enc_alg;
-	}
-
-	return f_cipher_mode_bssmap_to_rsl(enc_alg);
 }
 
 function f_verify_encr_info(RSL_Message rsl) runs on MSC_ConnHdlr {
@@ -776,7 +830,7 @@ function f_verify_encr_info(RSL_Message rsl) runs on MSC_ConnHdlr {
 
 	/* RSL uses a different representation of the encryption algorithm,
 	 * so we need to convert first */
-	alg_rsl := f_cipher_mode_bssmap_to_rsl_exp_enc_alg();
+	alg_rsl := f_cipher_mode_bssmap_to_rsl(g_pars.encr.enc_alg_expect);
 
 	if (alg_rsl == RSL_ALG_ID_A5_4 and ispresent(g_pars.encr.enc_kc128)) {
 		expect_kc := g_pars.encr.enc_kc128;
@@ -820,9 +874,9 @@ runs on MSC_ConnHdlr {
 	var RSL_Message rsl;
 
 	if (isvalue(enc.enc_kc128)) {
-		BSSAP.send(ts_BSSMAP_CipherModeCmdKc128(enc.enc_alg, enc.enc_key, valueof(enc.enc_kc128)));
+		BSSAP.send(ts_BSSMAP_CipherModeCmdKc128(enc.enc_alg_permitted, enc.enc_key, valueof(enc.enc_kc128)));
 	} else {
-		BSSAP.send(ts_BSSMAP_CipherModeCmd(enc.enc_alg, enc.enc_key));
+		BSSAP.send(ts_BSSMAP_CipherModeCmd(enc.enc_alg_permitted, enc.enc_key));
 	}
 
 	alt {
@@ -843,7 +897,7 @@ runs on MSC_ConnHdlr {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected Cipher Mode Complete");
 		} else {
 			setverdict(pass);
-			var RSL_AlgId alg_rsl := f_cipher_mode_bssmap_to_rsl_exp_enc_alg();
+			var RSL_AlgId alg_rsl := f_cipher_mode_bssmap_to_rsl(g_pars.encr.enc_alg_expect);
 			if (oct2int(bssap.pdu.bssmap.cipherModeComplete.chosenEncryptionAlgorithm.algorithmIdentifier) != enum2int(alg_rsl)) {
 				setverdict(fail, "Unexpected Encryption Algorithm ID in BSSMAP Cipher Mode Complete");
 			}
@@ -941,11 +995,11 @@ private function f_check_chan_act(AssignmentState st, RSL_Message chan_act) runs
 	var RSL_IE_Body ms_power_param;
 	var RSL_IE_Body ms_power;
 
-	if (ispresent(g_pars.encr) and g_pars.encr.enc_alg != '01'O) {
+	if (ispresent(g_pars.encr) and g_pars.encr.enc_alg_permitted != '01'O) {
 		if (not f_rsl_find_ie(chan_act, RSL_IE_ENCR_INFO, encr_info)) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Missing Encryption IE in CHAN ACT");
 		} else {
-			var RSL_AlgId alg := f_cipher_mode_bssmap_to_rsl_exp_enc_alg();
+			var RSL_AlgId alg := f_cipher_mode_bssmap_to_rsl(g_pars.encr.enc_alg_expect);
 			var octetstring expect_key;
 			if (alg == RSL_ALG_ID_A5_4) {
 				expect_key := g_pars.encr.enc_kc128;
