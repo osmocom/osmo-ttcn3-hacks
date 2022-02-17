@@ -5993,6 +5993,7 @@ testcase TC_ho_out_fail_no_result_after_ho_cmd() runs on test_CT {
 }
 
 private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit) runs on MSC_ConnHdlr {
+	var PDU_BSSAP rx_bssap;
 	/* Hack: the proper way would be to wait for the BSSMAP Handover Request ACK and extract the
 	 * actual assigned chan_nr from its L3 (RR Handover Command) message. But osmo-bsc starts acting
 	 * on the lchan even before we get a chance to evaluate the BSSMAP Handover Request ACK. So we
@@ -6015,12 +6016,27 @@ private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToN
 							enc := g_pars.encr)));
 	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
 
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequestAcknowledge(?)) -> value rx_bssap {
+		if (g_pars.expect_ho_fail) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected Handover Request to fail, but got Handover Request Ack")
+		}
+		}
+	[] BSSAP.receive(tr_BSSMAP_HandoverFailure) -> value rx_bssap {
+		if (not g_pars.expect_ho_fail) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected Handover Request to succeed, but got Handover Failure")
+		}
+		// TODO: evaluate correct cause value. But osmo-bsc doesn't seem to send meaningful causes yet!
+		// For now just accept any cause.
+		BSSAP.receive(tr_BSSMAP_ClearRequest);
+		setverdict(pass);
+		return;
+		}
+	}
+
 	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
-
-	var PDU_BSSAP rx_bssap;
-	var octetstring ho_command_str;
-
-	BSSAP.receive(tr_BSSMAP_HandoverRequestAcknowledge(?)) -> value rx_bssap;
 
 	/* we're sure that the channel activation is done now, verify the parameters in it */
 	var RSL_Message chan_act := f_rslem_get_last_act(RSL_PROC, 0, g_chan_nr);
@@ -6053,6 +6069,7 @@ private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToN
 		}
 	}
 
+	var octetstring ho_command_str;
 	ho_command_str := rx_bssap.pdu.bssmap.handoverRequestAck.layer3Information.layer3info;
 	log("Received L3 Info in HO Request Ack: ", ho_command_str);
 	var PDU_ML3_NW_MS ho_command := dec_PDU_ML3_NW_MS(ho_command_str);
@@ -6112,7 +6129,11 @@ private function f_tc_ho_into_this_bsc(charstring id) runs on MSC_ConnHdlr {
 		exp_rr_rel_tmpl := tr_RRM_RR_RELEASE;
 	}
 	f_ho_into_this_bsc(id, oldToNewBSSIEs);
-	f_perform_clear(exp_rr_rel_tmpl := exp_rr_rel_tmpl);
+	if (g_pars.expect_ho_fail) {
+		f_perform_clear_no_lchan();
+	} else {
+		f_perform_clear(exp_rr_rel_tmpl := exp_rr_rel_tmpl);
+	}
 	setverdict(pass);
 }
 function f_tc_ho_into_this_bsc_main(TestHdlrParams pars, charstring vty_a5_cfg := VTY_A5_DEFAULT) runs on test_CT {
@@ -6131,9 +6152,14 @@ function f_tc_ho_into_this_bsc_main(TestHdlrParams pars, charstring vty_a5_cfg :
 	vc_conn.done;
 
 	f_ctrs_bsc_and_bts_add(0, "handover:attempted");
-	f_ctrs_bsc_and_bts_add(0, "handover:completed");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
-	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:completed");
+	if (pars.expect_ho_fail) {
+		f_ctrs_bsc_and_bts_add(0, "handover:failed");
+		f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:failed");
+	} else {
+		f_ctrs_bsc_and_bts_add(0, "handover:completed");
+		f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:completed");
+	}
 	f_ctrs_bsc_and_bts_verify();
 
 	f_vty_encryption_a5_reset();
@@ -6145,9 +6171,11 @@ testcase TC_ho_into_this_bsc() runs on test_CT {
 	f_shutdown_helper();
 }
 
-function f_tc_ho_into_this_bsc_a5(TestHdlrEncrParams encr, charstring vty_a5_cfg := VTY_A5_DEFAULT) runs on test_CT {
+function f_tc_ho_into_this_bsc_a5(TestHdlrEncrParams encr, charstring vty_a5_cfg := VTY_A5_DEFAULT,
+				  boolean expect_fail := false) runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	pars.encr := encr;
+	pars.expect_ho_fail := expect_fail;
 	f_tc_ho_into_this_bsc_main(pars, vty_a5_cfg);
 	f_shutdown_helper();
 }
@@ -6182,6 +6210,12 @@ testcase TC_ho_into_this_bsc_a5_1_3_no_chosen_enc_alg() runs on test_CT {
 
 testcase TC_ho_into_this_bsc_a5_1_3() runs on test_CT {
 	f_tc_ho_into_this_bsc_a5(f_encr_params(alg_permitted := '0a'O, alg_expect := '08'O));
+}
+
+/* Send a permitted algo mask that does not intersect with osmo-bsc.cfg */
+testcase TC_ho_into_this_bsc_a5_mismatch() runs on test_CT {
+	f_tc_ho_into_this_bsc_a5(f_encr_params(alg_permitted := '18'O, alg_expect := '10'O), "0 1",
+				 expect_fail := true); // 0x18 = A5/3 and A5/4
 }
 
 testcase TC_ho_into_this_bsc_tla_v6() runs on test_CT {
@@ -8024,6 +8058,16 @@ runs on MSC_ConnHdlr {
 	}
 	deactivate(ack_dlcx);
 	deactivate(ack_rel_req);
+}
+
+friend function f_perform_clear_no_lchan()
+runs on MSC_ConnHdlr {
+	f_logp(BSCVTY, "MSC instructs BSC to clear channel");
+	BSSAP.send(ts_BSSMAP_ClearCommand(0));
+	BSSAP.receive(tr_BSSMAP_ClearComplete);
+	f_logp(BSCVTY, "Got BSSMAP Clear Complete");
+	/* Also drop the SCCP connection */
+	BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
 }
 
 private function f_perform_clear_test_ct(DchanTuple dt)
@@ -11290,6 +11334,7 @@ control {
 	execute( TC_ho_into_this_bsc_a5_4() );
 	execute( TC_ho_into_this_bsc_a5_1_3_no_chosen_enc_alg() );
 	execute( TC_ho_into_this_bsc_a5_1_3() );
+	execute( TC_ho_into_this_bsc_a5_mismatch() );
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
 		execute( TC_ho_into_this_bsc_tla_v6() );
 	}
