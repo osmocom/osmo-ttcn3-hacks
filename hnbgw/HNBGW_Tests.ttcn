@@ -118,6 +118,7 @@ type record CrcxResponse {
 	MgcpConnectionId mgcp_connection_id
 }
 type record MgcpParameters {
+	boolean handle_mgcp,
 	integer got_crcx_count,
 	integer got_dlcx_count,
 	MgcpCallId mgcp_call_id optional,
@@ -135,6 +136,7 @@ type record MgcpParameters {
 }
 
 template (value) MgcpParameters t_MgcpParams := {
+	handle_mgcp := true,
 	got_crcx_count := 0,
 	got_dlcx_count := 0,
 	mgcp_call_id := omit,
@@ -775,15 +777,17 @@ friend function f_rab_ass_req(MgcpParameters pars) runs on ConnHdlr {
 	BSSAP.send(tx);
 	T.start;
 
-	/* Handle MGCP CRCX */
-	alt {
-	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
-		log("CRCX1", mgcp_cmd);
-		var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
-		MGCP.send(valueof(mgcp_rsp));
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for MGCP");
+	if (pars.handle_mgcp) {
+		/* Handle MGCP CRCX */
+		alt {
+		[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+			log("CRCX1", mgcp_cmd);
+			var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
+			MGCP.send(valueof(mgcp_rsp));
+			}
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for MGCP");
+			}
 		}
 	}
 
@@ -813,23 +817,25 @@ friend function f_rab_ass_resp(MgcpParameters pars) runs on ConnHdlr {
 	RUA.send(tx);
 	T.start;
 
-	interleave {
-	/* Expect MDCX with IP/port from RAB Assignment Response */
-	[] MGCP.receive(tr_MDCX(tr_SDP(pars.hnb_rtp_ip, pars.hnb_rtp_port))) -> value mgcp_cmd {
-		log("MDCX1", mgcp_cmd);
-		/* Verify SDP of MDCX */
-		var SDP_Message sdp := valueof(ts_SDP(pars.mgw_conn_1.mgw_rtp_ip, pars.mgw_conn_1.mgw_rtp_ip, hex2str(pars.mgcp_call_id), "42", pars.mgw_conn_1.mgw_rtp_port,
-			{ int2str(pars.rtp_payload_type) }, { valueof(ts_SDP_rtpmap(pars.rtp_payload_type, pars.rtp_sdp_format)), valueof(ts_SDP_ptime(20)) } ));
-		var template MgcpResponse mgcp_rsp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, pars.mgw_conn_1.mgcp_connection_id, sdp);
-		MGCP.send(valueof(mgcp_rsp));
+	if (pars.handle_mgcp) {
+		interleave {
+		/* Expect MDCX with IP/port from RAB Assignment Response */
+		[] MGCP.receive(tr_MDCX(tr_SDP(pars.hnb_rtp_ip, pars.hnb_rtp_port))) -> value mgcp_cmd {
+			log("MDCX1", mgcp_cmd);
+			/* Verify SDP of MDCX */
+			var SDP_Message sdp := valueof(ts_SDP(pars.mgw_conn_1.mgw_rtp_ip, pars.mgw_conn_1.mgw_rtp_ip, hex2str(pars.mgcp_call_id), "42", pars.mgw_conn_1.mgw_rtp_port,
+				{ int2str(pars.rtp_payload_type) }, { valueof(ts_SDP_rtpmap(pars.rtp_payload_type, pars.rtp_sdp_format)), valueof(ts_SDP_ptime(20)) } ));
+			var template MgcpResponse mgcp_rsp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, pars.mgw_conn_1.mgcp_connection_id, sdp);
+			MGCP.send(valueof(mgcp_rsp));
+			}
+		/* Handle CRCX for second leg of endpoint, answer with IP/port */
+		[] MGCP.receive(tr_CRCX(pars.mgcp_ep, tr_SDP(pars.cn_rtp_ip, pars.cn_rtp_port))) -> value mgcp_cmd {
+			log("CRCX2", mgcp_cmd);
+			/* Verify SDP of CRCX */
+			var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
+			MGCP.send(valueof(mgcp_rsp));
 		}
-	/* Handle CRCX for second leg of endpoint, answer with IP/port */
-	[] MGCP.receive(tr_CRCX(pars.mgcp_ep, tr_SDP(pars.cn_rtp_ip, pars.cn_rtp_port))) -> value mgcp_cmd {
-		log("CRCX2", mgcp_cmd);
-		/* Verify SDP of CRCX */
-		var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
-		MGCP.send(valueof(mgcp_rsp));
-	}
+		}
 	}
 
 	/* Expect RAB Assignment Response with IP/port from second CRCX ACK */
@@ -981,6 +987,55 @@ testcase TC_rab_release() runs on test_CT {
 	vc_conn.done;
 }
 
+friend function f_tc_rab_assign_mgcp_to(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	var RANAP_PDU tx;
+	var template RAB_SetupOrModifyList rab_sml;
+	timer T := 15.0;
+
+	T.start;
+	pars.mgcp_pars.handle_mgcp := false;
+	f_init_handler(pars);
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+
+
+	/* Send RAB Assignment Request */
+	rab_sml := ts_RAB_SML(t_RAB_id(23), f_ts_RAB_TLA(pars.mgcp_pars.cn_rtp_ip), t_RAB_binding_port(pars.mgcp_pars.cn_rtp_port));
+	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	BSSAP.send(tx);
+
+	/* Ignore MGCP CRCX */
+	alt {
+	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
+		log("Ignoreing CRCX1", mgcp_cmd);
+		repeat;
+		}
+	[] BSSAP.receive(tr_RANAP_IuReleaseRequest(?)) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for IuRelease");
+		}
+	}
+
+	/* Send Iu Release */
+	tx := valueof(ts_RANAP_IuReleaseCommand(ts_RanapCause_om_intervention));
+	f_iu2iuh(tx);
+
+	tx := valueof(ts_RANAP_IuReleaseComplete());
+	f_iuh2iu(tx);
+}
+
+testcase TC_rab_assign_mgcp_to() runs on test_CT {
+	var ConnHdlr vc_conn;
+	f_init();
+	f_start_hnbs();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_mgcp_to), t_pars(6));
+	vc_conn.done;
+}
+
 /* Create an Iuh connection; send InitialUE; transceive data both directions */
 friend function f_tc_ranap_bidir(charstring id, TestHdlrParams pars) runs on ConnHdlr {
 	f_init_handler(pars);
@@ -1061,6 +1116,7 @@ control {
 	execute(TC_rab_assignment());
 	execute(TC_rab_release());
 	execute(TC_rab_assign_fail());
+	execute(TC_rab_assign_mgcp_to());
 	execute(TC_ranap_cs_mo_disconnect());
 	execute(TC_ranap_ps_mo_disconnect());
 }
