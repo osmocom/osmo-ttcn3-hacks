@@ -331,9 +331,15 @@ module GGSN_Tests {
 		}
 	}
 
-	function f_handle_create_req(inout PdpContext ctx, in Gtp1cUnitdata ud, in OCT1 exp_cause := '80'O) runs on GT_CT {
+	function f_handle_create_req(inout PdpContext ctx, in Gtp1cUnitdata ud, in template OCT1 exp_cause := '80'O) runs on GT_CT {
 		var CreatePDPContextResponse cpr := ud.gtpc.gtpc_pdu.createPDPContextResponse;
-		if (exp_cause == '80'O and exp_cause == cpr.cause.causevalue) {
+
+		if (not match(cpr.cause.causevalue, exp_cause)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"CreatePDPContextResp: cause expectancies didn't match");
+		}
+
+		if (cpr.cause.causevalue == '80'O) { /* Accepted */
 			/*  Check if EUA type corresponds to requested type */
 			if (match(ctx.eua, t_EuaIPv4(?)) and
 			    not match(cpr.endUserAddress, tr_EuaIPv4(?))){
@@ -350,34 +356,44 @@ module GGSN_Tests {
 				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 							"EUAv4v6 expectancies didn't match");
 			}
-			/* Check if PCO response corresponds to request */
-			if (ispresent(ctx.pco_req)) {
-				if (match(ctx.pco_req, ts_PCO_IPv4_DNS_CONT) and
-				    not match(cpr.protConfigOptions, tr_PCO_IPv4_DNS_CONT_resp(?))) {
-					Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-								"IPv4 DNS Container requested, but missing");
-				}
-				if (match(ctx.pco_req, ts_PCO_IPv6_DNS) and
-				    not match(cpr.protConfigOptions, tr_PCO_IPv6_DNS_resp(?))) {
-					Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-								"IPv6 DNS Container requested, but missing");
-				}
+		} else if (cpr.cause.causevalue == '81'O) { /* Cause: New PDP type due to network preference */
+			/* ETSI TS 129 060 7.3.2 Create PDP Context Response. OS#5449 */
+			/* This should only happen if EUA requested type is v4v6: */
+			if (not ischosen(ctx.eua.endUserAddress.endUserAddressIPv4andIPv6)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Cause not expected when requesting a non v4v6 EUA");
 			}
-			ctx.teid_remote := cpr.teidDataI.teidDataI;
-			ctx.teic_remote := cpr.teidControlPlane.teidControlPlane;
-			ctx.eua := cpr.endUserAddress;
-			ctx.pco_neg := cpr.protConfigOptions;
-			setverdict(pass);
-		} else if (exp_cause != '80'O and exp_cause == cpr.cause.causevalue) {
-			if (ispresent(cpr.endUserAddress)) {
-				log("EUA received on createPDPContextResponse cause=" & oct2str(cpr.cause.causevalue));
-				setverdict(fail);
+			if (not match(cpr.endUserAddress, (tr_EuaIPv4(?), tr_EuaIPv6(?)))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Cause not expected when requesting+receiving EUAv4v6");
 			}
-			setverdict(pass);
 		} else {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						"CreatePDPContextResp: cause expectancies didn't match");
+			if (ispresent(cpr.endUserAddress)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"EUA received on createPDPContextResponse cause=" & oct2str(cpr.cause.causevalue));
+			}
+			setverdict(pass);
+			return;
 		}
+
+		/* Check if PCO response corresponds to request */
+		if (ispresent(ctx.pco_req)) {
+			if (match(ctx.pco_req, ts_PCO_IPv4_DNS_CONT) and
+				not match(cpr.protConfigOptions, tr_PCO_IPv4_DNS_CONT_resp(?))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"IPv4 DNS Container requested, but missing");
+			}
+			if (match(ctx.pco_req, ts_PCO_IPv6_DNS) and
+				not match(cpr.protConfigOptions, tr_PCO_IPv6_DNS_resp(?))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"IPv6 DNS Container requested, but missing");
+			}
+		}
+		ctx.teid_remote := cpr.teidDataI.teidDataI;
+		ctx.teic_remote := cpr.teidControlPlane.teidControlPlane;
+		ctx.eua := cpr.endUserAddress;
+		ctx.pco_neg := cpr.protConfigOptions;
+		setverdict(pass);
 	}
 
 	function f_handle_update_req(inout PdpContext ctx, in Gtp1cUnitdata ud, in OCT1 exp_cause := '80'O) runs on GT_CT {
@@ -420,8 +436,9 @@ module GGSN_Tests {
 	}
 
 	/* send a PDP context activation */
-	function f_pdp_ctx_act(inout PdpContext ctx, OCT1 exp_cause := '80'O) runs on GT_CT {
+	function f_pdp_ctx_act(inout PdpContext ctx, template OCT1 exp_cause := '80'O) runs on GT_CT return CreatePDPContextResponse {
 		var Gtp1cUnitdata ud;
+		var CreatePDPContextResponse cpr;
 		var default d;
 
 		log("sending CreatePDP");
@@ -436,10 +453,12 @@ module GGSN_Tests {
 		alt {
 			[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, createPDPContextResponse, ctx.teic)) -> value ud {
 				f_handle_create_req(ctx, ud, exp_cause);
+				cpr := ud.gtpc.gtpc_pdu.createPDPContextResponse;
 			}
 		}
 		deactivate(d);
 		T_default.stop;
+		return cpr;
 	}
 
 	function f_pdp_ctx_exp_del_req(PdpContext ctx, template (omit) OCT1 expect_cause := omit, boolean expect_teardown := false) runs on GT_CT {
@@ -1680,18 +1699,40 @@ module GGSN_Tests {
 
 	/* Test IPv4v6 context activation for dynamic IPv4v6 EUA on a v4-only APN */
 	testcase TC_pdp46_act_deact_apn4() runs on GT_CT {
+		const OCT1 cause_accept := '80'O; /* Normal accept cause */
+		const OCT1 cause_new_pdp_type := '81'O; /* Cause: New PDP type due to network preference */
+		const OCT1 cause_unknown_pdp := 'DC'O; /* Cause: Unknown PDP address or PDP type */
+		var CreatePDPContextResponse cpr;
+
 		f_init();
-		/* A typical MS first attempts v4v6, and if rejected, then tries v4 and v6 separetly */
 		var PdpContext ctx46 := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dynv6Dyn)));
-		f_pdp_ctx_act(ctx46, 'DC'O); /* Cause: Unknown PDP address or PDP type */
+		cpr := f_pdp_ctx_act(ctx46, (cause_unknown_pdp, cause_new_pdp_type));
 
-		var PdpContext ctx4 := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
-		f_pdp_ctx_act(ctx4, '80'O); /* Normal accept cause */
+		if (cpr.cause.causevalue == cause_new_pdp_type) {
+			/* 3GPP TS 23.060 sec 9.2.1: "If the MS requests PDP type IPv4v6,
+			 * but the operator preferences dictate the use of a single IP
+			 * version only, the PDP type shall be changed to a single address
+			 * PDP type (IPv4 or IPv6) and a reason cause shall be returned to
+			 * the MS indicating that only the assigned PDP type is allowed. In
+			 * this case, the MS shall not request another PDP context for the
+			 * other PDP type during the existence of the PDP context." */
+			f_pdp_ctx_del(ctx46, '1'B);
+		} else {
+			/* 3GPP TS 23.060 sec 9.2.1 NOTE 5: If the MS requests PDP type
+			 * IPv4v6, and the PDP context is rejected due to "unknown PDP
+			 * type", the MS can attempt to establish dual-stack connectivity
+			 * by performing two PDP context request procedures to activate an
+			 * IPv4 PDP context and an IPv6 PDP context, both to the same APN. A
+			 * typical MS first attempts v4v6, and if rejected, then tries v4
+			 * and v6 separetly */
+			var PdpContext ctx4 := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+			f_pdp_ctx_act(ctx4, cause_accept); /* Normal accept cause */
 
-		var PdpContext ctx6 := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv6Dyn)));
-		f_pdp_ctx_act(ctx6, 'DC'O); /* Cause: Unknown PDP address or PDP type */
+			var PdpContext ctx6 := valueof(t_DefinePDP(f_rnd_imsi('26242'H), '1234'O, c_ApnInternet, valueof(t_EuaIPv6Dyn)));
+			f_pdp_ctx_act(ctx6, cause_unknown_pdp); /* Cause: Unknown PDP address or PDP type */
 
-		f_pdp_ctx_del(ctx4, '1'B);
+			f_pdp_ctx_del(ctx4, '1'B);
+		}
 	}
 
 	/* Validate if 2nd CtxCreateReq with increased Recovery IE causes ggsn to drop 1st one (while keeping 2nd one). */
