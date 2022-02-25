@@ -19,9 +19,11 @@ import from SIMTRACE_Templates all;
 import from SIMTRACE_Emulation all;
 
 modulepar {
-	charstring mp_cardem_usb_path := "1-2";
+	//charstring mp_cardem_usb_path := "2-15";
 	integer mp_cardem_usb_interface := 0;
-	USB_Device_Match mp_ccid_usb_dev_match := { vid_pid := { vid := '076b'H, pid := '6622'H } };
+	USB_Device_Match mp_ccid_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '6141'H } };
+	USB_Device_Match mp_st_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '616d'H } };
+	boolean true_card := false;
 }
 
 type component test_CT extends Slot_CT {
@@ -30,6 +32,7 @@ type component test_CT extends Slot_CT {
 	port ST_USER_PT ST_IRQ;
 
 	var CCID_Emulation_CT vc_CCID;
+	timer t_transaction_guard := 3.0;
 };
 
 private template (value) USB_IF_Params ts_UsbPars_path(charstring path, uint8_t if_nr) := {
@@ -46,20 +49,23 @@ private function f_init(integer slot_nr := 0) runs on test_CT
 	g_slot_nr := slot_nr;
 
 	var USB_IF_Params st_usb_pars;
-	st_usb_pars := valueof(ts_UsbPars_path(mp_cardem_usb_path, mp_cardem_usb_interface));
+	st_usb_pars.usb_dev_match := mp_st_usb_dev_match;// := valueof(ts_UsbPars_path(mp_cardem_usb_path, mp_cardem_usb_interface));
+	st_usb_pars.usb_if_nr := mp_cardem_usb_interface;
 	vc_ST := ST_Emulation_CT.create("ST");
 	map(vc_ST:USB, system:USB);
 	connect(vc_ST:INOUT, self:ST);
 	connect(vc_ST:IRQ, self:ST_IRQ);
 	vc_ST.start(SIMTRACE_Emulation.main(st_usb_pars));
 
+	f_st_drain(0.5);
+
 	/* remove the virtual card */
 	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(0));
 
-	/* TODO: set the ATR */
+	ST.send(ts_SIMTRACE_CEMU_SET_ATR('3B9F96801FC78031A073BE21136743200718000001A5'O));
 
 	/* Enable the use of the IRQ endpoint to report status updates */
-	f_st_xceive(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true)),
+	f_st_xceive(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true), slot_nr),
 		    tr_SIMTRACE_CEMU_CONFIG(tr_FeatureFlags(true)))
 
 
@@ -77,8 +83,8 @@ private function f_init(integer slot_nr := 0) runs on test_CT
 	f_ccid_power_off(?);
 }
 
-function f_st_drain() runs on test_CT {
-	timer T := 0.1;
+function f_st_drain(float waittime := 0.1) runs on test_CT {
+	timer T := waittime;
 	T.start;
 	alt {
 	[] ST.receive {
@@ -158,80 +164,413 @@ private template (present) CardEmu_DataFlags tr_cef_tpdu_hdr :=
 		tr_CardEmu_DataFlags(false, false, false, tpdu_hdr := true);
 
 /* transceive a TPDU, either with e rx data part, or a tx data part */
-function f_xceive(octetstring apdu, octetstring sw := '9000'O, boolean rx := true) runs on test_CT {
+function f_xceive(octetstring apdu, octetstring sw := '9000'O, boolean rx := true) runs on test_CT return octetstring {
 	var octetstring apdu_hdr := substr(apdu, 0, 5);
 	var octetstring pb := substr(apdu, 1, 1);
 	var octetstring data := substr(apdu, 5, lengthof(apdu)-5);
+	var CCID_PDU rx_ccid;
 
-	CCID.send(ts_CCID_XfrBlock(g_slot_nr, apdu));
-	ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_cef_tpdu_hdr, apdu_hdr));
-	if (rx) {
-		/* transmit procedure byte and wait for remainder */
-		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_rx:=true), pb));
-		/* expect reader to transmit the remaining data */
-		ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_CardEmu_DataFlags(final:=true), data));
-		/* respond with status word */
-		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(final:=true), sw));
-		/* expect reader to receive status word */
-		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := sw));
+	if (rx == true) {
+		CCID.send(ts_CCID_XfrBlock(g_slot_nr, apdu));
 	} else {
-		/* FIXmE: doesn't work yet! */
+		/* the octsim judges the command type by length: >header size means data, and data means "rx = true" here */
+		CCID.send(ts_CCID_XfrBlock(g_slot_nr, apdu_hdr));
+	}
+
+	if(not true_card){
+		ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_cef_tpdu_hdr, apdu_hdr));
+	}
+	if (rx) {
+		if(not true_card){
+			/* transmit procedure byte and wait for remainder */
+			ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_rx:=true), pb));
+			/* expect reader to transmit the remaining data */
+			ST.receive(tr_SIMTRACE_CEMU_RX_DATA(tr_CardEmu_DataFlags(final:=true), data));
+			/* respond with status word */
+			ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(final:=true), sw));
+		}
+		/* expect reader to receive status word */
+		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := sw)) ->  value rx_ccid;
+	} else {
 		/* transmit procedure byte and remainder */
 		var octetstring tx := data;
-		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true), pb & data));
-		ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true, final:=true), sw));
+
+		if(not true_card){
+			ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true, final:=true), pb & data & sw));
+
+			// attempt to split the transfer causes proplems with 5m/512/32 ?! apparently anything above 4m/372/2
+			//ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true), pb & data));
+			//f_sleep(0.1);
+			//ST.send(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(pb_and_tx:=true, final:=true), sw));
+		}
 		/* expect reader to receive status word */
-		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := tx));
+		CCID.receive(tr_CCID_DataBlock(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK, data := data & sw)) ->  value rx_ccid;
 	}
 	setverdict(pass);
+
+
+	return rx_ccid.u.DataBlock.abData;
 }
 
 
-testcase TC_test() runs on test_CT
+private function f_update(integer slot_nr := 0) runs on test_CT
+{
+	/* remove the virtual card */
+	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(0));
+
+	f_st_drain();
+	disconnect(vc_CCID:SLOT[g_slot_nr], self:CCID);
+	g_slot_nr := slot_nr;
+	//f_sleep(1.0);
+	connect(vc_CCID:SLOT[g_slot_nr], self:CCID);
+	//f_ccid_power_off(?);
+	f_st_drain();
+	/* Enable the use of the IRQ endpoint to report status updates */
+	f_st_xceive(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true), slot_nr),
+		    tr_SIMTRACE_CEMU_CONFIG(tr_FeatureFlags(true)))
+
+
+}
+
+private function f_pps_512_32() runs on test_CT {
+	var CCID_PDU rx_ccid;
+	var CCID_ProtocolData pd := {
+	T0 := {
+
+		// does not work with sjs1!
+		// card will nak by being unresponsive
+		//Findex := bit2int('0000'B),
+		//Dindex := bit2int('0110'B),
+
+		Findex := bit2int('1001'B),
+		Dindex := bit2int('0101'B),
+		//Dindex := bit2int('0100'B),
+
+
+		// ok: 2.5m / 372/2
+		//Findex := bit2int('0001'B),
+		//Dindex := bit2int('0010'B),
+
+		bRFU := '000000'B,
+		inv_convention := false,
+		bRFU2 := '0'B,
+
+		bGuardTimeT0 := 0,
+		bWaitingIntegerT0 := 10,
+		bClockStop := STOPPING_NOT_ALLOWED
+		}
+	}
+	CCID.send(ts_CCID_SetParameters(g_slot_nr, pd));
+	if(not true_card){
+		ST.receive(tr_SIMTRACE_CEMU_PTS(?,?));
+	}
+	CCID.receive(tr_CCID_Parameters(g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK));
+
+}
+
+private altstep as_guardtimer() runs on test_CT {
+	[] t_transaction_guard.timeout {
+		setverdict(fail, "t_transaction_guard timeout!");
+		mtc.stop;
+	}
+}
+
+private function TC_test_common(integer slotnr,CCID_PowerSelect psel := CCID_PWRSEL_AUTO ,boolean use_ppss := true) runs on test_CT
 {
 	var template (present) CardEmu_StatusFlags exp_flags;
 	var CCID_PDU rx_ccid;
 
-	f_init();
-	f_st_drain();
+	f_update(slotnr);
 
-	f_sleep(1.0);
+	f_st_drain();
+	f_ccid_power_off(?);
 
 	/* insert the virtual card */
-	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(1));
+	ST.send(ts_SIMTRACE_CEMU_CARDINSERT(2));
 
 	//f_ccid_xceive(ts_CCID_GetSlotStatus(0, g_slot_nr), tr_CCID_SlotStatus(slot := g_slot_nr, hdr_in := tr_CCID_HeaderIN_OK(?)));
+	//f_sleep(1.0);
 
-	rx_ccid := f_ccid_power_on();
+	f_st_drain();
 
-	if (false) {
-		/* FIXME: why does this only work on the first time after powering both devices? */
-		f_sleep(1.0);
-		/* wait for status with RESET active */
-		exp_flags := tr_CardEmu_StatusFlags(reset_active := true, clk_active := true, vcc_present := true);
+	t_transaction_guard.start;
+	var default d1 := activate(as_guardtimer())
+
+	rx_ccid := f_ccid_power_on(psel);
+
+	/* wait for status with RESET inactive/released */
+	if(not true_card){
+		exp_flags := tr_CardEmu_StatusFlags(reset_active := false, clk_active := true, vcc_present := true);
 		as_st_irq_wait_flags(exp_flags);
 	}
 
-	/* wait for status with RESET inactive/released */
-	exp_flags := tr_CardEmu_StatusFlags(reset_active := false, clk_active := true, vcc_present := true);
-	as_st_irq_wait_flags(exp_flags);
-
-	if (not match(rx_ccid, tr_CCID_DataBlock(data := '3B8080811FC759'O))) {
-		setverdict(fail, "Unexpected ATR on CCID side: ", rx_ccid.u.DataBlock.abData);
+	if (not match(rx_ccid, tr_CCID_DataBlock(data := '3B9F96801FC78031A073BE21136743200718000001A5'O))) {
+		setverdict(fail, "Unexpected ATR on CCID side: ", slotnr, psel, use_ppss, rx_ccid.u.DataBlock.abData);
+		mtc.stop;
 	}
 
-	for (var integer i := 0; i < 100; i := i+1) {
-		f_xceive('a0a40004023f00'O);
+	f_sleep(0.1);
+	if (use_ppss){
+		f_pps_512_32();
 	}
-	/* doesn't work yet */
-	//f_xceive('a0a40004023f00'O, rx:=false);
-	f_sleep(2.0);
+
+	for (var integer i := 0; i < 5; i := i+1) {
+		//f_xceive('a0a40004023f00'O);
+		var octetstring rv := f_xceive('a0a40000023f00'O, sw := '9f22'O);
+
+		/* actual card data */
+		var octetstring data := '00007fff3f0001000000000015b104050600838a838a008300830000000000000000'O
+
+		//var OCT1 sw1 := substr(rv, 0, 1);
+		var OCT1 sw2 := substr(rv, 1, 1);
+		//var octetstring data := ''O;
+		//f_pad_oct(data, oct2int(sw2), '2B'O);
+		f_xceive('A0C00000'O & sw2 & data, rx:=false);
+
+		//f_xceive('a0b0000004fefed00f'O, rx:=false);
+	}
+
+	t_transaction_guard.stop;
+	deactivate(d1);
+
+	f_sleep(0.1);
+
+	f_ccid_power_off(?);
+	f_st_drain();
+
+	log("currently trying slot " & int2str(slotnr) & " with " , psel, getverdict);
+}
+
+testcase TC_test_grouped() runs on test_CT
+{
+	f_init(0);
+	f_st_drain(1.0);
+
+
+	for (var integer j := 0; j < 1; j := j+1) {
+		for (var integer i := 0; i < 8; i := i+1) {
+
+			//TC_test_common(1, CCID_PWRSEL_1V8);
+
+			if (false) {
+				f_st_drain();
+
+				f_update(i);
+				/* insert the virtual card */
+				ST.send(ts_SIMTRACE_CEMU_CARDINSERT(1));
+
+				f_sleep(1.0);
+				f_ccid_power_off(?);
+				f_sleep(1.0);
+				f_ccid_xceive(ts_CCID_IccPowerOn(i, CCID_PWRSEL_3V0), tr_CCID_DataBlock(?, hdr_in := ?) );
+			} else {
+				TC_test_common(i, CCID_PWRSEL_1V8);
+				TC_test_common(i, CCID_PWRSEL_3V0);
+				TC_test_common(i, CCID_PWRSEL_5V0, false);
+			}
+		}
+	}
+
+	f_ccid_power_off(?);
+	f_st_drain();
+}
+
+testcase TC_test_slot0_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(0);
+	TC_test_common(0, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot0_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(0);
+	TC_test_common(0, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot0_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(0);
+	TC_test_common(0, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot1_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(1);
+	TC_test_common(1, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot1_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(1);
+	TC_test_common(1, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot1_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(1);
+	TC_test_common(1, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot2_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(2);
+	TC_test_common(2, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot2_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(2);
+	TC_test_common(2, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot2_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(2);
+	TC_test_common(2, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot3_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(3);
+	TC_test_common(3, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot3_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(3);
+	TC_test_common(3, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot3_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(3);
+	TC_test_common(3, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot4_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(4);
+	TC_test_common(4, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot4_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(4);
+	TC_test_common(4, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot4_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(4);
+	TC_test_common(4, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot5_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(5);
+	TC_test_common(5, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot5_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(5);
+	TC_test_common(5, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot5_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(5);
+	TC_test_common(5, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot6_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(6);
+	TC_test_common(6, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot6_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(6);
+	TC_test_common(6, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot6_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(6);
+	TC_test_common(6, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot7_CCID_PWRSEL_1V8() runs on test_CT
+{
+	f_init(7);
+	TC_test_common(7, CCID_PWRSEL_1V8, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot7_CCID_PWRSEL_3V0() runs on test_CT
+{
+	f_init(7);
+	TC_test_common(7, CCID_PWRSEL_3V0, true);
+	f_ccid_power_off(?);
+}
+
+testcase TC_test_slot7_CCID_PWRSEL_5V0() runs on test_CT
+{
+	f_init(7);
+	TC_test_common(7, CCID_PWRSEL_5V0, false);
+	f_ccid_power_off(?);
 }
 
 
-
 control {
-	execute( TC_test() );
+
+execute( TC_test_slot0_CCID_PWRSEL_1V8() );
+execute( TC_test_slot0_CCID_PWRSEL_3V0() );
+execute( TC_test_slot0_CCID_PWRSEL_5V0() );
+execute( TC_test_slot1_CCID_PWRSEL_1V8() );
+execute( TC_test_slot1_CCID_PWRSEL_3V0() );
+execute( TC_test_slot1_CCID_PWRSEL_5V0() );
+execute( TC_test_slot2_CCID_PWRSEL_1V8() );
+execute( TC_test_slot2_CCID_PWRSEL_3V0() );
+execute( TC_test_slot2_CCID_PWRSEL_5V0() );
+execute( TC_test_slot3_CCID_PWRSEL_1V8() );
+execute( TC_test_slot3_CCID_PWRSEL_3V0() );
+execute( TC_test_slot3_CCID_PWRSEL_5V0() );
+execute( TC_test_slot4_CCID_PWRSEL_1V8() );
+execute( TC_test_slot4_CCID_PWRSEL_3V0() );
+execute( TC_test_slot4_CCID_PWRSEL_5V0() );
+execute( TC_test_slot5_CCID_PWRSEL_1V8() );
+execute( TC_test_slot5_CCID_PWRSEL_3V0() );
+execute( TC_test_slot5_CCID_PWRSEL_5V0() );
+execute( TC_test_slot6_CCID_PWRSEL_1V8() );
+execute( TC_test_slot6_CCID_PWRSEL_3V0() );
+execute( TC_test_slot6_CCID_PWRSEL_5V0() );
+execute( TC_test_slot7_CCID_PWRSEL_1V8() );
+execute( TC_test_slot7_CCID_PWRSEL_3V0() );
+execute( TC_test_slot7_CCID_PWRSEL_5V0() );
+
 }
 
 
