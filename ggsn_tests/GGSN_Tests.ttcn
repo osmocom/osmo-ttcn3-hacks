@@ -1862,6 +1862,119 @@ module GGSN_Tests {
 		setverdict(pass);
 	}
 
+	/* Test creation, user plane and deletion of big amount (1000) of concurrent PDP context */
+	testcase TC_lots_of_concurrent_pdp_ctx() runs on GT_CT  {
+		var Gtp1cUnitdata udc;
+		var Gtp1uUnitdata udu;
+		const integer num_ctx := 1000;
+		var PdpContext ctx[num_ctx];
+		timer T_next := 0.01;
+		var integer next_req_ctx := 0;
+		var integer rx_resp_ctx := 0;
+		var integer rx_pong := 0;
+		var OCT4 dns1_addr;
+		var OCT4 saddr;
+		var integer teic;
+		var integer idx;
+
+		f_init();
+
+		for (var integer i := 0; i < num_ctx; i := i + 1) {
+			ctx[i] := valueof(t_DefinePDP(f_rnd_imsi('26242'H), f_rnd_msisdn('1234'O), c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+			ctx[i].teic := int2oct(i+1, 4); /* +1: skip TEIC=0 */
+			ctx[i].teid := int2oct(i+1, 4); /* +1: skip TEID=0 */
+			ctx[i].pco_req := valueof(ts_PCO_IPv4_DNS_CONT);
+		}
+
+		T_default.start(60.0);
+
+		T_next.start;
+		alt {
+		[DIAMETER_PROC.checkstate("Connected")] as_DIA_CCR(INITIAL_REQUEST) { repeat; }
+		[] pingpong();
+		[] T_next.timeout {
+			f_send_gtpc(ts_GTPC_CreatePDP(g_peer_c, g_c_seq_nr, ctx[next_req_ctx].imsi, g_restart_ctr,
+							  ctx[next_req_ctx].teid, ctx[next_req_ctx].teic, ctx[next_req_ctx].nsapi,
+							  ctx[next_req_ctx].eua, ctx[next_req_ctx].apn,  g_sgsn_ip_c, g_sgsn_ip_u,
+							  ctx[next_req_ctx].msisdn, ctx[next_req_ctx].pco_req, ctx[next_req_ctx].ratType,
+							  ctx[next_req_ctx].uli));
+			next_req_ctx := next_req_ctx + 1;
+			if (next_req_ctx < num_ctx) {
+				T_next.start;
+			}
+			repeat;
+			}
+		[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, createPDPContextResponse, ?)) -> value udc {
+			teic := oct2int(udc.gtpc.teid);
+			if (not match(teic, (1 .. num_ctx))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Rx Unexpected TEIC");
+			}
+			idx := teic - 1;
+			f_handle_create_req(ctx[idx], udc);
+			rx_resp_ctx := rx_resp_ctx + 1;
+
+			dns1_addr := f_PCO_extract_proto(ctx[idx].pco_neg, '000d'O);
+			saddr := ctx[idx].eua.endUserAddress.endUserAddressIPv4.ipv4_address;
+			f_send_gtpu(ctx[idx], f_gen_icmpv4_echo(saddr, dns1_addr));
+			repeat;
+		}
+		[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ?)) -> value udu {
+			var octetstring gpdu := udu.gtpu.gtpu_IEs.g_PDU_IEs.data;
+			var IPv4_packet ip4 := f_IPv4_dec(gpdu);
+			if (ip4.header.ver != 4) {
+				repeat;
+			}
+			var PDU_ICMP icmp4 := f_dec_PDU_ICMP(ip4.payload);
+			if (not match(icmp4, (tr_ICMPv4_ERP, tr_ICMPv4_DU))) {
+				repeat;
+			}
+			rx_pong := rx_pong + 1;
+			if (rx_pong < num_ctx) {
+				repeat;
+			}
+			setverdict(pass);
+		}
+		[] GTPC.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPC"); }
+		[] GTPU.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPU"); }
+		}
+
+		/* Let's close them now: */
+		next_req_ctx := 0;
+		rx_resp_ctx := 0;
+		T_next.start;
+		alt {
+		[DIAMETER_PROC.checkstate("Connected")] as_DIA_CCR(TERMINATION_REQUEST) { repeat; }
+		[] pingpong();
+		[] T_next.timeout {
+			f_send_gtpc(ts_GTPC_DeletePDP(g_peer_c, g_c_seq_nr, ctx[next_req_ctx].teic_remote, ctx[next_req_ctx].nsapi, '1'B));
+			next_req_ctx := next_req_ctx + 1;
+			if (next_req_ctx < num_ctx) {
+				T_next.start;
+			}
+			repeat;
+			}
+		[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, ?)) -> value udc {
+			teic := oct2int(udc.gtpc.teid);
+			if (not match(teic, (1 .. num_ctx))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Rx Unexpected TEIC");
+			}
+			rx_resp_ctx := rx_resp_ctx + 1;
+			if (rx_resp_ctx < num_ctx) {
+				repeat;
+			}
+			setverdict(pass);
+		}
+		[] GTPC.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPC"); }
+		[] GTPU.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPU"); }
+		}
+		T_next.stop;
+
+		T_default.stop;
+		setverdict(pass);
+	}
+
 	control {
 		execute(TC_pdp4_act_deact());
 		execute(TC_pdp4_act_deact_ipcp());
@@ -1904,5 +2017,7 @@ module GGSN_Tests {
 		execute(TC_act_deact_retrans_duplicate());
 
 		execute(TC_pdp_act_restart_ctr_echo());
+
+		execute(TC_lots_of_concurrent_pdp_ctx());
 	}
 }
