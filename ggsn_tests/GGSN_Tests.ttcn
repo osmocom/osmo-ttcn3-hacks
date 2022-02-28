@@ -1975,6 +1975,107 @@ module GGSN_Tests {
 		setverdict(pass);
 	}
 
+	/* Test callocation of PDP contexts until reaching addr pool exhaustion */
+	type record of OCT4 TEIClist;
+	testcase TC_addr_pool_exhaustion() runs on GT_CT  {
+		var Gtp1cUnitdata udc;
+		var Gtp1uUnitdata udu;
+		var PdpContext ctx;
+		timer T_next := 0.005;
+		var integer next_req_ctx := 0;
+		var integer rx_resp_ctx := 0;
+		var integer num_ctx;
+		var boolean cont_req := true;
+		var CreatePDPContextResponse cpr;
+		var TEIClist teic_list := {};
+		var integer teic;
+
+		f_init();
+
+		T_default.start(120.0);
+
+		T_next.start;
+		alt {
+		[DIAMETER_PROC.checkstate("Connected")] as_DIA_CCR(INITIAL_REQUEST) { repeat; }
+		[] pingpong();
+		[] T_next.timeout {
+			if (cont_req) {
+				if (next_req_ctx - rx_resp_ctx < 100) { /* if we have too many in progress, wait a bit to continue */
+					ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), f_rnd_msisdn('1234'O), c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+					ctx.nsapi := '0001'B;
+					ctx.teic := int2oct(next_req_ctx+1, 4); /* +1: skip TEIC=0 */
+					ctx.teid := int2oct(next_req_ctx+1, 4); /* +1: skip TEID=0 */
+					f_send_gtpc(ts_GTPC_CreatePDP(g_peer_c, g_c_seq_nr, ctx.imsi, g_restart_ctr,
+									  ctx.teid, ctx.teic, ctx.nsapi,
+									  ctx.eua, ctx.apn,  g_sgsn_ip_c, g_sgsn_ip_u,
+									  ctx.msisdn, ctx.pco_req, ctx.ratType,
+									  ctx.uli));
+					next_req_ctx := next_req_ctx + 1;
+				}
+				T_next.start;
+			}
+			repeat;
+			}
+		[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, createPDPContextResponse, ?)) -> value udc {
+			cpr := udc.gtpc.gtpc_pdu.createPDPContextResponse;
+
+			if (cpr.cause.causevalue == '80'O) {
+				teic_list := teic_list & {cpr.teidControlPlane.teidControlPlane};
+			} else {
+				if (cont_req == true) {
+					num_ctx := rx_resp_ctx;
+					log("Successfully created ", num_ctx, " PDP contexts before exhausting the pool");
+					setverdict(pass);
+				}
+				cont_req := false;
+			}
+			rx_resp_ctx := rx_resp_ctx + 1;
+			if (not cont_req and next_req_ctx == rx_resp_ctx) {
+				break;
+			} else {
+				repeat;
+			}
+		}
+		[] GTPC.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPC"); }
+		[] GTPU.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPU"); }
+		}
+
+		/* Let's close them now: */
+		next_req_ctx := 0;
+		rx_resp_ctx := 0;
+		T_next.start;
+		alt {
+		[DIAMETER_PROC.checkstate("Connected")] as_DIA_CCR(TERMINATION_REQUEST) { repeat; }
+		[] pingpong();
+		[] T_next.timeout {
+			f_send_gtpc(ts_GTPC_DeletePDP(g_peer_c, g_c_seq_nr, teic_list[next_req_ctx], '0001'B, '1'B));
+			next_req_ctx := next_req_ctx + 1;
+			if (next_req_ctx < num_ctx) {
+				T_next.start;
+			}
+			repeat;
+			}
+		[] GTPC.receive(tr_GTPC_MsgType(g_peer_c, deletePDPContextResponse, ?)) -> value udc {
+			teic := oct2int(udc.gtpc.teid);
+			if (not match(teic, (1 .. num_ctx))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"Rx Unexpected TEIC");
+			}
+			rx_resp_ctx := rx_resp_ctx + 1;
+			if (rx_resp_ctx < num_ctx) {
+				repeat;
+			}
+			setverdict(pass);
+		}
+		[] GTPC.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPC"); }
+		[] GTPU.receive { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx Unexpected GTPU"); }
+		}
+		T_next.stop;
+
+		T_default.stop;
+		setverdict(pass);
+	}
+
 	control {
 		execute(TC_pdp4_act_deact());
 		execute(TC_pdp4_act_deact_ipcp());
@@ -2019,5 +2120,7 @@ module GGSN_Tests {
 		execute(TC_pdp_act_restart_ctr_echo());
 
 		execute(TC_lots_of_concurrent_pdp_ctx());
+		/* Keep at the end, crashes older osmo-ggsn versions (OS#5469): */
+		execute(TC_addr_pool_exhaustion());
 	}
 }
