@@ -135,6 +135,10 @@ modulepar {
 	 *   X5: -109 >= -115 dBm (no)
 	 * So all channels should be in band 4. */
 	uint3_t mp_interf_band := 4;
+	/* T3105 timer (see 3GPP TS 44.018, section 11.1.2) */
+	integer mp_ho_t3105_ms := 100;
+	/* Ny1 counter (see 3GPP TS 44.018, section 11.1.3) */
+	integer mp_ho_ny1 := 10;
 }
 
 type record of RslChannelNr ChannelNrs;
@@ -1946,6 +1950,93 @@ testcase TC_ho_rach() runs on test_CT {
 		pars := valueof(t_Pars(g_AllChannels[i], ts_RSL_ChanMode_SIGN));
 		log(testcasename(), ": Starting for ", g_AllChannels[i]);
 		vc_conn := f_start_handler(refers(f_TC_ho_rach), pars);
+		vc_conn.done;
+	}
+
+	/* TODO: do the above in parallel, rather than sequentially? */
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
+/* Test sending of the RR Physical Information message on DCCH */
+private function f_TC_ho_physical_info(charstring id) runs on ConnHdlr {
+	var PDU_ML3_NW_MS dcch_pdu;
+	var integer count := 0;
+	var L1ctlDlMessage dl;
+	timer T;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* Generate a random Handover Reference */
+	var integer ho_ref := oct2int(f_rnd_octstring(1));
+
+	/* Handover Reference IE (see 3GPP TS 48.058, 9.3.9) */
+	var RSL_IE ho_ref_ie := valueof(t_RSL_IE(RSL_IE_HANDO_REF,
+					RSL_IE_Body:{ handover_ref := ho_ref }));
+
+	/* Activate a channel on the BTS side (no encryption) */
+	f_rsl_chan_act(g_pars.chan_mode, more_ies := { ho_ref_ie },
+		       act_type := t_RSL_IE_ActType_HO_SYNC);
+
+	/* Switch the MS side (e.g. trxcon) to a dedicated channel without
+	 * waiting for Immediate Assignment and sending of an Access Burst. */
+	f_l1ctl_est_dchan(L1CTL, g_pars); /* FIXME: disable Uplink Tx */
+
+	/* Expect nothing to be transmitted on Downlink DCCH.  Nothing in this
+	 * context means any L2 frames, not only the RR Physical Information. */
+	T.start(2.0);
+	L1CTL.clear;
+	alt {
+	[] L1CTL.receive(tr_L1CTL_DATA_IND(g_chan_nr, tr_RslLinkID_DCCH(?))) -> value dl {
+		setverdict(fail, "Rx unexpected Downlink DCCH (before handover RACH): ", dl);
+		T.stop;
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout { setverdict(pass); }
+	}
+
+	/* Send handover Access Burst */
+	log("Sending handover Access Burst");
+	f_L1CTL_RACH(L1CTL, ho_ref, chan_nr := g_pars.chan_nr);
+
+	/* Expect RR Physical Information being sent on Downlink DCCH Ny1 times */
+	T.start(int2float(mp_ho_t3105_ms * mp_ho_ny1) / 1000.0 + 1.0);
+	L1CTL.clear;
+	alt {
+	[] as_dl_lapdm_dummy(); /* Ignore empty LAPDm func=UI frames */
+	[] as_dl_dcch_pdu(dcch_pdu, tr_RRM_PhysicalInfo) {
+		log("Rx RR Physical Information: ", dcch_pdu);
+		/* Wait until the count reaches Ny1 */
+		count := count + 1;
+		if (count < mp_ho_ny1)
+			{ repeat; }
+		setverdict(pass);
+		}
+	[] as_dl_dcch_pdu(dcch_pdu, ?) {
+		setverdict(fail, "Rx unexpected DCCH PDU: ", dcch_pdu);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RR Physical Information");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* Release the channel */
+	f_rsl_chan_deact();
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+}
+testcase TC_ho_physical_info() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	for (var integer i := 0; i < sizeof(g_AllChanTypes); i := i + 1) {
+		pars := valueof(t_Pars(g_AllChanTypes[i], ts_RSL_ChanMode_SIGN));
+		log(testcasename(), ": Starting for ", g_AllChanTypes[i]);
+		vc_conn := f_start_handler(refers(f_TC_ho_physical_info), pars);
 		vc_conn.done;
 	}
 
@@ -8381,6 +8472,7 @@ control {
 	execute( TC_rach_count() );
 	execute( TC_rach_max_ta() );
 	execute( TC_ho_rach() );
+	execute( TC_ho_physical_info() );
 	execute( TC_rach_load_idle_thresh0() );
 	execute( TC_rach_load_idle_below_thresh() );
 	execute( TC_rach_load_count() );
