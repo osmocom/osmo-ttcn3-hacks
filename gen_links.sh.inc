@@ -36,6 +36,8 @@ gen_links() {
 }
 
 ignore_pp_results() {
+	# Avoid using the pattern itself if no file is found in globbing below:
+	shopt -s nullglob
 	for pp in *.ttcnpp; do
 		ttcn_file="$(echo $pp | sed 's/pp$//')"
 		echo "$ttcn_file" >> .gitignore
