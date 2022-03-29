@@ -42,6 +42,19 @@ if [ -x $DUMPCAP ]; then
 	/sbin/setcap -q -v 'cap_net_admin,cap_net_raw=pie' $DUMPCAP
 	CAP_ERR="$?"
     fi
+
+    # did we implicitly inherit all those caps because we're root in a netns?
+    if [ -u $DUMPCAP -o "$CAP_ERR" = "1" ]; then
+	getpcaps 0 2>&1 | grep -e cap_net_admin | grep -q -e cap_net_raw
+	CAP_ERR="$?"
+    fi
+
+    # did we implicitly inherit all those caps because we're root in a netns?
+    if [ -u $DUMPCAP -o "$CAP_ERR" = "1" ]; then
+	getpcaps 0 2>&1 | grep -q -e " =ep" # all perms
+	CAP_ERR="$?"
+    fi
+
     if [ -u $DUMPCAP -o "$CAP_ERR" = "0" ]; then
 	CMD="$DUMPCAP -q"
     else
