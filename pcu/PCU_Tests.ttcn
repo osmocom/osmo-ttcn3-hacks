@@ -3022,6 +3022,104 @@ testcase TC_dl_no_ack_retrans_imm_ass() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* OS#5508: Verify scheduling of LLC frames with SAPI=1 (GMM) takes precedence
+ * over SAPI2/7/8 which in turn take prececende over others */
+testcase TC_dl_llc_sapi_priority() runs on RAW_PCU_Test_CT {
+	var octetstring data_sapi1 := f_pad_oct('01'O, 19, 'ff'O);
+	var octetstring data_sapi2 := f_pad_oct('02'O, 19, 'ff'O);
+	var octetstring data_sapi7 := f_pad_oct('07'O, 19, 'ff'O);
+	var octetstring data_sapi8 := f_pad_oct('08'O, 19, 'ff'O);
+	var octetstring data_sapi_other := f_pad_oct('03'O, 19, 'ff'O);
+	var RlcmacDlBlock dl_block;
+	var uint32_t dl_fn;
+	var GprsMS ms;
+	var integer state := 1;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+
+	/* Lock to CS1 to keep same DL RLCMAC data block size: */
+	g_cs_initial_dl := 1;
+	g_mcs_max_dl := 1;
+	f_pcuvty_set_allowed_cs_mcs();
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* SGSN sends some low prio DL data, PCU will page on CCCH (PCH) */
+	for (var integer i := 0; i < 10; i := i + 1) {
+		BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data_sapi_other));
+	}
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data_sapi2));
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data_sapi7));
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data_sapi8));
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data_sapi1));
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Wait timer X2002 and DL block is available after CCCH IMM ASS */
+	f_sleep(X2002);
+
+	while (state != 0) {
+		var OCT1 rx_sapi;
+		f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, ?, ?);
+		rx_sapi := dl_block.data.blocks[0].payload[0];
+
+		select (state) {
+		case(1) { /* We expect the first GMM LLC frame here (SAPI=1, highest prio) */
+			if (rx_sapi != '01'O) {
+				setverdict(fail, "Wrong prio: Expected LLC SAPI 1 (GMM) but got ", rx_sapi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			state := 2;
+		}
+		case(2) { /* We expect the second LLC frame here (SAPI=2, middle prio) */
+			if (rx_sapi != '02'O) {
+				setverdict(fail, "Wrong prio: Expected LLC SAPI 2 but got ", rx_sapi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			state := 7;
+		}
+		case(7) { /* We expect the third LLC frame here (SAPI=7, middle prio) */
+			if (rx_sapi != '07'O) {
+				setverdict(fail, "Wrong prio: Expected LLC SAPI 7 but got ", rx_sapi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			state := 8;
+		}
+		case(8) { /* We expect the fourth LLC frame here (SAPI=8, middle prio) */
+			if (rx_sapi != '08'O) {
+				setverdict(fail, "Wrong prio: Expected LLC SAPI 8 but got ", rx_sapi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			state := 3;
+		}
+		case(3) { /* We expect the other LLC frame here (SAPI=3, lower prio) */
+			if (rx_sapi != '03'O) {
+				setverdict(fail, "Wrong prio: Expected LLC SAPI 3 but got ", rx_sapi);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			state := 0; /* Done, break */
+		}
+		}
+		/* Keep Ack/Nack description updated (except for last BSN) */
+		f_acknackdesc_ack_block(ms.dl_tbf.acknack_desc, dl_block);
+
+		if (f_dl_block_rrbp_valid(dl_block)) {
+			f_ms_tx_ul_block(ms, ts_RLCMAC_DL_ACK_NACK(ms.dl_tbf.tfi, ms.dl_tbf.acknack_desc),
+					 f_dl_block_ack_fn(dl_block, dl_fn));
+		}
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Verify allocation and use of multislot tbf, triggered by MS class provided in SGSN. SYS#5131 */
 testcase TC_dl_multislot_tbf_ms_class_from_sgsn() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
@@ -6724,6 +6822,7 @@ control {
 	execute( TC_dl_flow_more_blocks() );
 	execute( TC_ul_flow_multiple_llc_blocks() );
 	execute( TC_dl_no_ack_retrans_imm_ass() );
+	execute( TC_dl_llc_sapi_priority() );
 	execute( TC_paging_cs_from_bts() );
 	execute( TC_paging_cs_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_cs_from_sgsn_sign() );
