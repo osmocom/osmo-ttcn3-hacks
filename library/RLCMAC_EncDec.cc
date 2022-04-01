@@ -513,8 +513,17 @@ RlcmacDlDataBlock dec__RlcmacDlDataBlock(const OCTETSTRING& stream)
 		if (ret_val.blocks().is_bound()) {
 			for (int i = 0; i < ret_val.blocks().size_of(); i++) {
 				unsigned int length = ret_val.blocks()[i].hdr()().length__ind();
+
+				/* LI[0]=0 indicates: The current LLC PDU would fit within
+				   current RLC data block but the addition of the length
+				   indicator octet (to indicate the LLC PDU boundary) causes the
+				   LLC PDU to extend into another RLC data block */
+				if (i == 0 && length == 0)
+					length = ttcn_buffer.get_read_len();
+
 				if (length > ttcn_buffer.get_read_len())
 					length = ttcn_buffer.get_read_len();
+
 				ret_val.blocks()[i].payload() = OCTETSTRING(length, ttcn_buffer.get_read_data());
 				ttcn_buffer.increase_pos(length);
 			}
