@@ -10093,6 +10093,105 @@ testcase TC_ho_during_lcs_loc_req() runs on test_CT {
 	f_shutdown_helper();
 }
 
+private function f_tc_emerg_call_and_lcs_loc_req(charstring id) runs on MSC_ConnHdlr
+{
+	/* Make sure the CHAN RQD indicates an emergency call (0b101xxxxx). The difference is that osmo-bsc directly
+	 * assigns a TCH lchan and establishing voice for the emergency call will use Mode Modify, not reassignment to
+	 * another lchan. */
+	g_pars.ra := 'b7'O;
+	f_assignment_emerg_setup();
+
+	var PDU_BSSAP emerg_setup_data_ind_bssap;
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_DTAP) -> value emerg_setup_data_ind_bssap {
+		var PDU_ML3_MS_NW verify_emerg_setup;
+		verify_emerg_setup := dec_PDU_ML3_MS_NW(emerg_setup_data_ind_bssap.pdu.dtap);
+		if (not isbound(verify_emerg_setup.msgs.cc.emergencySetup)) {
+			setverdict(fail, "no emergency setup");
+		}
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "unexpected BSSAP message!");
+		}
+	[] T.timeout {
+		setverdict(fail, "timeout waiting for EMERGENCY SETUP!");
+		}
+	}
+
+	/* Here would usually be a CC Call Proceeding from the MSC, but what does the BSC care about DTAP. */
+
+	/* Do a Location Request in-between the CC call setup */
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?));
+	/* SMLC got the TA from the BSC, now responds with geo information data. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	/* Go on with voice call assignment */
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+
+	/* Below speechOrDataIndicator and codecList are copied from an emergency call captured during tests.
+	 * They seem a bit weird (AMR-WB, and the order differ between speechId_DataIndicator and the codecList), but
+	 * seems a good idea to see how osmo-bsc reacts to this. */
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := {
+		elementIdentifier := '0B'O,	/* overwritten */
+		lengthIndicator := 0,		/* overwritten */
+		speechOrDataIndicator := '0001'B,	/* speech */
+		spare1_4 := '0000'B,
+		channelRateAndType := ChRate_TCHForH_Fpref,
+		speechId_DataIndicator := 'c2918105'O
+	};
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({
+		ts_CodecHR, ts_CodecAMR_WB, ts_CodecEFR, ts_CodecFR}));
+
+	f_rslem_dchan_queue_enable();
+
+	var ExpectCriteria mgcpcrit := {
+		connid := omit,
+		endpoint := omit,
+		transid := omit
+	};
+	f_create_mgcp_expect(mgcpcrit);
+
+	BSSAP.send(ass_cmd);
+
+	var AssignmentState st := valueof(ts_AssignmentStateInit);
+	st.voice_call := true;
+	st.is_assignment := false;
+	alt {
+	[] as_modify(st);
+	[] as_Media();
+	[st.modify_done] BSSAP.receive(exp_compl) {
+		setverdict(pass);
+		}
+	}
+
+	/* Voice call carries on ... */
+	f_sleep(2.0);
+
+	setverdict(pass);
+	f_perform_clear();
+}
+
+testcase TC_emerg_call_and_lcs_loc_req() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_allow_emerg_msc(true);
+	f_vty_allow_emerg_bts(true, 0);
+	vc_conn := f_start_handler(refers(f_tc_emerg_call_and_lcs_loc_req), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
 /* Attempt Complete Layer 3 without any MSC available (OS#4832) */
 private function f_tc_no_msc(charstring id) runs on MSC_ConnHdlr {
 	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
@@ -11466,6 +11565,7 @@ control {
 		execute( TC_lcs_loc_req_for_idle_ms_no_pag_resp() );
 		execute( TC_cm_service_during_lcs_loc_req() );
 		execute( TC_ho_during_lcs_loc_req() );
+		execute( TC_emerg_call_and_lcs_loc_req() );
 	}
 
 	execute( TC_no_msc() );
