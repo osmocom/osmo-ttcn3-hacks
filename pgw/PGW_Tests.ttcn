@@ -3,6 +3,7 @@ module PGW_Tests {
 import from General_Types all;
 import from Osmocom_Types all;
 import from Native_Functions all;
+import from Misc_Helpers all;
 
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
@@ -29,6 +30,9 @@ modulepar {
 
 	charstring mp_pcrf_local_ip := "127.0.0.9";
 	integer mp_pcrf_local_port := 3868;
+
+	charstring mp_ocs_local_ip := "127.0.0.9";
+	integer mp_ocs_local_port := 3869;
 }
 
 /* main component, we typically have one per testcase */
@@ -40,6 +44,10 @@ type component PGW_Test_CT {
 	var DIAMETER_Emulation_CT vc_Gx;
 	port DIAMETER_PT Gx_UNIT;
 	port DIAMETEREM_PROC_PT Gx_PROC;
+	/* emulated OCS */
+	var DIAMETER_Emulation_CT vc_Gy;
+	port DIAMETER_PT Gy_UNIT;
+	port DIAMETEREM_PROC_PT Gy_PROC;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard;
 }
@@ -81,6 +89,7 @@ type component PGW_Session_CT extends GTP2_ConnHdlr {
 	var SessionPars	g_pars;
 
 	port DIAMETER_Conn_PT Gx;
+	port DIAMETER_Conn_PT Gy;
 
 	/* TEI (Data) local side */
 	var OCT4	g_teid;
@@ -119,7 +128,10 @@ type record SessionPars {
 	/* Bearer Contexts to be created */
 
 	charstring	tun_dev_name,
-	charstring	tun_netns_name optional
+	charstring	tun_netns_name optional,
+
+	/* In seconds. 0 => disabled, !0 => grant over CC-Time period */
+	integer gy_validity_time
 }
 
 template (value) SessionPars
@@ -134,7 +146,8 @@ t_SessionPars(hexstring imsi, charstring tundev, integer rat_type := 6, charstri
 	pco := omit,
 	epco := omit,
 	tun_dev_name := tundev,
-	tun_netns_name := tundev
+	tun_netns_name := tundev,
+	gy_validity_time := 0
 }
 
 type record BearerConfig {
@@ -155,7 +168,10 @@ friend function f_init_diameter(charstring id) runs on PGW_Test_CT {
 		unitdata_cb := refers(DiameterForwardUnitdataCallback),
 		raw := false /* handler mode (IMSI based routing) */
 	};
-	var DIAMETER_conn_parameters pars := {
+	var DIAMETER_conn_parameters pars;
+
+	/* Gx setup: */
+	pars := {
 		remote_ip := mp_pgw_hostname,
 		remote_sctp_port := -1,
 		local_ip := mp_pcrf_local_ip,
@@ -171,7 +187,25 @@ friend function f_init_diameter(charstring id) runs on PGW_Test_CT {
 	connect(vc_Gx:DIAMETER_PROC, self:Gx_PROC);
 	vc_Gx.start(DIAMETER_Emulation.main(ops, pars, id));
 
+	/* Gy setup: */
+	pars := {
+		remote_ip := mp_pgw_hostname,
+		remote_sctp_port := -1,
+		local_ip := mp_ocs_local_ip,
+		local_sctp_port := mp_ocs_local_port,
+		origin_host := "ocs.localdomain",
+		origin_realm := "localdomain",
+		auth_app_id := c_DIAMETER_CREDIT_CONTROL_AID,
+		vendor_app_id := omit
+	};
+	vc_Gy := DIAMETER_Emulation_CT.create(id);
+	map(vc_Gy:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_Gy:DIAMETER_UNIT, self:Gy_UNIT);
+	connect(vc_Gy:DIAMETER_PROC, self:Gy_PROC);
+	vc_Gy.start(DIAMETER_Emulation.main(ops, pars, id));
+
 	f_diameter_wait_capability(Gx_UNIT);
+	f_diameter_wait_capability(Gy_UNIT);
 	/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdong ping-pongs):
 	 * RFC6733 sec 5.1
 	 * RFC3539 sec 3.4.1 [5]
@@ -206,7 +240,7 @@ private function f_init(float guard_timeout := 60.0) runs on PGW_Test_CT {
 function f_start_handler(void_fn fn, template (omit) SessionPars pars_tmpl := omit)
 runs on PGW_Test_CT return PGW_Session_CT {
 	var charstring id := testcasename();
-	var DIAMETER_ConnHdlr_CT vc_conn_gx;
+	var DIAMETER_ConnHdlr_CT vc_conn_gx, vc_conn_gy;
 	var PGW_Session_CT vc_conn;
 	var SessionPars pars;
 
@@ -226,6 +260,14 @@ runs on PGW_Test_CT return PGW_Session_CT {
 		connect(vc_conn_gx:DIAMETER_PROC, vc_Gx:DIAMETER_PROC);
 		connect(vc_conn:Gx, vc_conn_gx:DIAMETER_CLIENT);
 		vc_conn_gx.start(f_diam_connhldr_ct_main(pars.imsi));
+	}
+
+	if (isbound(vc_Gy)) {
+		vc_conn_gy := DIAMETER_ConnHdlr_CT.create(id);
+		connect(vc_conn_gy:DIAMETER, vc_Gy:DIAMETER_CLIENT);
+		connect(vc_conn_gy:DIAMETER_PROC, vc_Gy:DIAMETER_PROC);
+		connect(vc_conn:Gy, vc_conn_gy:DIAMETER_CLIENT);
+		vc_conn_gy.start(f_diam_connhldr_ct_main(pars.imsi));
 	}
 
 	vc_conn.start(f_handler_init(fn, pars));
@@ -275,8 +317,36 @@ private altstep as_DIA_Gx_CCR(DCC_NONE_CC_Request_Type req_type) runs on PGW_Ses
 					 req_type, req_num));
 	}
 	[] Gx.receive(PDU_DIAMETER:?) -> value rx_dia {
-		setverdict(fail, "Received unexpected DIAMETER ", rx_dia);
-		self.stop;
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER ", rx_dia));
+	}
+}
+
+private altstep as_DIA_Gy_CCR(DCC_NONE_CC_Request_Type req_type) runs on PGW_Session_CT {
+	var PDU_DIAMETER rx_dia;
+	[] Gy.receive(tr_DIA_Gy_CCR(req_type := req_type)) -> value rx_dia {
+		var template (value) PDU_DIAMETER tx_dia;
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var AVP_Unsigned32 req_num;
+
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_DCC_NONE_CC_Request_Number);
+		req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
+		if (g_pars.gy_validity_time > 0) {
+			tx_dia := ts_DIA_Gy_CCA_ValidityTime(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id, sess_id,
+						 req_type, req_num, g_pars.gy_validity_time);
+		} else {
+			tx_dia := ts_DIA_Gy_CCA(rx_dia.hop_by_hop_id, rx_dia.end_to_end_id, sess_id,
+						 req_type, req_num);
+		}
+		Gy.send(tx_dia);
+	}
+	[] Gy.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER Gy", rx_dia));
 	}
 }
 
@@ -366,6 +436,9 @@ private function f_create_session() runs on PGW_Session_CT {
 	if (Gx.checkstate("Connected")) {
 		as_DIA_Gx_CCR(INITIAL_REQUEST);
 	}
+	if (Gy.checkstate("Connected")) {
+		as_DIA_Gy_CCR(INITIAL_REQUEST);
+	}
 	alt {
 	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_teic, cause:='10'O)) -> value rx {
 		/* extract TEIDs */
@@ -424,6 +497,9 @@ private function f_delete_session(template (omit) OCT1 tx_cause := omit,
 	GTP2.send(g2c);
 	if (Gx.checkstate("Connected") and expect_diameter) {
 		as_DIA_Gx_CCR(TERMINATION_REQUEST);
+	}
+	if (Gy.checkstate("Connected") and expect_diameter) {
+		as_DIA_Gy_CCR(TERMINATION_REQUEST);
 	}
 	alt {
 	[] GTP2.receive(tr_GTP2C_DeleteSessionResp(d_teid := exp_teid, cause := exp_cause)) {
