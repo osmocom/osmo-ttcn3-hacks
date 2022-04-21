@@ -3583,6 +3583,66 @@ testcase TC_paging_resp_unsol() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Verify BSC can schedule 500 paging requests under one minute if BTS buffer is good enough */
+testcase TC_paging_500req() runs on test_CT {
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	const integer num_subscribers := 500;
+	var hexstring imsis[num_subscribers];
+	var boolean rx_paging_done[num_subscribers];
+	var integer rx_paging_num := 0;
+	var integer i;
+	timer T_rx := 60.0;
+	timer T_load_ind := 1.0;
+
+	for (i := 0; i < num_subscribers; i := i + 1) {
+		imsis[i] := f_gen_imsi(i);
+		rx_paging_done[i] := false;
+	}
+
+	f_init(1, guard_timeout := 100.0);
+
+	/* Clear the queue, it might still contain stuff like BCCH FILLING */
+	IPA_RSL[0].clear;
+	/* Tell there's plenty of space at the BTS (UINT16_MAX): */
+	f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(65535));
+
+	for (i := 0; i < num_subscribers; i := i + 1) {
+		BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own,
+			   ts_BSSMAP_Paging(imsis[i], valueof(ts_BSSMAP_CIL_noCell), omit, omit)));
+	}
+
+	T_rx.start;
+	T_load_ind.start;
+	alt {
+	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?), IPAC_PROTO_RSL_TRX0)) -> value rx_rsl_ud {
+		var hexstring imsi := rx_rsl_ud.rsl.ies[2].body.ms_identity.mobileIdentityV.oddEvenInd_identity.imsi.digits;
+		var hexstring imsi_suffix := substr(imsi, lengthof(imsi)-6, 6);
+		var charstring imsi_str := hex2str(imsi_suffix);
+		var integer imsi_idx := str2int(imsi_str);
+		if (rx_paging_done[imsi_idx] == false) {
+			rx_paging_done[imsi_idx] := true;
+			rx_paging_num := rx_paging_num + 1;
+		}
+		if (rx_paging_num < num_subscribers) {
+			repeat;
+		}
+		}
+	[] IPA_RSL[0].receive { repeat; }
+	[] T_load_ind.timeout {
+		log("Tx CCH Load Ind, received paging requests so far: ", rx_paging_num);
+		f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(40));
+		T_load_ind.start;
+		repeat;
+		}
+	[] T_rx.timeout {
+		setverdict(fail, "Timeout expecting paging requests, so far ", rx_paging_num);
+		mtc.stop;
+		}
+	}
+
+	f_shutdown_helper();
+}
+
 /* Test RSL link drop causes counter increment */
 testcase TC_rsl_drop_counter() runs on test_CT {
 	var integer rsl_fail;
@@ -11441,6 +11501,7 @@ control {
 	execute( TC_paging_imsi_load() );
 	execute( TC_paging_counter() );
 	execute( TC_paging_resp_unsol() );
+	execute( TC_paging_500req() );
 
 	execute( TC_rsl_drop_counter() );
 	execute( TC_rsl_unknown_unit_id() );
