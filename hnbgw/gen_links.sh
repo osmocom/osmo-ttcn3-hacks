@@ -22,6 +22,7 @@ FILES="MobileL3_CC_Types.ttcn MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types
 gen_links $DIR $FILES
 
 # Required by MGCP and IPA
+# Required by PFCP/UDP
 DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
@@ -76,6 +77,10 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.PFCP_v15.1.0/src
+FILES="PFCP_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library/hnbap
 FILES="HNBAP_CommonDataTypes.asn HNBAP_Constants.asn HNBAP_Containers.asn HNBAP_IEs.asn HNBAP_PDU_Contents.asn HNBAP_PDU_Descriptions.asn "
 FILES+="HNBAP_EncDec.cc  HNBAP_Types.ttcn  HNBAP_Templates.ttcn "
@@ -95,6 +100,7 @@ DIR=../library
 FILES="Iuh_Types.ttcn Iuh_CodecPort.ttcn Iuh_CodecPort_CtrlFunctDef.cc Iuh_CodecPort_CtrlFunct.ttcn Iuh_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="MGCP_Emulation.ttcn MGCP_Types.ttcn MGCP_Templates.ttcn MGCP_CodecPort.ttcn MGCP_CodecPort_CtrlFunct.ttcn MGCP_CodecPort_CtrlFunctDef.cc "
 FILES+="RAN_Adapter.ttcnpp RAN_Emulation.ttcnpp BSSAP_CodecPort.ttcn SCCP_Templates.ttcn "
+FILES+="PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn PFCP_Templates.ttcn "
 FILES+="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_EncDec.cc IuUP_Emulation.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcn "
 

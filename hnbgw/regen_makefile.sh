@@ -27,6 +27,7 @@ FILES="
 	RANAP_EncDec.cc
 	MGCP_CodecPort_CtrlFunctDef.cc
 	UD_PT.cc
+	PFCP_CodecPort_CtrlFunctDef.cc
 "
 
 export CPPFLAGS_TTCN3="
