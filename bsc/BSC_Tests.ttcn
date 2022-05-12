@@ -10301,6 +10301,120 @@ testcase TC_emerg_call_and_lcs_loc_req() runs on test_CT {
 	f_shutdown_helper();
 }
 
+private altstep no_bssmap_clear_req() runs on MSC_ConnHdlr {
+	[] BSSAP.receive(tr_BSSMAP_ClearRequest) {
+		setverdict(fail, "unexpected BSSMAP Clear Request");
+		mtc.stop;
+	}
+}
+
+private type enumerated RslRel {
+	RSLREL_REL_IND,
+	RSLREL_CONN_FAIL
+};
+
+private function f_emerg_call_and_lcs_loc_req_early_lchan_release(RslRel rsl_rel) runs on MSC_ConnHdlr
+{
+	g_pars.ra := f_rnd_ra_emerg();
+	f_assignment_emerg_setup();
+
+	var PDU_BSSAP emerg_setup_data_ind_bssap;
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_DTAP) -> value emerg_setup_data_ind_bssap {
+		var PDU_ML3_MS_NW verify_emerg_setup;
+		verify_emerg_setup := dec_PDU_ML3_MS_NW(emerg_setup_data_ind_bssap.pdu.dtap);
+		if (not ischosen(verify_emerg_setup.msgs.cc.emergencySetup)) {
+			setverdict(fail, "no emergency setup");
+		}
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "unexpected BSSAP message!");
+		}
+	[] T.timeout {
+		setverdict(fail, "timeout waiting for EMERGENCY SETUP!");
+		}
+	}
+
+	/* Start a Location Request to locate the emergency */
+	f_bssap_le_register_imsi(g_pars.imsi, omit);
+	BSSAP.send(valueof(ts_BSSMAP_Perform_Location_Request(ts_BSSMAP_Imsi(g_pars.imsi),
+					ts_CellId_CGI('262'H, '42'H, 23, 42))));
+	BSSAP_LE.receive(tr_BSSMAP_LE_PerfLocReq(BSSMAP_LE_LOC_INFO_CURRENT_GEOGRAPHIC_LOC, ?, ?));
+
+	/* As long as this LCS is going on, the BSC should not send any Clear Request. Later on, it is up to the MSC to
+	 * do a Clear Command when the Location Response arrives. */
+	activate(no_bssmap_clear_req());
+
+	/* the lchan gets interrupted while the Location Request has no response */
+	select (rsl_rel) {
+	case (RSLREL_REL_IND) {
+			RSL.send(ts_RSL_REL_IND(g_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+			f_expect_lchan_rel(RSL, RSL_PROC);
+		}
+	case (RSLREL_CONN_FAIL) {
+			RSL.send(ts_RSL_CONN_FAIL_IND(g_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+		}
+	case else {
+			setverdict(fail, "Unknown RslRel type");
+			mtc.stop;
+		}
+	}
+
+	/* Still expect the Location Response to find its way to the MSC. */
+	BSSAP_LE.send(ts_BSSMAP_LE_PerfLocResp(gad_ell_point_unc_circle, omit));
+	BSSAP_LE.receive(BSSAP_LE_Conn_Prim:CONN_PRIM_DISC_IND);
+	BSSAP.receive(tr_BSSMAP_Perform_Location_Response(tr_BSSMAP_IE_LocationEstimate(gad_ell_point_unc_circle)));
+
+	setverdict(pass);
+
+	select (rsl_rel) {
+	case (RSLREL_REL_IND) {
+			f_perform_clear_no_lchan();
+		}
+	case (RSLREL_CONN_FAIL) {
+			f_perform_clear();
+		}
+	}
+}
+
+private function f_tc_emerg_call_and_lcs_loc_req_early_lchan_rel_ind(charstring id) runs on MSC_ConnHdlr
+{
+	f_emerg_call_and_lcs_loc_req_early_lchan_release(RSLREL_REL_IND);
+}
+
+testcase TC_emerg_call_and_lcs_loc_req_early_lchan_rel_ind() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_allow_emerg_msc(true);
+	f_vty_allow_emerg_bts(true, 0);
+	vc_conn := f_start_handler(refers(f_tc_emerg_call_and_lcs_loc_req_early_lchan_rel_ind), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+private function f_tc_emerg_call_and_lcs_loc_req_early_lchan_conn_fail(charstring id) runs on MSC_ConnHdlr
+{
+	f_emerg_call_and_lcs_loc_req_early_lchan_release(RSLREL_CONN_FAIL);
+}
+
+testcase TC_emerg_call_and_lcs_loc_req_early_lchan_conn_fail() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_allow_emerg_msc(true);
+	f_vty_allow_emerg_bts(true, 0);
+	vc_conn := f_start_handler(refers(f_tc_emerg_call_and_lcs_loc_req_early_lchan_conn_fail), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
 /* Attempt Complete Layer 3 without any MSC available (OS#4832) */
 private function f_tc_no_msc(charstring id) runs on MSC_ConnHdlr {
 	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
@@ -11677,6 +11791,8 @@ control {
 		execute( TC_cm_service_during_lcs_loc_req() );
 		execute( TC_ho_during_lcs_loc_req() );
 		execute( TC_emerg_call_and_lcs_loc_req() );
+		execute( TC_emerg_call_and_lcs_loc_req_early_lchan_rel_ind() );
+		execute( TC_emerg_call_and_lcs_loc_req_early_lchan_conn_fail() );
 	}
 
 	execute( TC_no_msc() );
