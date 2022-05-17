@@ -110,9 +110,12 @@ $(foreach dir,$(SUBDIRS), \
 	$(eval $(call DIR_all_template,$(dir)))		\
 	)
 
-.PHONY: tags
+.PHONY: tags regen-diameter-types-ttcn
 tags:
 	find $(shell pwd) \
 		-type f -name "*.ttcn" -o \
 		-type f -name "*.ttcnpp" | \
 	xargs ctags
+
+regen-diameter-types-ttcn:
+	(cd library/ && ./regen-DIAMETER_Types_ttcn.sh)
