@@ -19,6 +19,7 @@ FILES="
 	Native_FunctionDefs.cc
 	TCCConversion.cc
 	TCCInterface.cc
+	TCCEncoding.cc
 	UDP_EncDec.cc
 	UECUPS_CodecPort_CtrlFunctDef.cc
 "
