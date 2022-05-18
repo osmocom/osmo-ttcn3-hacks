@@ -18,6 +18,7 @@ FILES="
 	Native_FunctionDefs.cc
 	TCCConversion.cc
 	TCCInterface.cc
+	TCCEncoding.cc
 	TELNETasp_PT.cc
 	UDP_EncDec.cc
 "
