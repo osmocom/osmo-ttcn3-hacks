@@ -141,6 +141,7 @@ module GGSN_Tests {
 		port DIAMETER_PT Gy_UNIT;
 		port DIAMETEREM_PROC_PT Gy_PROC;
 		var integer g_gy_validity_time := 0; /* In seconds. 0 => disabled, !0 => grant over CC-Time period */
+		var integer g_gy_volume_threshold := 0; /* In octets. 0 => disabled, !0 => request IUT to revalidate after N octets */
 		var PDU_DIAMETER g_rx_gy; /* Store last received Gy message */
 	}
 
@@ -667,8 +668,13 @@ module GGSN_Tests {
 			avp := f_DIAMETER_get_avp(g_rx_gy, c_AVP_Code_DCC_NONE_CC_Request_Number);
 			req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
 			if (g_gy_validity_time > 0) {
-				tx_dia := ts_DIA_Gy_CCA_ValidityTime(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
-							 req_type, req_num, g_gy_validity_time);
+				if (g_gy_volume_threshold > 0) {
+					tx_dia := ts_DIA_Gy_CCA_ValidityTimeVolumeThreshold(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
+								 req_type, req_num, g_gy_validity_time, g_gy_volume_threshold);
+				} else {
+					tx_dia := ts_DIA_Gy_CCA_ValidityTime(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
+								 req_type, req_num, g_gy_validity_time);
+				}
 			} else {
 				tx_dia := ts_DIA_Gy_CCA(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
 							 req_type, req_num);
@@ -812,14 +818,14 @@ module GGSN_Tests {
 	const octetstring c_neigh_solicit:= '6000000000203afffe800000000000000000000000000002ff0200000000000000000001ff00000287009f9600000000fe80000000000000000000000000000201010288b51f2559'O;
 
 	/* template for sending an ICMPv4 echo request */
-	template PDU_ICMP ts_ICMPv4_ERQ := {
+	template PDU_ICMP ts_ICMPv4_ERQ(octetstring data := ''O) := {
 		echo := {
 			type_field := 8,
 			code := 0,
 			checksum := '0000'O,
 			identifier := '0345'O,
 			sequence_number := '0001'O,
-			data := ''O
+			data := data
 		}
 	}
 
@@ -1112,8 +1118,8 @@ module GGSN_Tests {
 	}
 
 	/* Send an ICMPv4 echo msg through GTP given pdp ctx, and ip src and dst addr */
-	function f_gen_icmpv4_echo(OCT4 saddr, OCT4 daddr) return octetstring {
-		var octetstring tmp := f_enc_PDU_ICMP(valueof(ts_ICMPv4_ERQ));
+	function f_gen_icmpv4_echo(OCT4 saddr, OCT4 daddr, octetstring pl := ''O) return octetstring {
+		var octetstring tmp := f_enc_PDU_ICMP(valueof(ts_ICMPv4_ERQ(pl)));
 		var IPv4_packet ip4 := valueof(ts_IP4(saddr, daddr, 1, 50, tmp));
 		var octetstring data := f_IPv4_enc(ip4);
 		var OCT2 cksum := f_IPv4_checksum(data);
@@ -2429,6 +2435,60 @@ module GGSN_Tests {
 		f_shutdown_helper();
 	}
 
+	/* Test  Volume-Quota-Thresold AVP triggers request before Validity-Time */
+	testcase TC_gy_charging_volume_quota_threshold() runs on GT_CT {
+		var default d;
+		timer Tout;
+		g_gy_volume_threshold := 1000; /* Will make a trigger when we send bigger payload below */
+		g_gy_validity_time := 8; /* Grant access for 8 seconds, needs to be re-validated afterwards */
+		f_init();
+		var float tout_sec := int2float(g_gy_validity_time) / 2.0;
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), "1234", c_ApnInternet, valueof(t_EuaIPv4Dyn)));
+		ctx.pco_req := valueof(ts_PCO_IPv4_DNS_CONT);
+		f_pdp_ctx_act(ctx);
+
+		var OCT4 dns1_addr := f_PCO_extract_proto(ctx.pco_neg, '000d'O);
+
+		T_default.start(40.0);
+		d := activate(pingpong());
+
+		/* Send some UL traffic: */
+		var octetstring payload := f_rnd_octstring(1200);
+		var OCT4 saddr := ctx.eua.endUserAddress.endUserAddressIPv4.ipv4_address;
+		f_send_gtpu(ctx, f_gen_icmpv4_echo(saddr, dns1_addr, payload));
+		f_wait_icmp4_echo_reply(ctx);
+
+		/* ICMP Req generates one report: */
+		Tout.start(tout_sec);
+		alt {
+		[] as_DIA_Gy_CCR(ctx, UPDATE_REQUEST);
+		[] Tout.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"TImeout waiting for Gy UPDATE triggered by Volume-Quota-Threshold");
+		}
+		}
+		f_validate_gy_cc_report(g_rx_gy, THRESHOLD, (0..6), 0, (1200..1400));
+
+		/* ICMP Resp (echo back) generates one report: */
+		as_DIA_Gy_CCR(ctx, UPDATE_REQUEST);
+		f_validate_gy_cc_report(g_rx_gy, THRESHOLD, (0..1), (1200..1400), 0);
+
+		/* Second update: 0 ul/dl pkt/octet should be reported, since nothing was sent */
+		as_DIA_Gy_CCR(ctx, UPDATE_REQUEST);
+		f_validate_gy_cc_report(g_rx_gy, VALIDITY_TIME, (8..9), 0, 0);
+
+		/* Let the CCA reach the GGSN */
+		f_sleep(0.5);
+		deactivate(d);
+		T_default.stop;
+
+		f_pdp_ctx_del(ctx, '1'B);
+		f_validate_gy_cc_report(g_rx_gy, FINAL, (0..2), 0, 0);
+
+
+		f_shutdown_helper();
+	}
+
 	control {
 		execute(TC_pdp4_act_deact());
 		execute(TC_pdp4_act_deact_ipcp());
@@ -2479,6 +2539,7 @@ module GGSN_Tests {
 		/* open5gs specific tests: */
 		if (m_ggsn_impl == GGSN_IMPL_OPEN5GS) {
 			execute(TC_gy_charging_cc_time());
+			execute(TC_gy_charging_volume_quota_threshold());
 		}
 	}
 }
