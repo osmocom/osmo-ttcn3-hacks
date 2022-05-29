@@ -75,10 +75,10 @@ import from GSM_SystemInformation all;
 import from GSM_RestOctets all;
 import from TCCConversion_Functions all;
 
-type record of integer integer_list;
-
+const integer NUM_TRX := 4;
 const integer NUM_BTS := 3;
 const integer NUM_BTS_CFG := 4; /* we have 4 BTS in the osmo-bsc.cfg (for inter-BSC HO tests) but use only 3 */
+const integer NUM_TRX_CFG := 1; /* we support up to 4 TRX per BTS, but have only 1 TRX per BTS in osmo-bsc.cfg */
 const integer NUM_MSC := 3;
 const float T3101_MAX := 12.0;
 
@@ -87,17 +87,27 @@ const integer NUM_TCHH_PER_BTS := 2;
 const integer NUM_TCHF_PER_BTS := 4;
 const integer NUM_SDCCH_PER_BTS := 3;
 
+friend type record BtsTrxIdx {
+	uint8_t bts,
+	uint8_t trx
+}
+
+private type record BtsParams {
+	integer trx_num,
+	integer tsc
+}
+
 /* Default Training Sequence Code expected for bts[i]:
  * BTS 0 has BSIC 10 (and no explicit timeslot training_sequence_code config), so expecting TSC = (BSIC & 7) = 2.
  * BTS 1 has BSIC 11, TSC = (BSIC & 7) = 3.
  * BTS 2 has BSIC 12, TSC = (BSIC & 7) = 4.
  * BTS 2 has BSIC 12, TSC = (BSIC & 7) = 4.
  */
-const integer_list BTS_TSC := {
-	2,
-	3,
-	4,
-	4
+private const BtsParams c_BtsParams[NUM_BTS_CFG] := {
+	/* BTS0 */ { trx_num := 1, tsc := 2 },
+	/* BTS1 */ { trx_num := 1, tsc := 3 },
+	/* BTS2 */ { trx_num := 1, tsc := 4 },
+	/* BTS3 */ { trx_num := 1, tsc := 4 }
 }
 
 /* per-BTS state which we keep */
@@ -593,12 +603,12 @@ function f_sysinfo_dec_raw(inout SystemInformationConfig si, RSL_Message rsl)
 }
 
 type component test_CT extends CTRL_Adapter_CT {
-	/* Array of per-BTS state */
-	var BTS_State bts[NUM_BTS];
+	/* Array of per-BTS/TRX state */
+	var BTS_State bts[NUM_BTS][NUM_TRX];
 	/* RSL common Channel Port (for RSL_Emulation) */
 	port RSL_CCHAN_PT RSL_CCHAN[NUM_BTS];
-	/* array of per-BTS RSL test ports */
-	port IPA_RSL_PT IPA_RSL[NUM_BTS];
+	/* array of per-BTS/TRX RSL test ports */
+	port IPA_RSL_PT IPA_RSL[NUM_BTS][NUM_TRX];
 	port IPA_CODEC_PT IPA; /* Required for compilation of TC_rsl_unknown_unit_id() */
 	/* CTRL muxed over IPA in SCCPlite conn BSC<->MSC (or BSC-NAT) */
 	port IPA_CTRL_PT SCCPLITE_IPA_CTRL;
@@ -731,7 +741,7 @@ friend function f_gen_test_hdlr_pars(integer bssap_idx := 0) return TestHdlrPara
 	}
 	pars.exp_ms_power_level := mp_exp_ms_power_level;
 	pars.mscpool.bssap_idx := bssap_idx;
-	pars.expect_tsc := BTS_TSC[0];
+	pars.expect_tsc := c_BtsParams[0].tsc;
 	pars.imsi := f_rnd_imsi('00101'H);
 
 	log(testcasename(), ": using IMSI ", pars.imsi);
@@ -925,21 +935,21 @@ type record IPA_Client {
  *  \param clnt IPA_Client for which to establish
  *  \param bsc_host IP address / hostname of the BSC
  *  \param bsc_port TCP port number of the BSC
- *  \param i number identifying this BTS
+ *  \param idx BTS/TRX index values
  *  \param handler_mode Start an RSL_Emulation_CT component (true) or not (false) */
-function f_ipa_rsl_start(inout IPA_Client clnt, charstring bsc_host, PortNumber bsc_port, integer i,
-			 boolean handler_mode := false)
+function f_ipa_rsl_start(inout IPA_Client clnt, charstring bsc_host, PortNumber bsc_port,
+			 BtsTrxIdx idx := {0, 0}, boolean handler_mode := false)
 runs on test_CT {
 	timer T := 10.0;
 
-	clnt.id := "IPA" & int2str(i) & "-RSL";
+	clnt.id := "IPA-BTS" & int2str(idx.bts) & "-TRX" & int2str(idx.trx) & "-RSL";
 	clnt.vc_IPA := IPA_Emulation_CT.create(clnt.id & "-IPA") alive;
 	clnt.ccm_pars := c_IPA_default_ccm_pars;
 	clnt.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
-	clnt.ccm_pars.unit_id := int2str(1234+i) & "/0/0";
+	clnt.ccm_pars.unit_id := int2str(1234 + idx.bts) & "/0/" & int2str(idx.trx);
 	if (handler_mode) {
 		clnt.vc_RSL := RSL_Emulation_CT.create(clnt.id & "-RSL") alive;
-		connect(clnt.vc_RSL:CCHAN_PT, self:RSL_CCHAN[i]);
+		connect(clnt.vc_RSL:CCHAN_PT, self:RSL_CCHAN[idx.bts]);
 	}
 
 	map(clnt.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
@@ -947,10 +957,11 @@ runs on test_CT {
 	if (handler_mode) {
 		connect(clnt.vc_IPA:IPA_RSL_PORT, clnt.vc_RSL:IPA_PT);
 	} else {
-		connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[i]);
+		connect(clnt.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[idx.bts][idx.trx]);
 	}
 
-	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", 10000+i, clnt.ccm_pars));
+	var integer local_port := 10000 + idx.bts * 1000 + idx.trx;
+	clnt.vc_IPA.start(IPA_Emulation.main_client(bsc_host, bsc_port, "", local_port, clnt.ccm_pars));
 	if (handler_mode) {
 		clnt.vc_RSL.start(RSL_Emulation.main());
 		return;
@@ -959,11 +970,11 @@ runs on test_CT {
 	/* wait for IPA RSL link to connect and send ID ACK */
 	T.start;
 	alt {
-	[] IPA_RSL[i].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK)) {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK)) {
 		T.stop;
 		}
-	[] IPA_RSL[i].receive(ASP_IPA_Event:?) { repeat }
-	[] IPA_RSL[i].receive { repeat }
+	[] IPA_RSL[idx.bts][idx.trx].receive(ASP_IPA_Event:?) { repeat }
+	[] IPA_RSL[idx.bts][idx.trx].receive { repeat }
 	[] T.timeout {
 		setverdict(fail, "Timeout RSL waiting for ASP_IPA_EVENT_ID_ACK");
 		mtc.stop;
@@ -1108,19 +1119,19 @@ altstep as_catch_RSL_sysinfo(integer rsl_idx) runs on test_CT {
 	var ASP_RSL_Unitdata rx_rsl_ud;
 
 	/* For handler_mode := false, receiving the RSL bootstrap messages directly on IPA_RSL */
-	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
+	[] IPA_RSL[rsl_idx][0].receive(tr_ASP_RSL_UD(tr_RSL_NO_BCCH_INFO)) -> value rx_rsl_ud {
 		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
 		repeat;
 		}
-	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
+	[] IPA_RSL[rsl_idx][0].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO)) -> value rx_rsl_ud {
 		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
 		repeat;
 		}
-	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
+	[] IPA_RSL[rsl_idx][0].receive(tr_ASP_RSL_UD(tr_RSL_NO_SACCH_FILL)) -> value rx_rsl_ud {
 		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
 		repeat;
 		}
-	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
+	[] IPA_RSL[rsl_idx][0].receive(tr_ASP_RSL_UD(tr_RSL_SACCH_FILL)) -> value rx_rsl_ud {
 		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
 		repeat;
 		}
@@ -1234,30 +1245,38 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false, boolea
 	f_init_mgcp("VirtMSC");
 
 	for (var integer i := 0; i < nr_bts; i := i+1) {
-		f_init_bts(i, handler_mode);
+		f_init_bts(i, c_BtsParams[i].trx_num, handler_mode);
 	}
 
 	/* Emit a marker to appear in the SUT's own logging output */
 	f_logp(BSCVTY, testcasename() & "() start");
 }
 
-function f_init_bts(integer bts_idx := 0, boolean handler_mode := false)
+function f_init_bts(integer bts_idx := 0,
+		    integer trx_num := NUM_TRX_CFG,
+		    boolean handler_mode := false)
 runs on test_CT {
 	/* wait until osmo-bts-omldummy has respawned */
 	f_wait_oml(bts_idx, "degraded", 5.0);
 
-	/* start RSL connection */
-	f_ipa_rsl_start(bts[bts_idx].rsl, mp_bsc_ip, mp_bsc_rsl_port, bts_idx, handler_mode);
+	/* start RSL connection(s) */
+	for (var integer trx_idx := 0; trx_idx < trx_num; trx_idx := trx_idx + 1) {
+		f_ipa_rsl_start(bts[bts_idx][trx_idx].rsl,
+				mp_bsc_ip, mp_bsc_rsl_port,
+				{bts_idx, trx_idx}, handler_mode);
+	}
 	/* wait until BSC tells us "connected" */
 	f_wait_oml(bts_idx, "connected", 5.0);
 }
 
-function f_init_bts_and_check_sysinfo(integer bts_idx := 0, boolean handler_mode := false,
+function f_init_bts_and_check_sysinfo(integer bts_idx := 0,
+				      integer trx_num := NUM_TRX_CFG,
+				      boolean handler_mode := false,
 				      template SystemInformationConfig expect_si)
 runs on test_CT {
 	var default sysinfo := activate(as_catch_RSL_sysinfo(bts_idx));
 
-	f_init_bts(bts_idx, handler_mode);
+	f_init_bts(bts_idx, trx_num, handler_mode);
 
 	/* Give some time to (hopefully/most likely) collect all system informations from RSL startup.
 	 * We could stop as soon as all expected SI are received, but then we might miss SI that we don't expect and
@@ -1278,18 +1297,20 @@ runs on test_CT {
 	}
 }
 
-/* expect to receive a RSL message matching a specified template on a given BTS / stream */
-function f_exp_ipa_rx(integer bts_nr, template (present) RSL_Message t_rx, float t_secs := 2.0, IpaStreamId sid := IPAC_PROTO_RSL_TRX0)
+/* expect to receive a RSL message matching a specified template on a given BTS / TRX */
+function f_exp_ipa_rx(template (present) RSL_Message t_rx,
+		      BtsTrxIdx idx := {0, 0},
+		      float Tval := 2.0)
 runs on test_CT return RSL_Message {
 	var ASP_RSL_Unitdata rx_rsl_ud;
-	timer T := t_secs;
+	timer T := Tval;
 
 	T.start;
 	alt {
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(t_rx, sid)) -> value rx_rsl_ud {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(t_rx, ?)) -> value rx_rsl_ud {
 		T.stop;
 		}
-	[] IPA_RSL[bts_nr].receive { repeat; }
+	[] IPA_RSL[idx.bts][idx.trx].receive { repeat; }
 	[] T.timeout {
 		setverdict(fail, "Timeout expecting ", t_rx);
 		mtc.stop;
@@ -1299,9 +1320,11 @@ runs on test_CT return RSL_Message {
 }
 
 /* helper function to transmit RSL on a given BTS/stream */
-function f_ipa_tx(integer bts_nr, template (value) RSL_Message t_tx, IpaStreamId sid := IPAC_PROTO_RSL_TRX0)
+function f_ipa_tx(template (value) RSL_Message t_tx,
+		  BtsTrxIdx idx := {0, 0},
+		  IpaStreamId sid := IPAC_PROTO_RSL_TRX0)
 runs on test_CT {
-	IPA_RSL[bts_nr].send(ts_ASP_RSL_UD(t_tx, sid));
+	IPA_RSL[idx.bts][idx.trx].send(ts_ASP_RSL_UD(t_tx, sid));
 }
 
 
@@ -1312,8 +1335,8 @@ testcase TC_chan_act_noreply() runs on test_CT {
 
 	f_init(1);
 
-	IPA_RSL[0].send(ts_ASP_RSL_UD(ts_RSL_CHAN_RQD('23'O, 23)));
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ipa_tx(ts_RSL_CHAN_RQD('23'O, 23));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	f_shutdown_helper();
 }
 
@@ -1346,25 +1369,25 @@ private function f_chan_act_counter(OCT1 ra, charstring chreq_ctr_suffix) runs o
 	f_logp(BSCVTY, "f_chan_act_counter(" & chreq_ctr_suffix & ")");
 
 	var RSL_Message rx_rsl;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(ra, fn));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ipa_tx(ts_RSL_CHAN_RQD(ra, fn));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RslChannelNr chan_nr := rx_rsl.ies[0].body.chan_nr;
 
 	f_ctrs_bts_add(0, "chreq:total");
 	f_ctrs_bts_add(0, "chreq:attempted_" & chreq_ctr_suffix);
 	f_ctrs_bts_verify();
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 
 	f_ctrs_bts_add(0, "chreq:successful");
 	f_ctrs_bts_add(0, "chreq:successful_" & chreq_ctr_suffix);
 	f_ctrs_bts_verify();
 
 	/* test is done, release RSL Conn Fail Ind to clean up */
-	f_ipa_tx(0, ts_RSL_CONN_FAIL_IND(chan_nr, RSL_ERR_RADIO_LINK_FAIL));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), 10.0);
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+	f_ipa_tx(ts_RSL_CONN_FAIL_IND(chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), Tval := 10.0);
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
 	f_sleep(1.0);
 }
 
@@ -1411,7 +1434,7 @@ private function f_TC_chan_act_ack_noest(OCT1 ra := '23'O) runs on test_CT {
 	var RslChannelNr chan_nr := f_chreq_act_ack(ra);
 
 	/* expect BSC to disable the channel again if there's no RLL EST IND */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), Tval := T3101_MAX);
 
 	f_shutdown_helper();
 }
@@ -1440,10 +1463,10 @@ testcase TC_chan_rqd_emerg_deny() runs on test_CT {
 	 f_init(1);
 	 f_vty_allow_emerg_bts(false, 0);
 
-	 IPA_RSL[0].clear;
-	 f_ipa_tx(0, ts_RSL_CHAN_RQD('A5'O, 23));
+	 IPA_RSL[0][0].clear;
+	 f_ipa_tx(ts_RSL_CHAN_RQD('A5'O, 23));
 
-	 rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeC(RSL_MT_IMMEDIATE_ASSIGN_CMD));
+	 rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeC(RSL_MT_IMMEDIATE_ASSIGN_CMD));
 	 rr := dec_GsmRrMessage(rx_rsl.ies[1].body.full_imm_ass_info.payload);
 	 if (rr.header.message_type == IMMEDIATE_ASSIGNMENT_REJECT) {
 		setverdict(pass);
@@ -1467,13 +1490,13 @@ testcase TC_chan_act_ack_est_ind_noreply() runs on test_CT {
 	var RslChannelNr chan_nr := f_chreq_act_ack();
 
 	var octetstring l3 := '00010203040506'O
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3)));
 
 	/* expect BSC to disable the channel again if there's no response from MSC */
 	/* MS waits 20s (T3210) at LU; 10s (T3230) at CM SERV REQ and 5s (T3220) AT detach */
-	f_expect_chan_rel(0, chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -1488,13 +1511,13 @@ testcase TC_chan_act_ack_est_ind_refused() runs on test_CT {
 	var RslChannelNr chan_nr := f_chreq_act_ack();
 
 	var octetstring l3 := '00010203040506'O
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
 	BSSAP.send(ts_BSSAP_DISC_req(rx_c_ind.connectionId, 0));
 
 	/* expect BSC to disable the channel */
-	f_expect_chan_rel(0, chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -1507,11 +1530,11 @@ testcase TC_chan_act_nack() runs on test_CT {
 
 	chact_nack := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "chan_act:nack");
 
-	f_ipa_tx(0, ts_RSL_CHAN_RQD('33'O, 33));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ipa_tx(ts_RSL_CHAN_RQD('33'O, 33));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RslChannelNr chan_nr := rx_rsl.ies[0].body.chan_nr;
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL));
+	f_ipa_tx(ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL));
 
 	/* wait for some time to hope the NACK arrives before the CTRL GET below */
 	f_sleep(0.5);
@@ -1539,19 +1562,19 @@ testcase TC_chan_exhaustion() runs on test_CT {
 		var RslChannelNr chan_nr := f_chreq_act_ack('33'O, i);
 	}
 
-	IPA_RSL[0].clear;
+	IPA_RSL[0][0].clear;
 
 	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total",
 				   chreq_total + NUM_TCHF_PER_BTS + NUM_TCHH_PER_BTS + NUM_SDCCH_PER_BTS);
 
 	/* now expect additional channel activations to fail */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD('42'O, 42));
+	f_ipa_tx(ts_RSL_CHAN_RQD('42'O, 42));
 
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV))) {
 		setverdict(fail, "Received CHAN ACT ACK without resources?!?");
 		}
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_IMM_ASSIGN(?))) -> value rsl_ud {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_IMM_ASSIGN(?))) -> value rsl_ud {
 		var GsmRrMessage rr;
 		/* match on IMM ASS REJ */
 		rr := dec_GsmRrMessage(rsl_ud.rsl.ies[1].body.full_imm_ass_info.payload);
@@ -1565,7 +1588,7 @@ testcase TC_chan_exhaustion() runs on test_CT {
 			repeat;
 		}
 		}
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	}
 	f_shutdown_helper();
 }
@@ -1584,18 +1607,18 @@ testcase TC_chan_deact_silence() runs on test_CT {
 
 	/* Expect CHANnel RELease */
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL))) {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL))) {
 		log("Received CHANnel RELease");
 		setverdict(pass);
 		}
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_IMM_ASSIGN(?))) {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_IMM_ASSIGN(?))) {
 		/* See OS#3709, OsmoBSC should not send Immediate
 		 * Assignment Reject since a dedicated channel was
 		 * already allocated, and Immediate Assignment was
 		 * already sent. */
 		setverdict(fail, "Unexpected Immediate Assignment!");
 		}
-	[] IPA_RSL[0].receive {
+	[] IPA_RSL[0][0].receive {
 		setverdict(fail, "Unexpected RSL message!");
 		}
 	}
@@ -1787,79 +1810,87 @@ testcase TC_assignment_ctm() runs on test_CT {
 
 type record DchanTuple {
 	integer sccp_conn_id,
-	RslChannelNr rsl_chan_nr
+	RslChannelNr rsl_chan_nr,
+	BtsTrxIdx idx
 }
 
 type record of DchanTuple DchanTuples;
 
 /* Send CHAN RQD and wait for allocation; acknowledge it */
-private function f_chreq_act_ack(OCT1 ra := '23'O, GsmFrameNumber fn := 23)
+private function f_chreq_act_ack(OCT1 ra := '23'O,
+				 GsmFrameNumber fn := 23,
+				 BtsTrxIdx idx := {0, 0})
 runs on test_CT return RslChannelNr {
 	var RSL_Message rx_rsl;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(ra, fn));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ipa_tx(ts_RSL_CHAN_RQD(ra, fn), {idx.bts, 0});
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV), idx);
 	var RslChannelNr chan_nr := rx_rsl.ies[0].body.chan_nr;
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10), idx);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0), {idx.bts, 0});
 	return chan_nr;
 }
 
 /* helper function to establish a dedicated channel via BTS and MSC */
-function f_est_dchan(OCT1 ra, GsmFrameNumber fn, octetstring l3)
+function f_est_dchan(OCT1 ra, GsmFrameNumber fn, octetstring l3,
+		     BtsTrxIdx idx := {0, 0})
 runs on test_CT return DchanTuple {
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	var DchanTuple dt;
 
 	/* Send CHAN RQD and wait for allocation; acknowledge it */
-	dt.rsl_chan_nr := f_chreq_act_ack(ra, fn);
+	dt.rsl_chan_nr := f_chreq_act_ack(ra, fn, idx);
 
-	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3), idx);
 
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
 	dt.sccp_conn_id := rx_c_ind.connectionId;
 	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
 
+	dt.idx := idx;
 	return dt;
 }
 
 /* Like f_est_dchan(), but for the first lchan of a dynamic timeslot: first ACK the deactivation of PDCH. */
-function f_est_dchan_dyn(OCT1 ra, GsmFrameNumber fn, octetstring l3)
+function f_est_dchan_dyn(OCT1 ra, GsmFrameNumber fn, octetstring l3,
+			 BtsTrxIdx idx := {0, 0})
 runs on test_CT return DchanTuple {
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	var DchanTuple dt;
 
 	/* Send CHAN RQD */
 	var RSL_Message rx_rsl;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(ra, fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(ra, fn), {idx.bts, 0});
 
 	/* The dyn TS first deactivates PDCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), idx, Tval := T3101_MAX);
 	dt.rsl_chan_nr := rx_rsl.ies[0].body.chan_nr;
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr), idx);
 
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV), idx);
 	dt.rsl_chan_nr := rx_rsl.ies[0].body.chan_nr;
 
 	/* Now activates the signalling channel */
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, fn+10));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, fn+10), idx);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0), {idx.bts, 0});
 
-	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3), idx);
 
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
 	dt.sccp_conn_id := rx_c_ind.connectionId;
 	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
 
+	dt.idx := idx;
 	return dt;
 }
 
 /* expect RF CAN REL from BTS, acknowledge it and clear the MSC side */
-private function f_exp_chan_rel_and_clear(DchanTuple dt, integer bts_nr := 0) runs on test_CT {
+private function f_exp_chan_rel_and_clear(DchanTuple dt)
+runs on test_CT {
 	var RSL_Message rx_rsl;
 	/* expect BSC to disable the channel */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), T3101_MAX);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), dt.idx, Tval := T3101_MAX);
 	/* respond with CHAN REL ACK */
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr), dt.idx);
 
 	/* expect Clear Complete from BSC */
 	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete));
@@ -1878,7 +1909,7 @@ testcase TC_chan_rel_rll_rel_ind() runs on test_CT {
 	dt := f_est_dchan('23'O, 23, '00010203040506'O);
 
 	/* simulate RLL REL IND */
-	f_ipa_tx(0, ts_RSL_REL_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+	f_ipa_tx(ts_RSL_REL_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
 
 	/* expect Clear Request on MSC side */
 	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearRequest)) -> value rx_di;
@@ -1888,7 +1919,7 @@ testcase TC_chan_rel_rll_rel_ind() runs on test_CT {
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
 
 	/* expect BSC to disable the channel */
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 
 	/* wait for SCCP emulation to do its job */
 	f_sleep(1.0);
@@ -1906,7 +1937,7 @@ testcase TC_chan_rel_conn_fail() runs on test_CT {
 	dt := f_est_dchan('23'O, 23, '00010203040506'O);
 
 	/* simulate CONN FAIL IND */
-	f_ipa_tx(0, ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+	f_ipa_tx(ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
 	/* TODO: different cause values? */
 
 	/* expect Clear Request from BSC */
@@ -1917,7 +1948,7 @@ testcase TC_chan_rel_conn_fail() runs on test_CT {
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
 
 	/* expect BSC to disable the channel */
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 
 	/* wait for SCCP emulation to do its job */
 	f_sleep(1.0);
@@ -1937,13 +1968,13 @@ testcase TC_early_conn_fail() runs on test_CT {
 	dt.rsl_chan_nr := f_chreq_act_ack(f_rnd_ra_cs(), 23);
 
 	/* BTS->BSC: simulate CONN FAIL IND */
-	f_ipa_tx(0, ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+	f_ipa_tx(ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
 
 	/* BTS->BSC: Expect RF channel release from BSC on Abis */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), 10.0);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), Tval := 10.0);
 
 	/* BTS<-BSC: respond with CHAN REL ACK */
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
 
 	f_shutdown_helper();
 }
@@ -1962,15 +1993,15 @@ testcase TC_late_conn_fail() runs on test_CT {
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(0)));
 
 	/* BTS->BSC: expect BSC to deactivate SACCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_DEACT_SACCH(dt.rsl_chan_nr));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_DEACT_SACCH(dt.rsl_chan_nr));
 
 	/* BTS->BSC: simulate a late CONN FAIL IND from BTS */
-	f_ipa_tx(0, ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
+	f_ipa_tx(ts_RSL_CONN_FAIL_IND(dt.rsl_chan_nr, RSL_ERR_RADIO_LINK_FAIL));
 
 	/* BTS<-BSC: Expect RF channel release from BSC on Abis */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), 10.0);
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL), Tval := 10.0);
 	/* BTS->BSC: respond with CHAN REL ACK */
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(dt.rsl_chan_nr));
 
 	/* BSC->MSC: expect Clear Complete from BSC */
 	BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearComplete));
@@ -2027,7 +2058,8 @@ testcase TC_stats_conn_fail() runs on test_CT {
 	f_shutdown_helper();
 }
 
-function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
+function f_expect_chan_rel(RslChannelNr rsl_chan_nr,
+			   BtsTrxIdx idx := {0, 0},
 			   boolean expect_deact_sacch := true,
 			   boolean expect_rr_chan_rel := true,
 			   boolean expect_rll_rel_req := true,
@@ -2047,11 +2079,11 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 	log("f_expect_chan_rel() expecting: expect_deact_sacch=", expect_deact_sacch, " expect_rr_chan_rel=", expect_rr_chan_rel,
 	    " expect_rll_rel_req=", expect_rll_rel_req);
 	alt {
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DEACT_SACCH(rsl_chan_nr))) {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(tr_RSL_DEACT_SACCH(rsl_chan_nr))) {
 		got_deact_sacch := true;
 		repeat;
 	}
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) -> value ud {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(tr_RSL_DATA_REQ(rsl_chan_nr, ?, decmatch tr_RRM_RR_RELEASE))) -> value ud {
 		got_rr_chan_rel := true;
 
 		if (f_rsl_find_ie(ud.rsl, RSL_IE_L3_INFO, l3_ie) == false) {
@@ -2083,20 +2115,20 @@ function f_expect_chan_rel(integer bts_nr, RslChannelNr rsl_chan_nr,
 		}
 		repeat;
 	}
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_REL_REQ(rsl_chan_nr, ?))) {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(tr_RSL_REL_REQ(rsl_chan_nr, ?))) {
 		got_rll_rel_req := true;
 		/* FIXME: Why are we getting this for LinkID SACCH? */
 		if (handle_rll_rel) {
-			f_ipa_tx(0, ts_RSL_REL_CONF(rsl_chan_nr, main_dcch));
+			f_ipa_tx(ts_RSL_REL_CONF(rsl_chan_nr, main_dcch));
 		}
 		repeat;
 	}
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL))) {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_RF_CHAN_REL))) {
 		/* respond with CHAN REL ACK */
-		f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(rsl_chan_nr));
+		f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(rsl_chan_nr));
 		}
 	/* ignore any user data */
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeR(?))) {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeR(?))) {
 		repeat;
 		}
 	}
@@ -2134,7 +2166,7 @@ testcase TC_chan_rel_hard_clear() runs on test_CT {
 		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 	}
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2167,7 +2199,7 @@ function f_TC_chan_rel_last_eutran_plmn_hard_clear(boolean tx_csfb_ind) runs on 
 	   SystemInformationConfig_default, use that: */
 	var template CellSelIndValue exp_cells := f_tr_rr_chan_rel_earfcns(1);
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := exp_cells);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := exp_cells);
 	f_shutdown_helper();
 }
 
@@ -2212,7 +2244,7 @@ testcase TC_chan_rel_hard_clear_csfb() runs on test_CT {
 		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 	}
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2227,7 +2259,7 @@ testcase TC_chan_rel_hard_rlsd() runs on test_CT {
 	/* release the SCCP connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2242,7 +2274,7 @@ testcase TC_chan_rel_hard_rlsd_ms_dead() runs on test_CT {
 	/* release the SCCP connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2255,7 +2287,7 @@ testcase TC_chan_rel_a_reset() runs on test_CT {
 	dt := f_est_dchan('23'O, 23, '00010203040506'O);
 
 	/* Clear the queue, it might still contain stuff like IMMEDIATE ASSIGN */
-	IPA_RSL[0].clear;
+	IPA_RSL[0][0].clear;
 
 	/* perform BSSAP RESET, expect RESET ACK and DISC.ind on connection */
 	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own, ts_BSSMAP_Reset(0, g_osmux_enabled)));
@@ -2264,7 +2296,7 @@ testcase TC_chan_rel_a_reset() runs on test_CT {
 	[] BSSAP.receive(tr_BSSAP_DISC_ind(dt.sccp_conn_id, ?, ?)) { }
 	}
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2281,7 +2313,7 @@ testcase TC_chan_rel_sccp_tiar_timeout() runs on test_CT {
 	f_init(1);
 
 	dt := f_est_dchan('23'O, 23, '00010203040506'O);
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 	f_shutdown_helper();
 }
 
@@ -2298,7 +2330,7 @@ runs on test_CT
 		BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 	}
 
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_rr_cause := expect_rr_cause);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false, expect_rr_cause := expect_rr_cause);
 }
 
 /* Test that Clear Command cause codes affect the RR Channel Release cause code */
@@ -2323,7 +2355,7 @@ testcase TC_rll_est_ind_inact_lchan() runs on test_CT {
 
 	var octetstring l3 := '00010203040506'O;
 	var RslChannelNr chan_nr := valueof(t_RslChanNr_Bm(6));
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	T.start;
 	alt {
@@ -2331,7 +2363,7 @@ testcase TC_rll_est_ind_inact_lchan() runs on test_CT {
 		setverdict(fail, "MSC received COMPL L3 for non-active lchan");
 		}
 	[] BSSAP.receive {}
-	[] IPA_RSL[0].receive {}
+	[] IPA_RSL[0][0].receive {}
 	[] T.timeout {}
 	}
 
@@ -2347,7 +2379,7 @@ testcase TC_rll_est_ind_inval_sapi1() runs on test_CT {
 	chan_nr := f_chreq_act_ack()
 
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(1)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(1)), l3));
 
 	timer T := 2.0;
 	T.start;
@@ -2356,7 +2388,7 @@ testcase TC_rll_est_ind_inval_sapi1() runs on test_CT {
 		setverdict(fail, "MSC received COMPL L3 for invalid SAPI 1");
 		}
 	[] BSSAP.receive { repeat; }
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	[] T.timeout {}
 	}
 
@@ -2372,7 +2404,7 @@ testcase TC_rll_est_ind_inval_sapi3() runs on test_CT {
 	var RslChannelNr chan_nr := f_chreq_act_ack();
 
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(3)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(3)), l3));
 
 	T.start;
 	alt {
@@ -2380,7 +2412,7 @@ testcase TC_rll_est_ind_inval_sapi3() runs on test_CT {
 		setverdict(fail, "MSC received COMPL L3 for invalid SAPI 3");
 		}
 	[] BSSAP.receive { repeat; }
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	[] T.timeout {}
 	}
 
@@ -2396,7 +2428,7 @@ testcase TC_rll_est_ind_inval_sacch() runs on test_CT {
 	var RslChannelNr chan_nr := f_chreq_act_ack();
 
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_SACCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_SACCH(0)), l3));
 
 	T.start;
 	alt {
@@ -2404,7 +2436,7 @@ testcase TC_rll_est_ind_inval_sacch() runs on test_CT {
 		setverdict(fail, "MSC received COMPL L3 for invalid Link SACCH");
 		}
 	[] BSSAP.receive { repeat; }
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	[] T.timeout {}
 	}
 
@@ -2521,16 +2553,16 @@ testcase TC_rll_rel_ind_sapi_n_reject() runs on test_CT {
 	/* MSC sends some data on (not yet established) SAPI=3 link */
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSAP_DTAP(rnd_data, '03'O)));
 	/* BSC attempts to establish a SAPI=3 link on DCCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
 
 	/* MS sends unexpected RELease INDication on SAPI=3 */
-	f_ipa_tx(0, ts_RSL_REL_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3)));
+	f_ipa_tx(ts_RSL_REL_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3)));
 	/* We expect to receive BSSMAP SAPI N Reject message from the BSC */
 	f_exp_sapi_n_reject(3, GSM0808_CAUSE_MS_NOT_EQUIPPED);
 
 	/* Clean up the connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 
 	f_shutdown_helper();
 }
@@ -2549,16 +2581,16 @@ testcase TC_rll_err_ind_sapi_n_reject() runs on test_CT {
 	/* MSC sends some data on (not yet established) SAPI=3 link */
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSAP_DTAP(rnd_data, '03'O)));
 	/* BSC attempts to establish a SAPI=3 link on DCCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
 
 	/* BTS sends unexpected ERROR INDication on SAPI=3 */
-	f_ipa_tx(0, ts_RSL_ERROR_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3), ''O));
+	f_ipa_tx(ts_RSL_ERROR_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3), ''O));
 	/* We expect to receive BSSMAP SAPI N Reject message from the BSC */
 	f_exp_sapi_n_reject(3, GSM0808_CAUSE_BSS_NOT_EQUIPPED);
 
 	/* Clean up the connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 
 	f_shutdown_helper();
 }
@@ -2577,14 +2609,14 @@ testcase TC_rll_timeout_sapi_n_reject() runs on test_CT {
 	/* MSC sends some data on (not yet established) SAPI=3 link */
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSAP_DTAP(rnd_data, '03'O)));
 	/* BSC attempts to establish a SAPI=3 link on DCCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
 
 	/* MS does not respond, so the link establishment timeout triggers SAPI N Reject */
 	f_exp_sapi_n_reject(3, GSM0808_CAUSE_BSS_NOT_EQUIPPED, T_val := 8.0);
 
 	/* Clean up the connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 
 	f_shutdown_helper();
 }
@@ -2603,15 +2635,15 @@ testcase TC_rll_sapi_n_reject_dlci_cc() runs on test_CT {
 	/* MSC sends some data on (not yet established) SAPI=3 link */
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSAP_DTAP(rnd_data, '03'O)));
 	/* BSC attempts to establish a SAPI=3 link on DCCH */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_EST_REQ(dt.rsl_chan_nr, tr_RslLinkID_DCCH(3)));
 
 	/* MS sends unexpected ERROR INDication on DCCH/ACCH SAPI=3 */
-	f_ipa_tx(0, ts_RSL_ERROR_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3), ''O));
+	f_ipa_tx(ts_RSL_ERROR_IND(dt.rsl_chan_nr, ts_RslLinkID_DCCH(3), ''O));
 	f_exp_sapi_n_reject(3, GSM0808_CAUSE_BSS_NOT_EQUIPPED, '10'B);
 
 	/* Clean up the connection */
 	BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
-	f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false);
+	f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false);
 
 	f_shutdown_helper();
 }
@@ -2680,7 +2712,7 @@ function f_test_si2quater(integer total_earfcns, template SystemInformationConfi
 			BSSAP.send(ts_BSSAP_DISC_req(dt.sccp_conn_id, 0));
 		}
 
-		f_expect_chan_rel(0, dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := expect_cells);
+		f_expect_chan_rel(dt.rsl_chan_nr, expect_rll_rel_req := false, expect_cells := expect_cells);
 	}
 
 	for (var integer i := 1; i < total_earfcns; i := i + 1) {
@@ -2835,11 +2867,10 @@ private function f_recv_next_si1(integer rsl_idx := 0) runs on test_CT return Sy
 	timer T := 30.0;
 	T.start;
 	alt {
-	[] IPA_RSL[rsl_idx].receive(tr_ASP_RSL_UD((tr_RSL_NO_BCCH_INFO,
-						   tr_RSL_BCCH_INFO,
-						   tr_RSL_NO_SACCH_FILL,
-						   tr_RSL_SACCH_FILL))
-				   ) -> value rx_rsl_ud {
+	[] IPA_RSL[rsl_idx][0].receive(tr_ASP_RSL_UD((tr_RSL_NO_BCCH_INFO,
+						      tr_RSL_BCCH_INFO,
+						      tr_RSL_NO_SACCH_FILL,
+						      tr_RSL_SACCH_FILL))) -> value rx_rsl_ud {
 		f_sysinfo_seen(rsl_idx, rx_rsl_ud.rsl);
 		if (g_system_information[rsl_idx].si1 == omit) {
 			repeat;
@@ -2848,7 +2879,7 @@ private function f_recv_next_si1(integer rsl_idx := 0) runs on test_CT return Sy
 		g_system_information[rsl_idx].si1 := omit;
 		T.stop;
 		}
-	[] IPA_RSL[rsl_idx].receive { repeat; }
+	[] IPA_RSL[rsl_idx][0].receive { repeat; }
 	[] T.timeout { setverdict(fail, "Timeout receiving next SI1"); }
 	}
 	return last_si1;
@@ -3036,18 +3067,32 @@ testcase TC_stat_num_msc_connected_3() runs on test_CT {
 
 /* Verify correct stats on the number of configured and connected MSCs */
 private function f_tc_stat_num_bts_connected_msc_connhdlr(integer expect_num_bts_connected) runs on MSC_ConnHdlr {
-	g_pars := f_gen_test_hdlr_pars();
+	var integer num_trx_connected := 0;
+	var integer num_trx_total := 0;
+
+	for (var integer i := 0; i < lengthof(c_BtsParams); i := i + 1) {
+		var integer trx_num := c_BtsParams[i].trx_num;
+		num_trx_total := num_trx_total + trx_num;
+		if (i < expect_num_bts_connected) {
+			num_trx_connected := num_trx_connected + trx_num;
+		}
+	}
+
 	var StatsDExpects expect := {
 		{ name := "TTCN3.bsc.0.num_bts.oml_connected", mtype := "g", min := expect_num_bts_connected, max := NUM_BTS_CFG },
 		{ name := "TTCN3.bsc.0.num_bts.all_trx_rsl_connected", mtype := "g", min := expect_num_bts_connected, max := expect_num_bts_connected },
 		{ name := "TTCN3.bsc.0.num_bts.total", mtype := "g", min := NUM_BTS_CFG, max := NUM_BTS_CFG },
-		{ name := "TTCN3.bsc.0.num_trx.rsl_connected", mtype := "g", min := expect_num_bts_connected, max := expect_num_bts_connected },
-		{ name := "TTCN3.bsc.0.num_trx.total", mtype := "g", min := NUM_BTS_CFG, max := NUM_BTS_CFG }
+		{ name := "TTCN3.bsc.0.num_trx.rsl_connected", mtype := "g", min := num_trx_connected, max := num_trx_connected },
+		{ name := "TTCN3.bsc.0.num_trx.total", mtype := "g", min := num_trx_total, max := num_trx_total }
 	};
+
+	g_pars := f_gen_test_hdlr_pars();
 	f_statsd_expect(expect);
 }
 
 private function f_tc_stat_num_bts_connected_test_ct(void_fn tc_fn, integer nr_bts) runs on test_CT {
+	var integer num_trx_connected := 0;
+	var integer num_trx_total := 0;
 	var MSC_ConnHdlr vc_conn;
 
 	f_init(nr_bts := nr_bts, handler_mode := true, nr_msc := 1);
@@ -3055,30 +3100,43 @@ private function f_tc_stat_num_bts_connected_test_ct(void_fn tc_fn, integer nr_b
 	vc_conn := f_start_handler(tc_fn);
 	vc_conn.done;
 
+	for (var integer i := 0; i < lengthof(c_BtsParams); i := i + 1) {
+		var integer trx_num := c_BtsParams[i].trx_num;
+		num_trx_total := num_trx_total + trx_num;
+		if (i < nr_bts) {
+			num_trx_connected := num_trx_connected + trx_num;
+		}
+	}
+
 	/* Also verify stat exposed on CTRL interface */
 	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_bts:all_trx_rsl_connected", int2str(nr_bts));
 	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_bts:total", int2str(NUM_BTS_CFG));
-	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:rsl_connected", int2str(nr_bts));
-	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:total", int2str(NUM_BTS_CFG));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:rsl_connected", int2str(num_trx_connected));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_trx:total", int2str(num_trx_total));
 
 	/* Verify rf_states exposed on CTRL interface */
 	var charstring expect_net_rf_states := "";
 	for (var integer i := 0; i < NUM_BTS_CFG; i := i + 1) {
-		var charstring expect_bts_rf_states := int2str(i) & ",0,";
-		if (i < NUM_BTS) {
-			/* In these tests, OML for the first NUM_BTS are always connected via osmo-bts-omldummy */
-			expect_bts_rf_states := expect_bts_rf_states & "operational,unlocked,";
-		} else {
-			/* For remaining i < NUM_BTS_CFG, OML is not connected, i.e. inoperational */
-			expect_bts_rf_states := expect_bts_rf_states & "inoperational,locked,";
-		}
-		/* The RF policy is still global in osmo-bsc, i.e. always "on" */
-		expect_bts_rf_states := expect_bts_rf_states & "on,";
-		if (i < nr_bts) {
-			/* For BTS where RSL is connected, the RSL state will be "up" */
-			expect_bts_rf_states := expect_bts_rf_states & "rsl-up;";
-		} else {
-			expect_bts_rf_states := expect_bts_rf_states & "rsl-down;";
+		var charstring expect_bts_rf_states := "";
+
+		for (var integer j := 0; j < c_BtsParams[i].trx_num; j := j + 1) {
+			expect_bts_rf_states := expect_bts_rf_states &
+						int2str(i) & "," & int2str(j) & ",";
+			if (i < NUM_BTS) {
+				/* In these tests, OML for the first NUM_BTS are always connected via osmo-bts-omldummy */
+				expect_bts_rf_states := expect_bts_rf_states & "operational,unlocked,";
+			} else {
+				/* For remaining i < NUM_BTS_CFG, OML is not connected, i.e. inoperational */
+				expect_bts_rf_states := expect_bts_rf_states & "inoperational,locked,";
+			}
+			/* The RF policy is still global in osmo-bsc, i.e. always "on" */
+			expect_bts_rf_states := expect_bts_rf_states & "on,";
+			if (i < nr_bts) {
+				/* For BTS where RSL is connected, the RSL state will be "up" */
+				expect_bts_rf_states := expect_bts_rf_states & "rsl-up;";
+			} else {
+				expect_bts_rf_states := expect_bts_rf_states & "rsl-down;";
+			}
 		}
 
 		f_ctrl_get_exp(IPA_CTRL, "bts." & int2str(i) & ".rf_states", expect_bts_rf_states);
@@ -3213,7 +3271,7 @@ private function f_pageing_helper(hexstring imsi,
 
 	/* Clear the queue, it might still contain stuff like BCCH FILLING */
 	for (i := 0; i < NUM_BTS; i := i + 1) {
-		IPA_RSL[i].clear;
+		IPA_RSL[i][0].clear;
 	}
 
 	if (isvalue(rsl_chneed)) {
@@ -3233,7 +3291,7 @@ private function f_pageing_helper(hexstring imsi,
 	}
 
 	for (i := 0; i < sizeof(bts_ids); i := i + 1) {
-		rx_rsl := f_exp_ipa_rx(bts_ids[i], tr_RSL_PAGING_CMD(mi));
+		rx_rsl := f_exp_ipa_rx(tr_RSL_PAGING_CMD(mi), idx := {bts_ids[i], 0});
 		/* check channel type, paging group */
 		if (rx_rsl.ies[1].body.paging_group != paging_group) {
 			setverdict(fail, "Paging for wrong paging group");
@@ -3252,10 +3310,10 @@ private function f_pageing_helper(hexstring imsi,
 		}
 		T.start;
 		alt {
-		[] IPA_RSL[i].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(mi))) {
+		[] IPA_RSL[i][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(mi))) {
 			setverdict(fail, "Paging on BTS ", i, " which is not part of ", bts_ids);
 			}
-		[] IPA_RSL[i].receive { repeat; }
+		[] IPA_RSL[i][0].receive { repeat; }
 		[] T.timeout { }
 		}
 	}
@@ -3419,22 +3477,22 @@ testcase TC_paging_imsi_load() runs on test_CT {
 	f_pageing_helper('001010123456789'H, cid_list, c_BtsId_all);
 
 	/* tell BSC there is no paging space anymore */
-	f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(0));
+	f_ipa_tx(ts_RSL_PAGING_LOAD_IND(0));
 	f_sleep(0.2);
-	IPA_RSL[0].clear;
+	IPA_RSL[0][0].clear;
 
 	/* Wait for 4 seconds if any more PAGING CMD are received on RSL. Normally,
 	 * there would be 8 retransmissions during 4 seconds */
 	T.start;
 	T_retrans.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
 		setverdict(fail, "Received PAGING after LOAD_IND(0)");
 		mtc.stop;
 		}
 	[] T_retrans.timeout {
 		/* re-trnsmit the zero-space LOAD IND to avoid BSC 'auto credit' */
-		f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(0));
+		f_ipa_tx(ts_RSL_PAGING_LOAD_IND(0));
 		T_retrans.start;
 		repeat;
 		}
@@ -3512,21 +3570,21 @@ testcase TC_paging_imsi_a_reset() runs on test_CT {
 
 	/* Clear the queue, it might still contain stuff like BCCH FILLING */
 	for (var integer i := 0; i < sizeof(IPA_RSL); i := i+1) {
-		IPA_RSL[i].clear;
+		IPA_RSL[i][0].clear;
 	}
 
 	/* Wait for 3 seconds if any more PAGING CMD are received on RSL */
 	T.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
 		setverdict(fail, "Received PAGING after A-RESET");
 		mtc.stop;
 		}
-	[] IPA_RSL[1].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
+	[] IPA_RSL[1][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
 		setverdict(fail, "Received PAGING after A-RESET");
 		mtc.stop;
 		}
-	[] IPA_RSL[2].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
+	[] IPA_RSL[2][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?))) {
 		setverdict(fail, "Received PAGING after A-RESET");
 		mtc.stop;
 		}
@@ -3557,9 +3615,10 @@ testcase TC_paging_resp_unsol() runs on test_CT {
 
 	/* Send CHAN RQD and wait for allocation; acknowledge it */
 	dt.rsl_chan_nr := f_chreq_act_ack();
+	dt.idx := {0, 0};
 
 	/* Send unsolicited Paging response (no matching Paging CMD stored in BSC) */
-	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), enc_PDU_ML3_MS_NW(l3)));
+	f_ipa_tx(ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), enc_PDU_ML3_MS_NW(l3)));
 
 
 	/* Expevct a CR with a matching Paging response on the A-Interface */
@@ -3600,10 +3659,10 @@ function f_TC_paging_Nreq(integer num_subscribers, boolean send_pag_load_ind) ru
 	f_init(1, guard_timeout := 100.0);
 
 	/* Clear the queue, it might still contain stuff like BCCH FILLING */
-	IPA_RSL[0].clear;
+	IPA_RSL[0][0].clear;
 	if (send_pag_load_ind) {
 		/* Tell there's plenty of space at the BTS (UINT16_MAX): */
-		f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(65535));
+		f_ipa_tx(ts_RSL_PAGING_LOAD_IND(65535));
 	}
 
 	for (i := 0; i < num_subscribers; i := i + 1) {
@@ -3616,7 +3675,7 @@ function f_TC_paging_Nreq(integer num_subscribers, boolean send_pag_load_ind) ru
 	T_rx.start;
 	T_load_ind.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?), IPAC_PROTO_RSL_TRX0)) -> value rx_rsl_ud {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_PAGING_CMD(?), IPAC_PROTO_RSL_TRX0)) -> value rx_rsl_ud {
 		var hexstring imsi := rx_rsl_ud.rsl.ies[2].body.ms_identity.mobileIdentityV.oddEvenInd_identity.imsi.digits;
 		var hexstring imsi_suffix := substr(imsi, lengthof(imsi)-6, 6);
 		var charstring imsi_str := hex2str(imsi_suffix);
@@ -3632,11 +3691,11 @@ function f_TC_paging_Nreq(integer num_subscribers, boolean send_pag_load_ind) ru
 			repeat;
 		}
 		}
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	[] T_load_ind.timeout {
 		log("[CCH Load Ind timer] received paging requests so far: ", rx_paging_num);
 		if (send_pag_load_ind) {
-			f_ipa_tx(0, ts_RSL_PAGING_LOAD_IND(40));
+			f_ipa_tx(ts_RSL_PAGING_LOAD_IND(40));
 		}
 		T_load_ind.start;
 		repeat;
@@ -3672,7 +3731,7 @@ testcase TC_rsl_drop_counter() runs on test_CT {
 
 	rsl_fail := f_ctrl_get_ratectr_abs(IPA_CTRL, "bts", 0, "rsl_fail");
 
-	f_ipa_rsl_stop(bts[0].rsl);
+	f_ipa_rsl_stop(bts[0][0].rsl);
 
 	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "rsl_fail", rsl_fail+1);
 
@@ -3683,31 +3742,32 @@ testcase TC_rsl_drop_counter() runs on test_CT {
 
 /* The body of TC_rsl_unknown_unit_id() and TC_oml_unknown_unit_id() tests. */
 function f_ipa_unknown_unit_id(integer mp_bsc_ipa_port) runs on test_CT return boolean {
+	var IPA_Client client;
 	timer T := 10.0;
 
-	bts[0].rsl.id := "IPA-0-RSL";
-	bts[0].rsl.vc_IPA := IPA_Emulation_CT.create(bts[0].rsl.id & "-IPA") alive;
-	bts[0].rsl.ccm_pars := c_IPA_default_ccm_pars;
-	bts[0].rsl.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
-	bts[0].rsl.ccm_pars.unit_id := "99/0/0"; /* value which is unknown at BTS */
+	client.id := "IPA-BTS0-TRX0-RSL";
+	client.vc_IPA := IPA_Emulation_CT.create(client.id & "-IPA") alive;
+	client.ccm_pars := c_IPA_default_ccm_pars;
+	client.ccm_pars.name := "Osmocom TTCN-3 BTS Simulator";
+	client.ccm_pars.unit_id := "99/0/0"; /* value which is unknown at BTS */
 
 	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
 
 	f_init_mgcp("VirtMSC");
 
 	/* start RSL/OML connection (XXX re-uses RSL port/protocol definitions for OML) */
-	map(bts[0].rsl.vc_IPA:IPA_PORT, system:IPA);
-	connect(bts[0].rsl.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[0]);
-	bts[0].rsl.vc_IPA.start(IPA_Emulation.main_client(mp_bsc_ip, mp_bsc_ipa_port, "", 10000, bts[0].rsl.ccm_pars));
+	map(client.vc_IPA:IPA_PORT, system:IPA);
+	connect(client.vc_IPA:IPA_RSL_PORT, self:IPA_RSL[0][0]);
+	client.vc_IPA.start(IPA_Emulation.main_client(mp_bsc_ip, mp_bsc_ipa_port, "", 10000, client.ccm_pars));
 
 	/* wait for IPA OML link to connect and then disconnect */
 	T.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) {
+	[] IPA_RSL[0][0].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) {
 		T.stop;
 		return true;
 	}
-	[] IPA_RSL[0].receive { repeat }
+	[] IPA_RSL[0][0].receive { repeat }
 	[] T.timeout {
 		return false;
 		}
@@ -3748,19 +3808,20 @@ import from MSC_ConnectionHandler all;
 
 type function void_fn(charstring id) runs on MSC_ConnHdlr;
 
-/* helper function to create and connect a MSC_ConnHdlr component */
+/* helper function to create and connect a MSC_ConnHdlr component
+ * TODO: allow connecting to TRX1..N, not only TRX0 */
 private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx := 0) runs on test_CT {
 	connect(vc_conn:RAN, g_bssap[bssap_idx].vc_RAN:PROC);
 	connect(vc_conn:MGCP_PROC, vc_MGCP:MGCP_PROC);
-	connect(vc_conn:RSL, bts[0].rsl.vc_RSL:CLIENT_PT);
-	connect(vc_conn:RSL_PROC, bts[0].rsl.vc_RSL:RSL_PROC);
-	if (isvalue(bts[1])) {
-		connect(vc_conn:RSL1, bts[1].rsl.vc_RSL:CLIENT_PT);
-		connect(vc_conn:RSL1_PROC, bts[1].rsl.vc_RSL:RSL_PROC);
+	connect(vc_conn:RSL, bts[0][0].rsl.vc_RSL:CLIENT_PT);
+	connect(vc_conn:RSL_PROC, bts[0][0].rsl.vc_RSL:RSL_PROC);
+	if (isvalue(bts[1][0])) {
+		connect(vc_conn:RSL1, bts[1][0].rsl.vc_RSL:CLIENT_PT);
+		connect(vc_conn:RSL1_PROC, bts[1][0].rsl.vc_RSL:RSL_PROC);
 	}
-	if (isvalue(bts[2])) {
-		connect(vc_conn:RSL2, bts[2].rsl.vc_RSL:CLIENT_PT);
-		connect(vc_conn:RSL2_PROC, bts[2].rsl.vc_RSL:RSL_PROC);
+	if (isvalue(bts[2][0])) {
+		connect(vc_conn:RSL2, bts[2][0].rsl.vc_RSL:CLIENT_PT);
+		connect(vc_conn:RSL2_PROC, bts[2][0].rsl.vc_RSL:RSL_PROC);
 	}
 	connect(vc_conn:BSSAP, g_bssap[bssap_idx].vc_RAN:CLIENT);
 	if (mp_enable_lcs_tests) {
@@ -5127,8 +5188,8 @@ testcase TC_assignment_sdcch_exhausted_req_signalling_tch_forbidden() runs on te
 	f_disable_all_sdcch();
 
 	/* RA containing reason=LU */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD('02'O, 2342));
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_RQD('02'O, 2342));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	rr := dec_GsmRrMessage(rsl_msg.ies[1].body.full_imm_ass_info.payload);
 	if (rr.header.message_type != IMMEDIATE_ASSIGNMENT_REJECT) {
 		setverdict(fail, "Expected reject");
@@ -5446,7 +5507,7 @@ private function f_tc_ho_int(charstring id) runs on MSC_ConnHdlr {
 		rr_ho_cmpl_seen := false,
 		handover_done := false,
 		old_chan_nr := -,
-		expect_target_tsc := BTS_TSC[1]
+		expect_target_tsc := c_BtsParams[1].tsc
 	};
 	/* issue hand-over command on VTY, from BTS 0 to BTS 1 */
 	f_vty_handover(BSCVTY, 0, 0, g_chan_nr, 1);
@@ -5476,7 +5537,7 @@ private function f_tc_ho_int(charstring id) runs on MSC_ConnHdlr {
 	 * g_chan_nr to the new lchan that was handed over to. It lives in bts 1, so look it up at RSL1_PROC. */
 	f_verify_encr_info(chan_act);
 
-	f_chan_act_verify_tsc(chan_act, BTS_TSC[1]);
+	f_chan_act_verify_tsc(chan_act, c_BtsParams[1].tsc);
 
 	f_perform_clear(RSL1, RSL1_PROC);
 
@@ -5489,7 +5550,7 @@ testcase TC_ho_int() runs on test_CT {
 	f_init(2, true);
 	f_sleep(1.0);
 
-	pars.expect_tsc := BTS_TSC[0];
+	pars.expect_tsc := c_BtsParams[0].tsc;
 
 	f_ctrs_bsc_and_bts_handover_init();
 
@@ -5571,7 +5632,7 @@ private function f_tc_ho_int_radio_link_failure(charstring id) runs on MSC_ConnH
 		rr_ho_cmpl_seen := false,
 		handover_done := false,
 		old_chan_nr := -,
-		expect_target_tsc := BTS_TSC[1]
+		expect_target_tsc := c_BtsParams[1].tsc
 	};
 	/* issue hand-over command on VTY */
 	f_vty_handover(BSCVTY, 0, 0, g_chan_nr, 1);
@@ -6073,7 +6134,7 @@ private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToN
 	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
 	f_rslem_register(0, new_chan_nr);
 	g_chan_nr := new_chan_nr;
-	var uint3_t expect_target_tsc := BTS_TSC[0];
+	var uint3_t expect_target_tsc := c_BtsParams[0].tsc;
 	f_sleep(1.0);
 
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
@@ -6984,7 +7045,7 @@ private function f_tc_ho_neighbor_config_1(charstring id) runs on MSC_ConnHdlr {
 	f_bts_0_cfg(BSCVTY, {"no neighbors"});
 	f_probe_for_handover("1.a", "HO to bts 1 works, implicitly listed as neighbor (legacy behavior when none are configured)",
 			"handover any to arfcn 871 bsic 11",
-			true, expect_target_tsc := BTS_TSC[1]);
+			true, expect_target_tsc := c_BtsParams[1].tsc);
 
 	f_probe_for_handover("1.b", "HO to unknown cell does not start",
 			"handover any to arfcn 13 bsic 39",
@@ -6996,7 +7057,7 @@ private function f_tc_ho_neighbor_config_1(charstring id) runs on MSC_ConnHdlr {
 
 	f_probe_for_handover("1.d", "HO to 871-11 still works (verify that this test properly cleans up)",
 			"handover any to arfcn 871 bsic 11",
-			true, expect_target_tsc := BTS_TSC[1]);
+			true, expect_target_tsc := c_BtsParams[1].tsc);
 
 	f_perform_clear();
 }
@@ -7058,7 +7119,7 @@ private function f_tc_ho_neighbor_config_2(charstring id) runs on MSC_ConnHdlr {
 
 	f_probe_for_handover("2.a", "HO to bts 1 works, explicitly listed as neighbor",
 			"handover any to arfcn 871 bsic 11",
-			true, expect_target_tsc := BTS_TSC[1]);
+			true, expect_target_tsc := c_BtsParams[1].tsc);
 
 	f_probe_for_handover("2.b", "HO to bts 2 doesn't work, not listed as neighbor",
 			"handover any to arfcn 871 bsic 12",
@@ -7114,7 +7175,7 @@ private function f_tc_ho_neighbor_config_3(charstring id) runs on MSC_ConnHdlr {
 			false);
 	f_probe_for_handover("3.b", "HO to bts 2 works, explicitly listed as neighbor; no ambiguity because bts 3 is not listed as neighbor",
 			"handover any to arfcn 871 bsic 12",
-			true, expect_target_tsc := BTS_TSC[2]);
+			true, expect_target_tsc := c_BtsParams[2].tsc);
 	f_perform_clear();
 }
 testcase TC_ho_neighbor_config_3() runs on test_CT {
@@ -7306,7 +7367,7 @@ private function f_tc_ho_neighbor_config_7(charstring id) runs on MSC_ConnHdlr {
 
 	f_probe_for_handover("7.a", "HO to 871-12 does HO to bts 2",
 			"handover any to arfcn 871 bsic 12",
-			true, expect_target_tsc := BTS_TSC[2]);
+			true, expect_target_tsc := c_BtsParams[2].tsc);
 	f_probe_for_handover("7.b", "HO to 123-45 triggers inter-BSC HO",
 			"handover any to arfcn 123 bsic 45",
 			true, true);
@@ -7421,7 +7482,7 @@ testcase TC_bssmap_clear_does_not_cause_bssmap_reset() runs on test_CT {
 		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
 
 		/* expect BSC to disable the channel */
-		f_exp_chan_rel_and_clear(dt, 0);
+		f_exp_chan_rel_and_clear(dt);
 	}
 
 	/* In the buggy behavior, a timeout of 2 seconds happens between above
@@ -7464,7 +7525,7 @@ testcase TC_ms_rel_ind_does_not_cause_bssmap_reset() runs on test_CT {
 		dt := f_est_dchan('23'O, 23, '00010203040506'O);
 
 		/* simulate RLL REL IND */
-		f_ipa_tx(0, ts_RSL_REL_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
+		f_ipa_tx(ts_RSL_REL_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0))));
 
 		/* expect Clear Request on MSC side */
 		BSSAP.receive(tr_BSSAP_DATA_ind(dt.sccp_conn_id, tr_BSSMAP_ClearRequest)) -> value rx_di;
@@ -7474,7 +7535,7 @@ testcase TC_ms_rel_ind_does_not_cause_bssmap_reset() runs on test_CT {
 		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
 
 		/* expect BSC to disable the channel */
-		f_exp_chan_rel_and_clear(dt, 0);
+		f_exp_chan_rel_and_clear(dt);
 	}
 
 	/* In the buggy behavior, a timeout of 2 seconds happens between above
@@ -7498,12 +7559,12 @@ runs on test_CT {
 	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
 	f_vty_ts_action("pdch activate", bts_nr, trx_nr, ts_nr);
 	/* expect the BSC to issue the related RSL command */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_IPA_PDCH_ACT(chan_nr));
 	if (istemplatekind(nack, "omit")) {
 		/* respond with a related acknowledgement */
-		f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+		f_ipa_tx(ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
 	} else {
-		f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_NACK(chan_nr, valueof(nack)));
+		f_ipa_tx(ts_RSL_IPA_PDCH_ACT_NACK(chan_nr, valueof(nack)));
 	}
 }
 
@@ -7515,12 +7576,12 @@ runs on test_CT {
 	/* ask BSC via VTY to activate a given IPA style chan as PDCH */
 	f_vty_ts_action("pdch deactivate", bts_nr, trx_nr, ts_nr);
 	/* expect the BSC to issue the related RSL command */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_DEACT(chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_IPA_PDCH_DEACT(chan_nr));
 	if (istemplatekind(nack, "omit")) {
 		/* respond with a related acknowledgement */
-		f_ipa_tx(0, ts_RSL_IPA_PDCH_DEACT_ACK(chan_nr));
+		f_ipa_tx(ts_RSL_IPA_PDCH_DEACT_ACK(chan_nr));
 	} else {
-		f_ipa_tx(0, ts_RSL_IPA_PDCH_DEACT_NACK(chan_nr, valueof(nack)));
+		f_ipa_tx(ts_RSL_IPA_PDCH_DEACT_NACK(chan_nr, valueof(nack)));
 	}
 }
 
@@ -7579,8 +7640,8 @@ testcase TC_dyn_pdch_ipa_act_deact() runs on test_CT {
 	log("TCH/F_PDCH pchan starts out in TCH/F mode:");
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
-	f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_IPA_PDCH_ACT(chan_nr));
+	f_ipa_tx(ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
 	f_sleep(1.0);
 	log("TCH/F_PDCH pchan, PDCH ACT was ACKed, so now in PDCH mode:");
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
@@ -7625,8 +7686,8 @@ testcase TC_dyn_pdch_ipa_act_nack() runs on test_CT {
 
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, TCHF_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_IPA_PDCH_ACT(chan_nr));
-	f_ipa_tx(0, ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_IPA_PDCH_ACT(chan_nr));
+	f_ipa_tx(ts_RSL_IPA_PDCH_ACT_ACK(chan_nr, ts_RSL_IE_FrameNumber(2342)));
 	f_sleep(1.0);
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
 
@@ -7659,12 +7720,12 @@ runs on test_CT {
 	/* ask BSC via VTY to activate a given OSMO style chan as PDCH */
 	/* FIXME: no VTY command to activate Osmocom PDCH !! */
 	/* expect the BSC to issue the related RSL command */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT(chan_nr, ?));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT(chan_nr, ?));
 	if (istemplatekind(nack, "omit")) {
 		/* respond with a related acknowledgement */
-		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+		f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
 	} else {
-		f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(chan_nr, valueof(nack)));
+		f_ipa_tx(ts_RSL_CHAN_ACT_NACK(chan_nr, valueof(nack)));
 	}
 }
 
@@ -7676,12 +7737,12 @@ runs on test_CT {
 	/* ask BSC via VTY to activate a given OSMO style chan as PDCH */
 	/* FIXME: no VTY command to activate Osmocom PDCH !! */
 	/* expect the BSC to issue the related RSL command */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(chan_nr));
 	if (istemplatekind(nack, "omit")) {
 		/* respond with a related acknowledgement */
-		f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+		f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
 	} else {
-		//f_ipa_tx(0, ts_RSL_RF_CHAN_REL_NACK(chan_nr, valueof(nack)));
+		//f_ipa_tx(ts_RSL_RF_CHAN_REL_NACK(chan_nr, valueof(nack)));
 	}
 }
 
@@ -7702,9 +7763,9 @@ testcase TC_dyn_pdch_osmo_act_deact() runs on test_CT {
 	log("TCH/F_TCH/H_PDCH pchan starts out in disabled mode:");
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
 	f_sleep(1.0);
 	log("TCH/F_TCH/H_PDCH requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, PDCH_MODE);
@@ -7731,10 +7792,10 @@ testcase TC_dyn_pdch_osmo_act_nack() runs on test_CT {
 
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
 
 	/* NACK this activation and expect the "show timeslot" mode still to be NONE */
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL));
+	f_ipa_tx(ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL));
 	f_sleep(1.0);
 	f_ts_dyn_mode_assert(0, 0, chan_nr.tn, NONE_MODE);
 
@@ -7763,9 +7824,9 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 	log("TCH/F_TCH/H_SDCCH8_PDCH pchan starts out in disabled mode:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, NONE_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	f_sleep(1.0);
 	log("TCH/F_TCH/H_SDCCH8_PDC requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
@@ -7780,19 +7841,20 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 	}
 
 	/* Now the dyn ts is selected. First PDCH is released, then sdcch chan is activated */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(pdch_chan_nr));
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
 
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	dt.rsl_chan_nr := rsl_msg.ies[0].body.chan_nr;
+	dt.idx := {0, 0};
 
 	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, SDCCH8_MODE);
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, 2342));
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, 2342));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, SDCCH8_MODE);
 
-	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), '1234'O));
+	f_ipa_tx(ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), '1234'O));
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3('1234'O))) -> value rx_c_ind;
 	dt.sccp_conn_id := rx_c_ind.connectionId;
 	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
@@ -7800,11 +7862,11 @@ testcase TC_dyn_ts_sdcch8_act_deact() runs on test_CT {
 	/* Instruct BSC to clear channel */
 	var BssmapCause cause := 0;
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 
 	/* The BSC will switch the TS back to PDCH once the only lchan using it is released: */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	f_sleep(1.0);
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
 
@@ -7840,8 +7902,8 @@ testcase TC_dyn_ts_sdcch8_all_subslots_used() runs on test_CT {
 	/* The dyn TS want to activate PDCH mode, ACK that. */
 	var RslChannelNr chan_nr;
 	chan_nr := valueof(t_RslChanNr_PDCH(2));
-	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
 
 	f_sleep(1.0);
 
@@ -7900,9 +7962,9 @@ testcase TC_dyn_ts_sdcch8_tch_call_act_deact() runs on test_CT {
 	log("TCH/F_TCH/H_SDCCH8_PDCH pchan starts out in disabled mode:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, NONE_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	f_sleep(1.0);
 	log("TCH/F_TCH/H_SDCCH8_PDC requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
@@ -7917,19 +7979,20 @@ testcase TC_dyn_ts_sdcch8_tch_call_act_deact() runs on test_CT {
 	}
 
 	/* Now the dyn ts is selected. First PDCH is released, then TCH chan is activated */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(oct2int(ra) + i, 1), 2342));
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(pdch_chan_nr));
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(oct2int(ra) + i, 1), 2342));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
 
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	dt.rsl_chan_nr := rsl_msg.ies[0].body.chan_nr;
+	dt.idx := {0, 0};
 
 	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, TCHH_MODE);
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, 2342));
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(dt.rsl_chan_nr, 2342));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, TCHH_MODE);
 
-	f_ipa_tx(0, ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), '1234'O));
+	f_ipa_tx(ts_RSL_EST_IND(dt.rsl_chan_nr, valueof(ts_RslLinkID_DCCH(0)), '1234'O));
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3('1234'O))) -> value rx_c_ind;
 	dt.sccp_conn_id := rx_c_ind.connectionId;
 	BSSAP.send(ts_BSSAP_CONNECT_res(dt.sccp_conn_id));
@@ -7937,11 +8000,11 @@ testcase TC_dyn_ts_sdcch8_tch_call_act_deact() runs on test_CT {
 	/* Instruct BSC to clear channel */
 	var BssmapCause cause := 0;
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 
 	/* The BSC will switch the TS back to PDCH once the only lchan using it is released: */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	f_sleep(1.0);
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
 
@@ -7977,9 +8040,9 @@ testcase TC_dyn_ts_sdcch8_act_nack() runs on test_CT {
 	log("TCH/F_TCH/H_SDCCH8_PDCH pchan starts out in disabled mode:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, NONE_MODE);
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	f_sleep(1.0);
 	log("TCH/F_TCH/H_SDCCH8_PDC requested to PDCH ACT on startup, which was ACKed, so now in PDCH:");
 	f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE);
@@ -7994,16 +8057,17 @@ testcase TC_dyn_ts_sdcch8_act_nack() runs on test_CT {
 	}
 
 	/* Now the dyn ts is selected. First PDCH is released, then sdcch chan is activated */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
-	rsl_unused := f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(pdch_chan_nr));
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(oct2int('23'O) + i, 1), 2342));
+	rsl_unused := f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(pdch_chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(pdch_chan_nr));
 
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	dt.rsl_chan_nr := rsl_msg.ies[0].body.chan_nr;
+	dt.idx := {0, 0};
 
 	f_ts_dyn_mode_assert(0, 0, dt.rsl_chan_nr.tn, SDCCH8_MODE);
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_NACK(dt.rsl_chan_nr, RSL_ERR_EQUIPMENT_FAIL));
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_NACK(dt.rsl_chan_nr, RSL_ERR_EQUIPMENT_FAIL));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	rr := dec_GsmRrMessage(rsl_msg.ies[1].body.full_imm_ass_info.payload);
 	if (rr.header.message_type != IMMEDIATE_ASSIGNMENT_REJECT) {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected reject");
@@ -8012,8 +8076,8 @@ testcase TC_dyn_ts_sdcch8_act_nack() runs on test_CT {
 	/* FIXME? Currently the TS stays in state BORKEN: */
 
 	/* The BSC will switch the TS back to PDCH once the only lchan using it is released: */
-	/* rsl_unused := f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
-	 * f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
+	/* rsl_unused := f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(pdch_chan_nr));
+	 * f_ipa_tx(ts_RSL_CHAN_ACT_ACK(pdch_chan_nr, 2342));
 	 * f_sleep(1.0);
 	 * f_ts_dyn_mode_assert(0, 0, pdch_chan_nr.tn, PDCH_MODE)
 	 */
@@ -8074,7 +8138,7 @@ testcase TC_c0_power_red_mode() runs on test_CT {
 			chan_nr := t_RslChanNr_BCCH(0),
 			bs_power := tr_RSL_IE_BS_Power(red / 2));
 		tr_rsl_pdu.msg_disc := tr_RSL_MsgDisc(RSL_MDISC_CCHAN, false);
-		var RSL_Message unused := f_exp_ipa_rx(0, tr_rsl_pdu);
+		var RSL_Message unused := f_exp_ipa_rx(tr_rsl_pdu);
 
 		/* Additionally verify the applied value over the CTRL interface */
 		var CtrlValue cred := f_ctrl_get_bts(IPA_CTRL, 0, "c0-power-reduction");
@@ -8198,7 +8262,7 @@ private function f_perform_clear_test_ct(DchanTuple dt)
 	/* Instruct BSC to clear channel */
 	var BssmapCause cause := 0;
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 }
 
 private function f_perform_compl_l3(RSL_DCHAN_PT rsl_pt, RSLEM_PROC_PT rsl_proc_pt,
@@ -9041,14 +9105,14 @@ testcase TC_emerg_premption() runs on test_CT {
 	for (i := 0; i < NUM_TCHF_PER_BTS + NUM_TCHH_PER_BTS + NUM_SDCCH_PER_BTS; i := i+1) {
 		f_chreq_act_ack('33'O, i);
 	}
-	IPA_RSL[0].clear;
+	IPA_RSL[0][0].clear;
 	f_ctrl_get_exp_ratectr_abs(IPA_CTRL, "bts", 0, "chreq:total",
 				   chreq_total + NUM_TCHF_PER_BTS + NUM_TCHH_PER_BTS + NUM_SDCCH_PER_BTS);
 
 	/* Send EST IND for the first TCH, so we get to test the RR release cause */
 	var RslChannelNr first_tch := valueof(t_RslChanNr_Bm(1));
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(first_tch, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(first_tch, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	/* Accept BSSAP conn, so we get to test the Clear Request cause */
 	var BSSAP_N_CONNECT_ind rx_c_ind;
@@ -9057,10 +9121,10 @@ testcase TC_emerg_premption() runs on test_CT {
 	BSSAP.send(ts_BSSAP_CONNECT_res(rx_c_ind.connectionId));
 
 	/* Send Channel request for emegergency call */
-	f_ipa_tx(0, ts_RSL_CHAN_RQD('A5'O, 23));
+	f_ipa_tx(ts_RSL_CHAN_RQD('A5'O, 23));
 
 	/* Expect the BSC to release one (the first) TCH/F on the BTS */
-	f_expect_chan_rel(0, first_tch, expect_rr_chan_rel := true, expect_rll_rel_req := false,
+	f_expect_chan_rel(first_tch, expect_rr_chan_rel := true, expect_rll_rel_req := false,
 			  expect_rr_cause := GSM48_RR_CAUSE_PREMPTIVE_REL);
 
 	/* Also expect a BSSMAP Clear Request with PREEMPTION */
@@ -9073,12 +9137,12 @@ testcase TC_emerg_premption() runs on test_CT {
 	}
 
 	/* Expect the BSC to send activate/assign the channel for the emergency call */
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	if (first_tch != rx_rsl.ies[0].body.chan_nr) {
 		setverdict(fail, "different TCH lchan activated than expected");
 	}
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(first_tch, 33));
-	rx_rsl := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(first_tch, 33));
+	rx_rsl := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 
 	/* complete the BSSMAP Clear to satisfy the conn leak check */
 	BSSAP.send(ts_BSSAP_DATA_req(sccp_conn_id, ts_BSSMAP_ClearCommand(enum2int(preemption))));
@@ -9340,8 +9404,8 @@ testcase TC_fh_params_chan_activ() runs on test_CT {
 
 	/* CS domain: 3 (SDCCH/4+CBCH) + 4 (TCH/F) + 2 (TCH/H) channels available */
 	for (var integer i := 0; i < 9; i := i + 1) {
-		f_ipa_tx(0, ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
-		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+		f_ipa_tx(ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
+		rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 
 		/* Make sure that Channel Identification IE is present */
 		if (not f_rsl_find_ie(rsl_msg, RSL_IE_CHAN_IDENT, ie)) {
@@ -9381,11 +9445,11 @@ testcase TC_fh_params_imm_ass() runs on test_CT {
 
 	/* CS domain: 3 (SDCCH/4+CBCH) + 4 (TCH/F) + 2 (TCH/H) channels available */
 	for (var integer i := 0; i < 9; i := i + 1) {
-		f_ipa_tx(0, ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
-		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+		f_ipa_tx(ts_RSL_CHAN_RQD(f_rnd_ra_cs(), 23));
+		rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 
-		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
-		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeC(RSL_MT_IMMEDIATE_ASSIGN_CMD));
+		f_ipa_tx(ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
+		rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeC(RSL_MT_IMMEDIATE_ASSIGN_CMD));
 
 		/* Make sure that Full Immediate Assign Info IE is present */
 		if (not f_rsl_find_ie(rsl_msg, RSL_IE_FULL_IMM_ASS_INFO, ie)) {
@@ -9441,11 +9505,11 @@ testcase TC_fh_params_assignment_cmd() runs on test_CT {
 
 		/* Send a BSSMAP Assignment Command, expect CHANnel ACTIVation */
 		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ass_cmd));
-		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+		rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 
 		/* ACKnowledge CHANnel ACTIVation, expect RSL DATA REQuest */
-		f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
-		rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
+		f_ipa_tx(ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
+		rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
 
 		/* Make sure that L3 Information IE is present */
 		if (not f_rsl_find_ie(rsl_msg, RSL_IE_L3_INFO, ie)) {
@@ -9511,11 +9575,11 @@ runs on test_CT {
 	f_vty_handover(BSCVTY, 0, 0, dt.rsl_chan_nr, 1);
 
 	/* Expect RSL CHANnel ACTIVation on BTS1/TRX0/TS1 */
-	rsl_msg := f_exp_ipa_rx(1, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV), idx := {1, 0});
 
 	/* ACKnowledge channel activation and expect (RR) Handover Command */
-	f_ipa_tx(1, ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33));
-	rsl_msg := f_exp_ipa_rx(0, tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(rsl_msg.ies[0].body.chan_nr, 33), idx := {1, 0});
+	rsl_msg := f_exp_ipa_rx(tr_RSL_MsgTypeR(RSL_MT_DATA_REQ));
 
 	/* Make sure that L3 Information IE is present */
 	if (not f_rsl_find_ie(rsl_msg, RSL_IE_L3_INFO, ie)) {
@@ -9624,7 +9688,7 @@ testcase TC_fh_params_si4_cbch() runs on test_CT {
 
 	T.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO(RSL_SYSTEM_INFO_4))) -> value rx_rsl_ud {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(tr_RSL_BCCH_INFO(RSL_SYSTEM_INFO_4))) -> value rx_rsl_ud {
 		var RSL_IE_Body ie := rx_rsl_ud.rsl.ies[2].body; /* FULL BCCH Information IE */
 		var SystemInformation si := dec_SystemInformation(ie.other.payload);
 
@@ -9654,7 +9718,7 @@ testcase TC_fh_params_si4_cbch() runs on test_CT {
 						si.payload.si4.cbch_mobile_alloc.v);
 		}
 		}
-	[] IPA_RSL[0].receive { repeat; }
+	[] IPA_RSL[0][0].receive { repeat; }
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for RSL BCCH INFOrmation (SI4)");
 		}
@@ -10149,7 +10213,7 @@ private function f_tc_ho_during_lcs_loc_req(charstring id) runs on MSC_ConnHdlr 
 		rr_ho_cmpl_seen := false,
 		handover_done := false,
 		old_chan_nr := -,
-		expect_target_tsc := BTS_TSC[1]
+		expect_target_tsc := c_BtsParams[1].tsc
 	};
 	/* issue hand-over command on VTY */
 	f_vty_handover(BSCVTY, 0, 0, g_chan_nr, 1);
@@ -10545,7 +10609,7 @@ testcase TC_refuse_chan_act_to_vamos() runs on test_CT {
 
 	T.start;
 	alt {
-	[] IPA_RSL[0].receive(tr_ASP_RSL_UD(?, IPAC_PROTO_RSL_TRX0)) -> value rx_rsl_ud {
+	[] IPA_RSL[0][0].receive(tr_ASP_RSL_UD(?, IPAC_PROTO_RSL_TRX0)) -> value rx_rsl_ud {
 		if (rx_rsl_ud.rsl.msg_type == RSL_MT_CHAN_ACTIV) {
 			T.stop;
 			setverdict(fail, "CHANnel ACTivate in VAMOS mode succeeded even though BTS does not support VAMOS");
@@ -10768,7 +10832,7 @@ testcase TC_cm_reestablishment() runs on test_CT {
 	var MSC_ConnHdlr vc_conn2;
 	pars2.imsi := pars1.imsi;
 	pars2.media_nr := 2;
-	pars2.expect_tsc := BTS_TSC[1];
+	pars2.expect_tsc := c_BtsParams[1].tsc;
 
 	f_init(2, true, guard_timeout := 40.0);
 	f_sleep(1.0);
@@ -10784,19 +10848,21 @@ testcase TC_cm_reestablishment() runs on test_CT {
 	f_shutdown_helper();
 }
 
-function f_exp_ipa_rx_nonfatal(integer bts_nr, template (present) RSL_Message t_rx, float t_secs := 2.0,
-			       IpaStreamId sid := IPAC_PROTO_RSL_TRX0, boolean ignore_other_rx := true)
+function f_exp_ipa_rx_nonfatal(template (present) RSL_Message t_rx,
+			       boolean ignore_other_rx := true,
+			       BtsTrxIdx idx := {0, 0},
+			       float Tval := 2.0)
 runs on test_CT return template (omit) RSL_Message {
 	var ASP_RSL_Unitdata rx_rsl_ud;
-	timer T := t_secs;
+	timer T := Tval;
 
 	T.start;
 	alt {
-	[] IPA_RSL[bts_nr].receive(tr_ASP_RSL_UD(t_rx, sid)) -> value rx_rsl_ud {
+	[] IPA_RSL[idx.bts][idx.trx].receive(tr_ASP_RSL_UD(t_rx, ?)) -> value rx_rsl_ud {
 		T.stop;
 		}
-	[ignore_other_rx] IPA_RSL[bts_nr].receive { repeat; }
-	[not ignore_other_rx] IPA_RSL[bts_nr].receive {
+	[ignore_other_rx] IPA_RSL[idx.bts][idx.trx].receive { repeat; }
+	[not ignore_other_rx] IPA_RSL[idx.bts][idx.trx].receive {
 			log("f_exp_ipa_rx_nonfatal(): Got different message than ", t_rx);
 			T.stop;
 			return omit;
@@ -10852,31 +10918,30 @@ testcase TC_imm_ass_post_chan_ack() runs on test_CT {
 	/* RA containing reason=LU */
 	var GsmFrameNumber fn := 2342;
 	var uint8_t ra := 2;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
 
-	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 
 	/* First send the Chan Act ACK */
 	var RslChannelNr chan_nr := chan_act.ies[0].body.chan_nr;
-	var DchanTuple dt;
-	dt.rsl_chan_nr := chan_nr;
+	var DchanTuple dt := {-, chan_nr, {0, 0}};
 	var RSL_IE_Body chan_ident_ie;
 	if (not f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, chan_ident_ie)) {
 		setverdict(fail, "RSL Channel Identification IE is absent");
 		mtc.stop;
 	}
 
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn + 10));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn + 10));
 
 	/* Then expect the Immediate Assignment, after we ACKed the chan act */
-	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	imm_ass := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 
 	f_verify_imm_ass(imm_ass, ra, fn, chan_nr, chan_ident_ie.chan_ident.ch_desc.v.arfcn,
 			 chan_ident_ie.chan_ident.ch_desc.v.tsc);
 
 	/* Check that the lchan is working */
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
@@ -10900,12 +10965,11 @@ testcase TC_imm_ass_pre_chan_ack() runs on test_CT {
 	/* RA containing reason=LU */
 	var GsmFrameNumber fn := 2342;
 	var uint8_t ra := 2;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
 
-	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RslChannelNr chan_nr := chan_act.ies[0].body.chan_nr;
-	var DchanTuple dt;
-	dt.rsl_chan_nr := chan_nr;
+	var DchanTuple dt := {-, chan_nr, {0, 0}};
 	var RSL_IE_Body chan_ident_ie;
 	if (not f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, chan_ident_ie)) {
 		setverdict(fail, "RSL Channel Identification IE is absent");
@@ -10916,16 +10980,16 @@ testcase TC_imm_ass_pre_chan_ack() runs on test_CT {
 	f_vty_set_imm_ass(BSCVTY);
 
 	/* *FIRST* expect the Immediate Assignment, before we ACK the chan act */
-	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	imm_ass := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	f_verify_imm_ass(imm_ass, ra, fn, chan_nr, chan_ident_ie.chan_ident.ch_desc.v.arfcn,
 			 chan_ident_ie.chan_ident.ch_desc.v.tsc);
 
 	/* Only now send the Chan Act ACK */
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
 
 	/* Check that the lchan is working */
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
@@ -10949,12 +11013,11 @@ testcase TC_imm_ass_pre_ts_ack() runs on test_CT {
 	/* RA containing reason=LU */
 	var GsmFrameNumber fn := 2342;
 	var uint8_t ra := 2;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
 
-	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RslChannelNr chan_nr := chan_act.ies[0].body.chan_nr;
-	var DchanTuple dt;
-	dt.rsl_chan_nr := chan_nr;
+	var DchanTuple dt := {-, chan_nr, {0, 0}};
 	var RSL_IE_Body chan_ident_ie;
 	if (not f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, chan_ident_ie)) {
 		setverdict(fail, "RSL Channel Identification IE is absent");
@@ -10965,16 +11028,16 @@ testcase TC_imm_ass_pre_ts_ack() runs on test_CT {
 	f_vty_set_imm_ass(BSCVTY);
 
 	/* *FIRST* expect the Immediate Assignment, before we ACK the chan act */
-	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	imm_ass := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	f_verify_imm_ass(imm_ass, ra, fn, chan_nr, chan_ident_ie.chan_ident.ch_desc.v.arfcn,
 			 chan_ident_ie.chan_ident.ch_desc.v.tsc);
 
 	/* Only now send the Chan Act ACK */
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
 
 	/* Check that the lchan is working */
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
@@ -10997,8 +11060,8 @@ testcase TC_imm_ass_pre_chan_ack_dyn_ts() runs on test_CT {
 
 	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(6));
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2323));
+	f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2323));
 
 	/* clean up timeslot 6 config, will only take effect when the OML drops the next time */
 	f_ts_set_chcomb(0, 0, 6, "PDCH");
@@ -11019,21 +11082,20 @@ testcase TC_imm_ass_pre_chan_ack_dyn_ts() runs on test_CT {
 	/* RA containing reason=LU */
 	var GsmFrameNumber fn := 2342;
 	var uint8_t ra := 2;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
 
 	/* (set bts 0 cfg back to default) */
 	f_vty_set_imm_ass(BSCVTY);
 
 	/* Expect the dyn TS to deactivate PDCH first */
-	f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(chan_nr));
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+	f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
 
 	/* Now activation as SDCCH8 */
 	chan_nr := valueof(t_RslChanNr_SDCCH8(tn := 6, sub_slot := 0));
-	var DchanTuple dt;
-	dt.rsl_chan_nr := chan_nr;
+	var DchanTuple dt := {-, chan_nr, {0, 0}};
 
-	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RSL_IE_Body chan_ident_ie;
 	if (not f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, chan_ident_ie)) {
 		setverdict(fail, "RSL Channel Identification IE is absent");
@@ -11041,16 +11103,16 @@ testcase TC_imm_ass_pre_chan_ack_dyn_ts() runs on test_CT {
 	}
 
 	/* *FIRST* expect the Immediate Assignment, before we ACK the chan act */
-	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	imm_ass := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 	f_verify_imm_ass(imm_ass, ra, fn, chan_nr, chan_ident_ie.chan_ident.ch_desc.v.arfcn,
 			 chan_ident_ie.chan_ident.ch_desc.v.tsc);
 
 	/* Only now send the Chan Act ACK */
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
 
 	/* Check that the lchan is working */
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
@@ -11073,8 +11135,8 @@ testcase TC_imm_ass_pre_ts_ack_dyn_ts() runs on test_CT {
 
 	var RslChannelNr chan_nr := valueof(t_RslChanNr_PDCH(6));
 	/* The BSC will activate the dynamic PDCH by default, so confirm that */
-	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2323));
+	f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2323));
 
 	/* clean up timeslot 6 config, will only take effect when the OML drops the next time */
 	f_ts_set_chcomb(0, 0, 6, "PDCH");
@@ -11095,39 +11157,38 @@ testcase TC_imm_ass_pre_ts_ack_dyn_ts() runs on test_CT {
 	/* RA containing reason=LU */
 	var GsmFrameNumber fn := 2342;
 	var uint8_t ra := 2;
-	f_ipa_tx(0, ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
+	f_ipa_tx(ts_RSL_CHAN_RQD(int2oct(ra, 1), fn));
 
 	/* (set bts 0 cfg back to default) */
 	f_vty_set_imm_ass(BSCVTY);
 
 	/* Expect the dyn TS to deactivate PDCH first */
-	f_exp_ipa_rx(0, tr_RSL_RF_CHAN_REL(chan_nr));
+	f_exp_ipa_rx(tr_RSL_RF_CHAN_REL(chan_nr));
 
 	/* And already the Immediate Assignment even before the PDCH Deact ACK */
-	imm_ass := f_exp_ipa_rx(0, tr_RSL_IMM_ASSIGN(0));
+	imm_ass := f_exp_ipa_rx(tr_RSL_IMM_ASSIGN(0));
 
 	/* continue the Osmo style PDCH Deact (usual chan rel) */
-	f_ipa_tx(0, ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+	f_ipa_tx(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
 
 	/* Now activation as SDCCH8 */
 	chan_nr := valueof(t_RslChanNr_SDCCH8(tn := 6, sub_slot := 0));
-	var DchanTuple dt;
-	dt.rsl_chan_nr := chan_nr;
+	var DchanTuple dt := {-, chan_nr, {0, 0}};
 
-	chan_act := f_exp_ipa_rx(0, tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
 	var RSL_IE_Body chan_ident_ie;
 	if (not f_rsl_find_ie(chan_act, RSL_IE_CHAN_IDENT, chan_ident_ie)) {
 		setverdict(fail, "RSL Channel Identification IE is absent");
 		mtc.stop;
 	}
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, fn+10));
 
 	f_verify_imm_ass(imm_ass, ra, fn, chan_nr, chan_ident_ie.chan_ident.ch_desc.v.arfcn,
 			 chan_ident_ie.chan_ident.ch_desc.v.tsc);
 
 	/* Check that the lchan is working */
 	var octetstring l3 := '00010203040506'O;
-	f_ipa_tx(0, ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
+	f_ipa_tx(ts_RSL_EST_IND(chan_nr, valueof(ts_RslLinkID_DCCH(0)), l3));
 
 	var BSSAP_N_CONNECT_ind rx_c_ind;
 	BSSAP.receive(tr_BSSAP_CONNECT_ind(?, ?, tr_BSSMAP_ComplL3(l3))) -> value rx_c_ind;
@@ -11151,6 +11212,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,unlocked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_logp(BSCVTY, "TC_ctrl_trx_rf_locked: lock BTS 1 TRX 0");
@@ -11165,6 +11229,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,locked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_logp(BSCVTY, "TC_ctrl_trx_rf_locked: lock the already locked TRX, nothing should change");
@@ -11174,6 +11241,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,locked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_logp(BSCVTY, "TC_ctrl_trx_rf_locked: unlock BTS 1 TRX 0");
@@ -11183,6 +11253,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,unlocked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_logp(BSCVTY, "TC_ctrl_trx_rf_locked: unlock an already unlocked TRX, nothing should change");
@@ -11192,6 +11265,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,unlocked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_logp(BSCVTY, "TC_ctrl_trx_rf_locked: unlock an inoperational TRX");
@@ -11201,6 +11277,9 @@ testcase TC_ctrl_trx_rf_locked() runs on test_CT {
 		       "0,0,operational,unlocked,on,rsl-up;" &
 		       "1,0,operational,unlocked,on,rsl-up;" &
 		       "2,0,operational,unlocked,on,rsl-down;" &
+		       "2,1,operational,unlocked,on,rsl-down;" &
+		       "2,2,operational,unlocked,on,rsl-down;" &
+		       "2,3,operational,unlocked,on,rsl-down;" &
 		       "3,0,inoperational,locked,on,rsl-down;");
 
 	f_shutdown_helper();
@@ -11426,8 +11505,8 @@ testcase TC_ratectr_all_available_allocated_dyn() runs on test_CT {
 	/* The dyn TS wants to activate PDCH mode, ACK that. */
 	var RslChannelNr chan_nr;
 	chan_nr := valueof(t_RslChanNr_PDCH(2));
-	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
 
 	/* Exhaust all dedicated SDCCH lchans.
 	/* GSM 44.018 Table 9.1.8.2:
@@ -11469,7 +11548,7 @@ testcase TC_ratectr_all_available_allocated_dyn() runs on test_CT {
 	var BssmapCause cause := 0;
 	var DchanTuple dt := dyn_sddch[0];
 	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
-	f_exp_chan_rel_and_clear(dt, 0);
+	f_exp_chan_rel_and_clear(dt);
 
 	/* one dyn TS SDCCH is free again, so only the static_sdcch should increment. For tch, both static and dynamic
 	 * count as occupied, so those still both increment. */
@@ -11480,13 +11559,13 @@ testcase TC_ratectr_all_available_allocated_dyn() runs on test_CT {
 	for (i := 1; i < lengthof(dyn_sddch); i := i+1) {
 		dt := dyn_sddch[i];
 		BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ts_BSSMAP_ClearCommand(cause)));
-		f_exp_chan_rel_and_clear(dt, 0);
+		f_exp_chan_rel_and_clear(dt);
 	}
 
 	/* All SDCCH on the dyn TS are released, the dyn TS wants to activate PDCH again */
 	chan_nr := valueof(t_RslChanNr_PDCH(2));
-	f_exp_ipa_rx(0, tr_RSL_CHAN_ACT_PDCH(chan_nr));
-	f_ipa_tx(0, ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
+	f_exp_ipa_rx(tr_RSL_CHAN_ACT_PDCH(chan_nr));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(chan_nr, 2342));
 
 	/* Now all channels are occupied except the dyn TS, so expecting only the static counters to increment */
 	f_all_allocated_expect_counter_change({"all_allocated:static_sdcch", "all_allocated:static_tch"});
