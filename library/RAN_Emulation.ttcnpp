@@ -555,9 +555,18 @@ private function f_bssap_l3_is_rr(PDU_BSSAP bssap) return boolean {
 type record RANAP_Conn_Req {
 	SCCP_PAR_Address	addr_peer,
 	SCCP_PAR_Address	addr_own,
-	RANAP_PDU		ranap
+	RANAP_PDU		ranap optional
 }
-template (value) RANAP_Conn_Req ts_RANAP_Conn_Req(SCCP_PAR_Address peer, SCCP_PAR_Address own, RANAP_PDU ranap) := {
+template (value) RANAP_Conn_Req ts_RANAP_Conn_Req(SCCP_PAR_Address peer, SCCP_PAR_Address own,
+						  template (omit) RANAP_PDU ranap) := {
+	addr_peer := peer,
+	addr_own := own,
+	ranap := ranap
+};
+
+template RANAP_Conn_Req tr_RANAP_Conn_Req(template SCCP_PAR_Address peer := ?,
+						  template SCCP_PAR_Address own := ?,
+						  template (omit) RANAP_PDU ranap := omit) := {
 	addr_peer := peer,
 	addr_own := own,
 	ranap := ranap
@@ -973,7 +982,12 @@ private altstep as_main_ranap() runs on RAN_Emulation_CT {
 			/* store mapping between client components and SCCP connectionId */
 			f_conn_table_add(vc_conn, rconn_ind.connectionId);
 			/* handle user payload */
-			f_handle_userData_RANAP(vc_conn, rconn_ind.userData);
+			if (ispresent(rconn_ind.userData)) {
+				f_handle_userData_RANAP(vc_conn, rconn_ind.userData);
+			} else {
+				/* Notify client that we received an SCCP CR without user data */
+				CLIENT.send(ts_RANAP_Conn_Req(rconn_ind.callingAddress, rconn_ind.calledAddress, omit));
+			}
 			/* confirm connection establishment */
 			RANAP.send(ts_RANAP_CONNECT_res(rconn_ind.connectionId, omit));
 			}
@@ -1250,6 +1264,11 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 			PROC.reply(RAN_register_handoverRequest:{targetPointCode, vc_hdlr}) to vc_hdlr;
 			}
 
+		[] PROC.getcall(RAN_register_sccp_cr_without_payload:{?}) -> param(vc_hdlr) {
+			f_create_expect(omit, vc_hdlr);
+			PROC.reply(RAN_register_sccp_cr_without_payload:{vc_hdlr}) to vc_hdlr;
+			}
+
 		[] PROC.getcall(RAN_register_imsi:{?,?,?}) -> param(imsi, tmsi, vc_hdlr) {
 			f_create_imsi(imsi, tmsi, vc_hdlr);
 			PROC.reply(RAN_register_imsi:{imsi, tmsi, vc_hdlr}) to vc_hdlr;
@@ -1280,6 +1299,7 @@ type record ExpectData {
 	/* L3 payload based on which we can match it */
 	octetstring l3_payload optional,
 	integer handoverRequestPointCode optional,
+	boolean sccp_cr_without_payload,
 	/* component reference for this connection */
 	RAN_ConnHdlr vc_conn
 }
@@ -1287,6 +1307,7 @@ type record ExpectData {
 /* procedure based port to register for incoming connections */
 signature RAN_register(in octetstring l3, in RAN_ConnHdlr hdlr);
 signature RAN_register_handoverRequest(in integer targetPointCode, in RAN_ConnHdlr hdlr);
+signature RAN_register_sccp_cr_without_payload(in RAN_ConnHdlr hdlr);
 
 /* procedure based port to register for incoming IMSI/TMSI */
 signature RAN_register_imsi(in hexstring imsi, in OCT4 tmsi, in RAN_ConnHdlr hdlr);
@@ -1299,7 +1320,8 @@ signature RAN_last_n_sd(in RAN_ConnHdlr hdlr, out N_Sd_Array last_n_sd);
 signature RAN_continue_after_n_sd(N_Sd_Array last_n_sd, in RAN_ConnHdlr hdlr);
 
 type port RAN_PROC_PT procedure {
-	inout RAN_register, RAN_register_imsi, RAN_unregister_imsi, RAN_register_handoverRequest, RAN_last_n_sd, RAN_continue_after_n_sd;
+	inout RAN_register, RAN_register_imsi, RAN_unregister_imsi, RAN_register_handoverRequest,
+	      RAN_register_sccp_cr_without_payload, RAN_last_n_sd, RAN_continue_after_n_sd;
 } with { extension "internal" };
 
 #ifdef RAN_EMULATION_BSSAP
@@ -1360,25 +1382,31 @@ function RanapExpectedCreateCallback(RANAP_N_CONNECT_ind conn_ind, charstring id
 runs on RAN_Emulation_CT return RAN_ConnHdlr {
 	var RAN_ConnHdlr ret := null;
 	var template (omit) octetstring l3_info;
+	var boolean rx_sccp_cr_without_payload;
 	var integer i;
 
-	l3_info := f_ranap_extract_l3(conn_ind.userData);
-	if (istemplatekind(l3_info, "omit")) {
-		setverdict(fail, "N-CONNECT.ind without NAS payload");
-		mtc.stop;
-		return ret;
+	if (ispresent(conn_ind.userData)) {
+		l3_info := f_ranap_extract_l3(conn_ind.userData);
+		rx_sccp_cr_without_payload := false;
+		if (istemplatekind(l3_info, "omit") and not rx_sccp_cr_without_payload) {
+			setverdict(fail, "N-CONNECT.ind without NAS payload");
+			mtc.stop;
+			return ret;
+		}
+	} else {
+		l3_info := omit;
+		rx_sccp_cr_without_payload := true;
 	}
 
 	for (i := 0; i < sizeof(ExpectTable); i:= i+1) {
-		if (not ispresent(ExpectTable[i].l3_payload)) {
-			continue;
-		}
-		if (valueof(l3_info) == ExpectTable[i].l3_payload) {
+		if ((rx_sccp_cr_without_payload and ExpectTable[i].sccp_cr_without_payload)
+		    or (ispresent(ExpectTable[i].l3_payload) and valueof(l3_info) == ExpectTable[i].l3_payload)) {
 			ret := ExpectTable[i].vc_conn;
 			/* release this entry to be used again */
+			ExpectTable[i].sccp_cr_without_payload := false;
 			ExpectTable[i].l3_payload := omit;
 			ExpectTable[i].vc_conn := null;
-			log("Found Expect[", i, "] for ", l3_info, " handled at ", ret);
+			log("Found Expect[", i, "] for l3=", l3_info, " handled at ", ret);
 			/* return the component reference */
 			return ret;
 		}
@@ -1396,9 +1424,12 @@ runs on RAN_Emulation_CT {
 	log("f_create_expect(l3 := ", l3, ", handoverRequest := ", handoverRequestPointCode);
 	for (i := 0; i < sizeof(ExpectTable); i := i+1) {
 		if (not ispresent(ExpectTable[i].l3_payload)
+		    and not ExpectTable[i].sccp_cr_without_payload
 		    and not ispresent(ExpectTable[i].handoverRequestPointCode)) {
 			if (ispresent(l3)) {
 				ExpectTable[i].l3_payload := valueof(l3);
+			} else {
+				ExpectTable[i].sccp_cr_without_payload := true;
 			}
 			if (ispresent(handoverRequestPointCode)) {
 				ExpectTable[i].handoverRequestPointCode := valueof(handoverRequestPointCode);
@@ -1448,6 +1479,7 @@ runs on RAN_Emulation_CT {
 	for (var integer i := 0; i < sizeof(ExpectTable); i := i+1) {
 		ExpectTable[i].l3_payload := omit;
 		ExpectTable[i].handoverRequestPointCode := omit;
+		ExpectTable[i].sccp_cr_without_payload := false;
 	}
 }
 
@@ -1481,6 +1513,12 @@ runs on RAN_ConnHdlr {
 function f_ran_register_exp(octetstring l3_enc) runs on RAN_ConnHdlr {
 	BSSAP_PROC.call(RAN_register:{l3_enc, self}) {
 		[] BSSAP_PROC.getreply(RAN_register:{?, ?}) {};
+	}
+}
+
+function f_ran_register_sccp_cr_without_payload() runs on RAN_ConnHdlr {
+	BSSAP_PROC.call(RAN_register_sccp_cr_without_payload:{self}) {
+		[] BSSAP_PROC.getreply(RAN_register_sccp_cr_without_payload:{?}) {};
 	}
 }
 

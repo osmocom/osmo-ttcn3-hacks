@@ -167,7 +167,8 @@ type record TestHdlrParams {
 	hexstring imsi,
 	boolean ps_domain,
 	MgcpParameters mgcp_pars optional,
-	HnbConfig hnb optional
+	HnbConfig hnb optional,
+	boolean separate_sccp_cr
 }
 
 /* We extend:
@@ -498,11 +499,20 @@ runs on ConnHdlr return RANAP_PDU {
 	}
 
 	/* create an expect on the Iu side for the random NAS portion */
-	var template (omit) octetstring nas := f_ranap_extract_l3(valueof(tx));
-	f_ran_register_exp(valueof(nas));
+	if (g_pars.separate_sccp_cr) {
+		f_ran_register_sccp_cr_without_payload();
+	} else {
+		var template (omit) octetstring nas := f_ranap_extract_l3(valueof(tx));
+		f_ran_register_exp(valueof(nas));
+	}
 
 	/* send it via Iuh (creating a RUA connection) */
 	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
+
+	if (g_pars.separate_sccp_cr) {
+		/* Acknowledge the empty SCCP CR. RAN_Emulation does the confirmation, no need to respond. */
+		BSSAP.receive(tr_RANAP_Conn_Req());
+	}
 
 	/* expect to receive it on the Iu side */
 	T.start;
@@ -634,11 +644,13 @@ testcase TC_hnb_register() runs on test_CT {
  ***********************************************************************/
 
 private template (value) TestHdlrParams
-t_pars(integer imsi_suffix, boolean ps_domain := false,integer hnb_idx := 0) := {
+t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
+       boolean separate_sccp_cr := false) := {
 	hnb_idx := hnb_idx,
 	imsi := f_gen_imsi(imsi_suffix),
 	ps_domain := ps_domain,
-	hnb := omit	/* filled in later */
+	hnb := omit,	/* filled in later */
+	separate_sccp_cr := separate_sccp_cr
 }
 
 /* Create an Iuh connection; send InitialUE; expect it to appear on new SCCP conenction */
@@ -664,6 +676,43 @@ testcase TC_ranap_ps_initial_ue() runs on test_CT {
 
 	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true));
 	vc_conn.done;
+}
+
+private function f_vty_set_sccp_cr_max_payload_len(TELNETasp_PT pt, integer val := 999999)
+{
+	f_vty_enter_config(pt);
+	f_vty_transceive(pt, "hnbgw");
+	f_vty_transceive(pt, "sccp cr max-payload-len " & int2str(val));
+	f_vty_transceive(pt, "end");
+}
+
+testcase TC_ranap_cs_initial_ue_empty_cr() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY, 0);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1, separate_sccp_cr := true));
+	vc_conn.done;
+
+	/* reset */
+	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY);
+}
+testcase TC_ranap_ps_initial_ue_empty_cr() runs on test_CT {
+	var ConnHdlr vc_conn;
+
+	f_init();
+	f_start_hnbs();
+
+	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY, 0);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true, separate_sccp_cr := true));
+	vc_conn.done;
+
+	/* reset */
+	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY);
 }
 
 /* Reply to a received CRCX with an OK (or the reply configured in cpars), using the given parameters.
@@ -1104,6 +1153,8 @@ control {
 	execute(TC_hnb_register());
 	execute(TC_ranap_cs_initial_ue());
 	execute(TC_ranap_ps_initial_ue());
+	execute(TC_ranap_cs_initial_ue_empty_cr());
+	execute(TC_ranap_ps_initial_ue_empty_cr());
 	execute(TC_ranap_cs_bidir());
 	execute(TC_ranap_ps_bidir());
 	execute(TC_rab_assignment());
