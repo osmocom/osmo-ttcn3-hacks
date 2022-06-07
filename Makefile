@@ -42,6 +42,7 @@ SUBDIRS= \
 	smlc \
 	stp \
 	sysinfo \
+	upf \
 	$(NULL)
 
 NPROC=$(shell nproc 2>/dev/null)

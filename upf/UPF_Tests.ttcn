@@ -1,0 +1,785 @@
+module UPF_Tests {
+
+/* Integration Tests for OsmoUPF
+ * (C) 2022 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite acts as a PFCP Control Plane Function to test OsmoUPF.
+ */
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from Native_Functions all;
+import from TCCConversion_Functions all;
+
+import from Osmocom_CTRL_Functions all;
+import from Osmocom_CTRL_Types all;
+import from Osmocom_CTRL_Adapter all;
+
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+import from StatsD_Checker all;
+
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from CPF_ConnectionHandler all;
+
+import from PFCP_Types all;
+import from PFCP_Emulation all;
+import from PFCP_Templates all;
+
+modulepar {
+	/* IP address at which the UPF can be reached */
+	charstring mp_pfcp_ip_upf := "127.0.0.1";
+	charstring mp_pfcp_ip_local := "127.0.0.2";
+
+	/* When testing with gtp mockup, actions will not show. */
+	boolean mp_verify_gtp_actions := false;
+}
+
+type component test_CT extends CTRL_Adapter_CT {
+	port PFCPEM_PT PFCP;
+
+	port TELNETasp_PT UPFVTY;
+
+	/* global test case guard timer (actual timeout value is set in f_init()) */
+	timer T_guard := 15.0;
+}
+
+/* global altstep for global guard timer; */
+altstep as_Tguard() runs on test_CT {
+	[] T_guard.timeout {
+			setverdict(fail, "Timeout of T_guard");
+			mtc.stop;
+		}
+}
+
+friend function f_logp(TELNETasp_PT pt, charstring log_msg)
+{
+	// log on TTCN3 log output
+	log(log_msg);
+	// log in stderr log
+	f_vty_transceive(pt, "logp lglobal notice TTCN3 f_logp(): " & log_msg);
+}
+
+private function f_str_split(charstring str, charstring delim := "\n") return ro_charstring
+{
+	var integer pos := 0;
+	var ro_charstring parts := {};
+	var integer delim_pos;
+	var integer end := lengthof(str);
+	while (pos < end) {
+		delim_pos := f_strstr(str, delim, pos);
+		if (delim_pos < 0) {
+			delim_pos := end;
+		}
+		parts := parts & { substr(str, pos, delim_pos - pos) };
+		pos := delim_pos + 1;
+	}
+	return parts;
+}
+
+private function f_get_name_val(out charstring val, charstring str, charstring name, charstring sep := ":", charstring delim := " ") return boolean {
+	var charstring labl := name & sep;
+	var integer namepos := f_strstr(str, labl);
+	if (namepos < 0) {
+		return false;
+	}
+	var integer valpos := namepos + lengthof(labl);
+	var integer valend := f_strstr(str, delim, valpos);
+	if (valend < 0) {
+		valend := lengthof(str);
+	}
+	val := substr(str, valpos, valend - valpos);
+	return true;
+}
+
+private function f_get_name_val_oct8(out OCT8 val, charstring str, charstring name) return boolean {
+	var charstring token;
+	if (not f_get_name_val(token, str, name, ":0x")) {
+		return false;
+	}
+	if (lengthof(token) > 16) {
+		log("token too long: ", name, " in ", str);
+		return false;
+	}
+	var charstring padded := substr("0000000000000000", 0, 16 - lengthof(token)) & token;
+	val := str2oct(padded);
+	return true;
+}
+
+private function f_get_name_val_oct4(out OCT4 val, charstring str, charstring name) return boolean {
+	var charstring token;
+	if (not f_get_name_val(token, str, name, ":0x")) {
+		return false;
+	}
+	if (lengthof(token) > 8) {
+		log("token too long: ", name, " in ", str);
+		return false;
+	}
+	var charstring padded := substr("00000000", 0, 8 - lengthof(token)) & token;
+	val := str2oct(padded);
+	return true;
+}
+
+private function f_get_name_val_int(out integer val, charstring str, charstring name) return boolean {
+	var charstring token;
+	if (not f_get_name_val(token, str, name)) {
+		return false;
+	}
+	val := str2int(token);
+	return true;
+}
+
+private function f_get_name_val_2int(out integer val1, out integer val2, charstring str, charstring name, charstring delim := ",") return boolean {
+	var charstring token;
+	if (not f_get_name_val(token, str, name)) {
+		return false;
+	}
+	var ro_charstring nrl := f_str_split(token, delim);
+	if (lengthof(nrl) != 2) {
+		return false;
+	}
+	val1 := str2int(nrl[0]);
+	val2 := str2int(nrl[1]);
+	return true;
+}
+
+/* A PFCP session as seen by the system under test, osmo-upf. up_seid is what osmo-upf sees as its local SEID
+ * ("SEID-l"). cp_seid is this tester's side's SEID, which osmo-upf sees as the remote SEID. */
+type record PFCP_session {
+	OCT8 up_seid,
+	OCT8 cp_seid,
+	GTP_Action gtp
+}
+
+type record GTP_Action {
+	charstring kind,
+	charstring gtp_access_ip,
+	OCT4 teid_access_r,
+	OCT4 teid_access_l,
+	charstring core_ip,
+	charstring pfcp_peer,
+	OCT8 seid_l
+};
+
+type record of GTP_Action GTP_Action_List;
+
+private function f_parse_gtp_action(out GTP_Action ret, charstring str) return boolean {
+	var GTP_Action a;
+	if (not f_get_name_val(a.kind, str, "GTP")) {
+		return false;
+	}
+	if (not f_get_name_val(a.gtp_access_ip, str, "GTP-access")) {
+		return false;
+	}
+	if (not f_get_name_val_oct4(a.teid_access_r, str, "TEID-r")) {
+		return false;
+	}
+	if (not f_get_name_val_oct4(a.teid_access_l, str, "TEID-l")) {
+		return false;
+	}
+	if (not f_get_name_val(a.pfcp_peer, str, "PFCP-peer")) {
+		return false;
+	}
+	if (not f_get_name_val_oct8(a.seid_l, str, "SEID-l")) {
+		return false;
+	}
+	if (not f_get_name_val(a.core_ip, str, "IP-core")) {
+		return false;
+	}
+	ret := a;
+	return true;
+}
+
+private function f_vty_get_gtp_actions(TELNETasp_PT vty_pt) return GTP_Action_List {
+	var charstring gtp_str := f_vty_transceive_ret(vty_pt, "show gtp");
+	var ro_charstring lines := f_str_split(gtp_str, "\n");
+	var GTP_Action_List gtps := {};
+	for (var integer i := 0; i < lengthof(lines); i := i + 1) {
+		var charstring line := lines[i];
+		var GTP_Action a;
+		if (not f_parse_gtp_action(a, line)) {
+			continue;
+		}
+		gtps := gtps & { a };
+	}
+	log("GTP-actions: ", gtps);
+	return gtps;
+}
+
+private function f_find_gtp_action(GTP_Action_List actions, template GTP_Action find) return boolean {
+	for (var integer i := 0; i < lengthof(actions); i := i + 1) {
+		if (match(actions[i], find)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_expect_gtp_action(GTP_Action_List actions, template GTP_Action expect) {
+	if (f_find_gtp_action(actions, expect)) {
+		log("VTY confirms: GTP action active: ", expect);
+		setverdict(pass);
+		return;
+	}
+	log("Expected to find ", expect, " in ", actions);
+	setverdict(fail, "on VTY, a GTP action failed to show as active");
+	mtc.stop;
+}
+
+private function f_expect_no_gtp_action(GTP_Action_List actions, template GTP_Action expect) {
+	if (f_find_gtp_action(actions, expect)) {
+		log("Expected to *not* find ", expect, " in ", actions);
+		setverdict(fail, "a GTP action failed to show as inactive");
+		mtc.stop;
+	}
+	log("VTY confirms: GTP action inactive: ", expect);
+	setverdict(pass);
+	return;
+}
+
+private function f_vty_expect_gtp_action(TELNETasp_PT vty_pt, template GTP_Action expect) {
+	if (not mp_verify_gtp_actions) {
+		/* In GTP mockup mode, GTP actions don't show on VTY. Cannot verify. */
+		setverdict(pass);
+		return;
+	}
+	var GTP_Action_List actions := f_vty_get_gtp_actions(vty_pt);
+	f_expect_gtp_action(actions, expect);
+}
+
+private function f_vty_expect_no_gtp_actions(TELNETasp_PT vty_pt) {
+	var GTP_Action_List actions := f_vty_get_gtp_actions(vty_pt);
+	if (lengthof(actions) > 0) {
+		setverdict(fail, "VTY says that there are still active GTP actions");
+		mtc.stop;
+	}
+	setverdict(pass);
+}
+
+type record PFCP_Session_Status {
+	charstring peer,
+	OCT8 seid_r,
+	OCT8 seid_l,
+	charstring state,
+	integer pdr_active_count,
+	integer pdr_count,
+	integer far_active_count,
+	integer far_count,
+	integer gtp_active_count
+};
+
+template PFCP_Session_Status PFCP_session_active := {
+	peer := ?,
+	seid_r := ?,
+	seid_l := ?,
+	state := "ESTABLISHED",
+	pdr_active_count := (1..99999),
+	pdr_count := (1..99999),
+	far_active_count := (1..99999),
+	far_count := (1..99999),
+	gtp_active_count := (1..99999)
+};
+
+template PFCP_Session_Status PFCP_session_inactive := {
+	peer := ?,
+	seid_r := ?,
+	seid_l := ?,
+	state := "ESTABLISHED",
+	pdr_active_count := 0,
+	pdr_count := (1..99999),
+	far_active_count := 0,
+	far_count := (1..99999),
+	gtp_active_count := 0
+};
+
+type record of PFCP_Session_Status PFCP_Session_Status_List;
+
+private function f_parse_session_status(out PFCP_Session_Status ret, charstring str) return boolean {
+	var PFCP_Session_Status st;
+	if (not f_get_name_val(st.peer, str, "peer")) {
+		return false;
+	}
+	if (not f_get_name_val_oct8(st.seid_l, str, "SEID-l")) {
+		return false;
+	}
+	f_get_name_val_oct8(st.seid_r, str, "SEID-r");
+	f_get_name_val(st.state, str, "state");
+
+	/* parse 'PDR-active:1/2' */
+	if (not f_get_name_val_2int(st.pdr_active_count, st.pdr_count, str, "PDR-active", "/")) {
+		return false;
+	}
+	/* parse 'FAR-active:1/2' */
+	if (not f_get_name_val_2int(st.far_active_count, st.far_count, str, "FAR-active", "/")) {
+		return false;
+	}
+
+	f_get_name_val_int(st.gtp_active_count, str, "GTP-active");
+	ret := st;
+	return true;
+}
+
+private function f_vty_get_sessions(TELNETasp_PT vty_pt) return PFCP_Session_Status_List {
+	var charstring sessions_str := f_vty_transceive_ret(vty_pt, "show session");
+	var ro_charstring lines := f_str_split(sessions_str, "\n");
+	var PFCP_Session_Status_List sessions := {};
+	for (var integer i := 0; i < lengthof(lines); i := i + 1) {
+		var charstring line := lines[i];
+		var PFCP_Session_Status st;
+		if (not f_parse_session_status(st, line)) {
+			continue;
+		}
+		sessions := sessions & { st };
+	}
+	log("Sessions: ", sessions);
+	return sessions;
+}
+
+private function f_vty_get_session_status(TELNETasp_PT vty_pt, PFCP_session s, out PFCP_Session_Status ret) return boolean {
+	var PFCP_Session_Status_List sessions := f_vty_get_sessions(vty_pt);
+	return f_get_session_status(sessions, s, ret);
+}
+
+private function f_get_session_status(PFCP_Session_Status_List sessions, PFCP_session s, out PFCP_Session_Status ret)
+return boolean {
+	var PFCP_Session_Status_List matches := {};
+	for (var integer i := 0; i < lengthof(sessions); i := i + 1) {
+		var PFCP_Session_Status st := sessions[i];
+		if (st.seid_l != s.up_seid) {
+			continue;
+		}
+		if (st.seid_r != s.cp_seid) {
+			continue;
+		}
+		matches := matches & { st };
+	}
+	if (lengthof(matches) < 1) {
+		log("no session with SEID-l = ", s.up_seid);
+		return false;
+	}
+	if (lengthof(matches) > 1) {
+		log("multiple sessions have ", s, ": ", matches);
+		return false;
+	}
+	ret := matches[0];
+	return true;
+}
+
+private function f_vty_expect_session_status(TELNETasp_PT vty_pt, PFCP_session s, template PFCP_Session_Status expect_st) {
+	var PFCP_Session_Status st;
+	if (not f_vty_get_session_status(vty_pt, s, st)) {
+		log("Session ", s, " not found in VTY session list");
+		setverdict(fail, "Session not found in VTY list");
+		mtc.stop;
+	}
+	log("Session ", s, " status: ", st);
+	if (not match(st, expect_st)) {
+		log("ERROR: Session ", st, " does not match ", expect_st);
+		setverdict(fail, "VTY shows unexpected state of PFCP session");
+		mtc.stop;
+	}
+
+	setverdict(pass);
+}
+
+private function f_vty_expect_session_active(TELNETasp_PT vty_pt, PFCP_session s)
+{
+	f_vty_expect_session_status(vty_pt, s, PFCP_session_active);
+	f_vty_expect_gtp_action(vty_pt, s.gtp);
+	setverdict(pass);
+}
+
+private function f_vty_expect_no_active_sessions(TELNETasp_PT vty_pt) {
+	var PFCP_Session_Status_List stl := f_vty_get_sessions(vty_pt);
+	var integer active := 0;
+	for (var integer i := 0; i < lengthof(stl); i := i + 1) {
+		if (match(stl[i], PFCP_session_active)) {
+			log("Active session: ", stl[i]);
+			active := active + 1;
+		}
+	}
+	if (active > 0) {
+		setverdict(fail, "There are still active sessions");
+		mtc.stop;
+	}
+	setverdict(pass);
+}
+
+function f_init_vty(charstring id := "foo") runs on test_CT {
+	if (UPFVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:UPFVTY, system:UPFVTY);
+	f_vty_set_prompts(UPFVTY);
+	f_vty_transceive(UPFVTY, "enable");
+}
+
+/* global initialization function */
+function f_init(float guard_timeout := 30.0) runs on test_CT {
+	var integer bssap_idx;
+
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	f_init_vty("VirtCPF");
+}
+
+friend function f_shutdown_helper() runs on test_CT {
+	all component.stop;
+	setverdict(pass);
+	mtc.stop;
+}
+
+private function f_gen_test_hdlr_pars() runs on test_CT return TestHdlrParams {
+	var TestHdlrParams pars := valueof(t_def_TestHdlrPars);
+	pars.remote_upf_addr := mp_pfcp_ip_upf;
+	pars.local_addr := mp_pfcp_ip_local;
+	pars.local_node_id := valueof(ts_PFCP_Node_ID_ipv4(f_inet_addr(mp_pfcp_ip_local)));
+	return pars;
+}
+
+type function void_fn(charstring id) runs on CPF_ConnHdlr;
+
+function f_start_handler_create(TestHdlrParams pars)
+runs on test_CT return CPF_ConnHdlr {
+	var charstring id := testcasename();
+	var CPF_ConnHdlr vc_conn;
+	vc_conn := CPF_ConnHdlr.create(id);
+	return vc_conn;
+}
+
+function f_start_handler_run(CPF_ConnHdlr vc_conn, void_fn fn, TestHdlrParams pars)
+runs on test_CT return CPF_ConnHdlr {
+	var charstring id := testcasename();
+	/* Emit a marker to appear in the SUT's own logging output */
+	f_logp(UPFVTY, id & "() start");
+	vc_conn.start(f_handler_init(fn, id, pars));
+	return vc_conn;
+}
+
+function f_start_handler(void_fn fn, template (omit) TestHdlrParams pars_tmpl := omit)
+runs on test_CT return CPF_ConnHdlr {
+	var TestHdlrParams pars;
+	if (isvalue(pars_tmpl)) {
+		pars := valueof(pars_tmpl);
+	} else {
+		pars := valueof(f_gen_test_hdlr_pars());
+	}
+	return f_start_handler_run(f_start_handler_create(pars), fn, pars);
+}
+
+/* first function inside ConnHdlr component; sets g_pars + starts function */
+private function f_handler_init(void_fn fn, charstring id, TestHdlrParams pars)
+runs on CPF_ConnHdlr {
+	f_CPF_ConnHdlr_init(id, pars);
+	fn.apply(id);
+}
+
+/* Run a PFCP Association procedure */
+private function f_assoc_setup() runs on CPF_ConnHdlr {
+	PFCP.send(ts_PFCP_Assoc_Setup_Req(g_pars.local_node_id, g_recovery_timestamp));
+	PFCP.receive(tr_PFCP_Assoc_Setup_Resp(cause := tr_PFCP_Cause(REQUEST_ACCEPTED)));
+}
+
+/* Release a PFCP Association */
+private function f_assoc_release() runs on CPF_ConnHdlr {
+	PFCP.send(ts_PFCP_Assoc_Release_Req(g_pars.local_node_id));
+	PFCP.receive(tr_PFCP_Assoc_Release_Resp(cause := tr_PFCP_Cause(REQUEST_ACCEPTED)));
+}
+
+type record PFCP_Ruleset {
+	Create_PDR_list pdr,
+	Create_FAR_list far
+};
+
+/* Add to r a rule set that does GTP decapsulation (half of encapsulation/decapsulation) */
+private function f_ruleset_add_GTP_decaps(inout PFCP_Ruleset r,
+					  template F_TEID local_f_teid := omit) {
+	var integer pdr_id := lengthof(r.pdr) + 1;
+	var integer far_id := lengthof(r.far) + 1;
+
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				ACCESS,
+				local_F_TEID := local_f_teid),
+			ts_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4),
+			far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Forwarding_Parameters(CORE))
+			)
+		)
+		};
+}
+
+/* Add to r a rule set that does GTP encapsulation (half of encapsulation/decapsulation) */
+private function f_ruleset_add_GTP_encaps(inout PFCP_Ruleset r,
+					  charstring ue_addr_v4 := "192.168.23.42",
+					  OCT4 remote_teid,
+					  charstring gtp_dest_addr_v4) {
+
+	var integer pdr_id := lengthof(r.pdr) + 1;
+	var integer far_id := lengthof(r.far) + 1;
+
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				CORE,
+				ue_addr_v4 := ts_PFCP_UE_IP_Address_v4(ue_addr_v4, is_destination := true)
+				),
+			far_id := far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Forwarding_Parameters(
+				ACCESS,
+				ts_PFCP_Outer_Header_Creation_GTP_ipv4(
+					remote_teid,
+					gtp_dest_addr_v4)
+				))
+			)
+		)
+		};
+}
+
+/* Return two PDR+FAR rulesets that involve a src=CP-Function. Such rulesets are emitted by certain third party CPF, and
+ * osmo-upf should ACK the creation but ignore the rules (no-op). This function models rulesets seen in the field, so we
+ * can confirm that osmo-upf ACKs and ignores. */
+private function f_ruleset_noop() return PFCP_Ruleset
+{
+	var PFCP_Ruleset r := { {}, {} };
+	var integer pdr_id := lengthof(r.pdr) + 1;
+	var integer far_id := lengthof(r.far) + 1;
+
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				CP_FUNCTION,
+				local_F_TEID := ts_PFCP_F_TEID_choose_v4('17'O)),
+			ts_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4),
+			far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Forwarding_Parameters(ACCESS))
+			)
+		)
+		};
+
+	/* And another one (sic) */
+	pdr_id := lengthof(r.pdr) + 1;
+	far_id := lengthof(r.far) + 1;
+
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				CP_FUNCTION,
+				local_F_TEID := ts_PFCP_F_TEID_choose_v4('2a'O)),
+			far_id := far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Forwarding_Parameters(ACCESS))
+			)
+		)
+		};
+	return r;
+}
+
+/* Return a rule set that does GTP encapsulation/decapsulation */
+private function f_ruleset_endecaps(GTP_Action gtp) return PFCP_Ruleset
+{
+	var PFCP_Ruleset rules := { {}, {} };
+	f_ruleset_add_GTP_decaps(rules, ts_PFCP_F_TEID_ipv4(gtp.teid_access_l, gtp.gtp_access_ip));
+	f_ruleset_add_GTP_encaps(rules, gtp.core_ip, gtp.teid_access_r, gtp.gtp_access_ip);
+	return rules;
+}
+
+/* Run a PFCP Session Establishment procedure */
+private function f_session_est(inout PFCP_session s, PFCP_Ruleset rules) runs on CPF_ConnHdlr {
+
+	PFCP.send(ts_PFCP_Session_Est_Req(g_pars.local_addr, s.cp_seid, rules.pdr, rules.far));
+
+	var PDU_PFCP pfcp;
+	PFCP.receive(tr_PFCP_Session_Est_Resp(s.cp_seid)) -> value pfcp;
+	s.up_seid := pfcp.message_body.pfcp_session_establishment_response.UP_F_SEID.seid;
+	s.gtp.seid_l := s.up_seid;
+	log("established PFCP session: ", s);
+}
+
+private function f_create_PFCP_session() runs on CPF_ConnHdlr return PFCP_session
+{
+	var PFCP_session s := {
+		up_seid := -,
+		cp_seid := f_next_seid(),
+		gtp := {
+			kind := "endecaps",
+			gtp_access_ip := "127.0.0.2",
+			teid_access_r := f_next_remote_teid(),
+			teid_access_l := f_next_local_teid(),
+			core_ip := f_next_ue_addr(),
+			pfcp_peer := g_pars.local_addr,
+			seid_l := '0000000000000000'O
+		}
+	};
+	return s;
+}
+
+/* Do a PFCP Session Establishment with default values (see f_create_PFCP_session()) */
+private function f_session_est_default() runs on CPF_ConnHdlr return PFCP_session
+{
+	var PFCP_session s := f_create_PFCP_session();
+	f_session_est(s, f_ruleset_endecaps(s.gtp));
+	return s;
+}
+
+private function f_session_del(PFCP_session s) runs on CPF_ConnHdlr {
+	PFCP.send(ts_PFCP_Session_Del_Req(s.up_seid));
+	PFCP.receive(tr_PFCP_Session_Del_Resp(s.cp_seid));
+}
+
+private function f_tc_assoc(charstring id) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	f_assoc_release();
+	setverdict(pass);
+}
+
+/* Verify that the CPF can send a Node-ID of the IPv4 type */
+testcase TC_assoc_node_id_v4() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 5.0);
+	vc_conn := f_start_handler(refers(f_tc_assoc));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+/* Verify that the CPF can send a Node-ID of the FQDN type */
+testcase TC_assoc_node_id_fqdn() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	pars.local_node_id := valueof(ts_PFCP_Node_ID_fqdn("\7example\3com"));
+
+	f_init(guard_timeout := 5.0);
+	vc_conn := f_start_handler(refers(f_tc_assoc), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+/* Verify PFCP Session Establishment and Deletion */
+private function f_tc_session_est(charstring id) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	var PFCP_session s := f_session_est_default();
+	f_sleep(1.0);
+	f_vty_expect_session_active(UPFVTY, s);
+	f_session_del(s);
+	f_vty_expect_no_active_sessions(UPFVTY);
+	f_vty_expect_no_gtp_actions(UPFVTY);
+	f_assoc_release();
+	setverdict(pass);
+}
+testcase TC_session_est() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+	vc_conn := f_start_handler(refers(f_tc_session_est));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+/* Verify that releasing a PFCP Association also releases all its sessions and GTP actions. */
+private function f_tc_session_term_by_assoc_rel(charstring id) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	var PFCP_session s := f_session_est_default();
+	f_sleep(1.0);
+	f_vty_expect_session_active(UPFVTY, s);
+	f_assoc_release();
+	f_vty_expect_no_active_sessions(UPFVTY);
+	f_vty_expect_no_gtp_actions(UPFVTY);
+	setverdict(pass);
+}
+testcase TC_session_term_by_assoc_rel() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+	vc_conn := f_start_handler(refers(f_tc_session_term_by_assoc_rel));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+/* Verify that PFCP Sessions with a src-interface other than ACCESS or CORE are ACKed by osmo-upf but have no effect. */
+private function f_tc_session_est_noop(charstring id) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	var PFCP_session s := f_create_PFCP_session();
+	f_session_est(s, f_ruleset_noop());
+
+	f_sleep(1.0);
+	f_vty_expect_session_status(UPFVTY, s, PFCP_session_inactive);
+
+	f_session_del(s);
+	f_vty_expect_no_active_sessions(UPFVTY);
+	f_vty_expect_no_gtp_actions(UPFVTY);
+	f_assoc_release();
+	setverdict(pass);
+}
+testcase TC_session_est_noop() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+	vc_conn := f_start_handler(refers(f_tc_session_est_noop));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+control {
+	execute( TC_assoc_node_id_v4() );
+	execute( TC_assoc_node_id_fqdn() );
+	execute( TC_session_est() );
+	execute( TC_session_term_by_assoc_rel() );
+	execute( TC_session_est_noop() );
+}
+
+}
