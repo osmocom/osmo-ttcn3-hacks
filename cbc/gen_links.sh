@@ -31,6 +31,7 @@ gen_links $DIR $FILES
 
 DIR=../library/sabp
 FILES="SABP_CommonDataTypes.asn SABP_Constants.asn SABP_Containers.asn SABP_IEs.asn SABP_PDU_Contents.asn SABP_PDU_Descriptions.asn SABP_Types.ttcn SABP_EncDec.cc SABP_Templates.ttcn "
+FILES+="SABP_CodecPort.ttcn SABP_CodecPort_CtrlFunct.ttcn SABP_CodecPort_CtrlFunctDef.cc SABP_Adapter.ttcn "
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
@@ -51,7 +52,6 @@ FILES+="HTTP_Adapter.ttcn "
 FILES+="BSSMAP_Templates.ttcn "
 FILES+="CBSP_Types.ttcn CBSP_Templates.ttcn "
 FILES+="CBSP_CodecPort.ttcn CBSP_CodecPort_CtrlFunct.ttcn CBSP_CodecPort_CtrlFunctdef.cc CBSP_Adapter.ttcn "
-FILES+="SABP_CodecPort.ttcn SABP_CodecPort_CtrlFunct.ttcn SABP_CodecPort_CtrlFunctDef.cc SABP_Adapter.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
