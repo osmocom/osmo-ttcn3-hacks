@@ -34,6 +34,11 @@ FILES="SABP_CommonDataTypes.asn SABP_Constants.asn SABP_Containers.asn SABP_IEs.
 FILES+="SABP_CodecPort.ttcn SABP_CodecPort_CtrlFunct.ttcn SABP_CodecPort_CtrlFunctDef.cc SABP_Adapter.ttcn "
 gen_links $DIR $FILES
 
+DIR=../library/sbcap
+FILES="SBC_AP_CommonDataTypes.asn SBC_AP_Constants.asn SBC_AP_Containers.asn SBC_AP_IEs.asn SBC_AP_PDU_Contents.asn SBC_AP_PDU_Descriptions.asn "
+FILES+="SBC_AP_Types.ttcn SBC_AP_EncDec.cc SBC_AP_Templates.ttcn SBC_AP_CodecPort.ttcn SBC_AP_CodecPort_CtrlFunct.ttcn SBC_AP_CodecPort_CtrlFunctDef.cc SBC_AP_Adapter.ttcn "
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
 FILES="Abstract_Socket.cc Abstract_Socket.hh "
 gen_links $DIR $FILES

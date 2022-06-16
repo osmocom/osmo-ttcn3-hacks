@@ -1,6 +1,7 @@
 module CBC_Tests {
 
 import from Osmocom_Types all;
+import from Socket_API_Definitions all;
 
 import from BSSAP_Types all;
 import from BSSMAP_Templates all;
@@ -8,7 +9,15 @@ import from CBSP_Types all;
 import from CBSP_Templates all;
 import from CBSP_Adapter all;
 import from CBSP_CodecPort all;
-import from Socket_API_Definitions all;
+
+import from SBC_AP_IEs all;
+import from SBC_AP_Constants all;
+import from SBC_AP_PDU_Contents all;
+import from SBC_AP_PDU_Descriptions all;
+import from SBC_AP_Types all;
+import from SBC_AP_Templates all;
+import from SBC_AP_CodecPort all;
+import from SBC_AP_Adapter all;
 
 import from HTTP_Adapter all;
 import from HTTPmsg_Types all;
@@ -17,11 +26,13 @@ import from ECBE_Types all;
 modulepar {
 	charstring mp_cbc_host := "127.0.0.1";
 	integer mp_cbc_cbsp_port := 48049;
+	integer mp_cbc_sbcap_port := c_SBC_AP_PORT;
 	integer mp_cbc_ecbe_port := 12345;
 	integer mp_local_cbsp_port := 9999;
+	integer mp_local_sbcap_port := 9998;
 };
 
-type component test_CT extends CBSP_Adapter_CT, http_CT {
+type component test_CT extends CBSP_Adapter_CT, SBC_AP_Adapter_CT, http_CT {
 };
 
 /*********************************************************************************
@@ -141,6 +152,7 @@ private function f_shutdown_helper() runs on test_CT {
 private function f_init(boolean raw := false) runs on test_CT {
 	f_http_init(mp_cbc_host, mp_cbc_ecbe_port);
 	CBSP_Adapter.f_connect(mp_cbc_host, mp_cbc_cbsp_port, "", mp_local_cbsp_port);
+	SBC_AP_Adapter.f_connect(mp_cbc_host, mp_cbc_sbcap_port, "", mp_local_sbcap_port);
 
 	if (not raw) {
 		var BSSMAP_FIELD_CellIdentificationList cell_list := {
@@ -299,6 +311,63 @@ runs on test_CT {
 	}
 }
 
+private function f_sbcap_tx_write_replace_warn_resp(CBS_Message msg, integer idx := 0)
+runs on test_CT {
+	var template (value) SBC_AP_PDU tx;
+	/* TODO: pass Unknown Tracking Area List as parameter above (omit by default) */
+	f_SBC_AP_send(tx, idx);
+}
+
+private function f_sbcap_tx_stop_warn_resp(integer idx := 0, CBS_Message msg)
+runs on test_CT {
+	var template (value) SBC_AP_PDU tx;
+	tx := ts_SBCAP_STOP_WARNING_RESP(int2bit(msg.msg_id, 16),
+					  int2bit(msg.ser_nr, 16));
+	f_SBC_AP_send(tx, idx);
+}
+
+/* handle a SBc-AP Write-Replace Request and respond to it with Response or FAILURE depending on arguments */
+private function f_sbcap_handle_write_replace_warn_req(CBS_Message msg, integer idx := 0,
+			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit)
+runs on test_CT {
+	var template (present) SBC_AP_PDU rx_templ;
+	var SBC_AP_RecvFrom rf;
+	rx_templ := tr_SBCAP_WRITE_WARNING(int2bit(msg.msg_id, 16),
+					   int2bit(msg.ser_nr, 16),
+					   msg.rep_period,
+					   msg.num_bcast_req);
+	alt {
+	[] SBC_AP[idx].receive(tr_SBC_AP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
+		var template (value) SBC_AP_PDU tx;
+		log ("received expected req:", rf);
+		f_sbcap_tx_write_replace_warn_resp(msg, idx);
+		}
+	[] SBC_AP[idx].receive {
+		setverdict(fail, "Received unexpected SBc-AP in index ", idx);
+		}
+	}
+}
+
+/* handle a SBc-AP Stop-Warning-Request and respond to it with Response or FAILURE depending on arguments */
+private function f_sbcap_handle_stop_warn_req(integer idx := 0, CBS_Message msg)
+runs on test_CT {
+	var template (present) SBC_AP_PDU rx_templ;
+	var SBC_AP_RecvFrom rf;
+
+	rx_templ := tr_SBCAP_STOP_WARNING(int2bit(msg.msg_id, 16),
+					  int2bit(msg.ser_nr, 16));
+	alt {
+	[] SBC_AP[idx].receive(tr_SBC_AP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
+		var template (value) SBC_AP_PDU tx;
+		log ("received expected req:", rf);
+		f_sbcap_tx_stop_warn_resp(idx, msg);
+		}
+	[] SBC_AP[idx].receive {
+		setverdict(fail, "Received unexpected SBc-AP in index ", idx);
+		}
+	}
+}
+
 private const BSSMAP_FIELD_CellIdentificationList cil_BSS := {
 	cIl_allInBSS := ''O
 };
@@ -396,6 +465,7 @@ runs on test_CT {
 	var EcbeCbcMessage ecbe := f_cbs2ecbe(msg, "TTCN-3");
 	f_ecbe_tx_post_cbs(ecbe);
 	f_cbsp_handle_write(msg, 0, cell_list_success);
+	f_sbcap_handle_write_replace_warn_req(msg, 0);
 	f_ecbe_rx_resp(201);
 
 	f_sleep(2.0);
@@ -404,6 +474,7 @@ runs on test_CT {
 	/* FIXME: cbc segfaults if we terminate here (if we don't wait for Connect_result? */
 	f_cbsp_handle_kill(0, msg.msg_id, msg.ser_nr, exp_list:=cell_list_success, tx_list:=cell_list_success,
 			   tx_fail_list:=omit, tx_compl_list:=omit, channel_ind:=msg.channel_ind);
+	f_sbcap_handle_stop_warn_req(0, msg);
 	f_ecbe_rx_resp(200);
 }
 

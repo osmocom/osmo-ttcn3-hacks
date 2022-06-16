@@ -15,6 +15,8 @@ FILES="
 	Native_FunctionDefs.cc
 	SABP_CodecPort_CtrlFunctDef.cc
 	SABP_EncDec.cc
+	SBC_AP_CodecPort_CtrlFunctDef.cc
+	SBC_AP_EncDec.cc
 	SCTPasp_PT.cc
 	TCCConversion.cc
 	TCCEncoding.cc
