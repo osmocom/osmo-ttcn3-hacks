@@ -617,6 +617,8 @@ type component test_CT extends CTRL_Adapter_CT {
 	port IPA_CFG_PT IPA_CFG_PORT[NUM_BTS][NUM_TRX];
 
 	var MGCP_Emulation_CT vc_MGCP;
+	port MGCP_CODEC_PT MGCP;
+
 	port TELNETasp_PT BSCVTY;
 
 	/* StatsD */
@@ -11575,6 +11577,55 @@ testcase TC_ratectr_all_available_allocated_dyn() runs on test_CT {
 
 	f_shutdown_helper();
 }
+
+testcase TC_assignment_crcx_nack() runs on test_CT {
+	f_init(1);
+
+	/* HACK: we don't want to employ MGCP_Emulation here because:
+	 * a) there is no way to talk to it from component test_CT;
+	 * b) it does not allow us to send ts_MgcpResp_Err (fails). */
+	vc_MGCP.stop;
+	map(self:MGCP, system:MGCP);
+	var Result res := MGCP_CodecPort_CtrlFunct.f_IPL4_connect(MGCP, mp_bsc_ip, 2727,
+									mp_test_ip, 2427,
+									-1, { udp := { } });
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect MGCP socket, check your configuration");
+		mtc.stop;
+	}
+
+	/* Establish an SDCCH channel for signalling */
+	var DchanTuple dt := f_est_dchan('4C'O, 23, '00000000'O);
+
+	/* MSC sends an Assignment Request */
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	BSSAP.send(ts_BSSAP_DATA_req(dt.sccp_conn_id, ass_cmd));
+
+	/* BSC activates a TCH channel */
+	var RSL_Message rsl_chan_act := f_exp_ipa_rx(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV));
+	f_ipa_tx(ts_RSL_CHAN_ACT_ACK(rsl_chan_act.ies[0].body.chan_nr, 23 + 10));
+
+	/* Send assignment complete over the new channel */
+	var PDU_ML3_MS_NW l3_tx := valueof(ts_RRM_AssignmentComplete('00'O));
+	f_ipa_tx(ts_RSL_EST_IND(rsl_chan_act.ies[0].body.chan_nr,
+				valueof(ts_RslLinkID_DCCH(0)),
+				enc_PDU_ML3_MS_NW(l3_tx)));
+
+	var MGCP_RecvFrom mrf;
+	MGCP.receive(MGCP_RecvFrom:?) -> value mrf;
+	var MgcpCommand mgcp_cmd := mrf.msg.command;
+	log("Rx MGCP command: ", mgcp_cmd);
+
+	/* Respond with an error (code=540), osmo-bsc is expected to crash here */
+	template MgcpResponse mgcp_resp := ts_MgcpResp_Err(mgcp_cmd.line.trans_id, "540");
+	MGCP.send(t_MGCP_Send(res.connId, MgcpMessage:{ response := mgcp_resp }));
+
+	f_perform_clear_test_ct(dt);
+	f_shutdown_helper();
+}
+
 
 control {
 	/* CTRL interface testing */
