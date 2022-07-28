@@ -1,0 +1,175 @@
+/* BSC (CBSP) Connection Handler of CBC test suite in TTCN-3
+ * (C) 2022 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module BSC_ConnectionHandler {
+
+import from Osmocom_Types all;
+
+import from BSSAP_Types all;
+import from BSSMAP_Templates all;
+import from CBSP_Types all;
+import from CBSP_Templates all;
+import from CBSP_Adapter all;
+import from CBSP_CodecPort all;
+
+import from CBS_Message all;
+
+type function void_fn() runs on BSC_ConnHdlr;
+
+/* this component represents a single subscriber connection */
+type component BSC_ConnHdlr extends CBSP_Adapter_CT {
+	var BSC_ConnHdlrPars g_pars;
+}
+
+type record BSC_ConnHdlrPars {
+	integer bsc_cbsp_port,
+	charstring cbc_host,
+	integer cbc_cbsp_port,
+	void_fn start_fn,
+	CBS_Message exp_cbs_msg optional,
+	BSSMAP_FIELD_CellIdentificationList cell_list_success optional
+};
+
+function f_BSC_ConnHdlr_main(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	g_pars := pars;
+	CBSP_Adapter.f_connect(g_pars.cbc_host, g_pars.cbc_cbsp_port, "", g_pars.bsc_cbsp_port);
+
+	var BSSMAP_FIELD_CellIdentificationList cell_list := {
+		cIl_allInBSS := ''O
+	};
+	activate(as_cbsp_keepalive_ack(0));
+	activate(as_cbsp_restart(0));
+	f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_CBS, CBSP_RI_DATA_LOST));
+	f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_EMERG, CBSP_RI_DATA_LOST));
+	as_cbsp_reset(0);
+
+	g_pars.start_fn.apply();
+}
+
+altstep as_cbsp_reset(integer idx) runs on CBSP_Adapter_CT {
+	var CBSP_RecvFrom rf;
+	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_RESET)) -> value rf {
+		var CBSP_IE ie;
+		f_cbsp_find_ie(rf.msg, CBSP_IEI_CELL_LIST, ie);
+		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx],
+				ts_CBSP_RESET_COMPL(ie.body.cell_list.cell_id)));
+	}
+}
+
+/* receive + acknowledge KEEP-ALIVE */
+altstep as_cbsp_keepalive_ack(integer idx) runs on CBSP_Adapter_CT {
+	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_KEEP_ALIVE)) {
+		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], ts_CBSP_KEEP_ALIVE_COMPL));
+	}
+}
+
+/* receive + ignore RESTART */
+altstep as_cbsp_restart(integer idx) runs on CBSP_Adapter_CT {
+	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_RESTART));
+}
+
+function f_cbsp_tx_write_compl(CBS_Message msg, integer idx := 0,
+			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
+			      template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit)
+runs on BSC_ConnHdlr {
+	var template (value) CBSP_PDU tx;
+	var template (value) BSSMAP_FIELD_CellIdentificationList tx_list;
+	if (istemplatekind(tx_cell_list, "omit")) {
+		/* use the "expected list" when confirming the write-replace */
+		tx_list := msg.cell_list;
+	} else {
+		/* use an user-provided different list of cells */
+		tx_list := valueof(tx_cell_list);
+	}
+	if (istemplatekind(tx_compl_list, "omit")) {
+		tx := ts_CBSP_WRITE_CBS_COMPL(msg.msg_id, msg.ser_nr, tx_list, msg.channel_ind);
+	} else {
+		tx := ts_CBSP_REPLACE_CBS_COMPL(msg.msg_id, msg.ser_nr, msg.old_ser_nr,
+						valueof(tx_compl_list), tx_list,
+						msg.channel_ind);
+	}
+	CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
+}
+
+function f_cbsp_tx_write_fail(CBS_Message msg, integer idx := 0,
+				      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
+				      template (omit) CBSP_FailureListItems tx_fail_list := omit)
+runs on BSC_ConnHdlr {
+	var template (value) CBSP_PDU tx;
+	tx := ts_CBSP_WRITE_CBS_FAIL(msg.msg_id, msg.ser_nr, valueof(tx_fail_list),
+				     omit, tx_cell_list, msg.channel_ind);
+	CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
+}
+
+/* handle a CBSP-WRITE-REPLACE and respond to it with COMPLETE or FAILURE depending on arguments */
+function f_cbsp_handle_write(CBS_Message msg, integer idx := 0,
+			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
+			      template (omit) CBSP_FailureListItems tx_fail_list := omit,
+			      template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit)
+runs on BSC_ConnHdlr {
+	var template CBSP_IEs content_ies := {};
+	var template (present) CBSP_PDU rx_templ;
+	var CBSP_RecvFrom rf;
+	for (var integer i := 0; i < lengthof(msg.content); i := i+1) {
+		//content_ies[i] := tr_CbspMsgContent(msg.content[i].payload, msg.content[i].user_len);
+		content_ies[i] := tr_CbspMsgContent(?, ?);
+	}
+	rx_templ := tr_CBSP_WRITE_CBS(msg.msg_id, msg.ser_nr, msg.cell_list, msg.channel_ind,
+				      msg.category, msg.rep_period, msg.num_bcast_req, msg.dcs,
+				      content_ies);
+	alt {
+	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
+		var template (value) CBSP_PDU tx;
+		if (istemplatekind(tx_fail_list, "omit")) {
+			f_cbsp_tx_write_compl(msg, idx, tx_cell_list, tx_compl_list);
+		} else {
+			f_cbsp_tx_write_fail(msg, idx, tx_cell_list, tx_fail_list);
+		}
+		}
+	[] as_cbsp_keepalive_ack(idx) { repeat; }
+	[] CBSP[idx].receive {
+		setverdict(fail, "Received unexpected CBSP in index ", idx);
+		}
+	}
+}
+
+/* handle a CBSP-KILL and respond to it with COMPLETE or FAILURE depending on arguments */
+function f_cbsp_handle_kill(integer idx, uint16_t msg_id, uint16_t ser_nr,
+				    template BSSMAP_FIELD_CellIdentificationList exp_list,
+				    template (omit) BSSMAP_FIELD_CellIdentificationList tx_list,
+				    template (omit) CBSP_FailureListItems tx_fail_list := omit,
+				    template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit,
+				    template (omit) uint8_t channel_ind := omit)
+runs on BSC_ConnHdlr {
+	var template (present) CBSP_PDU rx_templ;
+	var CBSP_RecvFrom rf;
+
+	rx_templ := tr_CBSP_KILL(msg_id, ser_nr, exp_list, channel_ind);
+	alt {
+	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
+		var template (value) CBSP_PDU tx;
+		if (istemplatekind(tx_fail_list, "omit")) {
+			tx := ts_CBSP_KILL_COMPL(msg_id, ser_nr, tx_compl_list, tx_list, channel_ind);
+		} else {
+			tx := ts_CBSP_KILL_FAIL(msg_id, ser_nr, valueof(tx_fail_list), tx_compl_list,
+						tx_list, channel_ind);
+		}
+		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
+		}
+	[] as_cbsp_keepalive_ack(idx) { repeat; }
+	[] CBSP[idx].receive {
+		setverdict(fail, "Received unexpected CBSP in index ", idx);
+		}
+	}
+}
+
+}

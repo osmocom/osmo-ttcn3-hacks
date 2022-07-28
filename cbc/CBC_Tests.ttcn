@@ -10,6 +10,11 @@ import from CBSP_Templates all;
 import from CBSP_Adapter all;
 import from CBSP_CodecPort all;
 
+import from SABP_Types all;
+import from SABP_Templates all;
+import from SABP_IEs all;
+import from SABP_PDU_Descriptions all;
+
 import from SBC_AP_IEs all;
 import from SBC_AP_Constants all;
 import from SBC_AP_PDU_Contents all;
@@ -23,6 +28,11 @@ import from HTTP_Adapter all;
 import from HTTPmsg_Types all;
 import from ECBE_Types all;
 
+import from CBS_Message all;
+import from ECBE_Components all;
+import from BSC_ConnectionHandler all;
+import from MME_ConnectionHandler all;
+
 modulepar {
 	charstring mp_cbc_host := "127.0.0.1";
 	integer mp_cbc_cbsp_port := 48049;
@@ -32,159 +42,144 @@ modulepar {
 	integer mp_local_sbcap_port := 9998;
 };
 
-type component test_CT extends CBSP_Adapter_CT, SBC_AP_Adapter_CT, http_CT {
+const integer MAX_BSC := 3;
+const integer MAX_MME := 3;
+
+type component test_CT extends CBSP_Adapter_CT, http_CT {
+	var integer g_num_bsc;
+	var integer g_num_mme;
+	var BSC_ConnHdlr g_vc_conn_BSC[MAX_BSC];
+	var MME_ConnHdlr g_vc_conn_MME[MAX_MME];
+	var BSC_ConnHdlrPars g_pars_BSC[MAX_BSC];
+	var MME_ConnHdlrPars g_pars_MME[MAX_MME];
 };
 
-/*********************************************************************************
- * ECBE (REST) interface
- *********************************************************************************/
-
-function f_ecbe_tx_post_cbs(EcbeCbcMessage cbc)
-runs on http_CT {
-	var charstring body := oct2char(enc_EcbeCbcMessage(cbc));
-	log("TX POST CBS: ", body);
-	var HTTPMessage http_resp;
-	f_http_tx_request(url := "/api/ecbe/v1/message", method := "POST", body := body);
-}
-
-function f_ecbe_rx_resp(template integer exp_sts := (200..299))
-runs on http_CT return HTTPResponse {
-	var HTTPMessage http_resp := f_http_rx_response(tr_HTTP_Resp(exp_sts), tout := 20.0);
-	return http_resp.response;
-}
-
-/* run a HTTP POST to add a new CBC message */
-function f_ecbe_post_cbs(EcbeCbcMessage cbc, template integer exp_sts := 201)
-runs on http_CT return HTTPResponse {
-	f_ecbe_tx_post_cbs(cbc);
-	return f_ecbe_rx_resp(exp_sts)
-}
-
-function f_ecbe_tx_delete_cbs(integer msg_id)
-runs on http_CT {
-	f_http_tx_request("/api/ecbe/v1/message/" & int2str(msg_id), method := "DELETE");
-}
-
-/* run a HTTP GET on specified URL expecting json in RSRES format as response */
-function f_ecbe_delete_cbs(integer msg_id, template integer exp_sts := 200)
-runs on http_CT return HTTPResponse {
-	f_ecbe_tx_delete_cbs(msg_id);
-	return f_ecbe_rx_resp(exp_sts);
-}
-
-
-altstep as_cbsp_reset(integer idx) runs on CBSP_Adapter_CT {
-	var CBSP_RecvFrom rf;
-	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_RESET)) -> value rf {
-		var CBSP_IE ie;
-		f_cbsp_find_ie(rf.msg, CBSP_IEI_CELL_LIST, ie);
-		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx],
-				ts_CBSP_RESET_COMPL(ie.body.cell_list.cell_id)));
-	}
-}
-
-private function f_cbs2ecbe_category(CBSP_Category cat_in) return EcbeCategory
-{
-	select (cat_in) {
-	case (CBSP_CATEG_HIGH_PRIO) { return high_priority; }
-	case (CBSP_CATEG_BACKGROUND) { return background; }
-	case (CBSP_CATEG_NORMAL) { return normal; }
-	case else { mtc.stop }
-	}
-}
-
-private function f_cbs2ecbe_page(CBS_MessageContent inp) return EcbePage
-{
-	return hex2str(oct2hex(inp.payload));
-}
-
-/* convert from CBS_Message to EcbeCbcMessage */
-function f_cbs2ecbe(CBS_Message inp, charstring cbe_name) return EcbeCbcMessage
-{
-	var EcbeCbcMessage ret := {
-		cbe_name := cbe_name,
-		category := f_cbs2ecbe_category(inp.category),
-		repetition_period := inp.rep_period,
-		num_of_bcast := inp.num_bcast_req,
-		scope := { scope_plmn := {} },
-		smscb_message := {
-			serial_nr := {
-				serial_nr_encoded := inp.ser_nr
-			},
-			message_id := inp.msg_id,
-			payload := {
-				payload_encoded := {
-					dcs := inp.dcs,
-					pages := { } /* appended below */
-					}
-			}
-		}
-	};
-	for (var integer i := 0; i < lengthof(inp.content); i := i+1) {
-		ret.smscb_message.payload.payload_encoded.pages :=
-			ret.smscb_message.payload.payload_encoded.pages & { f_cbs2ecbe_page(inp.content[i]) };
-	}
-	return ret;
-}
-
-/*********************************************************************************
- * CBSP interface
- *********************************************************************************/
-
-/* receive + acknowledge KEEP-ALIVE */
-altstep as_cbsp_keepalive_ack(integer idx) runs on CBSP_Adapter_CT {
-	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_KEEP_ALIVE)) {
-		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], ts_CBSP_KEEP_ALIVE_COMPL));
-	}
-}
-
-/* receive + ignore RESTART */
-altstep as_cbsp_restart(integer idx) runs on CBSP_Adapter_CT {
-	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], tr_CBSP_RESTART));
-}
-
 private function f_shutdown_helper() runs on test_CT {
+	/* Wait for all BSC cons to terminate */
+	for (var integer i := 0; i < g_num_bsc; i := i + 1) {
+		g_vc_conn_BSC[i].done;
+	}
+	/* Wait for all MME cons to terminate */
+	for (var integer i := 0; i < g_num_mme; i := i + 1) {
+		g_vc_conn_MME[i].done;
+	}
 	all component.stop;
 	setverdict(pass);
 	mtc.stop;
 }
 
-private function f_init(boolean raw := false) runs on test_CT {
-	f_http_init(mp_cbc_host, mp_cbc_ecbe_port);
-	CBSP_Adapter.f_connect(mp_cbc_host, mp_cbc_cbsp_port, "", mp_local_cbsp_port);
-	SBC_AP_Adapter.f_connect(mp_cbc_host, mp_cbc_sbcap_port, "", mp_local_sbcap_port);
+/*
+ * BSC Conn Handler:
+ */
+private function f_BSC_ConnHdlr_start_fn_void() runs on BSC_ConnHdlr {
+	log("Default start_fn() function called!");
+}
+private function f_init_pars_bsc(integer bsc_cbsp_port, charstring cbc_host, integer cbc_cbsp_port)
+		runs on test_CT return BSC_ConnHdlrPars {
+	var BSC_ConnHdlrPars pars := {
+		bsc_cbsp_port := bsc_cbsp_port,
+		cbc_host := cbc_host,
+		cbc_cbsp_port := cbc_cbsp_port,
+		start_fn := refers(f_BSC_ConnHdlr_start_fn_void),
+		exp_cbs_msg := omit,
+		cell_list_success := omit
+	};
+	return pars;
+}
 
-	if (not raw) {
-		var BSSMAP_FIELD_CellIdentificationList cell_list := {
-			cIl_allInBSS := ''O
-		};
-		activate(as_cbsp_keepalive_ack(0));
-		activate(as_cbsp_restart(0));
-		f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_CBS, CBSP_RI_DATA_LOST));
-		f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_EMERG, CBSP_RI_DATA_LOST));
-		as_cbsp_reset(0);
+private function f_init_bsc(integer idx, charstring id) runs on test_CT return BSC_ConnHdlr {
+	var BSC_ConnHdlr vc_conn;
+	id := id & "-BSC" & int2str(idx);
+	vc_conn := BSC_ConnHdlr.create(id) alive;
+	g_pars_BSC[idx] := f_init_pars_bsc(mp_local_cbsp_port + idx, mp_cbc_host, mp_cbc_cbsp_port);
+	return vc_conn;
+}
+
+private function f_start_bsc(integer idx, charstring id, BSC_ConnHdlrPars pars)
+		runs on test_CT {
+	id := id & "-BSC" & int2str(idx);
+	g_vc_conn_BSC[idx] := f_init_bsc(idx, id);
+	g_vc_conn_BSC[idx].start(f_BSC_ConnHdlr_main(id, pars));
+}
+
+/*
+ * MME Conn Handler:
+ */
+private function f_MME_ConnHdlr_start_fn_void() runs on MME_ConnHdlr {
+	log("Default start_fn() function called!");
+}
+private function f_init_pars_mme(integer mme_sbcap_port, charstring cbc_host, integer cbc_sbcap_port)
+		runs on test_CT return MME_ConnHdlrPars {
+	var MME_ConnHdlrPars pars := {
+		mme_sbcap_port := mme_sbcap_port,
+		cbc_host := cbc_host,
+		cbc_sbcap_port := cbc_sbcap_port,
+		start_fn := refers(f_MME_ConnHdlr_start_fn_void),
+		exp_cbs_msg := omit
+	};
+	return pars;
+}
+
+private function f_init_mme(integer idx, charstring id) runs on test_CT return MME_ConnHdlr {
+	var MME_ConnHdlr vc_conn;
+	id := id & "-MME" & int2str(idx);
+	vc_conn := MME_ConnHdlr.create(id) alive;
+	g_pars_MME[idx] := f_init_pars_mme(mp_local_sbcap_port + idx, mp_cbc_host, mp_cbc_sbcap_port);
+	return vc_conn;
+}
+
+private function f_start_mme(integer idx, charstring id, MME_ConnHdlrPars pars)
+		runs on test_CT {
+	id := id & "-MME" & int2str(idx);
+	g_vc_conn_MME[idx] := f_init_mme(idx, id);
+	g_vc_conn_MME[idx].start(f_MME_ConnHdlr_main(id, pars));
+}
+
+private function f_init(integer num_bsc := 1, integer num_mme := 1) runs on test_CT {
+	f_http_init(mp_cbc_host, mp_cbc_ecbe_port);
+
+	g_num_bsc := num_bsc;
+	for (var integer i := 0; i < g_num_bsc; i := i + 1) {
+		g_vc_conn_BSC[i] := f_init_bsc(i, testcasename());
+	}
+
+	g_num_mme := num_mme;
+	for (var integer i := 0; i < g_num_mme; i := i + 1) {
+		g_vc_conn_MME[i] := f_init_mme(i, testcasename());
 	}
 }
 
+function f_start() runs on test_CT {
+	for (var integer i := 0; i < g_num_mme; i := i + 1) {
+		f_start_bsc(i, testcasename(), g_pars_BSC[i]);
+	}
+	for (var integer i := 0; i < g_num_mme; i := i + 1) {
+		f_start_mme(i, testcasename(), g_pars_MME[i]);
+	}
+	f_sleep(2.0); /* wait all conns connected */
+}
+
 /* test whether or not we receive a valid KEEP-ALIVE from the CBC */
-testcase TC_rx_keepalive() runs on test_CT {
+private function f_bsc_TC_rx_keepalive() runs on BSC_ConnHdlr {
 	var CBSP_PDU rx;
 	var CBSP_IE ie;
-
-	f_init();
 	rx := f_cbsp_exp(tr_CBSP_KEEP_ALIVE(?));
 	f_cbsp_find_ie(rx, CBSP_IEI_KEEP_ALIVE_REP_PERIOD, ie);
+}
+testcase TC_rx_keepalive() runs on test_CT {
 
+	f_init();
+	g_pars_BSC[0].start_fn := refers(f_bsc_TC_rx_keepalive);
+	f_start();
 	f_shutdown_helper();
 }
 
 /* test whether CBC terminates connection if KEEP-ALIVE is not answered by BSC */
-testcase TC_rx_keepalive_timeout() runs on test_CT {
+private function f_bsc_TC_rx_keepalive_timeout() runs on BSC_ConnHdlr {
 	var CBSP_PDU rx;
 	var CBSP_IE ie;
 	var integer ka_rep_per_s;
 
-	f_init();
 	rx := f_cbsp_exp(tr_CBSP_KEEP_ALIVE(?));
 	f_cbsp_find_ie(rx, CBSP_IEI_KEEP_ALIVE_REP_PERIOD, ie);
 
@@ -194,188 +189,22 @@ testcase TC_rx_keepalive_timeout() runs on test_CT {
 
 	/* expect the CBSP connection to be closed */
 	CBSP[0].receive(PortEvent:{connClosed:=?})
-
+}
+testcase TC_rx_keepalive_timeout() runs on test_CT {
+	f_init();
+	g_pars_BSC[0].start_fn := refers(f_bsc_TC_rx_keepalive_timeout);
+	f_start();
 	f_shutdown_helper();
-}
-
-type record CBS_Message {
-	uint16_t msg_id,
-	uint16_t ser_nr,
-	uint16_t old_ser_nr optional,
-	BSSMAP_FIELD_CellIdentificationList cell_list,
-	uint8_t channel_ind,
-	CBSP_Category category,
-	uint16_t rep_period,
-	uint16_t num_bcast_req,
-	uint8_t dcs,
-	CBS_MessageContents content
-};
-type record CBS_MessageContent {
-	octetstring payload,
-	uint8_t user_len
-};
-type record of CBS_MessageContent CBS_MessageContents;
-
-private function f_cbsp_tx_write_compl(CBS_Message msg, integer idx := 0,
-			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
-			      template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit)
-runs on test_CT {
-	var template (value) CBSP_PDU tx;
-	var template (value) BSSMAP_FIELD_CellIdentificationList tx_list;
-	if (istemplatekind(tx_cell_list, "omit")) {
-		/* use the "expected list" when confirming the write-replace */
-		tx_list := msg.cell_list;
-	} else {
-		/* use an user-provided different list of cells */
-		tx_list := valueof(tx_cell_list);
-	}
-	if (istemplatekind(tx_compl_list, "omit")) {
-		tx := ts_CBSP_WRITE_CBS_COMPL(msg.msg_id, msg.ser_nr, tx_list, msg.channel_ind);
-	} else {
-		tx := ts_CBSP_REPLACE_CBS_COMPL(msg.msg_id, msg.ser_nr, msg.old_ser_nr,
-						valueof(tx_compl_list), tx_list,
-						msg.channel_ind);
-	}
-	CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
-}
-
-private function f_cbsp_tx_write_fail(CBS_Message msg, integer idx := 0,
-				      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
-				      template (omit) CBSP_FailureListItems tx_fail_list := omit)
-runs on test_CT {
-	var template (value) CBSP_PDU tx;
-	tx := ts_CBSP_WRITE_CBS_FAIL(msg.msg_id, msg.ser_nr, valueof(tx_fail_list),
-				     omit, tx_cell_list, msg.channel_ind);
-	CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
-}
-
-/* handle a CBSP-WRITE-REPLACE and respond to it with COMPLETE or FAILURE depending on arguments */
-private function f_cbsp_handle_write(CBS_Message msg, integer idx := 0,
-			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit,
-			      template (omit) CBSP_FailureListItems tx_fail_list := omit,
-			      template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit)
-runs on test_CT {
-	var template CBSP_IEs content_ies := {};
-	var template (present) CBSP_PDU rx_templ;
-	var CBSP_RecvFrom rf;
-	for (var integer i := 0; i < lengthof(msg.content); i := i+1) {
-		//content_ies[i] := tr_CbspMsgContent(msg.content[i].payload, msg.content[i].user_len);
-		content_ies[i] := tr_CbspMsgContent(?, ?);
-	}
-	rx_templ := tr_CBSP_WRITE_CBS(msg.msg_id, msg.ser_nr, msg.cell_list, msg.channel_ind,
-				      msg.category, msg.rep_period, msg.num_bcast_req, msg.dcs,
-				      content_ies);
-	alt {
-	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
-		var template (value) CBSP_PDU tx;
-		if (istemplatekind(tx_fail_list, "omit")) {
-			f_cbsp_tx_write_compl(msg, idx, tx_cell_list, tx_compl_list);
-		} else {
-			f_cbsp_tx_write_fail(msg, idx, tx_cell_list, tx_fail_list);
-		}
-		}
-	[] as_cbsp_keepalive_ack(idx) { repeat; }
-	[] CBSP[idx].receive {
-		setverdict(fail, "Received unexpected CBSP in index ", idx);
-		}
-	}
-}
-
-/* handle a CBSP-KILL and respond to it with COMPLETE or FAILURE depending on arguments */
-private function f_cbsp_handle_kill(integer idx, uint16_t msg_id, uint16_t ser_nr,
-				    template BSSMAP_FIELD_CellIdentificationList exp_list,
-				    template (omit) BSSMAP_FIELD_CellIdentificationList tx_list,
-				    template (omit) CBSP_FailureListItems tx_fail_list := omit,
-				    template (omit) CBSP_IE_NumBcastComplList tx_compl_list := omit,
-				    template (omit) uint8_t channel_ind := omit)
-runs on test_CT {
-	var template (present) CBSP_PDU rx_templ;
-	var CBSP_RecvFrom rf;
-
-	rx_templ := tr_CBSP_KILL(msg_id, ser_nr, exp_list, channel_ind);
-	alt {
-	[] CBSP[idx].receive(tr_CBSP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
-		var template (value) CBSP_PDU tx;
-		if (istemplatekind(tx_fail_list, "omit")) {
-			tx := ts_CBSP_KILL_COMPL(msg_id, ser_nr, tx_compl_list, tx_list, channel_ind);
-		} else {
-			tx := ts_CBSP_KILL_FAIL(msg_id, ser_nr, valueof(tx_fail_list), tx_compl_list,
-						tx_list, channel_ind);
-		}
-		CBSP[idx].send(ts_CBSP_Send(g_cbsp_conn_id[idx], tx));
-		}
-	[] as_cbsp_keepalive_ack(idx) { repeat; }
-	[] CBSP[idx].receive {
-		setverdict(fail, "Received unexpected CBSP in index ", idx);
-		}
-	}
-}
-
-private function f_sbcap_tx_write_replace_warn_resp(CBS_Message msg, integer idx := 0)
-runs on test_CT {
-	var template (value) SBC_AP_PDU tx;
-	/* TODO: pass Unknown Tracking Area List as parameter above (omit by default) */
-	tx := ts_SBCAP_WRITE_WARNING_RESP(int2bit(msg.msg_id, 16),
-					  int2bit(msg.ser_nr, 16));
-	f_SBC_AP_send(tx, idx);
-}
-
-private function f_sbcap_tx_stop_warn_resp(integer idx := 0, CBS_Message msg)
-runs on test_CT {
-	var template (value) SBC_AP_PDU tx;
-	tx := ts_SBCAP_STOP_WARNING_RESP(int2bit(msg.msg_id, 16),
-					  int2bit(msg.ser_nr, 16));
-	f_SBC_AP_send(tx, idx);
-}
-
-/* handle a SBc-AP Write-Replace Request and respond to it with Response or FAILURE depending on arguments */
-private function f_sbcap_handle_write_replace_warn_req(CBS_Message msg, integer idx := 0,
-			      template (omit) BSSMAP_FIELD_CellIdentificationList tx_cell_list := omit)
-runs on test_CT {
-	var template (present) SBC_AP_PDU rx_templ;
-	var SBC_AP_RecvFrom rf;
-	rx_templ := tr_SBCAP_WRITE_WARNING(int2bit(msg.msg_id, 16),
-					   int2bit(msg.ser_nr, 16),
-					   msg.rep_period,
-					   msg.num_bcast_req);
-	alt {
-	[] SBC_AP[idx].receive(tr_SBC_AP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
-		var template (value) SBC_AP_PDU tx;
-		log ("received expected req:", rf);
-		f_sbcap_tx_write_replace_warn_resp(msg, idx);
-		}
-	[] SBC_AP[idx].receive {
-		setverdict(fail, "Received unexpected SBc-AP in index ", idx);
-		}
-	}
-}
-
-/* handle a SBc-AP Stop-Warning-Request and respond to it with Response or FAILURE depending on arguments */
-private function f_sbcap_handle_stop_warn_req(integer idx := 0, CBS_Message msg)
-runs on test_CT {
-	var template (present) SBC_AP_PDU rx_templ;
-	var SBC_AP_RecvFrom rf;
-
-	rx_templ := tr_SBCAP_STOP_WARNING(int2bit(msg.msg_id, 16),
-					  int2bit(msg.ser_nr, 16));
-	alt {
-	[] SBC_AP[idx].receive(tr_SBC_AP_Recv(g_cbsp_conn_id[idx], rx_templ)) -> value rf {
-		var template (value) SBC_AP_PDU tx;
-		log ("received expected req:", rf);
-		f_sbcap_tx_stop_warn_resp(idx, msg);
-		}
-	[] SBC_AP[idx].receive {
-		setverdict(fail, "Received unexpected SBc-AP in index ", idx);
-		}
-	}
 }
 
 private const BSSMAP_FIELD_CellIdentificationList cil_BSS := {
 	cIl_allInBSS := ''O
 };
-
+private function f_bsc_TC_write_replace() runs on BSC_ConnHdlr {
+	f_cbsp_handle_write(g_pars.exp_cbs_msg);
+	f_sleep(100.0);
+}
 testcase TC_write_replace() runs on test_CT {
-	f_init();
 	var CBS_Message msg := {
 		msg_id := 42,
 		ser_nr := 16752,
@@ -390,8 +219,11 @@ testcase TC_write_replace() runs on test_CT {
 			{ '00'O, 1 }
 		}
 	};
-	f_cbsp_handle_write(msg);
-	f_sleep(100.0);
+
+	f_init();
+	g_pars_BSC[0].exp_cbs_msg := msg;
+	g_pars_BSC[0].start_fn := refers(f_bsc_TC_write_replace);
+	f_start();
 	f_shutdown_helper();
 }
 
@@ -427,11 +259,6 @@ testcase TC_selftest() runs on test_CT {
 	log(dec_CBSP_PDU(c_kill_compl));
 }
 
-import from SABP_Types all;
-import from SABP_Templates all;
-import from SABP_IEs all;
-import from SABP_PDU_Descriptions all;
-
 testcase TC_selftest_sabp() runs on test_CT {
 	const octetstring c_write := '00000080930000080006000211120007000240c0000f0010000113f0030282ec0613f0030282ec070001400100000d0002012a000900020000000400010100000056029f01b4d90d064297d9ec37e8fe96b3c9a0303bdd68341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d168341a8d46a3d10012'O;
 
@@ -457,26 +284,32 @@ testcase TC_selftest_sabp() runs on test_CT {
 	log("Restart: ", enc_SABP_PDU(valueof(tx)));
 }
 
-/*********************************************************************************
- * ECBE interface (verifying expected procedures on CBSP)
- *********************************************************************************/
+private function f_bsc_create_and_delete() runs on BSC_ConnHdlr {
+	var template (omit) BSSMAP_FIELD_CellIdentificationList cell_list_success := omit;
+	if (ispresent(g_pars.cell_list_success)) {
+		cell_list_success := g_pars.cell_list_success;
+	}
+	f_cbsp_handle_write(g_pars.exp_cbs_msg, 0, cell_list_success);
+	f_cbsp_handle_kill(0, g_pars.exp_cbs_msg.msg_id, g_pars.exp_cbs_msg.ser_nr,
+			   exp_list:=cell_list_success, tx_list:=cell_list_success,
+			   tx_fail_list:=omit, tx_compl_list:=omit,
+			   channel_ind:=g_pars.exp_cbs_msg.channel_ind);
+}
 
-function f_create_and_delete(CBS_Message msg,
-			     template (omit) BSSMAP_FIELD_CellIdentificationList cell_list_success)
+private function f_mme_create_and_delete() runs on MME_ConnHdlr {
+	f_sbcap_handle_write_replace_warn_req(g_pars.exp_cbs_msg, 0);
+	f_sbcap_handle_stop_warn_req(0, g_pars.exp_cbs_msg);
+}
+
+function f_create_and_delete(CBS_Message msg)
 runs on test_CT {
 	var EcbeCbcMessage ecbe := f_cbs2ecbe(msg, "TTCN-3");
 	f_ecbe_tx_post_cbs(ecbe);
-	f_cbsp_handle_write(msg, 0, cell_list_success);
-	f_sbcap_handle_write_replace_warn_req(msg, 0);
 	f_ecbe_rx_resp(201);
 
 	f_sleep(2.0);
 
 	f_ecbe_tx_delete_cbs(msg.msg_id);
-	/* FIXME: cbc segfaults if we terminate here (if we don't wait for Connect_result? */
-	f_cbsp_handle_kill(0, msg.msg_id, msg.ser_nr, exp_list:=cell_list_success, tx_list:=cell_list_success,
-			   tx_fail_list:=omit, tx_compl_list:=omit, channel_ind:=msg.channel_ind);
-	f_sbcap_handle_stop_warn_req(0, msg);
 	f_ecbe_rx_resp(200);
 }
 
@@ -506,7 +339,13 @@ testcase TC_ecbe_create_delete_cgi() runs on test_CT {
 		ts_BSSMAP_CI_CGI('901'H, '70'H, 24, 42),
 		ts_BSSMAP_CI_CGI('901'H, '70'H, 24, 43)
 	});
-	f_create_and_delete(valueof(msg), cell_list_success);
+	g_pars_BSC[0].start_fn := refers(f_bsc_create_and_delete);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	g_pars_MME[0].start_fn := refers(f_mme_create_and_delete);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	f_start();
+	f_create_and_delete(valueof(msg));
 	f_shutdown_helper();
 }
 testcase TC_ecbe_create_delete_lac_ci() runs on test_CT {
@@ -518,7 +357,13 @@ testcase TC_ecbe_create_delete_lac_ci() runs on test_CT {
 		ts_BSSMAP_CI_LAC_CI(10002, 50002),
 		ts_BSSMAP_CI_LAC_CI(10003, 50003)
 	});
-	f_create_and_delete(valueof(msg), cell_list_success);
+	g_pars_BSC[0].start_fn := refers(f_bsc_create_and_delete);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	g_pars_MME[0].start_fn := refers(f_mme_create_and_delete);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	f_start();
+	f_create_and_delete(valueof(msg));
 	f_shutdown_helper();
 }
 testcase TC_ecbe_create_delete_lac() runs on test_CT {
@@ -530,7 +375,13 @@ testcase TC_ecbe_create_delete_lac() runs on test_CT {
 		ts_BSSMAP_CI_LAC(10002),
 		ts_BSSMAP_CI_LAC(10003)
 	});
-	f_create_and_delete(valueof(msg), cell_list_success);
+	g_pars_BSC[0].start_fn := refers(f_bsc_create_and_delete);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	g_pars_MME[0].start_fn := refers(f_mme_create_and_delete);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	f_start();
+	f_create_and_delete(valueof(msg));
 	f_shutdown_helper();
 }
 testcase TC_ecbe_create_delete_ci() runs on test_CT {
@@ -542,7 +393,13 @@ testcase TC_ecbe_create_delete_ci() runs on test_CT {
 		ts_BSSMAP_CI_CI(50002),
 		ts_BSSMAP_CI_CI(50003)
 	});
-	f_create_and_delete(valueof(msg), cell_list_success);
+	g_pars_BSC[0].start_fn := refers(f_bsc_create_and_delete);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	g_pars_MME[0].start_fn := refers(f_mme_create_and_delete);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	f_start();
+	f_create_and_delete(valueof(msg));
 	f_shutdown_helper();
 }
 testcase TC_ecbe_create_delete_lai() runs on test_CT {
@@ -554,7 +411,13 @@ testcase TC_ecbe_create_delete_lai() runs on test_CT {
 		ts_BSSMAP_CI_LAI('901'H, '70'H, 26),
 		ts_BSSMAP_CI_LAI('901'H, '70'H, 27)
 	});
-	f_create_and_delete(valueof(msg), cell_list_success);
+	g_pars_BSC[0].start_fn := refers(f_bsc_create_and_delete);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	g_pars_MME[0].start_fn := refers(f_mme_create_and_delete);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	f_start();
+	f_create_and_delete(valueof(msg));
 	f_shutdown_helper();
 }
 
