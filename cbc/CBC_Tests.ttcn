@@ -787,6 +787,125 @@ testcase TC_cell_failure_restart_idle_mme() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Test cell actively broadcasting a message in BSC going unavailable for
+   broadcasting and going available again. The CBC should reload the announced
+   cell with the active messages. See 3GPP TS 48.049 7.8 */
+private function f_bsc_TC_cell_failure_restart_active_bsc() runs on BSC_ConnHdlr {
+	var template (value) CBSP_FailureListItems fail_list := {
+		CBSP_FailureListItem_CGI(g_pars.cell_list_success.cIl_CGI[0], CBSP_CAUSE_CB_NOT_OPERATIONAL)
+	};
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list := ts_BSSMAP_CIL_CGI({
+		g_pars.cell_list_success.cIl_CGI[0]
+	});
+
+	/* Guide cell into active broadcast msg state: */
+	f_cbsp_handle_write(g_pars.exp_cbs_msg, 0, g_pars.cell_list_success);
+
+	/* BSC reports the cell is down */
+	f_cbsp_send(ts_CBSP_FAILURE(fail_list, CBSP_BC_MSGT_CBS));
+	f_cbsp_send(ts_CBSP_FAILURE(fail_list, CBSP_BC_MSGT_EMERG));
+	f_sleep(1.0);
+
+	/* BSC reports the cell is up again */
+	f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_CBS, CBSP_RI_DATA_LOST));
+	f_cbsp_send(ts_CBSP_RESTART(cell_list, CBSP_BC_MSGT_EMERG, CBSP_RI_DATA_LOST));
+
+/* TODO: OS#5641
+ * The BSC informs the CBC by sending the RESTART message (see figure 7.8.2.1)
+ * containing the Cell List IE identifying the cell(s) being in CBS message
+ * operational state or in emergency message operational state and the Recovery
+ * Indication IE, indicating whether the broadcast information data is lost or
+ * not in the BSC.
+ * The RESTART message is sent once per broadcast message type
+ * as indicated by the Broadcast Message Type IE.
+ */
+	f_bsc_create_and_delete();
+}
+testcase TC_cell_failure_restart_active_bsc() runs on test_CT {
+	f_init(num_bsc := 1);
+	var template (value) BSSMAP_FIELD_CellIdentificationList cell_list_success;
+	var template (value) CBS_Message msg := t_CBSmsg(43, 16752);
+
+	cell_list_success := ts_BSSMAP_CIL_CGI({
+		ts_BSSMAP_CI_CGI('901'H, '70'H, 23, 42)
+	});
+	g_pars_BSC[0].start_fn := refers(f_bsc_TC_cell_failure_restart_active_bsc);
+	g_pars_BSC[0].exp_cbs_msg := valueof(msg);
+	g_pars_BSC[0].cell_list_success := valueof(cell_list_success);
+	f_start();
+
+	var EcbeCbcMessage ecbe := f_cbs2ecbe(valueof(msg), "TTCN-3");
+	f_ecbe_tx_post_cbs(ecbe);
+	f_ecbe_rx_resp(201);
+
+	f_shutdown_helper();
+}
+
+/* Test cell actively broadcasting a message in MME going unavailable for
+   broadcasting and going available again. The CBC should reload the announced
+   cell with the active messages. See 3GPP TS 29.168 4.3.3E.2 */
+private function f_mme_TC_cell_failure_restart_active_mme() runs on MME_ConnHdlr {
+	var template (value) Global_ENB_ID enb_id := ts_Global_ENB_ID_MACRO(f_enc_mcc_mnc('901'H, '70'H), 90);
+	var template (value) Failed_Cell_List fail_list := {
+		g_pars.bcast_cell_id_list[0].eCGI
+	}
+	var template (value) Restarted_Cell_List cell_list := {
+		g_pars.bcast_cell_id_list[0].eCGI
+	};
+	/* Guide cell into active broadcast msg state: */
+	f_sbcap_handle_write_replace_warn_req(g_pars.exp_cbs_msg, 0);
+	if (ispresent(g_pars.write_replace_warning_ind_cause) and
+	    ispresent(g_pars.bcast_cell_id_list)) {
+		f_sbcap_tx_write_replace_warn_ind(0, g_pars.exp_cbs_msg,
+						  g_pars.write_replace_warning_ind_cause,
+						  g_pars.bcast_cell_id_list)
+	}
+
+	/* MME reports the cell is down */
+	f_SBC_AP_send(ts_SBCAP_PWS_FAILURE(fail_list, enb_id));
+
+	f_sleep(1.0);
+
+	/* MME reports the cell is up again */
+	f_SBC_AP_send(ts_SBCAP_PWS_RESTART(cell_list, enb_id));
+
+/* TODO: OS#5641
+ * The CBC shall reload the warning message data (with the same Message
+ * Identifier and Serial Number) to the (H)eNB by initiating Write Replace
+ * Warning procedure(s) as specified in clause 4.3.3.2 with the following
+ * additions:
+ * - the CBC should set the Warning Area List IE in the Write-Replace
+ * Warning Request message to the identities of the cell(s) received in the
+ * Restarted-Cell-List which are relevant to the warning message data being
+ * reloaded;
+ * - the CBC shall copy the Global eNB ID into the Write-Replace
+ * Warning Request message; and
+ * - the CBC may update the Number of Broadcast Requested, if necessary.
+ */
+	f_mme_create_and_delete();
+}
+testcase TC_cell_failure_restart_active_mme() runs on test_CT {
+	var template (value) CellId_Broadcast_List bcast_cell_id_li;
+	var template (value) CBS_Message msg := t_CBSmsg(48, 16752);
+
+	f_init(num_bsc := 0, num_mme := 1);
+
+	bcast_cell_id_li := {
+		ts_SBCAP_CellId_Broadcast_List_Item(ts_SBCAP_ECGI(f_enc_mcc_mnc('901'H, '70'H), 1234))
+	};
+	g_pars_MME[0].start_fn := refers(f_mme_TC_cell_failure_restart_active_mme);
+	g_pars_MME[0].exp_cbs_msg := valueof(msg);
+	g_pars_MME[0].write_replace_warning_ind_cause := SBC_AP_Cause_message_accepted;
+	g_pars_MME[0].bcast_cell_id_list := valueof(bcast_cell_id_li);
+	f_start();
+
+	var EcbeCbcMessage ecbe := f_cbs2ecbe(valueof(msg), "TTCN-3");
+	f_ecbe_tx_post_cbs(ecbe);
+	f_ecbe_rx_resp(201);
+
+	f_shutdown_helper();
+}
+
 control {
 	execute( TC_rx_keepalive() );
 	execute( TC_rx_keepalive_timeout() );
@@ -810,6 +929,9 @@ control {
 
 	execute( TC_cell_failure_restart_idle_bsc() );
 	execute( TC_cell_failure_restart_idle_mme() );
+
+	execute( TC_cell_failure_restart_active_bsc() );
+	execute( TC_cell_failure_restart_active_mme() );
 }
 
 }
