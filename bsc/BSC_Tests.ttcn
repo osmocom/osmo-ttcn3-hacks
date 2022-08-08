@@ -636,6 +636,7 @@ type component test_CT extends CTRL_Adapter_CT {
 
 	/* Osmux is enabled through VTY */
 	var boolean g_osmux_enabled_cn := false;
+	var boolean g_osmux_enabled_bts := false;
 
 	/*Configure T(tias) over VTY, seconds */
 	var integer g_bsc_sccp_timer_ias :=  7 * 60;
@@ -1270,6 +1271,15 @@ runs on test_CT {
 	}
 	/* wait until BSC tells us "connected" */
 	f_wait_oml(bts_idx, "connected", 5.0);
+
+	/* Set up BTS with VTY commands: */
+	f_vty_enter_cfg_bts(BSCVTY, bts_idx);
+	if (g_osmux_enabled_bts) {
+		f_vty_transceive(BSCVTY, "osmux on");
+	} else {
+		f_vty_transceive(BSCVTY, "osmux off");
+	}
+	f_vty_transceive(BSCVTY, "end");
 }
 
 function f_init_bts_and_check_sysinfo(integer bts_idx := 0,
@@ -1744,18 +1754,26 @@ function f_gen_handover_req(integer bssap_idx := 0, charstring aoip_tla := "1.2.
 }
 
 /* generate an assignment complete template for either AoIP or SCCPlite */
-function f_gen_exp_compl(boolean expect_osmux := false, integer bssap_idx := 0) return template PDU_BSSAP {
+function f_gen_exp_compl(integer bssap_idx := 0)
+runs on MSC_ConnHdlr return template PDU_BSSAP {
 	var template PDU_BSSAP exp_compl;
-	var BSSMAP_IE_Osmo_OsmuxCID osmux_cid := valueof(ts_OsmuxCID(0));
 	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
-		if (expect_osmux) {
-			exp_compl := tr_BSSMAP_AssignmentComplete(omit, ?, osmux_cid);
-		} else {
-			exp_compl := tr_BSSMAP_AssignmentComplete(omit, ?, omit);
+		var template BSSMAP_IE_Osmo_OsmuxCID exp_osmux_cid := omit;
+		if (g_pars.use_osmux_cn) {
+			var template (present) INT1 exp_cid := ?;
+			if (isbound(g_media.mgcp_conn[0].local_osmux_cid) and isbound(g_media.mgcp_conn[1].local_osmux_cid)) {
+				exp_cid := (g_media.mgcp_conn[0].local_osmux_cid, g_media.mgcp_conn[1].local_osmux_cid);
+			} else if (isbound(g_media.mgcp_conn[0].local_osmux_cid)) {
+				exp_cid := g_media.mgcp_conn[0].local_osmux_cid;
+			} else if (isbound(g_media.mgcp_conn[1].local_osmux_cid)) {
+				exp_cid := g_media.mgcp_conn[1].local_osmux_cid;
+			}
+			exp_osmux_cid := tr_OsmuxCID(exp_cid);
 		}
+		exp_compl := tr_BSSMAP_AssignmentComplete(omit, ?, exp_osmux_cid);
 	} else {
 		/* CIC is optional "*" as the MSC allocated it */
-		exp_compl := tr_BSSMAP_AssignmentComplete(*, omit);
+		exp_compl := tr_BSSMAP_AssignmentComplete(*, omit, omit);
 	}
 	return exp_compl;
 }
@@ -4292,7 +4310,7 @@ private function f_TC_assignment_codec(charstring id) runs on MSC_ConnHdlr {
 
 private function f_assignment_codec(charstring id, boolean do_perform_clear := true) runs on MSC_ConnHdlr {
 	var PDU_BSSAP ass_cmd := f_gen_ass_req(g_pars.use_osmux_cn);
-	var template PDU_BSSAP exp_compl := f_gen_exp_compl(g_pars.use_osmux_cn);
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
 
 	/* puzzle together the ASSIGNMENT REQ for given codec[s] */
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
@@ -5226,7 +5244,8 @@ testcase TC_assignment_sdcch_exhausted_req_voice_tch_forbidden() runs on test_CT
 	f_shutdown_helper();
 }
 
-testcase TC_assignment_osmux() runs on test_CT {
+/* Test Osmux setup BSC<->MSC */
+testcase TC_assignment_osmux_cn() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	var MSC_ConnHdlr vc_conn;
 
@@ -5245,6 +5264,54 @@ testcase TC_assignment_osmux() runs on test_CT {
 	pars.use_osmux_cn := true;
 
 	g_osmux_enabled_cn := true;
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_amr_start_mode_set(false, "1");
+
+	vc_conn := f_start_handler(refers(f_TC_assignment_codec), pars);
+	vc_conn.done;
+
+	f_vty_amr_start_mode_restore(false);
+	f_shutdown_helper();
+}
+
+/* Test Osmux setup BTS<->BSC */
+testcase TC_assignment_osmux_bts() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecAMR_H}));
+	pars.ass_codec_list.codecElements[0].s0_7 := '00000100'B; /* 5,90k */
+	pars.ass_codec_list.codecElements[0].s8_15 := '00000111'B;
+	pars.expect_mr_conf_ie := mr_conf_amr_5_90;
+	pars.use_osmux_bts := true;
+
+	g_osmux_enabled_bts := true;
+	f_init(1, true);
+	f_sleep(1.0);
+	f_vty_amr_start_mode_set(false, "1");
+
+	vc_conn := f_start_handler(refers(f_TC_assignment_codec), pars);
+	vc_conn.done;
+
+	f_vty_amr_start_mode_restore(false);
+	f_shutdown_helper();
+}
+
+/* Test Osmux setup BTS<->BSC<->MSC */
+testcase TC_assignment_osmux() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+
+	pars.ass_codec_list := valueof(ts_BSSMAP_IE_CodecList({ts_CodecAMR_H}));
+	pars.ass_codec_list.codecElements[0].s0_7 := '00000100'B; /* 5,90k */
+	pars.ass_codec_list.codecElements[0].s8_15 := '00000111'B;
+	pars.expect_mr_conf_ie := mr_conf_amr_5_90;
+	pars.use_osmux_cn := true;
+	pars.use_osmux_bts := true;
+
+	g_osmux_enabled_cn := true;
+	g_osmux_enabled_bts := true;
 	f_init(1, true);
 	f_sleep(1.0);
 	f_vty_amr_start_mode_set(false, "1");
@@ -10516,7 +10583,7 @@ testcase TC_no_msc() runs on test_CT {
 
 private function f_TC_refuse_mode_modif_to_vamos(charstring id) runs on MSC_ConnHdlr {
 	var PDU_BSSAP ass_cmd := f_gen_ass_req(g_pars.use_osmux_cn);
-	var template PDU_BSSAP exp_compl := f_gen_exp_compl(g_pars.use_osmux_cn);
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
 
 	/* puzzle together the ASSIGNMENT REQ for given codec[s] */
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
@@ -11833,6 +11900,8 @@ control {
 	execute( TC_assignment_sdcch_exhausted_req_voice_tch_forbidden() );
 
 	execute( TC_assignment_osmux() );
+	execute( TC_assignment_osmux_cn() );
+	execute( TC_assignment_osmux_bts() );
 
 	/* RLL Establish Indication on inactive DCHAN / SAPI */
 	execute( TC_rll_est_ind_inact_lchan() );

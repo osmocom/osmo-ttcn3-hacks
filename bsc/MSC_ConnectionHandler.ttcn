@@ -52,6 +52,9 @@ import from TCCConversion_Functions all;
  * Media related handling
  ***********************************************************************/
 
+/* TODO: import OSMUX_Types.ttcn */
+type INT1 OsmuxCID	(0 .. 255);
+
 /* Get the matching payload type for a specified BSSAP codec type
  * (see also: BSSAP_Types.ttcn */
 private function f_get_mgcp_pt(BSSMAP_FIELD_CodecType codecType) return SDP_FIELD_PayloadType {
@@ -88,7 +91,9 @@ type record MgcpConnState {
 	integer ptime,			/* 20 */
 	uint7_t rtp_pt,			/* RTP Payload Type */
 	HostPort mgw,			/* MGW side */
-	HostPort peer			/* CA side */
+	HostPort peer,			/* CA side */
+	OsmuxCID local_osmux_cid optional,
+	OsmuxCID remote_osmux_cid optional
 };
 
 /* BTS media state */
@@ -98,7 +103,9 @@ type record BtsMediaState {
 	uint16_t conn_id,
 	uint7_t rtp_pt,
 	HostPort bts,
-	HostPort peer
+	HostPort peer,
+	OsmuxCID local_osmux_cid optional,
+	OsmuxCID remote_osmux_cid optional
 };
 
 type record MediaState {
@@ -119,7 +126,9 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 			host := bts,
 			port_nr := 9000 + nr*2
 		},
-		peer := -
+		peer := -,
+		local_osmux_cid := nr,
+		remote_osmux_cid := omit
 	}
 
 	g_media.bts1 := {
@@ -131,7 +140,9 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 			host := bts, /* FIXME */
 			port_nr := 9000 + nr*2
 		},
-		peer := -
+		peer := -,
+		local_osmux_cid := nr,
+		remote_osmux_cid := omit
 	}
 
 	g_media.mgcp_ep := "rtpbridge/" & int2str(nr) & "@mgw";
@@ -146,6 +157,8 @@ function f_MediaState_init(inout MediaState g_media, integer nr, HostName bts, H
 		g_media.mgcp_conn[i].crcx_seen_exp := 0;
 		g_media.mgcp_conn[i].mdcx_seen_exp := 0;
 		g_media.mgcp_conn[i].conn_id := f_mgcp_alloc_conn_id();
+		g_media.mgcp_conn[i].local_osmux_cid := i;
+		g_media.mgcp_conn[i].remote_osmux_cid := omit;
 	}
 
 	g_media.mgcp_conn[0].mgw := {
@@ -199,10 +212,23 @@ altstep as_Media_ipacc(RSL_DCHAN_PT rsl_pt := RSL, RSL_DCHAN_PT rsl_pt_ho_target
 		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
 			g_media.bts.rtp_pt := ie.ipa_rtp_pt2;
 		}
+		if (f_rsl_find_ie(rsl, RSL_IE_OSMO_OSMUX_CID, ie)) {
+			if (not g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC CRCX with Osmux CID IE");
+			}
+			g_media.bts.remote_osmux_cid := ie.osmux_cid.cid;
+		} else {
+			if (g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC CRCX without Osmux CID IE");
+			}
+			g_media.bts.local_osmux_cid := omit;
+			g_media.bts.remote_osmux_cid := omit;
+		}
 		rsl_pt.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, g_media.bts.conn_id,
 						f_inet_addr(g_media.bts.bts.host),
 						g_media.bts.bts.port_nr,
-						g_media.bts.rtp_pt));
+						g_media.bts.rtp_pt,
+						g_media.bts.local_osmux_cid));
 		g_media.bts.ipa_crcx_seen := true;
 		repeat;
 		}
@@ -224,10 +250,23 @@ altstep as_Media_ipacc(RSL_DCHAN_PT rsl_pt := RSL, RSL_DCHAN_PT rsl_pt_ho_target
 		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
 			g_media.bts.rtp_pt := ie.ipa_rtp_pt2;
 		}
+		if (f_rsl_find_ie(rsl, RSL_IE_OSMO_OSMUX_CID, ie)) {
+			if (not g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC MDCX with Osmux CID IE");
+			}
+			g_media.bts.remote_osmux_cid := ie.osmux_cid.cid;
+		} else {
+			if (g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC MDCX without Osmux CID IE");
+			}
+			g_media.bts.local_osmux_cid := omit;
+			g_media.bts.remote_osmux_cid := omit;
+		}
 		rsl_pt.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, g_media.bts.conn_id,
 						f_inet_addr(g_media.bts.peer.host),
 						g_media.bts.peer.port_nr,
-						g_media.bts.rtp_pt));
+						g_media.bts.rtp_pt,
+						g_media.bts.local_osmux_cid));
 		g_media.bts.ipa_mdcx_seen := true;
 		repeat;
 		}
@@ -241,10 +280,23 @@ altstep as_Media_ipacc(RSL_DCHAN_PT rsl_pt := RSL, RSL_DCHAN_PT rsl_pt_ho_target
 		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
 			g_media.bts1.rtp_pt := ie.ipa_rtp_pt2;
 		}
+		if (f_rsl_find_ie(rsl, RSL_IE_OSMO_OSMUX_CID, ie)) {
+			if (not g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC CRCX with Osmux CID IE");
+			}
+			g_media.bts.remote_osmux_cid := ie.osmux_cid.cid;
+		} else {
+			if (g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC CRCX without Osmux CID IE");
+			}
+			g_media.bts.local_osmux_cid := omit;
+			g_media.bts.remote_osmux_cid := omit;
+		}
 		rsl_pt_ho_target.send(ts_RSL_IPA_CRCX_ACK(g_chan_nr, g_media.bts1.conn_id,
 						f_inet_addr(g_media.bts1.bts.host),
 						g_media.bts1.bts.port_nr,
-						g_media.bts1.rtp_pt));
+						g_media.bts1.rtp_pt,
+						g_media.bts.local_osmux_cid));
 		g_media.bts1.ipa_crcx_seen := true;
 		repeat;
 		}
@@ -267,10 +319,23 @@ altstep as_Media_ipacc(RSL_DCHAN_PT rsl_pt := RSL, RSL_DCHAN_PT rsl_pt_ho_target
 		if (f_rsl_find_ie(rsl, RSL_IE_IPAC_RTP_PAYLOAD2, ie)) {
 			g_media.bts1.rtp_pt := ie.ipa_rtp_pt2;
 		}
+		if (f_rsl_find_ie(rsl, RSL_IE_OSMO_OSMUX_CID, ie)) {
+			if (not g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC MDCX with Osmux CID IE");
+			}
+			g_media.bts.remote_osmux_cid := ie.osmux_cid.cid;
+		} else {
+			if (g_pars.use_osmux_bts) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx unexpected IPAC MDCX without Osmux CID IE");
+			}
+			g_media.bts.local_osmux_cid := omit;
+			g_media.bts.remote_osmux_cid := omit;
+		}
 		rsl_pt_ho_target.send(ts_RSL_IPA_MDCX_ACK(g_chan_nr, g_media.bts1.conn_id,
 						f_inet_addr(g_media.bts1.peer.host),
 						g_media.bts1.peer.port_nr,
-						g_media.bts1.rtp_pt));
+						g_media.bts1.rtp_pt,
+						g_media.bts.local_osmux_cid));
 		g_media.bts1.ipa_mdcx_seen := true;
 		repeat;
 		}
@@ -280,10 +345,10 @@ altstep as_Media_ipacc(RSL_DCHAN_PT rsl_pt := RSL, RSL_DCHAN_PT rsl_pt_ho_target
 
 function f_rx_crcx(MgcpCommand mgcp_cmd)
 	 runs on MSC_ConnHdlr return template MgcpResponse {
-	var MgcpOsmuxCID osmux_cid;
 	var SDP_Message sdp;
 	var integer cid := f_get_free_mgcp_conn();
 	var charstring local_rtp_addr;
+	var MgcpOsmuxCID osmux_cid;
 
 	if (g_pars.media_mgw_offer_ipv6 == true) {
 		local_rtp_addr := host_mgw_rtp_v6; /* Use IPv6 by default if no remote addr is provided by client */
@@ -318,9 +383,13 @@ function f_rx_crcx(MgcpCommand mgcp_cmd)
 						int2str(mgcp_conn.sample_rate))),
 			valueof(ts_SDP_ptime(mgcp_conn.ptime)) } ));
 	var template MgcpResponse mgcp_resp;
-	if (g_pars.use_osmux_cn and f_MgcpCmd_contains_par(mgcp_cmd, "X-OSMUX")) {
+	if ((g_pars.use_osmux_cn or g_pars.use_osmux_bts) and
+	    f_MgcpCmd_contains_par(mgcp_cmd, "X-OSMUX")) {
 		osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
-		mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, osmux_cid, sdp);
+		if (osmux_cid != -1) {
+			mgcp_conn.remote_osmux_cid := osmux_cid;
+		}
+		mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, mgcp_conn.local_osmux_cid, sdp);
 	} else {
 		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, mgcp_conn.conn_id, sdp);
 	}
@@ -675,6 +744,7 @@ type record TestHdlrParams {
 	boolean         exp_ms_power_params,
 	boolean		aoip,
 	boolean		use_osmux_cn,
+	boolean		use_osmux_bts,
 	charstring	host_aoip_tla,
 	TestHdlrParamsMSCPool mscpool,
 	boolean		media_mgw_offer_ipv6,
@@ -713,6 +783,7 @@ template (value) TestHdlrParams t_def_TestHdlrPars := {
 	exp_ms_power_params := false,
 	aoip := true,
 	use_osmux_cn := false,
+	use_osmux_bts := false,
 	host_aoip_tla := "1.2.3.4",
 	mscpool := {
 		bssap_idx := 0,
