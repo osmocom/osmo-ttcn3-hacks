@@ -49,6 +49,11 @@ import from RTP_Emulation all;
 
 import from AMR_Types all;
 
+import from OSMUX_Types all;
+import from OSMUX_CodecPort all;
+import from OSMUX_CodecPort_CtrlFunct all;
+import from OSMUX_Emulation all;
+
 import from IPL4asp_Types all;
 import from TRXC_Types all;
 import from TRXC_CodecPort all;
@@ -99,6 +104,8 @@ modulepar {
 	integer mp_bsc_ctrl_port := 4249;
 	charstring mp_rtpem_bind_ip := "127.0.0.1";
 	integer mp_rtpem_bind_port := 6766;
+	charstring mp_osmuxem_bind_ip := "127.0.0.1";
+	integer mp_osmuxem_bind_port := 1984;
 	integer mp_tolerance_rxqual := 1;
 	integer mp_tolerance_rxlev := 3;
 	integer mp_tolerance_timing_offset_256syms := 0;
@@ -219,6 +226,9 @@ type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
 	var RTP_Emulation_CT vc_RTPEM;
 	port RTPEM_CTRL_PT RTPEM_CTRL;
 	port RTPEM_DATA_PT RTPEM_DATA;
+	var OSMUX_Emulation_CT vc_OsmuxEM;
+	port OsmuxEM_CTRL_PT OsmuxEM_CTRL;
+	port OsmuxEM_DATA_PT OsmuxEM_DATA;
 }
 
 private function f_init_rsl(charstring id) runs on test_CT {
@@ -319,7 +329,9 @@ type record ConnHdlrPars {
 	/* Training Sequence Code */
 	GsmTsc tsc,
 	/* Frequency hopping parameters */
-	FreqHopPars fhp
+	FreqHopPars fhp,
+	OsmuxCID loc_osmux_cid,
+	OsmuxCID rem_osmux_cid optional
 };
 
 /* Test-specific parameters */
@@ -907,7 +919,9 @@ friend template ConnHdlrPars t_Pars(template RslChannelNr chan_nr,
 		maio_hsn := ts_HsnMaio(0, 0),
 		ma_map := c_MA_null,
 		ma := { }
-	}
+	},
+	loc_osmux_cid := trx_nr,
+	rem_osmux_cid := omit
 }
 
 /* This altstep triggers on receipt of a L1CTL DATA.ind matching the given
@@ -2622,7 +2636,7 @@ runs on ConnHdlr {
 		/* FIXME (OS#5242): do not include Remote IP/Port IEs because
 		 * osmo-bts would respond with nonsense listen addr='0.0.0.0'. */
 		ts_RSL_IPA_CRCX(g_chan_nr, omit, omit),
-		tr_RSL_IPA_CRCX_ACK(g_chan_nr, ?, ?, ?),
+		tr_RSL_IPA_CRCX_ACK(g_chan_nr, ?, ?, ?, omit),
 		"IPA CRCX ACK");
 	var uint16_t conn_id := crcx_ack.ies[1].body.ipa_conn_id;
 
@@ -2642,6 +2656,71 @@ runs on ConnHdlr {
 
 	/* Step 5: set the given RTP emulation mode */
 	f_rtpem_mode(RTPEM_CTRL, mode);
+}
+
+/* Initialize and start the RTP emulation component for a ConnHdlr */
+friend function f_osmuxem_activate(inout octetstring payload,
+				 OsmuxemConfig cfg := c_OsmuxemDefaultCfg,
+				 OsmuxemMode mode := OSMUXEM_MODE_BIDIR)
+runs on ConnHdlr {
+	var RSL_IE_Body ie;
+	var OsmuxTxHandle tx_hdl;
+	var OsmuxRxHandle rx_hdl;
+	/* Step 0: initialize, connect and start the emulation component */
+	vc_OsmuxEM := OSMUX_Emulation_CT.create(testcasename() & "-OsmuxEM");
+	map(vc_OsmuxEM:OSMUX, system:OSMUX);
+	connect(vc_OsmuxEM:CTRL, self:OsmuxEM_CTRL);
+	connect(vc_OsmuxEM:DATA, self:OsmuxEM_DATA);
+	vc_OsmuxEM.start(OSMUX_Emulation.f_main());
+
+	/* Step 1: configure the RTP parameters */
+	var integer payload_len := 31;
+	var octetstring hdr := ''O;
+
+	/* Pad the payload to conform the expected length */
+	payload := f_pad_oct(hdr & payload, payload_len, '00'O);
+	cfg.tx_fixed_payload := payload;
+	f_osmuxem_configure(OsmuxEM_CTRL, cfg);
+
+	/* Step 2: bind the RTP emulation to the configured address */
+	var PortNumber osmuxem_bind_port := mp_osmuxem_bind_port;
+	f_osmuxem_bind(OsmuxEM_CTRL, mp_osmuxem_bind_ip, osmuxem_bind_port);
+	rx_hdl := c_OsmuxemDefaultRxHandle;
+	rx_hdl.cid := g_pars.loc_osmux_cid;
+	f_osmuxem_register_rxhandle(OsmuxEM_CTRL, rx_hdl);
+
+	/* Step 3a: send CRCX to create an RTP connection at the IUT */
+	var RSL_Message crcx_ack := f_rsl_transceive_ret(
+		/* FIXME (OS#5242): do not include Remote IP/Port IEs because
+		 * osmo-bts would respond with nonsense listen addr='0.0.0.0'. */
+		ts_RSL_IPA_CRCX(g_chan_nr, omit, omit, g_pars.loc_osmux_cid),
+		tr_RSL_IPA_CRCX_ACK(g_chan_nr, ?, ?, ?, ?),
+		"IPA CRCX ACK");
+	var uint16_t conn_id := crcx_ack.ies[1].body.ipa_conn_id;
+	f_rsl_find_ie(crcx_ack, RSL_IE_OSMO_OSMUX_CID, ie);
+	g_pars.rem_osmux_cid := ie.osmux_cid.cid;
+
+
+	/* Step 3b: send MDCX with the configured address/port to the IUT */
+	var RSL_Message mdcx_ack := f_rsl_transceive_ret(
+		ts_RSL_IPA_MDCX(g_chan_nr, conn_id,
+				remote_ip := f_inet_addr(mp_osmuxem_bind_ip),
+				remote_port := osmuxem_bind_port,
+				rtp_pt2 := 0,
+				osmux_cid := g_pars.loc_osmux_cid),
+		tr_RSL_IPA_MDCX_ACK(g_chan_nr, conn_id, ?, ?, ?, g_pars.rem_osmux_cid),
+		"IPA MDCX ACK");
+
+	tx_hdl := valueof(t_TxHandleAMR590(g_pars.rem_osmux_cid));
+	f_osmuxem_register_txhandle(OsmuxEM_CTRL, tx_hdl);
+
+	/* Step 4: connect to the IUT's address/port parsed from MDCX ACK */
+	var HostName bts_bind_ip := f_inet_ntoa(mdcx_ack.ies[2].body.ipa_local_ip);
+	var PortNumber bts_bind_port := mdcx_ack.ies[3].body.ipa_local_port;
+	f_osmuxem_connect(OsmuxEM_CTRL, bts_bind_ip, bts_bind_port);
+
+	/* Step 5: set the given RTP emulation mode */
+	f_osmuxem_mode(OsmuxEM_CTRL, mode);
 }
 
 /* establish DChan, verify existance + contents of measurement reports */
@@ -8211,6 +8290,120 @@ testcase TC_speech_rtp_tchh() runs on test_CT {
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+
+/* Verify handling of Downlink and Uplink Osmux speech frames */
+private function f_TC_speech_osmux(charstring id) runs on ConnHdlr {
+	var L1ctlDlMessage l1_dl;
+	var OSMUX_PDU osmux_pdu;
+	var octetstring pl;
+	var octetstring exp_rtp_pl;
+	timer Td, Tu;
+
+	f_l1_tune(L1CTL);
+	f_est_dchan();
+
+	/* Activate the RTP emulation */
+	pl := f_rnd_octstring(6);
+	f_osmuxem_activate(pl);
+
+	/* Give the scheduler some time to fill up the buffers */
+	f_sleep(2.0);
+	L1CTL.clear;
+	RSL.clear;
+
+	/* we transmit using AMR_FT_2 (5.90), see t_TxHandleAMR590 in f_osmuxem_activate() */
+	var integer amr_ft := get_start_amr_ft();
+	var integer amr_pl_len := f_amrft_payload_len(amr_ft);
+	var octetstring hdr := enc_RTP_AMR_Hdr(valueof(ts_RTP_AMR_Hdr(amr_ft, amr_ft, '1'B)));
+	pl := f_osmux_gen_expected_rx_rtp_payload(amr_ft, pl);
+	exp_rtp_pl := hdr & pl;
+
+	/* Make sure that Downlink frames are received at the UE */
+	Td.start(2.0);
+	alt {
+	[] L1CTL.receive(tr_L1CTL_TRAFFIC_IND(g_chan_nr, frame := exp_rtp_pl)) -> value l1_dl {
+		log("TCH received: ", l1_dl.payload.traffic_ind.data);
+		L1CTL.send(ts_L1CTL_TRAFFIC_REQ(g_chan_nr, l1_dl.dl_info.link_id,
+			   l1_dl.payload.traffic_ind.data));
+		setverdict(pass);
+		}
+	[] L1CTL.receive(tr_L1CTL_TRAFFIC_IND(g_chan_nr, frame := ?)) -> value l1_dl {
+		setverdict(fail, "Rx unexpected Downlink speech frame ",
+			   "(", l1_dl.payload.traffic_ind.data, ") ",
+			   "expected (", exp_rtp_pl, ")");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	[] as_l1_sacch();
+	[] L1CTL.receive { repeat; }
+	[] Td.timeout {
+		setverdict(fail, "Timeout waiting for Downlink speech frames");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* Make sure that Uplink frames are received at the BTS */
+	OsmuxEM_DATA.clear;
+	var template (present) OSMUX_PDU osmux_pdu_exp := tr_PDU_Osmux_AMR(cid := g_pars.loc_osmux_cid,
+									   amr_ft := amr_ft,
+									   amr_cmr := amr_ft);
+	Tu.start(2.0);
+	alt {
+	[] OsmuxEM_DATA.receive(osmux_pdu_exp) -> value osmux_pdu {
+		var boolean matched := false;
+		for (var integer i := 0; i < osmux_pdu.osmux_amr.header.ctr + 1; i := i + 1) {
+			var octetstring rx_pl;
+			rx_pl := f_osmux_amr_get_nth_amr_payload(osmux_pdu.osmux_amr, i);
+			log("got ", rx_pl, " vs exp ", pl);
+			if (rx_pl == pl) {
+				matched := true;
+				break;
+			}
+		}
+		if (not matched) {
+			repeat;
+		}
+		}
+	[] OsmuxEM_DATA.receive { repeat; }
+	[] Tu.timeout {
+		setverdict(fail, "Timeout waiting for Uplink speech frames");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	f_osmuxem_mode(OsmuxEM_CTRL, OSMUXEM_MODE_NONE);
+	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
+	f_rsl_chan_deact();
+	f_rslem_unregister(0, g_chan_nr);
+}
+testcase TC_speech_osmux_tchf() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+
+	f_init();
+
+	/* TS5, TCH/H0, V3 (AMR codec) */
+	pars := valueof(t_Pars(ts_RslChanNr_Bm(1), ts_RSL_ChanMode(RSL_CHRT_TCH_F, RSL_CMOD_SP_GSM3)));
+	pars.mr_conf := valueof(ts_RSL_MultirateCfg(false, 0, '00000100'B /* 5,90k */));
+	vc_conn := f_start_handler(refers(f_TC_speech_osmux), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+testcase TC_speech_osmux_tchh() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars;
+
+	f_init();
+
+	/* TS5, TCH/H0, V3 (AMR codec) */
+	pars := valueof(t_Pars(ts_RslChanNr_Lm(5, 0), ts_RSL_ChanMode(RSL_CHRT_TCH_H, RSL_CMOD_SP_GSM3)));
+	pars.mr_conf := valueof(ts_RSL_MultirateCfg(false, 0, '00000100'B /* 5,90k */));
+	vc_conn := f_start_handler(refers(f_TC_speech_osmux), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 private function f_TC_early_immediate_assignment(charstring id) runs on ConnHdlr {
 	var GsmFrameNumber fn;
 	var ChannelDescription ch_desc;
@@ -8808,6 +9001,8 @@ control {
 	execute( TC_speech_no_rtp_tchh() );
 	execute( TC_speech_rtp_tchf() );
 	execute( TC_speech_rtp_tchh() );
+	execute( TC_speech_osmux_tchf() );
+	execute( TC_speech_osmux_tchh() );
 
 	execute( TC_early_immediate_assignment() );
 

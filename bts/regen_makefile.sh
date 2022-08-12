@@ -11,6 +11,7 @@ FILES="
 	IuUP_EncDec.cc
 	L1CTL_PortType_CtrlFunctDef.cc
 	Native_FunctionDefs.cc
+	OSMUX_CodecPort_CtrlFunctDef.cc
 	RLCMAC_EncDec.cc
 	RTP_CodecPort_CtrlFunctDef.cc
 	RTP_EncDec.cc

@@ -47,6 +47,7 @@ FILES+="TRXC_Types.ttcn TRXC_CodecPort.ttcn TRXC_CodecPort_CtrlFunct.ttcn TRXC_C
 FILES+="AMR_Types.ttcn "
 FILES+="RTP_CodecPort.ttcn RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttcn IuUP_EncDec.cc "
 FILES+="RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc "
+FILES+="OSMUX_CodecPort.ttcn OSMUX_Emulation.ttcn OSMUX_Types.ttcn OSMUX_CodecPort_CtrlFunct.ttcn OSMUX_CodecPort_CtrlFunctDef.cc "
 FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
 FILES+="IPA_Testing.ttcn"
 gen_links $DIR $FILES
