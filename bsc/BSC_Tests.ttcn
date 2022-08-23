@@ -80,7 +80,7 @@ const integer NUM_TRX := 4;
 const integer NUM_BTS := 3;
 const integer NUM_BTS_CFG := 4; /* we have 4 BTS in the osmo-bsc.cfg (for inter-BSC HO tests) but use only 3 */
 const integer NUM_TRX_CFG := 1; /* we support up to 4 TRX per BTS, but have only 1 TRX per BTS in osmo-bsc.cfg */
-const integer NUM_MSC := 3;
+const integer NUM_MSC := 4;
 const float T3101_MAX := 12.0;
 
 /* make sure to sync this with the osmo-bts.cfg you're using */
@@ -698,6 +698,18 @@ modulepar {
 			peer_ssn := 254,
 			sio := '83'O,
 			rctx := 3
+		},
+		{
+			transport := BSSAP_TRANSPORT_AoIP,
+			sccp_service_type := "mtp3_itu",
+			sctp_addr := { 23909, "127.0.0.1", 2905, "127.0.0.1" },
+			own_pc := 4,	/* 0.0.4 fourth MSC emulation */
+			own_ssn := 254,
+			peer_pc := 187, /* 0.23.3 osmo-bsc */
+			peer_ssn := 254,
+			sio := '83'O,
+			rctx := 4,
+			own_alt_pc := 5 /* 0.0.5 alternative PC also routed to 0.0.4 */
 		}
 	};
 
@@ -1201,7 +1213,7 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
 	f_init_vty("VirtMSC");
 	f_vty_allow_osmux_cn(g_osmux_enabled_cn);
 
-	var my_BooleanList allow_attach := { false, false, false };
+	var my_BooleanList allow_attach := { false, false, false, false };
 	f_init_statsd("VirtMSC", vc_STATSD, mp_test_ip, mp_bsc_statsd_port);
 
 	/* Make sure each MSC's internal state is "DISCONNECTED" at first */
@@ -11715,6 +11727,79 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* The BSC asks for Compl L3 to 0.0.5, but osmo-stp redirects this SCCP CR to 0.0.4.
+ * The SCCP CC with the Compl L3 response comes back from 0.0.4.
+ * The BSC should continue to use that point-code 0.0.4 for this BSSAP connection.
+ * Related: SYS#6044 */
+private function f_tc_L3Compl_answer_from_other_m3ua_addr(charstring id) runs on MSC_ConnHdlr {
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+
+	f_create_bssmap_exp(l3_enc);
+
+	timer T := 10.0;
+
+	f_logp(BSCVTY, "establish channel, send Complete Layer 3 Info");
+	f_create_bssmap_exp(l3_enc);
+
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn);
+
+	f_logp(BSCVTY, "expect BSSAP Complete Layer 3 Info at MSC GW1");
+	var template PDU_BSSAP exp_l3_compl;
+	exp_l3_compl := tr_BSSMAP_ComplL3()
+	if (g_pars.aoip == false) {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := omit;
+	} else {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := ?;
+	}
+
+	var PDU_BSSAP bssap;
+	T.start;
+	alt {
+	[] BSSAP.receive(exp_l3_compl) -> value bssap {
+		f_logp(BSCVTY, "received expected Complete Layer 3 Info at MSC GW1");
+		log("rx exp_l3_compl = ", bssap);
+		}
+	[] BSSAP.receive(tr_BSSMAP_ComplL3) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Received non-matching COMPLETE LAYER 3 INFORMATION");
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	f_logp(BSCVTY, "send Compl L3 response");
+	/* Send a response, this will trigger the SCCP CC; then, this goes on to receive more messages from the BSC,
+	 * confirming a working BSSAP link. */
+	f_cipher_mode(g_pars.encr);
+
+	f_sleep(1.0);
+
+	f_perform_clear();
+}
+
+testcase TC_L3Compl_answer_from_other_m3ua_addr() runs on test_CT {
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 4);
+	f_sleep(1.0);
+
+	/* Make sure 'msc 3' gets chosen */
+	f_vty_msc_allow_attach(BSCVTY, {false, false, false, true});
+
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars(bssap_idx := 3);
+	pars.mscpool.rsl_idx := 0;
+	pars.encr := valueof(t_EncrParams('01'O, f_rnd_octstring(8)));
+
+	vc_conn := f_start_handler_create(pars);
+	f_start_handler_run(vc_conn, refers(f_tc_L3Compl_answer_from_other_m3ua_addr), pars);
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -12045,6 +12130,10 @@ control {
 	execute( TC_chan_alloc_algo_ascending() );
 	execute( TC_chan_alloc_algo_descending() );
 	execute( TC_chan_alloc_algo_ass_dynamic() );
+
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		execute( TC_L3Compl_answer_from_other_m3ua_addr() );
+	}
 
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */
