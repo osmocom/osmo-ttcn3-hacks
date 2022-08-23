@@ -11715,6 +11715,92 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Have one BSC connected to the same MSC over two gateways, and verify that if
+ * the BSC sends Complete Layer 3 Info to MSC GW 1, and the MSC GW2 answers,
+ * the BSC doesn't reject the answer. (SYS#6044) */
+private function f_tc_L3Compl_answer_from_other_m3ua_addr_part1_gw1(charstring id) runs on MSC_ConnHdlr {
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+
+	var PDU_ML3_MS_NW l3_info := g_pars.mscpool.l3_info;
+
+	timer T := 10.0;
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(valueof(l3_info));
+
+	f_logp(BSCVTY, "establish channel, send Complete Layer 3 Info");
+	f_create_bssmap_exp(l3_enc);
+
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn);
+
+	f_logp(BSCVTY, "expect BSSAP Complete Layer 3 Info at MSC GW1");
+	var template PDU_BSSAP exp_l3_compl;
+	exp_l3_compl := tr_BSSMAP_ComplL3()
+	if (g_pars.aoip == false) {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := omit;
+	} else {
+		exp_l3_compl.pdu.bssmap.completeLayer3Information.codecList := ?;
+	}
+
+	var PDU_BSSAP bssap;
+	T.start;
+	alt {
+	[] BSSAP.receive(exp_l3_compl) -> value bssap {
+		f_logp(BSCVTY, "received expected Complete Layer 3 Info at MSC GW1");
+		log("rx exp_l3_compl = ", bssap);
+		}
+	[] BSSAP.receive(tr_BSSMAP_ComplL3) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Received non-matching COMPLETE LAYER 3 INFORMATION");
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	setverdict(pass);
+	f_sleep(1.0);
+
+}
+private function f_tc_L3Compl_answer_from_other_m3ua_addr_part2_gw2(charstring id) runs on MSC_ConnHdlr {
+	// f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+
+	f_logp(BSCVTY, "start ciphering from GW 2");
+
+	/* FIXME: fails with
+	 * "RAN Connection table not found by component TC_L3Compl_answer_from_other_m3ua_addr(28)" */
+	/* FIXME: where will BSC send the answer, maybe to gw1 instead? */
+	f_cipher_mode(g_pars.encr, rsl_pt := RSL, rsl_proc_pt := RSL_PROC);
+
+	/* FIXME: do later? */
+	f_perform_clear(RSL, RSL_PROC);
+}
+testcase TC_L3Compl_answer_from_other_m3ua_addr() runs on test_CT {
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	f_ctrs_msc_init();
+
+	/* Let BSC send ComplLayer3 to MSC GW 1 */
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars.mscpool.rsl_idx := 0;
+	pars.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('001010000000001'H)), '00F110'O));
+	pars.encr := valueof(t_EncrParams('01'O, f_rnd_octstring(8)));
+	vc_conn1 := f_start_handler(refers(f_tc_L3Compl_answer_from_other_m3ua_addr_part1_gw1), pars);
+	vc_conn1.done;
+	f_ctrs_msc_expect(0, "mscpool:subscr:new");
+
+	/* Let MSC GW 2 send a CipherModeCmd. BSC must not reject it. */
+	var MSC_ConnHdlr vc_conn2;
+	pars.mscpool.bssap_idx := 1;
+	vc_conn2 := f_start_handler(refers(f_tc_L3Compl_answer_from_other_m3ua_addr_part2_gw2), pars);
+	vc_conn2.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -12045,6 +12131,10 @@ control {
 	execute( TC_chan_alloc_algo_ascending() );
 	execute( TC_chan_alloc_algo_descending() );
 	execute( TC_chan_alloc_algo_ass_dynamic() );
+
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		execute( TC_L3Compl_answer_from_other_m3ua_addr() );
+	}
 
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */
