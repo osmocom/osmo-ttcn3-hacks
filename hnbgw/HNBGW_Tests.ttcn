@@ -97,6 +97,8 @@ modulepar {
 		rctx := 2
 	};
 
+	boolean mp_enable_pfcp_tests := false;
+
 	/* IP address at which we listen for PFCP to emulate a UPF in ttcn3 */
 	charstring mp_pfcp_ip_local := "127.0.0.1";
 
@@ -1240,7 +1242,7 @@ template GtpParameters t_GtpParameters := {
 	}
 }
 
-friend function f_tc_ps_rab_assignment(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+friend function f_tc_ps_rab_assignment_with_pfcp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
 	var RANAP_PDU tx;
 	var RANAP_PDU rx;
 	timer T := 5.0;
@@ -1329,13 +1331,75 @@ friend function f_tc_ps_rab_assignment(charstring id, TestHdlrParams pars) runs 
 	f_sleep(2.0);
 }
 
-testcase TC_ps_rab_assignment() runs on test_CT {
+testcase TC_ps_rab_assignment_with_pfcp() runs on test_CT {
 	var ConnHdlr vc_conn;
 	f_init();
 	f_start_hnbs();
 	f_sleep(1.0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment), t_pars(7, ps_domain := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_with_pfcp), t_pars(7, ps_domain := true));
+	vc_conn.done;
+}
+
+altstep as_disallow_pfcp() runs on ConnHdlr {
+	[] PFCP.receive(PDU_PFCP:?) {
+			setverdict(fail, "Received PFCP message, but no PFCP communication expected");
+			mtc.stop;
+		}
+}
+
+friend function f_tc_ps_rab_assignment_without_pfcp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var RANAP_PDU rx;
+	timer T := 5.0;
+
+	f_init_handler(pars);
+
+	f_pfcp_register();
+	activate(as_disallow_pfcp());
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+
+	var GtpParameters gtp_pars := valueof(t_GtpParameters);
+	var template RAB_SetupOrModifyList rab_sml;
+
+	/* Send RAB Assignment Request */
+	rab_sml := ts_RAB_SML_ps(t_RAB_id(23), f_ts_RAB_TLA(gtp_pars.core.remote.addr), gtp_pars.core.remote.teid);
+	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	BSSAP.send(tx);
+
+	/* Expect on Iuh: unmodified RAB Assignment Request */
+	rx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	RUA.receive(rx);
+
+	/* Send back RAB Assignment Response via Iuh */
+	var template RAB_SetupOrModifiedList rab_smdl;
+	rab_smdl := ts_RAB_SMdL_ps(t_RAB_id(23), f_ts_RAB_TLA(gtp_pars.access.remote.addr),
+				   gtp_pars.access.remote.teid);
+	tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
+	RUA.send(tx);
+
+	/* Expect on IuPS: unmodified RAB Assignment Response */
+	BSSAP.receive(tr_RANAP_RabAssResp(rab_smdl));
+
+	f_sleep(2.0);
+	tx := valueof(ts_RANAP_IuReleaseCommand(ts_RanapCause_om_intervention));
+	f_iu2iuh(tx);
+
+	tx := valueof(ts_RANAP_IuReleaseComplete());
+	f_iuh2iu(tx);
+
+	f_sleep(2.0);
+}
+
+testcase TC_ps_rab_assignment_without_pfcp() runs on test_CT {
+	var ConnHdlr vc_conn;
+	f_init();
+	f_start_hnbs();
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_without_pfcp), t_pars(7, ps_domain := true));
 	vc_conn.done;
 }
 
@@ -1354,7 +1418,11 @@ control {
 	execute(TC_rab_assign_mgcp_to());
 	execute(TC_ranap_cs_mo_disconnect());
 	execute(TC_ranap_ps_mo_disconnect());
-	execute(TC_ps_rab_assignment());
+	if (mp_enable_pfcp_tests) {
+		execute(TC_ps_rab_assignment_with_pfcp());
+	} else {
+		execute(TC_ps_rab_assignment_without_pfcp());
+	}
 }
 
 }
