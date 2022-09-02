@@ -44,6 +44,7 @@ FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter
 FILES+="L3_Templates.ttcn L3_Common.ttcn "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="TRXC_Types.ttcn TRXC_CodecPort.ttcn TRXC_CodecPort_CtrlFunct.ttcn TRXC_CodecPort_CtrlFunctDef.cc "
+FILES+="AMR_Types.ttcn "
 FILES+="RTP_CodecPort.ttcn RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_Emulation.ttcn IuUP_EncDec.cc "
 FILES+="RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 FILES+="PCUIF_Types.ttcn PCUIF_CodecPort.ttcn "
