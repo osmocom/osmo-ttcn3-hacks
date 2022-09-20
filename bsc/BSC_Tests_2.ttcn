@@ -57,6 +57,175 @@ import from GSM_RestOctets all;
 import from TCCConversion_Functions all;
 import from MSC_ConnectionHandler all;
 
+private function f_vty_set_meas_res_l1_timeout(TELNETasp_PT pt, charstring val) {
+	f_vty_enter_cfg_network(pt);
+	f_vty_transceive(pt, "timer X27 " & val);
+	f_vty_transceive(pt, "end");
+}
+
+private function f_TC_chan_no_meas_res(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	g_pars.ra := '02'O; /* RA containing reason=LU */
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+	f_create_bssmap_exp(l3_enc);
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
+
+	/* we should now have a COMPL_L3 at the MSC */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ComplL3);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	/* The channel is open, but we are not sending any MEAS RES messages. The channel should release after due
+	 * timeout. */
+	f_expect_lchan_rel(RSL, RSL_PROC);
+
+	BSSAP.receive(tr_BSSMAP_ClearRequest);
+	f_perform_clear_no_lchan();
+
+	f_sleep(5.0);
+}
+testcase TC_chan_no_meas_res() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true, guard_timeout := 30.0);
+	f_sleep(1.0);
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "3");
+	vc_conn := f_start_handler(refers(f_TC_chan_no_meas_res));
+	vc_conn.done;
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "default");
+	f_shutdown_helper();
+}
+
+private function f_TC_chan_meas_res_no_l1_info(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	g_pars.ra := '02'O; /* RA containing reason=LU */
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+	f_create_bssmap_exp(l3_enc);
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
+
+	/* we should now have a COMPL_L3 at the MSC */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ComplL3);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	/* The channel is open, we are sending MEAS RES messages, but they do not contain L1 Info. The channel should
+	 * release after due timeout. */
+	timer T_meas := 1.0;
+	T_meas.start;
+	alt {
+	[] T_meas.timeout {
+			RSL.send(ts_RSL_MEAS_RES_EMPTY(g_chan_nr, 0,
+						       ts_RSL_IE_UplinkMeas(30, 0),
+						       ts_RSL_IE_BS_Power(0)));
+			T_meas.start;
+			repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearRequest);
+	}
+
+	f_expect_lchan_rel(RSL, RSL_PROC);
+	f_perform_clear_no_lchan();
+}
+testcase TC_chan_meas_res_no_l1_info() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true, guard_timeout := 30.0);
+	f_sleep(1.0);
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "3");
+	vc_conn := f_start_handler(refers(f_TC_chan_meas_res_no_l1_info));
+	vc_conn.done;
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "default");
+	f_shutdown_helper();
+}
+
+private function f_TC_chan_meas_res_with_l1_info(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	g_pars.ra := '02'O; /* RA containing reason=LU */
+
+	var MobileIdentityLV mi := valueof(ts_MI_IMSI_LV(g_pars.imsi));
+	var PDU_ML3_MS_NW l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, mi));
+	var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_info);
+	var template uint3_t tsc := ?;
+
+	f_MscConnHdlr_init(g_pars.media_nr, host_bts, host_mgw_mgcp, FR_AMR);
+	f_create_bssmap_exp(l3_enc);
+	/* call helper function for CHAN_RQD -> IMM ASS ->EST_IND */
+	RSL_Emulation.f_chan_est(g_pars.ra, l3_enc, g_pars.link_id, g_pars.fn, tsc);
+
+	/* we should now have a COMPL_L3 at the MSC */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_ComplL3);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for COMPLETE LAYER 3 INFORMATION");
+		}
+	}
+
+	/* The channel is open, we are sending MEAS RES messages WITH L1 Info. The channel should remain active. */
+	timer T_meas := 1.0;
+	T_meas.start;
+	var integer meas_count := 10;
+	alt {
+	[] T_meas.timeout {
+			/* Send a couple MEAS RES until we're sure the channel was kept open beyond the X27 timeout */
+			meas_count := meas_count - 1;
+			if (meas_count < 1) {
+				/* Done. */
+				break;
+			}
+
+			f_logp(BSCVTY, "Sending MEAS RES nr " & int2str(meas_count));
+			var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8)));
+			RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
+						 l3_mr, 0));
+			T_meas.start;
+			repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearRequest) {
+			setverdict(fail, "expected channel to remain open, but received Clear Request");
+		}
+	}
+
+	setverdict(pass);
+	f_perform_clear();
+}
+testcase TC_chan_meas_res_with_l1_info() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true, guard_timeout := 30.0);
+	f_sleep(1.0);
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "3");
+	vc_conn := f_start_handler(refers(f_TC_chan_meas_res_with_l1_info));
+	vc_conn.done;
+	f_vty_set_meas_res_l1_timeout(BSCVTY, "default");
+	f_shutdown_helper();
+}
+
 control {
+	execute( TC_chan_no_meas_res() );
+	execute( TC_chan_meas_res_no_l1_info() );
+	execute( TC_chan_meas_res_with_l1_info() );
 }
 }
