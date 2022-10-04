@@ -78,8 +78,24 @@ type component BSC_ConnHdlr extends RAN_ConnHdlr, MNCC_ConnHdlr, GSUP_ConnHdlr, 
 }
 
 type record BSC_ConnHdlrNetworkPars {
+	/* Bitmask of expected A5 levels; in Ciphering, will expect use of the highest A5 remaining after masking this
+	 * with A5 supported by the MS */
 	OCT1	kc_support,
+	/* osmo-msc VTY cfg under 'network': If a test wants to temporarily modify auth and encr config, this is the
+	 * original config to return to for this test (is *not* sent to vty before the test, but maybe it should).
+	 * For example: { "authentication optional", "encryption a5 0 3" } */
+	rof_charstring net_config,
+	/* expect_attach_success == true: expect Location Updating / CM Service Request to succeed.
+	 * expect_attach_success == false: expect the MSC to reject LU / CM Service. */
+	boolean expect_attach_success,
+	/* expect_tmsi == true: expect MSC to allocate a new TMSI.
+	 * expect_tmsi == false: expect no TMSI to be assigned, operate with IMSI Mobile Identity. */
 	boolean expect_tmsi,
+	/* expect_auth == true overrides expect_auth_attempt == false */
+	boolean	expect_auth_attempt,
+	/* hlr_has_auth_info has an effect only when (expect_auth_attempt or expect_auth) == true.
+	 * hlr_has_auth_info == false means the HLR responds to Send Auth Info Request with a NACK. */
+	boolean hlr_has_auth_info,
 	boolean	expect_auth,
 	boolean	expect_ciph,
 	boolean expect_imei,
@@ -404,7 +420,11 @@ runs on BSC_ConnHdlr {
 	} else {
 		if (etype != EST_TYPE_PAG_RESP) {
 			/* explicit CM SERVICE ACCEPT */
-			BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC));
+			if (g_pars.net.expect_attach_success) {
+				BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_ACC));
+			} else {
+				BSSAP.receive(tr_PDU_DTAP_MT(tr_CM_SERV_REJ));
+			}
 		}
 	}
 }
@@ -436,34 +456,43 @@ private function f_build_lu(MobileIdentityLV mi) runs on BSC_ConnHdlr return PDU
 altstep as_GSUP_SAI() runs on BSC_ConnHdlr {
 var GSUP_IE auth_tuple;
 [] GSUP.receive(tr_GSUP_SAI_REQ(g_pars.imsi)) {
-	if (g_pars.use_umts_aka) {
-		if (not g_pars.vec_keep) {
-			g_pars.vec := f_gen_auth_vec_3g();
+	if (g_pars.net.hlr_has_auth_info) {
+		if (g_pars.use_umts_aka) {
+			if (not g_pars.vec_keep) {
+				g_pars.vec := f_gen_auth_vec_3g();
+			}
+			auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
+									g_pars.vec.sres,
+									g_pars.vec.kc,
+									g_pars.vec.ik,
+									g_pars.vec.ck,
+									g_pars.vec.autn,
+									g_pars.vec.res));
+			GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+		} else {
+			if (not g_pars.vec_keep) {
+				g_pars.vec := f_gen_auth_vec_2g();
+			}
+			auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
+									g_pars.vec.sres,
+									g_pars.vec.kc));
+			GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
 		}
-		auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G3G(g_pars.vec.rand,
-								g_pars.vec.sres,
-								g_pars.vec.kc,
-								g_pars.vec.ik,
-								g_pars.vec.ck,
-								g_pars.vec.autn,
-								g_pars.vec.res));
-		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
 	} else {
-		if (not g_pars.vec_keep) {
-			g_pars.vec := f_gen_auth_vec_2g();
-		}
-		auth_tuple := valueof(ts_GSUP_IE_AuthTuple2G(g_pars.vec.rand,
-								g_pars.vec.sres,
-								g_pars.vec.kc));
-		GSUP.send(ts_GSUP_SAI_RES(g_pars.imsi, auth_tuple));
+		log("XXX ts_GSUP_SAI_ERR");
+		/* HLR knows the IMSI but has no authentication info; osmo-hlr responds with GMM_CAUSE_IMSI_UNKNOWN=2 in
+		 * this case, for SAI this merely means there is no auth entry for this IMSI. */
+		GSUP.send(ts_GSUP_SAI_ERR(g_pars.imsi, 2));
 	}
 	}
 }
 
 function f_mm_auth() runs on BSC_ConnHdlr
 {
-	if (g_pars.net.expect_auth) {
+	if (g_pars.net.expect_auth or g_pars.net.expect_auth_attempt) {
 		as_GSUP_SAI();
+	}
+	if (g_pars.net.expect_auth) {
 		if (g_pars.use_umts_aka) {
 			BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_MM_AUTH_REQ_3G(g_pars.vec.rand, g_pars.vec.autn)));
 			var OCT4 res := substr(g_pars.vec.res, 0, 4);
@@ -685,6 +714,9 @@ function f_mm_common() runs on BSC_ConnHdlr
 		f_mm_ciph_utran();
 	}
 
+	if (not g_pars.net.expect_attach_success) {
+		return;
+	}
 	f_expect_common_id();
 }
 
@@ -810,15 +842,18 @@ runs on BSC_ConnHdlr {
 	f_mm_common();
 	f_msc_lu_hlr();
 	f_mm_imei();
-	f_accept_reject_lu();
+	as_accept_reject_lu(g_pars.net.expect_attach_success);
 	/* FIXME: there could be pending SMS or other common procedures by the MSC, let's ignore them */
-	f_expect_clear();
+	f_expect_clear(verify_vlr_cell_id := g_pars.net.expect_attach_success);
 
 	setverdict(pass);
 }
 
 function f_msc_lu_hlr() runs on BSC_ConnHdlr
 {
+	if (not g_pars.net.expect_attach_success) {
+		return;
+	}
 	/* Expect MSC to perform LU with HLR */
 	GSUP.receive(tr_GSUP_UL_REQ(g_pars.imsi));
 	GSUP.send(ts_GSUP_ISD_REQ(g_pars.imsi, g_pars.msisdn));
@@ -826,11 +861,10 @@ function f_msc_lu_hlr() runs on BSC_ConnHdlr
 	GSUP.send(ts_GSUP_UL_RES(g_pars.imsi));
 }
 
-function f_accept_reject_lu() runs on BSC_ConnHdlr {
+altstep as_accept_reject_lu(boolean expect_accept := true) runs on BSC_ConnHdlr {
 	var PDU_DTAP_MT dtap_mt;
 
-	alt {
-	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) -> value dtap_mt {
+	[expect_accept] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) -> value dtap_mt {
 		var PDU_ML3_LocationUpdateAccept lu_acc := dtap_mt.dtap.msgs.mm.locationUpdateAccept;
 		if (g_pars.net.expect_tmsi) {
 			if (not ispresent(lu_acc.mobileIdentityTLV) or
@@ -848,16 +882,23 @@ function f_accept_reject_lu() runs on BSC_ConnHdlr {
 				mtc.stop;
 			}
 		}
-		}
-	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+
+		/* Wait for MM-Information (if enabled) */
+		f_expect_mm_info();
+		setverdict(pass);
+	}
+	[expect_accept] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
 		setverdict(fail, "Expected LU ACK, but received LU REJ");
 		mtc.stop;
-		}
 	}
 
-	/* Wait for MM-Information (if enabled) */
-	f_expect_mm_info();
-	setverdict(pass);
+	[not expect_accept] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Rej)) {
+		setverdict(pass);
+	}
+	[not expect_accept] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_LU_Acc)) -> value dtap_mt {
+		setverdict(fail, "Expected LU REJ, but received LU ACK");
+		mtc.stop;
+	}
 }
 
 function f_expect_lu_reject(template OCT1 cause := ?) runs on BSC_ConnHdlr {
