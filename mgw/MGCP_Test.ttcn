@@ -1446,7 +1446,7 @@ module MGCP_Test {
 		var MgcpResponse resp;
 		var MgcpEndpoint ep := c_mgw_ep_rtpbridge & "2@" & c_mgw_domain;
 		var MgcpCallId call_id := '1227'H;
-		var integer num_pkts_tx[2];
+		var integer num_pkts_tx[2], num_pkts_rx[2];
 		var integer temp;
 
 		f_init(ep, true);
@@ -1507,18 +1507,28 @@ module MGCP_Test {
 		/* The first leg will now be switched into bidirectional
 		 * mode, but we do not expect any data comming back yet. */
 		f_rtpem_mode(RTPEM[0], RTPEM_MODE_BIDIR);
-		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
-		num_pkts_tx[1] := stats_osmux.num_pkts_tx;
 		f_flow_modify(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
+		/* At this point in time, flow[1](Osmux)->MGW->flow[0](RTP) is active,
+		 * hence if local CID was provided during CRCX we should already be seeing packets
+		 * flowing in one direction, aka stats_rtp.num_pkts_rx sould be >0 after a while: */
 		f_sleep(0.5);
 		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
 		if (stats_rtp.num_pkts_rx_err_disabled != 0) {
 			setverdict(fail, "received packets from RTP MGW on recvonly connection");
 			mtc.stop;
 		}
+		if (not crcx_osmux_wildcard and stats_rtp.num_pkts_rx == 0) {
+			setverdict(fail, "received 0 packets Osmux->MGW->RTP");
+			mtc.stop;
+		}
+
 		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
 		if (stats_osmux.num_pkts_rx_err_disabled != 0) {
 			setverdict(fail, "received packets from Osmux MGW on recvonly connection");
+			mtc.stop;
+		}
+		if (stats_osmux.num_pkts_rx > 0) {
+			setverdict(fail, "received unexpected ", stats_osmux.num_pkts_rx, " packets RTP->MGW->Osmux");
 			mtc.stop;
 		}
 
@@ -1526,34 +1536,39 @@ module MGCP_Test {
 		 * as well, then the MGW will connect the two together and
 		 * we should see RTP streams passing through from both ends. */
 		f_osmuxem_mode(OsmuxEM, OSMUXEM_MODE_BIDIR);
-		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
-		num_pkts_tx[0] := stats_rtp.num_pkts_tx;
-
 		if (crcx_osmux_wildcard) {
 			/* We set now the local CID in MDCX: */
 			flow[1].osmux.local_cid := 2;
 		}
 		f_flow_modify_osmux(OsmuxEM, ep, call_id, "sendrecv", flow[1]);
+		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
+		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
+		num_pkts_tx[0] := stats_rtp.num_pkts_tx;
+		num_pkts_tx[1] := stats_osmux.num_pkts_tx;
+		num_pkts_rx[0] := stats_rtp.num_pkts_rx;
+		num_pkts_rx[1] := stats_osmux.num_pkts_rx;
 		f_sleep(2.0);
 
 		stats_rtp := f_rtpem_stats_get(RTPEM[0]);
 		stats_osmux := f_osmuxem_stats_get(OsmuxEM);
 
-		temp := stats_rtp.num_pkts_tx - num_pkts_tx[0] - stats_osmux.num_pkts_rx * flow[1].osmux.cfg.batch_size;
+		temp := (stats_rtp.num_pkts_tx - num_pkts_tx[0]) -
+			(stats_osmux.num_pkts_rx - num_pkts_rx[1]) * flow[1].osmux.cfg.batch_size;
 		if (temp > 3 * flow[1].osmux.cfg.batch_size or temp < -3 * flow[1].osmux.cfg.batch_size) {
 			log("stats_rtp: ", stats_rtp);
 			log("stats_osmux: ", stats_osmux);
 			log("old_rtp_tx: ", num_pkts_tx[0]);
-			setverdict(fail, "number of packets not within normal parameters (" & int2str(temp) & ")");
+			setverdict(fail, "RTP-Tx vs OSmux-Rx number of packets not within normal parameters (" & int2str(temp) & ")");
 			mtc.stop;
 		}
 
-		temp := stats_osmux.num_pkts_tx - num_pkts_tx[1] - stats_rtp.num_pkts_rx / flow[1].osmux.cfg.batch_size;
+		temp := (stats_osmux.num_pkts_tx - num_pkts_tx[1]) -
+			((stats_rtp.num_pkts_rx -  num_pkts_rx[0])/ flow[1].osmux.cfg.batch_size);
 		if (temp > 3 or temp < -3) {
 			log("stats_rtp: ", stats_rtp);
 			log("stats_osmux: ", stats_osmux);
 			log("old_osmux_tx: ", num_pkts_tx[1]);
-			setverdict(fail, "number of packets not within normal parameters (" & int2str(temp) & ")");
+			setverdict(fail, "Osmux-Tx vs RTP-Rx number of packets not within normal parameters (" & int2str(temp) & ")");
 			mtc.stop;
 		}
 
