@@ -81,6 +81,7 @@ const integer NUM_BTS := 3;
 const integer NUM_BTS_CFG := 4; /* we have 4 BTS in the osmo-bsc.cfg (for inter-BSC HO tests) but use only 3 */
 const integer NUM_TRX_CFG := 1; /* we support up to 4 TRX per BTS, but have only 1 TRX per BTS in osmo-bsc.cfg */
 const integer NUM_MSC := 3;
+const integer NUM_MGW := 2;
 const float T3101_MAX := 12.0;
 
 /* make sure to sync this with the osmo-bts.cfg you're using */
@@ -619,7 +620,8 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* Configure/manage IPA_Emulation per-BTS/TRX port: */
 	port IPA_CFG_PT IPA_CFG_PORT[NUM_BTS][NUM_TRX];
 
-	var MGCP_Emulation_CT vc_MGCP;
+	var MGCP_Emulation_CT vc_MGCP[NUM_MGW];
+	var integer g_nr_mgw; /* number of vc_MGCP to initialize */
 	port TELNETasp_PT BSCVTY;
 
 	/* StatsD */
@@ -1053,8 +1055,8 @@ altstep no_bssmap_reset() runs on test_CT {
 	}
 }
 
-function f_init_mgcp(charstring id) runs on test_CT {
-	id := id & "-MGCP";
+function f_init_mgcp(integer mgw_nr, charstring id) runs on test_CT {
+	id := id & "-MGCP-" & int2str(mgw_nr);
 
 	var MGCPOps ops := {
 		create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
@@ -1064,14 +1066,14 @@ function f_init_mgcp(charstring id) runs on test_CT {
 		callagent_ip := mp_bsc_ip,
 		callagent_udp_port := -1,
 		mgw_ip := mp_test_ip,
-		mgw_udp_port := 2427,
+		mgw_udp_port := 2427 + mgw_nr,
 		/* Enable it for SCCPlite, since we have 2 MGCP sockets towards MGW (UDP one +
 		   the one with MGCP over IPA forwarded from MSC one) */
 		multi_conn_mode := (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_SCCPlite_SERVER)
 	};
 
-	vc_MGCP := MGCP_Emulation_CT.create(id) alive;
-	vc_MGCP.start(MGCP_Emulation.main(ops, mgcp_pars, id));
+	vc_MGCP[mgw_nr] := MGCP_Emulation_CT.create(id) alive;
+	vc_MGCP[mgw_nr].start(MGCP_Emulation.main(ops, mgcp_pars, id));
 }
 
 /* Enable or disable (current default) Osmux. When enabling, BSSMAP Reset
@@ -1191,7 +1193,7 @@ private function f_vty_msc_allow_attach(TELNETasp_PT pt, my_BooleanList allow_at
  * \param nr_msc Number of virtual MSCs to bring up to connect to osmo-bsc.
  */
 function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
-		integer nr_msc := 1, float guard_timeout := 30.0) runs on test_CT {
+		integer nr_msc := 1, integer nr_mgw := 1, float guard_timeout := 30.0) runs on test_CT {
 	var integer bssap_idx;
 
 	if (g_initialized) {
@@ -1246,7 +1248,10 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
 
 	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
 
-	f_init_mgcp("VirtMGW");
+	g_nr_mgw := nr_mgw;
+	for (var integer i := 0; i < g_nr_mgw; i := i+1) {
+		f_init_mgcp(i, "VirtMGW");
+	}
 
 	for (var integer i := 0; i < nr_bts; i := i+1) {
 		f_init_bts(i, c_BtsParams[i].trx_num, handler_mode);
@@ -3776,7 +3781,7 @@ function f_ipa_unknown_unit_id(integer mp_bsc_ipa_port) runs on test_CT return b
 
 	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
 
-	f_init_mgcp("VirtMGW");
+	f_init_mgcp(0, "VirtMGW");
 
 	/* start RSL/OML connection (XXX re-uses RSL port/protocol definitions for OML) */
 	map(client.vc_IPA:IPA_PORT, system:IPA);
@@ -3833,9 +3838,8 @@ type function void_fn(charstring id) runs on MSC_ConnHdlr;
 
 /* helper function to create and connect a MSC_ConnHdlr component
  * TODO: allow connecting to TRX1..N, not only TRX0 */
-private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx := 0) runs on test_CT {
+private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx := 0, integer mgwpool_idx := 0) runs on test_CT {
 	connect(vc_conn:RAN, g_bssap[bssap_idx].vc_RAN:PROC);
-	connect(vc_conn:MGCP_PROC, vc_MGCP:MGCP_PROC);
 	connect(vc_conn:RSL, bts[0][0].rsl.vc_RSL:CLIENT_PT);
 	connect(vc_conn:RSL_PROC, bts[0][0].rsl.vc_RSL:RSL_PROC);
 	if (isvalue(bts[1][0])) {
@@ -3851,9 +3855,10 @@ private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx
 		connect(vc_conn:BSSAP_LE, g_bssap_le.vc_BSSAP_LE:CLIENT);
 		connect(vc_conn:BSSAP_LE_PROC, g_bssap_le.vc_BSSAP_LE:PROC);
 	}
-	connect(vc_conn:MGCP, vc_MGCP:MGCP_CLIENT);
-	connect(vc_conn:MGCP_MULTI, vc_MGCP:MGCP_CLIENT_MULTI);
 	connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	connect(vc_conn:MGCP_PROC, vc_MGCP[mgwpool_idx]:MGCP_PROC);
+	connect(vc_conn:MGCP, vc_MGCP[mgwpool_idx]:MGCP_CLIENT);
+	connect(vc_conn:MGCP_MULTI, vc_MGCP[mgwpool_idx]:MGCP_CLIENT_MULTI);
 }
 
 function f_start_handler_create(template (omit) TestHdlrParams pars := omit)
@@ -3861,11 +3866,14 @@ runs on test_CT return MSC_ConnHdlr {
 	var charstring id := testcasename();
 	var MSC_ConnHdlr vc_conn;
 	var integer bssap_idx := 0;
+	var integer mgwpool_idx := 0;
 	if (isvalue(pars)) {
-		bssap_idx := valueof(pars).mscpool.bssap_idx;
+		var TestHdlrParams pars_val := valueof(pars);
+		bssap_idx := pars_val.mscpool.bssap_idx;
+		mgwpool_idx := pars_val.mgwpool_idx;
 	}
 	vc_conn := MSC_ConnHdlr.create(id);
-	f_connect_handler(vc_conn, bssap_idx);
+	f_connect_handler(vc_conn, bssap_idx, mgwpool_idx);
 	return vc_conn;
 }
 
@@ -9588,7 +9596,7 @@ testcase TC_fh_params_assignment_cmd() runs on test_CT {
 	f_init(1);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	var template PDU_BSSAP ass_cmd := f_gen_ass_req();
 	ass_cmd.pdu.bssmap.assignmentRequest.codecList := ts_BSSMAP_IE_CodecList({ts_CodecFR});
@@ -11692,7 +11700,7 @@ testcase TC_chan_alloc_algo_ascending() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator ascending");
@@ -11715,7 +11723,7 @@ testcase TC_chan_alloc_algo_descending() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator descending");
@@ -11741,7 +11749,7 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator mode assignment dynamic");
