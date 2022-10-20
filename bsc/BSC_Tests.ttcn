@@ -11822,6 +11822,112 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	f_shutdown_helper();
 }
 
+private function f_vty_mgw_enable(integer mgw_nr := 1) runs on test_CT {
+	var rof_charstring cmds := {
+		"remote-ip " & mp_test_ip,
+		"remote-port " & int2str(2427 + mgw_nr)
+	};
+	f_vty_config3(BSCVTY, {"network", "mgw " & int2str(mgw_nr)}, cmds);
+	f_vty_transceive(BSCVTY, "mgw " & int2str(mgw_nr) & " reconnect")
+}
+private function f_vty_mgw_disable(integer mgw_nr := 1) runs on test_CT {
+	f_vty_config3(BSCVTY, {"network"}, { "no mgw " &int2str(mgw_nr) });
+}
+private function f_vty_mgw_block(integer mgw_nr := 1, boolean blocked := true) runs on test_CT {
+	var charstring arg;
+	if (blocked) {
+		arg := "block";
+	} else {
+		arg := "unblock";
+	}
+	f_vty_transceive(BSCVTY, "mgw " & int2str(mgw_nr) & " " & arg);
+}
+private const charstring COORD_CMD_ESTABLISHED := "COORD_CMD_ESTABLISHED";
+private function f_TC_mgwpool_call_seq_1(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(ass_cmd, exp_compl);
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	COORD.receive(COORD_CMD_ESTABLISHED);
+	f_perform_clear()
+	f_create_mgcp_delete_ep(g_media.mgcp_ep);
+}
+private function f_TC_mgwpool_call_seq_2(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+
+	COORD.receive(COORD_CMD_ESTABLISHED);
+	f_establish_fully(ass_cmd, exp_compl);
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	f_perform_clear()
+	f_create_mgcp_delete_ep(g_media.mgcp_ep);
+}
+/* Test load is spread around 2 available MGWs */
+testcase TC_mgwpool_all_used() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 1;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_call_seq_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_call_seq_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
+/* Test blocked MGW in the pool are not selected */
+testcase TC_mgwpool_blocked_not_used() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 0; /* expect it in the first one, since the second will be blocked */
+	pars2.media_nr := 2;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+	f_vty_mgw_block(1, true);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_call_seq_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_call_seq_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -12155,6 +12261,13 @@ control {
 	execute( TC_chan_alloc_algo_ascending() );
 	execute( TC_chan_alloc_algo_descending() );
 	execute( TC_chan_alloc_algo_ass_dynamic() );
+
+	/* MGW pool */
+	/* TODO: this conditional canbe dropped once osmo-bsc >1.10.0 is released: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_mgwpool_all_used() );
+		execute( TC_mgwpool_blocked_not_used() );
+	}
 
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */
