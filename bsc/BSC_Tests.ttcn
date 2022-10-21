@@ -5871,16 +5871,19 @@ private function f_expect_dlcx_conns() runs on MSC_ConnHdlr {
 	}
 }
 
-private function f_ho_out_of_this_bsc(template (omit) BSSMAP_oldToNewBSSIEs exp_oldToNewBSSIEs := omit) runs on MSC_ConnHdlr {
+private function f_ho_out_of_this_bsc(template (omit) BSSMAP_oldToNewBSSIEs exp_oldToNewBSSIEs := omit,
+				      boolean skip_meas_rep := false) runs on MSC_ConnHdlr {
 
-	var NcellReports neighbor_rep := {
-		{ rxlev := 20, bcch_freq := 0, bsic := 11 }
-	};
-	var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
-	RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
-				 l3_mr, 0));
+	if (not skip_meas_rep) {
+		var NcellReports neighbor_rep := {
+			{ rxlev := 20, bcch_freq := 0, bsic := 11 }
+		};
+		var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
+		RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
+					 l3_mr, 0));
 
-	BSSAP.receive(tr_BSSMAP_HandoverRequired(exp_oldToNewBSSIEs));
+		BSSAP.receive(tr_BSSMAP_HandoverRequired(exp_oldToNewBSSIEs));
+	}
 
 	f_sleep(0.5);
 	/* The MSC negotiates Handover Request and Handover Request Ack with
@@ -11971,6 +11974,84 @@ testcase TC_mgwpool_pin_bts() runs on test_CT {
 	f_shutdown_helper();
 }
 
+private function f_tc_ho_meas_rep_multi_band(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	/* Send a measurement report with bad rxlev except on 3rd entry. The
+	 * measurement report is divided into two sub lists, as described in
+	 * 3GPP TS 04.08 § 10.5.2.20. */
+	var NcellReports neighbor_rep := {
+		/* Sub list 1: same band */
+		{ rxlev := 0, bcch_freq := 0, bsic := 11 },  /* ARFCN  700, band 1800, LAC 96 */
+		{ rxlev := 0, bcch_freq := 1, bsic := 12 },  /* ARFCN  800, band 1800, LAC 98 */
+		/* Sub list 2: different band */
+		{ rxlev := 40, bcch_freq := 2, bsic := 13 }, /* ARFCN  200, band  850, LAC 97 */
+		{ rxlev := 0, bcch_freq := 3, bsic := 14 }   /* ARFCN 1000, band  900, LAC 99 */
+	};
+	var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
+	RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
+				 l3_mr, 0));
+
+	/* Expect a handover to the third entry. If the BSC parsed the report
+	 * correctly, the third entry has LAC 97. */
+	var template BSSMAP_FIELD_CellIdentificationList cid_list := {
+		cIl_LAC := { ts_BSSMAP_CI_LAC(97) }
+	};
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequired(cid_list := cid_list)) {
+			setverdict(pass);
+		}
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequired()) {
+			setverdict(fail, "Handover has unexpected LAC in Cell Identification List. The BSC probably"
+				   & " didn't parse the multi-band measurement report correctly.");
+		}
+	}
+
+	f_ho_out_of_this_bsc(skip_meas_rep := true);
+}
+testcase TC_ho_meas_rep_multi_band() runs on test_CT {
+	/* Verify that the BSC parses the measurement report correctly when
+	 * neighbors in multiple bands are configured (OS#5717). See
+	 * gsm_arfcn2band_rc() in libosmocore src/gsm/gsm_utils.c for the
+	 * ARFCN -> band mapping. The MS is connected to band 1800. */
+	var MSC_ConnHdlr vc_conn;
+
+	f_init_vty();
+	f_bts_0_cfg(BSCVTY,
+		    {"neighbor-list mode automatic",
+		     "handover 1",
+		     "handover algorithm 2",
+		     "handover2 window rxlev averaging 1",
+		     "no neighbors",
+		     "neighbor lac 99 arfcn 1000 bsic any",  /* band 900 */
+		     "neighbor lac 98 arfcn 800 bsic any",   /* band 1800 */
+		     "neighbor lac 97 arfcn 200 bsic any",   /* band 850 */
+		     "neighbor lac 96 arfcn 700 bsic any"}); /* band 1800 */
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_ctrs_bsc_and_bts_handover_init();
+
+	vc_conn := f_start_handler(refers(f_tc_ho_meas_rep_multi_band));
+	vc_conn.done;
+
+	f_ctrs_bsc_and_bts_add(0, "assignment:attempted");
+	f_ctrs_bsc_and_bts_add(0, "assignment:completed");
+	f_ctrs_bsc_and_bts_add(0, "handover:attempted");
+	f_ctrs_bsc_and_bts_add(0, "handover:completed");
+	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
+	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:completed");
+	f_ctrs_bsc_and_bts_verify();
+	f_shutdown_helper(ho := true);
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -12312,6 +12393,8 @@ control {
 		execute( TC_mgwpool_blocked_not_used() );
 		execute( TC_mgwpool_pin_bts() );
 	}
+
+	execute( TC_ho_meas_rep_multi_band() );
 
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */
