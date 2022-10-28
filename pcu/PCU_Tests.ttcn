@@ -3965,6 +3965,157 @@ testcase TC_ul_tbf_finished_pkt_dl_ass_pch() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Scenario: MS creates a UL TBF and
+ * finishes sending data (CV=0), which is forwarded to SGSN by PCU. PCU acks with
+ * FINAL_ACK=1 (hence UL TBF moves to FINISHED state). Then SGSN answers and PCU
+ * has to assign a DL TBF on PCH. While the network is waiting for the MS to
+ * move to PDCH before transmitting DL data (timer X2002), the MS finds out it
+ * needs to send new UL data and hence sends a RACH request to create a new UL
+ * TBF.
+ * Make sure the the MS is assigned a DL TBF through PACCH in that case even if
+ * no new DL data is received from the SGSN. OS#5700.
+ * This test validates the specific case where the 2nd UL TBF is done through
+ * 1phase-access.
+ */
+testcase TC_ul_tbf_1phase_while_dl_ass_pch() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn;
+	var uint32_t poll_fn;
+	var uint32_t dl_fn;
+	var GprsMS ms;
+	timer T;
+	var octetstring payload;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(f_ultbf_payload_fill_length(ms.ul_tbf, true));
+	dl_fn := f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	f_ms_tx_ul_data_block(ms, payload, cv := 1, with_tlli := true, fn := f_next_pdch_block(dl_fn));
+
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	payload := f_rnd_octstring(f_ultbf_payload_fill_length(ms.ul_tbf, false));
+	f_ms_tx_ul_data_block(ms, payload, cv := 0);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+
+	/* 1 UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+	/* Now SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+
+	/* UL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Now the PCU is waiting for the MS to move to PDCH in order to send data to it (timer X2002).
+	 * The MS decides it want to send new Ul TBF so it send RACH req to ask for it: */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	 * contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(f_ultbf_payload_fill_length(ms.ul_tbf, true));
+	dl_fn := f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	f_ms_tx_ul_data_block(ms, payload, cv := 1, with_tlli := true, fn := f_next_pdch_block(dl_fn));
+
+	/* UL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+
+	/* The PCU considers the MS to have gone over Contention Resolution
+	 * after having sent the first UL ACK/NACK to it, hence next it will try to
+	 * assign the DL-TBF to send the data it received from the SGSN previously: */
+	f_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_DL_PACKET_ASS);
+	/* the MS ACKs the PKT_DL_ASS: */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), poll_fn);
+
+	/* We should finally receive the DL-data that was received previously from the SGSN: */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
+/* Same as TC_ul_tbf_2phase_while_dl_ass_pch, but this test validates the
+ * specific case where the 2nd UL TBF is done through 2phase-access. */
+testcase TC_ul_tbf_2phase_while_dl_ass_pch() runs on RAW_PCU_Test_CT {
+	var RlcmacDlBlock dl_block;
+	var octetstring data := f_rnd_octstring(10);
+	var uint32_t sched_fn;
+	var uint32_t poll_fn;
+	var uint32_t dl_fn;
+	var GprsMS ms;
+	timer T;
+	var octetstring payload;
+	var PollFnCtx pollctx;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(f_ultbf_payload_fill_length(ms.ul_tbf, true));
+	dl_fn := f_rx_rlcmac_dl_block_exp_dummy(dl_block);
+	f_ms_tx_ul_data_block(ms, payload, cv := 1, with_tlli := true, fn := f_next_pdch_block(dl_fn));
+
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+	payload := f_rnd_octstring(f_ultbf_payload_fill_length(ms.ul_tbf, false));
+	f_ms_tx_ul_data_block(ms, payload, cv := 0);
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn);
+
+	/* 1 UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+	/* Now SGSN sends some DL data, PCU will page on CCCH (PCH) */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data));
+
+	/* UL ACK/NACK sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), sched_fn);
+	f_ms_exp_dl_tbf_ass_ccch(ms, PCU_IF_SAPI_PCH);
+
+	/* Now the PCU is waiting for the MS to move to PDCH in order to send data to it (timer X2002).
+	 * The MS decides it want to send new Ul TBF so it send RACH req to ask for it: */
+	pollctx := f_ms_establish_ul_tbf_2phase_access(ms, ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, ms_racap_gprs_def));
+
+	/* Pkt Uplink Assignment above sets poll+rrbp requesting PACKET CONTROL ACK */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), pollctx.fn, nr := pollctx.tstrxbts);
+
+	/* Now that MS seized the UL-TBF, PCU sends DL-TBF Assignment on PACCH */
+	f_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_DL_PACKET_ASS);
+	/* the MS ACKs the PKT_DL_ASS: */
+	f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), poll_fn);
+
+	/* We should finally receive the DL-data that was received previously from the SGSN: */
+	f_rx_rlcmac_dl_block_exp_data(dl_block, dl_fn, data, 0);
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 private function f_TC_egprs_pkt_chan_req(in EGPRSPktChRequest req,
 					 template GsmRrMessage t_imm_ass := ?,
 					 PCUIF_BurstType bt := BURST_TYPE_1)
@@ -6900,6 +7051,8 @@ control {
 	execute( TC_dl_egprs_data_no_llc_ui_dummy() );
 
 	execute( TC_ul_tbf_finished_pkt_dl_ass_pch() );
+	execute( TC_ul_tbf_1phase_while_dl_ass_pch() );
+	execute( TC_ul_tbf_2phase_while_dl_ass_pch() );
 
 	/* EGPRS specific test cases */
 	execute( TC_egprs_pkt_chan_req_signalling() );
