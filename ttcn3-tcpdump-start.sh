@@ -35,7 +35,7 @@ else
 	CMD="sudo $TCPDUMP -U"
 fi
 
-if [ -x $DUMPCAP ]; then
+if [ -x "$DUMPCAP" ]; then
     CAP_ERR="1"
     if [ -x /sbin/setcap ]; then
 	# N. B: this check requires libcap2-bin package
