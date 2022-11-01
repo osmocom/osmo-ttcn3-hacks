@@ -30,7 +30,7 @@ fi
 kill_rm_pidfile $PIDFILE_NETCAT
 kill_rm_pidfile $PIDFILE_PCAP
 
-if [ ! -x $DUMPCAP ]; then
+if [ ! -x "$DUMPCAP" ]; then
 	echo "Missing required dumpcap binary at ${DUMPCAP}"
 	exit 31
 fi
