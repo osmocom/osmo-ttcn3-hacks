@@ -5,26 +5,32 @@ PIDFILE_NETCAT=/tmp/netcat.pid
 TESTCASE=$1
 VERDICT="$2"
 
-kill_rm_pidfile() {
-if [ -e $1 ]; then
-        PSNAME="$(ps -q "$(cat "$1")" -o comm=)"
-	if [ "$PSNAME" != "sudo" ]; then
-		kill "$(cat "$1")"
-	else
-	# NOTE: This requires you to be root or something like
-	# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
-		sudo kill "$(cat "$1")"
-	fi
-	rm $1
+if ! [ "$(id -u)" = "0" ]; then
+	SUDOSTR="sudo -n"
+else
+	SUDOSTR=""
 fi
+
+kill_rm_pidfile() {
+	if ! [ -e "$1" ] && [ -s "$1" ]; then
+		$SUDOSTR kill "$(cat "$1")" 2>&1 || grep -v "No such process"
+		rm $1
+	fi
 }
 
 date
 
-if [ x"$VERDICT" = x"pass" ]; then
-	echo -e "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+# -e only works/is required only in Bash; in dash/POSIX shells it isn't required
+if (lsof -p $$ | grep -q /usr/bin/bash); then
+	ESCAPE_OPT="-e"
 else
-	echo -e "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
+	ESCAPE_OPT=""
+fi
+
+if [ x"$VERDICT" = x"pass" ]; then
+	echo $ESCAPE_OPT "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+else
+	echo $ESCAPE_OPT "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
 fi
 echo
 
