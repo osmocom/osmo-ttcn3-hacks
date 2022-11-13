@@ -24,10 +24,17 @@ kill_rm_pidfile() {
 
 date
 
-if [ x"$VERDICT" = x"pass" ]; then
-	echo -e "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+# -e only works/is required only in Bash; in dash/POSIX shells it isn't required and will be part of the output
+if (lsof -p $$ | grep -q /usr/bin/bash); then
+	ESCAPE_OPT="-e"
 else
-	echo -e "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
+	ESCAPE_OPT=""
+fi
+
+if [ x"$VERDICT" = x"pass" ]; then
+	echo $ESCAPE_OPT "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+else
+	echo $ESCAPE_OPT "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
 fi
 echo
 
