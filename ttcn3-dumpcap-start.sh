@@ -13,9 +13,21 @@ GSMTAP_PORT=4729
 
 TESTCASE=$1
 
+if ! [ "$(id -u)" = "0" ]; then
+	SUDOSTR="sudo -n"
+	# Check if sudo /usr/bin/kill, sudo /usr/bin/tcpdump can always be run without password prompt (otherwise this script may hang)
+	sudo -k
+	if ! (sudo -n echo test >/dev/null 2>&1); then
+		echo "Error: Make sure 'sudo /usr/bin/kill' and 'sudo /usr/bin/tcpdump' can be executed without a password (NOPASSWD in sudoers file)" >&2
+		exit 1
+	fi
+else
+	SUDOSTR=""
+fi
+
 kill_rm_pidfile() {
-	if [ -e $1 ]; then
-		kill "$(cat "$1")"
+	if ! [ -e "$1" ] && [ -s "$1" ]; then
+		$SUDOSTR kill "$(cat "$1")" 2>&1 || grep -v "No such process"
 		rm $1
 	fi
 }
