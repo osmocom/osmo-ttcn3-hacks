@@ -10,9 +10,19 @@ GSMTAP_PORT=4729
 
 TESTCASE=$1
 
+
+SUDOSTR=""
+if ! [ "$(id -u)" = "0" ]; then
+	SUDOSTR="sudo -n"
+	# Otherwise, if sudo /usr/bin/kill, sudo /usr/bin/tcpdump cannot be run without a password prompt,
+	# and this script will hang indefinitely
+fi
+
 kill_rm_pidfile() {
-	if [ -e $1 ]; then
-		kill "$(cat "$1")"
+	# NOTE: This requires you to be root or something like
+	# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
+	if ! [ -e "$1" ] && [ -s "$1" ]; then
+		$SUDOSTR kill "$(cat "$1")" 2>&1 | grep -v "No such process"
 		rm $1
 	fi
 }
@@ -27,13 +37,7 @@ fi
 kill_rm_pidfile $PIDFILE_NETCAT
 kill_rm_pidfile $PIDFILE_PCAP
 
-if [ "$(id -u)" = "0" ]; then
-	CMD="$TCPDUMP -U"
-else
-# NOTE: This requires you to be root or something like
-# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
-	CMD="sudo $TCPDUMP -U"
-fi
+CMD="$SUDOSTR $TCPDUMP -U"
 
 if [ -x "$DUMPCAP" ]; then
     CAP_ERR="1"
