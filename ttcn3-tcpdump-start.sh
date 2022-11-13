@@ -71,9 +71,28 @@ $NETCAT -l -u -k -p $GSMTAP_PORT >/dev/null 2>$TESTCASE.netcat.stderr &
 PID=$!
 echo $PID > $PIDFILE_NETCAT
 
-$CMD -s 1500 -n -i any -w "$TTCN3_PCAP_PATH/$TESTCASE.pcap" >$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout 2>&1 &
+CMD_OUTFILE=$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout
+CMD_OUTFILE_ERR=$TTCN3_PCAP_PATH/$TESTCASE.pcap_err
+FIFO=/tmp/cmderr
+if ! [ -e $FIFO ]; then
+	mkfifo $FIFO
+else
+	echo "Warning: Named pipe already exists: $FIFO"
+fi
+
+# Log stderr to CMD_OUTFILE and a dedicated error log file
+tee $CMD_OUTFILE < $FIFO > $CMD_OUTFILE_ERR &
+CMD_STR="$CMD -s 1500 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE 2>$FIFO &"
+eval $CMD_STR
+# $CMD -s 1500 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE &
 PID=$!
 echo $PID > $PIDFILE_PCAP
+if [ -f $CMD_OUTFILE_ERR ] && [ $(wc -l $CMD_OUTFILE_ERR | awk '{print $1}') -ne 0 ]; then
+	echo "Error running command:" >&2
+	echo "	$CMD_STR" >&2
+	echo "Error message:" >&2
+	echo "$(cat $CMD_OUTFILE_ERR)" | sed 's/^/\t/' >&2
+fi
 
 # Wait until packet dumper creates the pcap file and starts recording.
 # We generate some traffic until we see packet dumper catches it.

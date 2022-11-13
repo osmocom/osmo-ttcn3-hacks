@@ -2,6 +2,7 @@
 
 PIDFILE_PCAP=/tmp/pcap.pid
 PIDFILE_NETCAT=/tmp/netcat.pid
+FIFO=/tmp/cmderr
 TESTCASE=$1
 VERDICT="$2"
 
@@ -68,5 +69,6 @@ done
 
 kill_rm_pidfile "$PIDFILE_PCAP"
 kill_rm_pidfile "$PIDFILE_NETCAT"
+rm $FIFO
 
 gzip -f "$TTCN3_PCAP_PATH/$TESTCASE.pcap"
