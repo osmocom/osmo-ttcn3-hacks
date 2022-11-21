@@ -42,6 +42,11 @@ modulepar {
 	charstring mp_pfcp_ip_upf := "127.0.0.1";
 	charstring mp_pfcp_ip_local := "127.0.0.2";
 
+	charstring mp_netinst_access_ip_1 := "127.0.1.1";
+	charstring mp_netinst_access_ip_2 := "127.0.1.2";
+	charstring mp_netinst_core_ip_1 := "127.0.2.1";
+	charstring mp_netinst_core_ip_2 := "127.0.2.2";
+
 	/* When testing with gtp mockup, actions will not show. */
 	boolean mp_verify_gtp_actions := false;
 }
@@ -162,13 +167,60 @@ type record PFCP_session {
 	GTP_Action gtp
 }
 
+/* _r and _l means 'remote' and 'local', from the perspective of the osmo-upf process. */
+type record GTP_Action_tunend {
+	/* the PDR Id detecting packets from this side */
+	integer pdr_id,
+	/* IP packets arriving from this side are arriving on ip_l */
+	charstring ip_l,
+
+	/* the FAR Id forwarding packets to this side */
+	integer far_id
+}
+
+/* _r and _l means 'remote' and 'local', from the perspective of the osmo-upf process. */
+type record GTP_Action_tun {
+	/* the PDR Id detecting packets from this side */
+	integer pdr_id,
+	/* GTP arriving from this side is arriving on gtp_ip_l with teid_l */
+	charstring gtp_ip_l,
+	OCT4 teid_l,
+
+	/* the FAR Id forwarding packets to this side */
+	integer far_id,
+	/* GTP going out to this side should be sent to gtp_ip_r with teid_r */
+	charstring gtp_ip_r,
+	OCT4 teid_r
+}
+
+type union GTP_Action_core {
+	/* For kind = "tunend", the local IP that the UE has on 'the internet' */
+	GTP_Action_tunend tunend,
+	/* For kind = "tunmap", the second GTP tunnel */
+	GTP_Action_tun tunmap
+}
+
+/* State of what GTP functionality osmo-upf should put in place, after a PFCP request was ACKed by it.
+ * _r and _l means 'remote' and 'local', from the perspective of the osmo-upf process.
+ *
+ * tunend:
+ *  Access                                            UPF                      Core
+ *  GTP-r:127.0.0.2,0x1  <-FAR-1--                     | 192.168.0.1 <-PDR-1--
+ *                       --PDR-2-> GTP-l:127.0.0.1,0x2 |             --FAR-2-> (IP destination is in each GTP payload)
+ *
+ * tunmap:
+ *  Access                                            UPF                        Core
+ *  GTP-r:127.0.0.2,0x1  <-FAR-1--                     | 127.0.0.1,0x1 <-PDR-1--
+ *                       --PDR-2-> GTP-l:127.0.0.1,0x2 |               --FAR-2-> GTP-r:127.0.0.3,0x2
+ */
 type record GTP_Action {
 	/* kind = ("tunend"|"tunmap") */
 	charstring kind,
-	charstring gtp_access_ip,
-	OCT4 teid_access_r,
-	OCT4 teid_access_l,
-	charstring core_ip,
+	/* The access side GTP tunnel. (The 'Access' side is always GTP.) */
+	GTP_Action_tun access,
+	/* The core side GTP tunnel (tunmap) or local IP (tunend) */
+	GTP_Action_core core,
+	/* Reference to the PFCP Session that created this GTP action: PFCP session's F-SEID as seen from osmo-upf */
 	charstring pfcp_peer,
 	OCT8 seid_l
 };
@@ -176,17 +228,26 @@ type record GTP_Action {
 type record of GTP_Action GTP_Action_List;
 
 private function f_parse_gtp_action(out GTP_Action ret, charstring str) return boolean {
+	/* Parse a string like
+	 * "GTP:tunend GTP-access-r:127.0.0.2 TEID-access-r:0x94f0001 TEID-access-l:0x1 IP-core-l:192.168.44.241 PFCP-peer:127.0.0.2 SEID-l:0x1 PDR:1,2"
+	 */
 	var GTP_Action a;
 	if (not f_get_name_val(a.kind, str, "GTP")) {
 		return false;
 	}
-	if (not f_get_name_val(a.gtp_access_ip, str, "GTP-access")) {
+	if (not f_get_name_val(a.access.gtp_ip_r, str, "GTP-access-r")) {
 		return false;
 	}
-	if (not f_get_name_val_oct4(a.teid_access_r, str, "TEID-r")) {
+	if (not f_get_name_val_oct4(a.access.teid_r, str, "TEID-access-r")) {
 		return false;
 	}
-	if (not f_get_name_val_oct4(a.teid_access_l, str, "TEID-l")) {
+	if (not f_get_name_val(a.access.gtp_ip_l, str, "GTP-access-l")) {
+		return false;
+	}
+	if (not f_get_name_val_oct4(a.access.teid_l, str, "TEID-access-l")) {
+		return false;
+	}
+	if (not f_get_name_val_int(a.access.pdr_id, str, "PDR-access")) {
 		return false;
 	}
 	if (not f_get_name_val(a.pfcp_peer, str, "PFCP-peer")) {
@@ -195,9 +256,39 @@ private function f_parse_gtp_action(out GTP_Action ret, charstring str) return b
 	if (not f_get_name_val_oct8(a.seid_l, str, "SEID-l")) {
 		return false;
 	}
-	if (not f_get_name_val(a.core_ip, str, "IP-core")) {
-		return false;
+	if (a.kind == "tunend") {
+		if (not f_get_name_val_int(a.core.tunend.pdr_id, str, "PDR-core")) {
+			return false;
+		}
+		if (not f_get_name_val(a.core.tunend.ip_l, str, "IP-core-l")) {
+			return false;
+		}
+		/* in these tests, the PDR Id and its FAR Id are always the same: PDR for incoming on Access matches its
+		 * FAR that forwards to Core. */
+		a.core.tunend.far_id := a.access.pdr_id;
+		a.access.far_id := a.core.tunend.pdr_id;
+	} else if (a.kind == "tunmap") {
+		if (not f_get_name_val(a.core.tunmap.gtp_ip_r, str, "GTP-core-r")) {
+			return false;
+		}
+		if (not f_get_name_val_oct4(a.core.tunmap.teid_r, str, "TEID-core-r")) {
+			return false;
+		}
+		if (not f_get_name_val(a.core.tunmap.gtp_ip_l, str, "GTP-core-l")) {
+			return false;
+		}
+		if (not f_get_name_val_oct4(a.core.tunmap.teid_l, str, "TEID-core-l")) {
+			return false;
+		}
+		if (not f_get_name_val_int(a.core.tunmap.pdr_id, str, "PDR-core")) {
+			return false;
+		}
+		/* in these tests, the PDR Id and its FAR Id are always the same: PDR for incoming on Access matches its
+		 * FAR that forwards to Core. */
+		a.core.tunmap.far_id := a.access.pdr_id;
+		a.access.far_id := a.core.tunmap.pdr_id;
 	}
+
 	ret := a;
 	return true;
 }
@@ -417,6 +508,16 @@ private function f_vty_expect_no_active_sessions(TELNETasp_PT vty_pt) {
 	setverdict(pass);
 }
 
+private function f_vty_netinst_cfg(TELNETasp_PT vty_pt, ro_charstring netinst_cmds)
+{
+	f_vty_enter_config(vty_pt);
+	f_vty_transceive(vty_pt, "netinst");
+	for (var integer i := 0; i < lengthof(netinst_cmds); i := i + 1) {
+		f_vty_transceive(vty_pt, netinst_cmds[i]);
+	}
+	f_vty_transceive_ret(vty_pt, "end");
+}
+
 function f_init_vty(charstring id := "foo") runs on test_CT {
 	if (UPFVTY.checkstate("Mapped")) {
 		/* skip initialization if already executed once */
@@ -435,6 +536,15 @@ function f_init(float guard_timeout := 30.0) runs on test_CT {
 	activate(as_Tguard());
 
 	f_init_vty("VirtCPF");
+
+	/* Clear out and set up default network instance config */
+	f_vty_netinst_cfg(UPFVTY,
+			  { "clear",
+			    "add access " & mp_netinst_access_ip_1,
+			    "add access2 " & mp_netinst_access_ip_2,
+			    "add core " & mp_netinst_core_ip_1,
+			    "add core2 " & mp_netinst_core_ip_2
+			    });
 }
 
 friend function f_shutdown_helper() runs on test_CT {
@@ -500,6 +610,7 @@ private function f_assoc_release() runs on CPF_ConnHdlr {
 	PFCP.receive(tr_PFCP_Assoc_Release_Resp(cause := tr_PFCP_Cause(REQUEST_ACCEPTED)));
 }
 
+/* Collection of what a test intends to send to osmo-upf */
 type record PFCP_Ruleset {
 	Create_PDR_list pdr,
 	Create_FAR_list far
@@ -508,17 +619,18 @@ type record PFCP_Ruleset {
 /* Add to r a rule set that does GTP decapsulation (half of encapsulation/decapsulation):
  * Receive GTP on src_iface = ACCESS by a local F-TEID to be chosen by osmo-upf.
  * Dispatch GTP payload as plain IP on dest_iface = CORE. */
-private function f_ruleset_add_GTP_decaps(inout PFCP_Ruleset r) {
-	var integer pdr_id := lengthof(r.pdr) + 1;
-	var integer far_id := lengthof(r.far) + 1;
-
+private function f_ruleset_add_GTP_decaps(inout PFCP_Ruleset r,
+					  integer pdr_id,
+					  charstring src_netinst,
+					  integer far_id) {
 	r.pdr := r.pdr & {
 		valueof(
 		ts_PFCP_Create_PDR(
 			pdr_id,
 			ts_PFCP_PDI(
 				ACCESS,
-				local_F_TEID := ts_PFCP_F_TEID_choose_v4()),
+				local_F_TEID := ts_PFCP_F_TEID_choose_v4(),
+				network_instance := ts_PFCP_Network_Instance(src_netinst)),
 			ts_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4),
 			far_id
 			)
@@ -537,13 +649,11 @@ private function f_ruleset_add_GTP_decaps(inout PFCP_Ruleset r) {
 
 /* Add to r a rule set that does GTP encapsulation (half of encapsulation/decapsulation) */
 private function f_ruleset_add_GTP_encaps(inout PFCP_Ruleset r,
+					  integer pdr_id,
 					  charstring ue_addr_v4 := "192.168.23.42",
+					  integer far_id,
 					  OCT4 remote_teid,
 					  OCT4 gtp_dest_addr_v4) {
-
-	var integer pdr_id := lengthof(r.pdr) + 1;
-	var integer far_id := lengthof(r.far) + 1;
-
 	r.pdr := r.pdr & {
 		valueof(
 		ts_PFCP_Create_PDR(
@@ -570,6 +680,87 @@ private function f_ruleset_add_GTP_encaps(inout PFCP_Ruleset r,
 			)
 		)
 		};
+}
+
+/* Add to r a rule set that forwards GTP from one tunnel to another, i.e. one direction of a tunmap */
+private function f_ruleset_add_GTP_forw(inout PFCP_Ruleset r,
+					integer pdr_id,
+					e_PFCP_Src_Iface src_iface,
+					charstring src_netinst,
+					integer far_id,
+					e_PFCP_Dest_Iface dest_iface,
+					F_TEID dest_remote_f_teid) {
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				src_iface,
+				local_F_TEID := ts_PFCP_F_TEID_choose_v4(),
+				network_instance := ts_PFCP_Network_Instance(src_netinst)),
+			ts_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4),
+			far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Forwarding_Parameters(dest_iface,
+					ts_PFCP_Outer_Header_Creation_GTP_ipv4(dest_remote_f_teid.teid,
+									       dest_remote_f_teid.ipv4_address)))
+			)
+		)
+		};
+}
+
+/* Add to r a DROP rule from src_iface to dest_iface */
+private function f_ruleset_add_GTP_drop(inout PFCP_Ruleset r,
+					integer pdr_id,
+					e_PFCP_Src_Iface src_iface,
+					charstring src_netinst,
+					integer far_id,
+					e_PFCP_Dest_Iface dest_iface) {
+	r.pdr := r.pdr & {
+		valueof(
+		ts_PFCP_Create_PDR(
+			pdr_id,
+			ts_PFCP_PDI(
+				src_iface,
+				local_F_TEID := ts_PFCP_F_TEID_choose_v4(),
+				network_instance := ts_PFCP_Network_Instance(src_netinst)),
+			ts_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4),
+			far_id
+			)
+		)
+		};
+	r.far := r.far & {
+		valueof(
+		ts_PFCP_Create_FAR(
+			far_id,
+			ts_PFCP_Apply_Action_DROP,
+			fp := omit
+			)
+		)
+		};
+}
+
+private function f_tunmap_upd_far_to_core(GTP_Action gtp) return Update_FAR
+{
+	return valueof(
+		ts_PFCP_Update_FAR(
+			gtp.core.tunmap.far_id,
+			ts_PFCP_Apply_Action_FORW(),
+			valueof(ts_PFCP_Update_Forwarding_Parameters(
+					CORE,
+					ts_PFCP_Outer_Header_Creation_GTP_ipv4(gtp.core.tunmap.teid_r,
+									       f_inet_addr(gtp.core.tunmap.gtp_ip_r))
+					)
+			       )
+			)
+		);
 }
 
 /* Return two PDR+FAR rulesets that involve a src=CP-Function. Such rulesets are emitted by certain third party CPF, and
@@ -630,18 +821,87 @@ private function f_ruleset_noop() return PFCP_Ruleset
 	return r;
 }
 
-/* Return a rule set that does GTP encapsulation/decapsulation */
-private function f_ruleset_tunend(GTP_Action gtp) return PFCP_Ruleset
+/* Return a rule set that does GTP encapsulation and decapsulation, in both directions. */
+private function f_ruleset_tunend(GTP_Action gtp, charstring netinst_access := "access") return PFCP_Ruleset
 {
 	var PFCP_Ruleset rules := { {}, {} };
-	f_ruleset_add_GTP_decaps(rules);
-	f_ruleset_add_GTP_encaps(rules, gtp.core_ip, gtp.teid_access_r, f_inet_addr(gtp.gtp_access_ip));
+	f_ruleset_add_GTP_decaps(rules,
+				 pdr_id := gtp.access.pdr_id,
+				 src_netinst := netinst_access,
+				 far_id := gtp.core.tunend.far_id);
+	f_ruleset_add_GTP_encaps(rules,
+				 gtp.core.tunend.pdr_id,
+				 gtp.core.tunend.ip_l,
+				 gtp.access.far_id,
+				 gtp.access.teid_r,
+				 f_inet_addr(gtp.access.gtp_ip_r));
 	return rules;
 }
 
-/* Run a PFCP Session Establishment procedure */
-private function f_session_est(inout PFCP_session s, PFCP_Ruleset rules) runs on CPF_ConnHdlr {
+/* Return a rule set that does GTP tunnel forwarding in both directions.
+ * If core_gtp_known == true, place full FORW rules in both directions.
+ * If core_gtp_known == false, keep the Core side as DROP: this allows testing the usual/realistic case, where upon
+ * Session Establishment, the core side PGW has not yet provided the destination GTP F-TEID, which will follow later in
+ * a Session Modification. (This test suite has already configured which GTP F-TEID will be used on the core side, but
+ * we're omitting it from Session Establishment, until it is time to use it in f_session_mod()). */
+private function f_ruleset_tunmap(GTP_Action gtp, boolean core_gtp_known := true,
+				  charstring netinst_access := "access",
+				  charstring netinst_core := "core") return PFCP_Ruleset
+{
+	var PFCP_Ruleset rules := { {}, {} };
+	/* Access to Core */
+	if (core_gtp_known) {
+		f_ruleset_add_GTP_forw(rules,
+				       pdr_id := gtp.access.pdr_id,
+				       src_iface := ACCESS,
+				       src_netinst := netinst_access,
+				       far_id := gtp.core.tunmap.far_id,
+				       dest_iface := CORE,
+				       dest_remote_f_teid := valueof(ts_PFCP_F_TEID_ipv4(gtp.core.tunmap.teid_r,
+											 f_inet_addr(gtp.core.tunmap.gtp_ip_r))));
+	} else {
+		/* The Core remote GTP will follow in a Session Modification, for now set Core->Access to DROP */
+		f_ruleset_add_GTP_drop(rules,
+				       pdr_id := gtp.access.pdr_id,
+				       src_iface := ACCESS,
+				       src_netinst := netinst_access,
+				       far_id := gtp.core.tunmap.far_id,
+				       dest_iface := CORE);
+	}
+	/* Core to Access */
+	f_ruleset_add_GTP_forw(rules,
+			       pdr_id := gtp.core.tunmap.pdr_id,
+			       src_iface := CORE,
+			       src_netinst := netinst_core,
+			       far_id := gtp.access.far_id,
+			       dest_iface := ACCESS,
+			       dest_remote_f_teid := valueof(ts_PFCP_F_TEID_ipv4(gtp.access.teid_r,
+										 f_inet_addr(gtp.access.gtp_ip_r))));
+	return rules;
+}
 
+/* From a PFCP Session Establishment Response, retrieve the F_TEID returned in the Created PDR IE for the given PDR Id
+ */
+private function f_get_created_local_f_teid(PDU_PFCP sess_est_resp, integer pdr_id) return F_TEID
+{
+	for (var integer i := 0;
+	     i < lengthof(sess_est_resp.message_body.pfcp_session_establishment_response.created_PDR_list);
+	     i := i + 1) {
+		var Created_PDR cpdr := sess_est_resp.message_body.pfcp_session_establishment_response.created_PDR_list[i];
+		if (oct2int(cpdr.grouped_ie.pdr_id.rule_id) != pdr_id) {
+			continue;
+		}
+		log("osmo-upf has chosen local F-TEID: PDR-" & int2str(pdr_id) & " = ", cpdr.grouped_ie.local_F_TEID);
+		return cpdr.grouped_ie.local_F_TEID;
+	}
+	setverdict(fail, "PDR Id " & int2str(pdr_id) & " not found in PFCP message");
+	mtc.stop;
+}
+
+/* Run a PFCP Session Establishment procedure */
+private function f_session_est(inout PFCP_session s, PFCP_Ruleset rules) runs on CPF_ConnHdlr
+{
+	log("f_session_est: rules = ", rules);
 	PFCP.send(ts_PFCP_Session_Est_Req(ts_PFCP_Node_ID_ipv4(f_inet_addr(g_pars.local_addr)),
 					  ts_PFCP_F_SEID_ipv4(f_inet_addr(g_pars.local_addr), s.cp_seid),
 					  rules.pdr, rules.far));
@@ -650,7 +910,25 @@ private function f_session_est(inout PFCP_session s, PFCP_Ruleset rules) runs on
 	PFCP.receive(tr_PFCP_Session_Est_Resp(s.cp_seid)) -> value pfcp;
 	s.up_seid := pfcp.message_body.pfcp_session_establishment_response.UP_F_SEID.seid;
 	s.gtp.seid_l := s.up_seid;
+
+	var F_TEID access_local_f_teid := f_get_created_local_f_teid(pfcp, s.gtp.access.pdr_id);
+	s.gtp.access.gtp_ip_l := f_inet_ntoa(access_local_f_teid.ipv4_address);
+	s.gtp.access.teid_l := access_local_f_teid.teid;
+
+	if (ischosen(s.gtp.core.tunmap)) {
+		var F_TEID core_local_f_teid := f_get_created_local_f_teid(pfcp, s.gtp.core.tunmap.pdr_id);
+		s.gtp.core.tunmap.gtp_ip_l := f_inet_ntoa(core_local_f_teid.ipv4_address);
+		s.gtp.core.tunmap.teid_l := core_local_f_teid.teid;
+	}
 	log("established PFCP session: ", s);
+}
+
+/* Run a PFCP Session Modification procedure */
+private function f_session_mod(inout PFCP_session s) runs on CPF_ConnHdlr
+{
+	PFCP.send(ts_PFCP_Session_Mod_Req(s.up_seid, f_tunmap_upd_far_to_core(s.gtp)));
+	PFCP.receive(tr_PFCP_Session_Mod_Resp(s.cp_seid));
+	log("modified PFCP session: ", s);
 }
 
 private function f_create_PFCP_session_tunend() runs on CPF_ConnHdlr return PFCP_session
@@ -660,12 +938,60 @@ private function f_create_PFCP_session_tunend() runs on CPF_ConnHdlr return PFCP
 		cp_seid := f_next_seid(),
 		gtp := {
 			kind := "tunend",
-			gtp_access_ip := "127.0.0.2",
-			teid_access_r := f_next_remote_teid(),
-			teid_access_l := f_next_local_teid(),
-			core_ip := f_next_ue_addr(),
+			access := {
+				pdr_id := 1,
+				/* gtp_ip_l and teid_l will be returned by Session Establishment Response, Created PDR */
+				gtp_ip_l := "",
+				teid_l := '00000000'O,
+				far_id := 2,
+				gtp_ip_r := "127.0.0.2",
+				teid_r := f_next_remote_teid()
+			},
+			core := {
+				tunend := {
+					pdr_id := 2,
+					ip_l := f_next_ue_addr(),
+					far_id := 1
+				}
+			},
 			pfcp_peer := g_pars.local_addr,
 			seid_l := '0000000000000000'O
+			/* seid_l will be returned by Session Establishment Response */
+		}
+	};
+	return s;
+}
+
+private function f_create_PFCP_session_tunmap() runs on CPF_ConnHdlr return PFCP_session
+{
+	var PFCP_session s := {
+		up_seid := -,
+		cp_seid := f_next_seid(),
+		gtp := {
+			kind := "tunmap",
+			access := {
+				pdr_id := 1,
+				/* gtp_ip_l and teid_l will be returned by Session Establishment Response, Created PDR */
+				gtp_ip_l := "",
+				teid_l := '00000000'O,
+				far_id := 2,
+				gtp_ip_r := "127.0.0.2",
+				teid_r := f_next_remote_teid()
+			},
+			core := {
+				tunmap := {
+					pdr_id := 2,
+					/* gtp_ip_l and teid_l will be returned by Session Establishment Response, Created PDR */
+					gtp_ip_l := "",
+					teid_l := '00000000'O,
+					far_id := 1,
+					gtp_ip_r := "127.0.0.3",
+					teid_r := f_next_remote_teid()
+				}
+			},
+			pfcp_peer := g_pars.local_addr,
+			seid_l := '0000000000000000'O
+			/* seid_l will be returned by Session Establishment Response */
 		}
 	};
 	return s;
@@ -778,12 +1104,98 @@ testcase TC_session_est_noop() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Verify that the Network Instance IE in Create PDR chooses the right local address for a tunmap session */
+private function f_tc_session_est_tunmap(charstring id) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	var PFCP_session s := f_create_PFCP_session_tunmap();
+	f_session_est(s, f_ruleset_tunmap(s.gtp));
+	f_sleep(1.0);
+	f_vty_expect_session_active(UPFVTY, s);
+	f_session_del(s);
+	f_vty_expect_no_active_sessions(UPFVTY);
+	f_vty_expect_no_gtp_actions(UPFVTY);
+	f_assoc_release();
+	setverdict(pass);
+}
+testcase TC_session_est_tunmap() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+
+	vc_conn := f_start_handler(refers(f_tc_session_est_tunmap));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+/* Set up a tunmap session with a partial Session Establishment, followed by a Session Modification to complete it. */
+private function f_session_est_mod_tunmap(charstring netinst_access, charstring expect_gtp_ip_access,
+					  charstring netinst_core, charstring expect_gtp_ip_core) runs on CPF_ConnHdlr {
+	f_assoc_setup();
+	var PFCP_session s := f_create_PFCP_session_tunmap();
+	f_session_est(s, f_ruleset_tunmap(s.gtp, core_gtp_known := false,
+					  netinst_access := netinst_access, netinst_core := netinst_core));
+	/* The locally chosen GTP IP addresses where osmo-upf receives GTP traffic were chosen by netinst_access /
+	 * netinst_core and are returned in s.gtp.access.gtp_ip_l / s.gtp.core.tunmap.gtp_ip_l. Verify that the netinst
+	 * names have returned their matching IP addresses. */
+	if (s.gtp.access.gtp_ip_l != expect_gtp_ip_access) {
+		setverdict(fail, "Network Instance '" & netinst_access & "' should have yielded GTP IP " &
+			   expect_gtp_ip_access & " but osmo-upf chose " & s.gtp.access.gtp_ip_l);
+		mtc.stop;
+	}
+	if (s.gtp.core.tunmap.gtp_ip_l != expect_gtp_ip_core) {
+		setverdict(fail, "Network Instance '" & netinst_core & "' should have yielded GTP IP " &
+			   expect_gtp_ip_core & " but osmo-upf chose " & s.gtp.core.tunmap.gtp_ip_l);
+		mtc.stop;
+	}
+
+	f_sleep(1.0);
+	f_vty_expect_session_status(UPFVTY, s, PFCP_session_inactive);
+
+	f_session_mod(s);
+	f_sleep(1.0);
+	f_vty_expect_session_active(UPFVTY, s);
+	f_session_del(s);
+	f_vty_expect_no_active_sessions(UPFVTY);
+	f_vty_expect_no_gtp_actions(UPFVTY);
+	f_assoc_release();
+	setverdict(pass);
+}
+/* Run f_session_est_mod_tunmap() with the first Network Instances */
+private function f_tc_session_est_mod_tunmap(charstring id) runs on CPF_ConnHdlr {
+	f_session_est_mod_tunmap("access", mp_netinst_access_ip_1, "core", mp_netinst_core_ip_1);
+}
+/* Run f_session_est_mod_tunmap() with the second Network Instances */
+private function f_tc_session_est_mod_tunmap2(charstring id) runs on CPF_ConnHdlr {
+	f_session_est_mod_tunmap("access2", mp_netinst_access_ip_2, "core2", mp_netinst_core_ip_2);
+}
+testcase TC_session_est_mod_tunmap() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+
+	vc_conn := f_start_handler(refers(f_tc_session_est_mod_tunmap));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+testcase TC_session_est_mod_tunmap2() runs on test_CT {
+	var CPF_ConnHdlr vc_conn;
+
+	f_init(guard_timeout := 15.0);
+
+	vc_conn := f_start_handler(refers(f_tc_session_est_mod_tunmap2));
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
 control {
 	execute( TC_assoc_node_id_v4() );
 	execute( TC_assoc_node_id_fqdn() );
 	execute( TC_session_est_tunend() );
 	execute( TC_session_term_by_assoc_rel() );
 	execute( TC_session_est_noop() );
+	execute( TC_session_est_tunmap() );
+	execute( TC_session_est_mod_tunmap() );
+	execute( TC_session_est_mod_tunmap2() );
 }
 
 }
