@@ -72,6 +72,7 @@ FILES+="CBSP_Types.ttcn CBSP_Templates.ttcn "
 FILES+="CBSP_CodecPort.ttcn CBSP_CodecPort_CtrlFunct.ttcn CBSP_CodecPort_CtrlFunctdef.cc CBSP_Adapter.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcn "
 FILES+="BSSAP_LE_CodecPort.ttcn BSSAP_LE_Emulation.ttcn BSSAP_LE_Types.ttcn BSSAP_LE_Adapter.ttcn BSSLAP_Types.ttcn BSSMAP_LE_Templates.ttcn "
+FILES+="AbisOML_Types.ttcn"
 
 gen_links $DIR $FILES
 

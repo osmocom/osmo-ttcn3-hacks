@@ -1,0 +1,374 @@
+module BSC_Tests_OML {
+
+/* Integration Tests for OsmoBSC A-bis OML (Organization & Maintenance Link)
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2022 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Alexander Couzens <acouzens@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+/* The tests only require a BSC with VTY and OML to be present. */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from AbisOML_Types all;
+import from IPA_Emulation all;
+import from IPA_Types all;
+import from Misc_Helpers all;
+import from Osmocom_VTY_Functions all;
+import from TELNETasp_PortType all;
+
+import from BSC_Tests all;
+
+const integer NUM_TRX := 8;
+
+type record of uint16_t ArfcnList;
+type record length(3) of IPA_CCM_Parameters IPA_CCM_Parameters_multiple;
+
+modulepar {
+	charstring mp_oml_ip := "127.0.0.1";
+	integer mp_oml_port := 3002;
+	ArfcnList mp_arfcn := { 100, 101, 102, 103, 104, 105, 106, 107 };
+	OML_FOM_T200 mp_t200 := {
+		sdcch_5ms := 30,
+		facch_f_5ms := 36,
+		facch_h_5ms := 36,
+		sacch_tch_sapi0_10ms := 168,
+		sacch_sdcch_10ms := 52,
+		sdcch_sapi3_5ms := 33,
+		sacch_rch_sapi3_10ms := 168
+	};
+	uint8_t mp_max_ta := 63;
+	uint8_t mp_load_threshold := 10;
+	uint8_t mp_load_ind_period := 1;
+	uint8_t mp_rach_b_thresh := 90;
+	uint16_t mp_loadavg_slots := 1000;
+	uint8_t mp_air_timer := 100;
+	uint8_t mp_ny1 := 10;
+	uint8_t mp_bsic := 63;
+
+	IPA_CCM_Parameters_multiple mp_ccm_pars := {
+		{
+			ser_nr := "",
+			name := "",
+			location1 := "",
+			location2 := "",
+			equip_version := "",
+			sw_version := "",
+			ip_addr := "",
+			mac_addr := "",
+			unit_id := "1234/0/0",
+			osmo_rand := ""
+		},
+		{
+			ser_nr := "",
+			name := "",
+			location1 := "",
+			location2 := "",
+			equip_version := "",
+			sw_version := "",
+			ip_addr := "",
+			mac_addr := "",
+			unit_id := "1235/0/0",
+			osmo_rand := ""
+		},
+		{
+			ser_nr := "",
+			name := "",
+			location1 := "",
+			location2 := "",
+			equip_version := "",
+			sw_version := "",
+			ip_addr := "",
+			mac_addr := "",
+			unit_id := "1236/0/0",
+			osmo_rand := ""
+		}
+	};
+};
+
+/* BSC side OML component */
+type component BTS_OML_CT {
+	/* IPA client */
+	var IPA_Client client[3];
+
+	/* Port for OML */
+	port IPA_OML_PT OML[3];
+
+	/* VTY */
+	port TELNETasp_PT BSCVTY;
+
+	/* As rxed by Get Attributes Response NM_ATT_MANUF_ID IE, see f_oml_getattr() */
+	var bitstring g_bts_features[3];
+
+	/* global test case guard timer */
+	timer T_oml_guard := 60.0;
+};
+
+private altstep as_Tguard() runs on BTS_OML_CT {
+	[] T_oml_guard.timeout {
+		setverdict(fail, "Timeout of T_guard");
+		mtc.stop;
+		}
+}
+
+private altstep as_IPA_evt(integer idx := 0) runs on BTS_OML_CT {
+	var ASP_IPA_Event evt;
+	[] OML[idx].receive(ASP_IPA_Event:?) -> value evt {
+		log("Ignoring ", evt);
+		repeat;
+		}
+}
+
+function f_init_vty() runs on BTS_OML_CT {
+	if (BSCVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:BSCVTY, system:BSCVTY);
+	f_vty_set_prompts(BSCVTY);
+	f_vty_transceive(BSCVTY, "enable");
+
+	f_vty_enter_config(BSCVTY);
+	f_vty_transceive(BSCVTY, "bsc");
+	f_vty_transceive(BSCVTY, "no bts-setup-ramping");
+	f_vty_transceive(BSCVTY, "end");
+}
+
+function f_init_oml(charstring id, integer num_instance := 1) runs on BTS_OML_CT {
+	activate(as_Tguard());
+	for (var uint8_t idx := 0; idx < num_instance; idx := idx + 1) {
+		client[idx].id := id & "-" & int2str(idx);
+		client[idx].vc_IPA := IPA_Emulation_CT.create(id & "-IPA-" & int2str(idx)) alive;
+		client[idx].ccm_pars := mp_ccm_pars[idx];
+
+		map(client[idx].vc_IPA:IPA_PORT, system:IPA);
+		connect(client[idx].vc_IPA:IPA_OML_PORT, self:OML[idx]);
+		client[idx].vc_IPA.start(IPA_Emulation.main_client(mp_oml_ip, mp_oml_port, "", 10000 + idx, client[idx].ccm_pars));
+
+		T_oml_guard.start;
+
+		OML[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP));
+		OML[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK));
+
+		activate(as_IPA_evt(idx));
+	}
+}
+
+function f_oml_send_swact(integer idx := 0) runs on BTS_OML_CT
+{
+	OML[idx].send(ts_OML_SwActivatedRep(NM_OC_SITE_MANAGER, {255, 255, 255}));
+	OML[idx].send(ts_OML_SwActivatedRep(NM_OC_BTS, {0, 255, 255}));
+	OML[idx].send(ts_OML_SwActivatedRep(NM_OC_BASEB_TRANSC, {0, 0, 255}));
+	OML[idx].send(ts_OML_SwActivatedRep(NM_OC_RADIO_CARRIER, {0, 0, 255}));
+	for (var uint8_t i := 0; i < 8; i := i + 1) {
+		OML[idx].send(ts_OML_SwActivatedRep(NM_OC_CHANNEL, {0, 0, i}));
+	}
+}
+
+function f_oml_send_state_chg_evt_rep(
+		integer idx,
+		template (value) OML_FOM_OperationalState opstate,
+		template (value) OML_FOM_AvailabilityStatus avstate) runs on BTS_OML_CT
+{
+	OML[idx].send(ts_OML_StateChgEvtRep(NM_OC_SITE_MANAGER, {255, 255, 255}, opstate, avstate));
+	OML[idx].send(ts_OML_StateChgEvtRep(NM_OC_BTS, {0, 255, 255}, opstate, avstate));
+	OML[idx].send(ts_OML_StateChgEvtRep(NM_OC_BASEB_TRANSC, {0, 0, 255}, opstate, avstate));
+	OML[idx].send(ts_OML_StateChgEvtRep(NM_OC_RADIO_CARRIER, {0, 0, 255}, opstate, avstate));
+	for (var uint8_t i := 0; i < 8; i := i + 1) {
+		OML[idx].send(ts_OML_StateChgEvtRep(NM_OC_CHANNEL, {0, 0, i}, opstate, avstate));
+	}
+}
+
+
+/* Send an OML message and expect no response at all */
+private function f_oml_send_exp_no_resp(template (value) OML_PDU tx, charstring err_msg,
+					float tout := 5.0, integer idx := 0) runs on BTS_OML_CT
+{
+	timer T := tout;
+
+	OML[idx].send(tx);
+	T.start;
+	alt {
+	[] OML[idx].receive {
+		setverdict(fail, err_msg);
+		}
+	[] T.timeout {
+		setverdict(pass);
+		}
+	}
+}
+
+private function f_oml_exp_rx(template OML_PDU exp_rx, charstring err_msg, integer idx := 0)
+	runs on BTS_OML_CT return OML_PDU
+{
+	var OML_PDU rx;
+	timer T := 5.0;
+
+	T.start;
+	alt {
+	[] OML[idx].receive(exp_rx) -> value rx {
+		setverdict(pass);
+		}
+	[] OML[idx].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", err_msg);
+		}
+	}
+	return rx;
+}
+
+/* Send an OML message and expect a failure event report in response */
+private function f_oml_send_exp_fail_rep(template (value) OML_PDU tx, charstring err_msg,
+					 template OML_FOM_EventType evt := ?,
+					 template OML_FOM_Severity severity := ?,
+					 template OML_FOM_ProbableCause cause := ?,
+					 float tout := 5.0, integer idx := 0) runs on BTS_OML_CT
+{
+	var template OML_FOM_ObjectClass obj_class := ?;
+	var template OML_FOM_ObjectInstance obj_inst := ?;
+	if (ischosen(tx.u.fom)) {
+		obj_class := tx.u.fom.hdr.obj_class;
+		obj_inst := tx.u.fom.hdr.obj_inst;
+	}
+	var template OML_PDU exp_fail := tr_OML_FailureEvtRep(obj_class,obj_inst, evt, severity, cause);
+
+	OML[idx].send(tx);
+	f_oml_exp_rx(exp_fail, "Failure Event Report");
+}
+
+/* Send an OML message and expect it to be NACKed with specified cause */
+private function f_oml_send_exp_nack(template (value) OML_PDU tx, template OML_FOM_NackCause exp_cause,
+				     float tout := 5.0, integer idx := 0) runs on BTS_OML_CT
+{
+	timer T := 5.0;
+
+	var template OML_PDU exp_nack := f_OML_make_nack_exp(valueof(tx), exp_cause);
+	var template OML_PDU exp_ack := f_OML_make_ack_exp(valueof(tx));
+	var OML_PDU rx;
+
+	OML[idx].send(tx);
+	T.start;
+	alt {
+	[] OML[idx].receive(exp_ack) -> value rx {
+		setverdict(fail, "Unexpected ACK ", rx);
+		}
+	[] OML[idx].receive(exp_nack) -> value rx {
+		setverdict(pass);
+		}
+	[] OML[idx].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for NACK ", exp_nack);
+		}
+	}
+}
+
+testcase TC_oml_nothing() runs on BTS_OML_CT {
+	f_init_oml(testcasename());
+	f_sleep(40.0);
+	setverdict(pass);
+}
+
+/* Test bts setup ramping.
+ * Enable bts setup ramping (limit how many BTS will be setuped within a time interval.
+ * 1. Send 3x BTS to configure
+ * 2. Wait until BTS0 and BTS1 is configured (need both to be sure, when the bts setup ramp interval got restartet).
+ * 3. BTS2 must setup within a time window (it should be 10 seconds, but have -+ 3 seconds to be on the save side).
+ */
+testcase TC_oml_bts_setup_ramp() runs on BTS_OML_CT {
+	var template (value) OML_PDU ts_nm_site_change_event := ts_OML_StateChgEvtRep(NM_OC_SITE_MANAGER, {255, 255, 255}, NM_OPSTATE_DISABLED, NM_AVSTATE_OFF_LINE);
+	var template OML_PDU tr_nm_site_op_start := tr_OML_Opstart(NM_OC_SITE_MANAGER, {255, 255, 255});
+
+	f_init_vty();
+
+	f_vty_enter_config(BSCVTY);
+	f_vty_transceive(BSCVTY, "bsc");
+	f_vty_transceive(BSCVTY, "bts-setup-ramping");
+	f_vty_transceive(BSCVTY, "bts-setup-ramping-step-size 1");
+	f_vty_transceive(BSCVTY, "bts-setup-ramping-step-interval 10");
+	f_vty_transceive(BSCVTY, "end");
+
+	f_init_oml(testcasename(), 3);
+
+	f_oml_send_swact(0);
+	f_oml_send_swact(1);
+	f_oml_send_swact(2);
+	f_sleep(1.0);
+	OML[0].send(ts_nm_site_change_event);
+	OML[1].send(ts_nm_site_change_event);
+	OML[2].send(ts_nm_site_change_event);
+	OML[0].receive(tr_nm_site_op_start);
+
+	/* OML[2]: we expect at least no OP start for 7 seconds */
+	timer T_no_op := 7.0;
+	/* OML[2] we expect at least the OP start within 13 seconds */
+	timer T_op := 13.0;
+	alt {
+	[] OML[1].receive(tr_nm_site_op_start) { T_no_op.start; T_op.start; repeat; }
+	[] OML[2].receive(tr_nm_site_op_start) {
+		if (T_no_op.running) {
+			setverdict(fail, "OP Start came to early. T_no_op is still running");
+		} else if (T_op.running) {
+			setverdict(pass);
+		} else {
+			setverdict(fail, "OP Start came far too early.");
+		}
+	}
+	[] T_op.timeout { setverdict(fail, "Timeout. No OP Start PDU for OML[2]."); }
+	}
+}
+
+control {
+	/* execute( TC_oml_nothing() ); */
+	execute( TC_oml_bts_setup_ramp() );
+}
+
+/* BTS:
+ * - Evt: Disabled/Locked
+ * - SW ACT
+ * - Evt: Disabled/Dependency
+ * - SET BTS ATTR
+ * - Opstart
+ * - Chg Adm State Unlocked
+ * - Evt: Disabled/Dependency/Unlocked
+ * - Evt: Enabled/0 (after last channel unlocked?)
+ */
+
+/* Radio Carrier:
+ * - Evt: Disabled/Offline after SW ACT
+ * - Set Radio Carrier Attributes ? (->NACL)
+ * - Evt: Disabled/Dependency
+ * - Set Radio Carrier Attributes ?
+ * - Opstart
+ * - Chg Adm State Unlocked
+ * - Evt:
+ */
+
+/* Baseband Transceiver:
+ * - Evt: Disabled/Locked
+ * - SW Activation
+ * - Evt: Disabled/Dependency after SW ACT
+ * - IPA RSL Connect
+ * - Opstart
+ * - Chg Admin Unlocked
+ * - Evt: Disabled/Dependency/Unlocked
+ */
+
+/* Channel:
+ * - Evt: Not Installed/Locked
+ * - Evt: Disabled/Dependency (after SW ACT Rep on BB Transc)
+ * - Set Channel Attr
+ * - Opstart
+ * - Evt: Disabled/Offline
+ * - Chg Admin Unlocked
+ * - Evt: Disabled/OK/Unlocked
+ * - Evt: Enabled/OK (after BB TRANSC Opstart)
+ */
+
+};
