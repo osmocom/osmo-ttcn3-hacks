@@ -81,6 +81,7 @@ const integer NUM_BTS := 3;
 const integer NUM_BTS_CFG := 4; /* we have 4 BTS in the osmo-bsc.cfg (for inter-BSC HO tests) but use only 3 */
 const integer NUM_TRX_CFG := 1; /* we support up to 4 TRX per BTS, but have only 1 TRX per BTS in osmo-bsc.cfg */
 const integer NUM_MSC := 3;
+const integer NUM_MGW := 2;
 const float T3101_MAX := 12.0;
 
 /* make sure to sync this with the osmo-bts.cfg you're using */
@@ -619,7 +620,8 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* Configure/manage IPA_Emulation per-BTS/TRX port: */
 	port IPA_CFG_PT IPA_CFG_PORT[NUM_BTS][NUM_TRX];
 
-	var MGCP_Emulation_CT vc_MGCP;
+	var MGCP_Emulation_CT vc_MGCP[NUM_MGW];
+	var integer g_nr_mgw; /* number of vc_MGCP to initialize */
 	port TELNETasp_PT BSCVTY;
 
 	/* StatsD */
@@ -881,10 +883,22 @@ private function f_ctrs_bsc_expect(charstring countername, integer val := 1) run
 }
 
 
-friend function f_shutdown_helper() runs on test_CT {
+friend function f_shutdown_helper(boolean ho := false) runs on test_CT {
 	/* Run the subscr and conn leak test only when the VTY is initialized */
 	if (BSCVTY.checkstate("Mapped") and mp_verify_talloc_count) {
 		f_verify_talloc_count(BSCVTY, {"struct bsc_subscr", "struct gsm_subscriber_connection"});
+	}
+
+	/* Reset handover related configuration */
+	if (ho) {
+		f_bts_0_cfg(BSCVTY,
+			    {"no neighbors",
+			     "neighbor-list mode manual-si5",
+			     "neighbor-list add arfcn 100",
+			     "neighbor-list add arfcn 200",
+			     "si5 neighbor-list add arfcn 10",
+			     "si5 neighbor-list add arfcn 20",
+			     "handover algorithm 1"});
 	}
 
 	all component.stop;
@@ -1053,8 +1067,8 @@ altstep no_bssmap_reset() runs on test_CT {
 	}
 }
 
-function f_init_mgcp(charstring id) runs on test_CT {
-	id := id & "-MGCP";
+function f_init_mgcp(integer mgw_nr, charstring id) runs on test_CT {
+	id := id & "-MGCP-" & int2str(mgw_nr);
 
 	var MGCPOps ops := {
 		create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
@@ -1064,14 +1078,14 @@ function f_init_mgcp(charstring id) runs on test_CT {
 		callagent_ip := mp_bsc_ip,
 		callagent_udp_port := -1,
 		mgw_ip := mp_test_ip,
-		mgw_udp_port := 2427,
+		mgw_udp_port := 2427 + mgw_nr,
 		/* Enable it for SCCPlite, since we have 2 MGCP sockets towards MGW (UDP one +
-		   the on  with MGCP over IPA forwarded from MSC one) */
+		   the one with MGCP over IPA forwarded from MSC one) */
 		multi_conn_mode := (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_SCCPlite_SERVER)
 	};
 
-	vc_MGCP := MGCP_Emulation_CT.create(id) alive;
-	vc_MGCP.start(MGCP_Emulation.main(ops, mgcp_pars, id));
+	vc_MGCP[mgw_nr] := MGCP_Emulation_CT.create(id) alive;
+	vc_MGCP[mgw_nr].start(MGCP_Emulation.main(ops, mgcp_pars, id));
 }
 
 /* Enable or disable (current default) Osmux. When enabling, BSSMAP Reset
@@ -1191,7 +1205,7 @@ private function f_vty_msc_allow_attach(TELNETasp_PT pt, my_BooleanList allow_at
  * \param nr_msc Number of virtual MSCs to bring up to connect to osmo-bsc.
  */
 function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
-		integer nr_msc := 1, float guard_timeout := 30.0) runs on test_CT {
+		integer nr_msc := 1, integer nr_mgw := 1, float guard_timeout := 30.0) runs on test_CT {
 	var integer bssap_idx;
 
 	if (g_initialized) {
@@ -1246,7 +1260,10 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
 
 	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
 
-	f_init_mgcp("VirtMSC");
+	g_nr_mgw := nr_mgw;
+	for (var integer i := 0; i < g_nr_mgw; i := i+1) {
+		f_init_mgcp(i, "VirtMGW");
+	}
 
 	for (var integer i := 0; i < nr_bts; i := i+1) {
 		f_init_bts(i, c_BtsParams[i].trx_num, handler_mode);
@@ -3776,7 +3793,7 @@ function f_ipa_unknown_unit_id(integer mp_bsc_ipa_port) runs on test_CT return b
 
 	f_ipa_ctrl_start_client(mp_bsc_ip, mp_bsc_ctrl_port);
 
-	f_init_mgcp("VirtMSC");
+	f_init_mgcp(0, "VirtMGW");
 
 	/* start RSL/OML connection (XXX re-uses RSL port/protocol definitions for OML) */
 	map(client.vc_IPA:IPA_PORT, system:IPA);
@@ -3833,9 +3850,8 @@ type function void_fn(charstring id) runs on MSC_ConnHdlr;
 
 /* helper function to create and connect a MSC_ConnHdlr component
  * TODO: allow connecting to TRX1..N, not only TRX0 */
-private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx := 0) runs on test_CT {
+private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx := 0, integer mgwpool_idx := 0) runs on test_CT {
 	connect(vc_conn:RAN, g_bssap[bssap_idx].vc_RAN:PROC);
-	connect(vc_conn:MGCP_PROC, vc_MGCP:MGCP_PROC);
 	connect(vc_conn:RSL, bts[0][0].rsl.vc_RSL:CLIENT_PT);
 	connect(vc_conn:RSL_PROC, bts[0][0].rsl.vc_RSL:RSL_PROC);
 	if (isvalue(bts[1][0])) {
@@ -3851,9 +3867,10 @@ private function f_connect_handler(inout MSC_ConnHdlr vc_conn, integer bssap_idx
 		connect(vc_conn:BSSAP_LE, g_bssap_le.vc_BSSAP_LE:CLIENT);
 		connect(vc_conn:BSSAP_LE_PROC, g_bssap_le.vc_BSSAP_LE:PROC);
 	}
-	connect(vc_conn:MGCP, vc_MGCP:MGCP_CLIENT);
-	connect(vc_conn:MGCP_MULTI, vc_MGCP:MGCP_CLIENT_MULTI);
 	connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	connect(vc_conn:MGCP_PROC, vc_MGCP[mgwpool_idx]:MGCP_PROC);
+	connect(vc_conn:MGCP, vc_MGCP[mgwpool_idx]:MGCP_CLIENT);
+	connect(vc_conn:MGCP_MULTI, vc_MGCP[mgwpool_idx]:MGCP_CLIENT_MULTI);
 }
 
 function f_start_handler_create(template (omit) TestHdlrParams pars := omit)
@@ -3861,11 +3878,14 @@ runs on test_CT return MSC_ConnHdlr {
 	var charstring id := testcasename();
 	var MSC_ConnHdlr vc_conn;
 	var integer bssap_idx := 0;
+	var integer mgwpool_idx := 0;
 	if (isvalue(pars)) {
-		bssap_idx := valueof(pars).mscpool.bssap_idx;
+		var TestHdlrParams pars_val := valueof(pars);
+		bssap_idx := pars_val.mscpool.bssap_idx;
+		mgwpool_idx := pars_val.mgwpool_idx;
 	}
 	vc_conn := MSC_ConnHdlr.create(id);
-	f_connect_handler(vc_conn, bssap_idx);
+	f_connect_handler(vc_conn, bssap_idx, mgwpool_idx);
 	return vc_conn;
 }
 
@@ -5664,7 +5684,7 @@ testcase TC_ho_int() runs on test_CT {
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:attempted");
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:completed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 function f_tc_ho_int_a5(OCT1 encr_alg, charstring enc_a5 := "0 1 3") runs on test_CT {
@@ -5693,7 +5713,7 @@ function f_tc_ho_int_a5(OCT1 encr_alg, charstring enc_a5 := "0 1 3") runs on tes
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:completed");
 	f_ctrs_bsc_and_bts_verify();
 	f_vty_encryption_a5_reset();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 testcase TC_ho_int_a5_0() runs on test_CT {
@@ -5816,7 +5836,7 @@ testcase TC_ho_int_radio_link_failure() runs on test_CT {
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:attempted");
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:stopped");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* Expecting MGCP to DLCX the endpoint's two connections: towards BTS and towards MSC */
@@ -5851,16 +5871,19 @@ private function f_expect_dlcx_conns() runs on MSC_ConnHdlr {
 	}
 }
 
-private function f_ho_out_of_this_bsc(template (omit) BSSMAP_oldToNewBSSIEs exp_oldToNewBSSIEs := omit) runs on MSC_ConnHdlr {
+private function f_ho_out_of_this_bsc(template (omit) BSSMAP_oldToNewBSSIEs exp_oldToNewBSSIEs := omit,
+				      boolean skip_meas_rep := false) runs on MSC_ConnHdlr {
 
-	var NcellReports neighbor_rep := {
-		{ rxlev := 20, bcch_freq := 0, bsic := 11 }
-	};
-	var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
-	RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
-				 l3_mr, 0));
+	if (not skip_meas_rep) {
+		var NcellReports neighbor_rep := {
+			{ rxlev := 20, bcch_freq := 0, bsic := 11 }
+		};
+		var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
+		RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
+					 l3_mr, 0));
 
-	BSSAP.receive(tr_BSSMAP_HandoverRequired(exp_oldToNewBSSIEs));
+		BSSAP.receive(tr_BSSMAP_HandoverRequired(exp_oldToNewBSSIEs));
+	}
 
 	f_sleep(0.5);
 	/* The MSC negotiates Handover Request and Handover Request Ack with
@@ -5950,7 +5973,7 @@ testcase TC_ho_out_of_this_bsc() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:completed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_mo_l3_transceive(RSL_DCHAN_PT rsl := RSL,
@@ -6034,7 +6057,7 @@ testcase TC_ho_out_fail_no_msc_response() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:timeout");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* BSC asks for inter-BSC HO, receives BSSMAP Handover Command, but MS reports
@@ -6116,7 +6139,7 @@ testcase TC_ho_out_fail_rr_ho_failure() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:failed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* BSC asks for inter-BSC-out HO, receives BSSMAP Handover Command, but then no reply is received about HO outcome
@@ -6217,7 +6240,7 @@ testcase TC_ho_out_fail_no_result_after_ho_cmd() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:timeout");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_ho_into_this_bsc(charstring id, template (omit) BSSMAP_oldToNewBSSIEs oldToNewBSSIEs := omit) runs on MSC_ConnHdlr {
@@ -6423,7 +6446,7 @@ function f_tc_ho_into_this_bsc_main(TestHdlrParams pars, charstring vty_a5_cfg :
 testcase TC_ho_into_this_bsc() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	f_tc_ho_into_this_bsc_main(pars);
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 function f_tc_ho_into_this_bsc_a5(TestHdlrEncrParams encr, charstring vty_a5_cfg := VTY_A5_DEFAULT,
@@ -6432,7 +6455,7 @@ function f_tc_ho_into_this_bsc_a5(TestHdlrEncrParams encr, charstring vty_a5_cfg
 	pars.encr := encr;
 	pars.expect_ho_fail := expect_fail;
 	f_tc_ho_into_this_bsc_main(pars, vty_a5_cfg);
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 testcase TC_ho_into_this_bsc_a5_0() runs on test_CT {
@@ -6477,7 +6500,7 @@ testcase TC_ho_into_this_bsc_tla_v6() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	pars.host_aoip_tla := "::6";
 	f_tc_ho_into_this_bsc_main(pars);
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* Similar to TC_ho_into_this_bsc, but when in SRVCC, HO Req contains "Old BSS
@@ -6494,7 +6517,7 @@ testcase TC_srvcc_eutran_to_geran() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "srvcc:attempted");
 	f_ctrs_bsc_and_bts_add(0, "srvcc:completed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* Same as TC_srvcc_eutran_to_geran, but enables ciphering on the target channel. */
@@ -6508,7 +6531,7 @@ testcase TC_srvcc_eutran_to_geran_a5_3() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "srvcc:attempted");
 	f_ctrs_bsc_and_bts_add(0, "srvcc:completed");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* Same as TC_srvcc_eutran_to_geran, but test explicitly forbiding fast return
@@ -6689,7 +6712,7 @@ testcase TC_ho_in_fail_msc_clears() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:stopped");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_in_fail_msc_clears_after_ho_detect(charstring id) runs on MSC_ConnHdlr {
@@ -6780,7 +6803,7 @@ testcase TC_ho_in_fail_msc_clears_after_ho_detect() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:stopped");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* The new BSS's lchan times out before the MSC decides that handover failed. */
@@ -6870,7 +6893,7 @@ testcase TC_ho_in_fail_no_detect() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:error");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* Same as f_tc_ho_in_fail_no_detect, but MSC fails to send a Clear Command */
@@ -6952,7 +6975,7 @@ testcase TC_ho_in_fail_no_detect2() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:attempted");
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_in:error");
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* An incoming inter-BSC HO can either issue the Handover Request message attached to the initial SCCP N-Connect (as in
@@ -6962,7 +6985,7 @@ testcase TC_ho_into_this_bsc_sccp_cr_without_bssap() runs on test_CT {
 	var TestHdlrParams pars := f_gen_test_hdlr_pars();
 	pars.inter_bsc_ho_in__ho_req_in_initial_sccp_cr := false;
 	f_tc_ho_into_this_bsc_main(pars);
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 type record of charstring Commands;
@@ -7196,7 +7219,7 @@ testcase TC_ho_neighbor_config_1() runs on test_CT {
 	f_ctrs_bts_add(1, "incoming_intra_bsc_ho:failed");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_2(charstring id) runs on MSC_ConnHdlr {
@@ -7249,7 +7272,7 @@ testcase TC_ho_neighbor_config_2() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "handover:error");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_3(charstring id) runs on MSC_ConnHdlr {
@@ -7301,7 +7324,7 @@ testcase TC_ho_neighbor_config_3() runs on test_CT {
 	f_ctrs_bts_add(2, "incoming_intra_bsc_ho:failed");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_4(charstring id) runs on MSC_ConnHdlr {
@@ -7358,7 +7381,7 @@ testcase TC_ho_neighbor_config_4() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:timeout");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_5(charstring id) runs on MSC_ConnHdlr {
@@ -7401,7 +7424,7 @@ testcase TC_ho_neighbor_config_5() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:timeout");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_6(charstring id) runs on MSC_ConnHdlr {
@@ -7443,7 +7466,7 @@ testcase TC_ho_neighbor_config_6() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "handover:error");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_ho_neighbor_config_7(charstring id) runs on MSC_ConnHdlr {
@@ -7500,7 +7523,7 @@ testcase TC_ho_neighbor_config_7() runs on test_CT {
 	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:timeout");
 
 	f_ctrs_bsc_and_bts_verify();
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 /* OS#3041: Open and close N connections in a normal fashion, and expect no
@@ -9588,7 +9611,7 @@ testcase TC_fh_params_assignment_cmd() runs on test_CT {
 	f_init(1);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	var template PDU_BSSAP ass_cmd := f_gen_ass_req();
 	ass_cmd.pdu.bssmap.assignmentRequest.codecList := ts_BSSMAP_IE_CodecList({ts_CodecFR});
@@ -10359,7 +10382,7 @@ testcase TC_ho_during_lcs_loc_req() runs on test_CT {
 	f_sleep(1.0);
 	vc_conn := f_start_handler(refers(f_tc_ho_during_lcs_loc_req), pars);
 	vc_conn.done;
-	f_shutdown_helper();
+	f_shutdown_helper(ho := true);
 }
 
 private function f_tc_emerg_call_and_lcs_loc_req(charstring id) runs on MSC_ConnHdlr
@@ -11692,7 +11715,7 @@ testcase TC_chan_alloc_algo_ascending() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator ascending");
@@ -11715,7 +11738,7 @@ testcase TC_chan_alloc_algo_descending() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator descending");
@@ -11741,7 +11764,7 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	f_init(nr_bts := 3);
 
 	/* HACK: work around "Couldn't find Expect for CRCX" */
-	vc_MGCP.stop;
+	vc_MGCP[0].stop;
 
 	f_vty_enter_cfg_bts(BSCVTY, 2);
 	f_vty_transceive(BSCVTY, "channel allocator mode assignment dynamic");
@@ -11812,6 +11835,221 @@ testcase TC_chan_alloc_algo_ass_dynamic() runs on test_CT {
 	/* At this point some TCH/F channels are BORKEN, but they will be
 	 * resurrected upon the A-bis/OML link re-establishment. */
 	f_shutdown_helper();
+}
+
+private function f_vty_mgw_enable(integer mgw_nr := 1) runs on test_CT {
+	var rof_charstring cmds := {
+		"remote-ip " & mp_test_ip,
+		"remote-port " & int2str(2427 + mgw_nr)
+	};
+	f_vty_config3(BSCVTY, {"network", "mgw " & int2str(mgw_nr)}, cmds);
+	f_vty_transceive(BSCVTY, "mgw " & int2str(mgw_nr) & " reconnect")
+}
+private function f_vty_mgw_disable(integer mgw_nr := 1) runs on test_CT {
+	f_vty_config3(BSCVTY, {"network"}, { "no mgw " &int2str(mgw_nr) });
+}
+private function f_vty_mgw_block(integer mgw_nr := 1, boolean blocked := true) runs on test_CT {
+	var charstring arg;
+	if (blocked) {
+		arg := "block";
+	} else {
+		arg := "unblock";
+	}
+	f_vty_transceive(BSCVTY, "mgw " & int2str(mgw_nr) & " " & arg);
+}
+private const charstring COORD_CMD_ESTABLISHED := "COORD_CMD_ESTABLISHED";
+private function f_TC_mgwpool_call_seq_1(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(ass_cmd, exp_compl);
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	COORD.receive(COORD_CMD_ESTABLISHED);
+	f_perform_clear()
+	f_create_mgcp_delete_ep(g_media.mgcp_ep);
+}
+private function f_TC_mgwpool_call_seq_2(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+
+	COORD.receive(COORD_CMD_ESTABLISHED);
+	f_establish_fully(ass_cmd, exp_compl);
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	f_perform_clear()
+	f_create_mgcp_delete_ep(g_media.mgcp_ep);
+}
+/* Test load is spread around 2 available MGWs */
+testcase TC_mgwpool_all_used() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 1;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_call_seq_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_call_seq_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
+/* Test blocked MGW in the pool are not selected */
+testcase TC_mgwpool_blocked_not_used() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 0; /* expect it in the first one, since the second will be blocked */
+	pars2.media_nr := 2;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+	f_vty_mgw_block(1, true);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_call_seq_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_call_seq_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
+/* Test BTS pinning to an MGW is applied */
+testcase TC_mgwpool_pin_bts() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 0; /* expect it in the first one, since the BTS is pinned to the first MGW */
+	pars2.media_nr := 2;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+	f_vty_cfg_bts(BSCVTY, 0, { "mgw pool-target 0" });
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_call_seq_1), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_call_seq_2), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_cfg_bts(BSCVTY, 0, { "no mgw pool-target" } );
+	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
+private function f_tc_ho_meas_rep_multi_band(charstring id) runs on MSC_ConnHdlr {
+	g_pars := f_gen_test_hdlr_pars();
+	var PDU_BSSAP ass_req := f_gen_ass_req();
+	ass_req.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_req.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	f_establish_fully(ass_req, exp_compl);
+
+	/* Send a measurement report with bad rxlev except on 3rd entry. The
+	 * measurement report is divided into two sub lists, as described in
+	 * 3GPP TS 04.08 § 10.5.2.20. */
+	var NcellReports neighbor_rep := {
+		/* Sub list 1: same band */
+		{ rxlev := 0, bcch_freq := 0, bsic := 12 },  /* ARFCN  800, band 1800, LAC 98 */
+		/* Sub list 2: different band */
+		{ rxlev := 0, bcch_freq := 1, bsic := 13 },  /* ARFCN  200, band  850, LAC 97 */
+		{ rxlev := 40, bcch_freq := 2, bsic := 14 }, /* ARFCN 1000, band  900, LAC 99 */
+		{ rxlev := 0, bcch_freq := 3, bsic := 11 }   /* ARFCN    0, band  900, LAC 96 */
+	};
+	var octetstring l3_mr := enc_GsmRrL3Message(valueof(ts_MEAS_REP(true, 8, 8, reps := neighbor_rep)));
+	RSL.send(ts_RSL_MEAS_RES(g_chan_nr, 0, ts_RSL_IE_UplinkMeas, ts_RSL_IE_BS_Power(0), ts_RSL_IE_L1Info,
+				 l3_mr, 0));
+
+	/* Expect a handover to the third entry. If the BSC parsed the report
+	 * correctly, the third entry has LAC 99. */
+	var template BSSMAP_FIELD_CellIdentificationList cid_list := {
+		cIl_LAC := { ts_BSSMAP_CI_LAC(99) }
+	};
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequired(cid_list := cid_list)) {
+			setverdict(pass);
+		}
+	[] BSSAP.receive(tr_BSSMAP_HandoverRequired()) {
+			setverdict(fail, "Handover has unexpected LAC in Cell Identification List. The BSC probably"
+				   & " didn't parse the multi-band measurement report correctly.");
+		}
+	}
+
+	f_ho_out_of_this_bsc(skip_meas_rep := true);
+}
+testcase TC_ho_meas_rep_multi_band() runs on test_CT {
+	/* Verify that the BSC parses the measurement report correctly when
+	 * neighbors in multiple bands are configured (OS#5717). See
+	 * gsm_arfcn2band_rc() in libosmocore src/gsm/gsm_utils.c for the
+	 * ARFCN -> band mapping. The MS is connected to band 1800. */
+	var MSC_ConnHdlr vc_conn;
+
+	f_init_vty();
+	f_bts_0_cfg(BSCVTY,
+		    {"neighbor-list mode automatic",
+		     "handover 1",
+		     "handover algorithm 2",
+		     "handover2 window rxlev averaging 1",
+		     "no neighbors",
+		     "neighbor lac 99 arfcn 1000 bsic any",  /* band 900 */
+		     "neighbor lac 98 arfcn 800 bsic any",   /* band 1800 */
+		     "neighbor lac 97 arfcn 200 bsic any",   /* band 850 */
+		     "neighbor lac 96 arfcn 0 bsic any"});   /* band 900 */
+	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	f_ctrs_bsc_and_bts_handover_init();
+
+	vc_conn := f_start_handler(refers(f_tc_ho_meas_rep_multi_band));
+	vc_conn.done;
+
+	f_ctrs_bsc_and_bts_add(0, "assignment:attempted");
+	f_ctrs_bsc_and_bts_add(0, "assignment:completed");
+	f_ctrs_bsc_and_bts_add(0, "handover:attempted");
+	f_ctrs_bsc_and_bts_add(0, "handover:completed");
+	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:attempted");
+	f_ctrs_bsc_and_bts_add(0, "interbsc_ho_out:completed");
+	f_ctrs_bsc_and_bts_verify();
+	f_shutdown_helper(ho := true);
 }
 
 control {
@@ -12147,6 +12385,16 @@ control {
 	execute( TC_chan_alloc_algo_ascending() );
 	execute( TC_chan_alloc_algo_descending() );
 	execute( TC_chan_alloc_algo_ass_dynamic() );
+
+	/* MGW pool */
+	/* TODO: this conditional canbe dropped once osmo-bsc >1.10.0 is released: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_mgwpool_all_used() );
+		execute( TC_mgwpool_blocked_not_used() );
+		execute( TC_mgwpool_pin_bts() );
+	}
+
+	execute( TC_ho_meas_rep_multi_band() );
 
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */

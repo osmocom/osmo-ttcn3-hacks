@@ -25,8 +25,9 @@ kill_rm_pidfile() {
 date
 
 # -e only works/is required only in Bash; in dash/POSIX shells it isn't required and will be part of the output
-SHELL="$(cat /proc/$$/cmdline |  tr -d '\0')"
-if [ "$SHELL" = "bash" ]; then
+# SHELL environment variable doesn't always give name of current shell (e.g. for dash run inside bash...)
+SHELL_NAME="$(cat /proc/$$/cmdline |  tr -d '\0')"
+if [ "$SHELL_NAME" = "bash" ]; then
 	ESCAPE_OPT="-e"
 else
 	ESCAPE_OPT=""

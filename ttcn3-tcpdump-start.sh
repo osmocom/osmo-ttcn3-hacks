@@ -72,7 +72,7 @@ PID=$!
 echo $PID > $PIDFILE_NETCAT
 
 CMD_OUTFILE=$TTCN3_PCAP_PATH/$TESTCASE.pcap.stdout
-CMD_OUTFILE_ERR=$TTCN3_PCAP_PATH/$TESTCASE.pcap_err
+CMD_OUTFILE_ERR=$TTCN3_PCAP_PATH/$TESTCASE.pcap.stderr
 FIFO=/tmp/cmderr
 if ! [ -e $FIFO ]; then
 	mkfifo $FIFO
@@ -88,9 +88,9 @@ eval $CMD_STR
 PID=$!
 echo $PID > $PIDFILE_PCAP
 if [ -f $CMD_OUTFILE_ERR ] && [ $(wc -l $CMD_OUTFILE_ERR | awk '{print $1}') -ne 0 ]; then
-	echo "Error running command:" >&2
+	echo "Warnings or error messages from command:" >&2
 	echo "	$CMD_STR" >&2
-	echo "Error message:" >&2
+	echo "Message:" >&2
 	echo "$(cat $CMD_OUTFILE_ERR)" | sed 's/^/\t/' >&2
 fi
 

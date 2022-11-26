@@ -12,7 +12,6 @@ FILES="
 	IPL4asp_discovery.cc
 	LLC_EncDec.cc
 	Native_FunctionDefs.cc
-	RLCMAC_EncDec.cc
 	StatsD_CodecPort_CtrlFunctdef.cc
 	TCCConversion.cc
 	TCCInterface.cc

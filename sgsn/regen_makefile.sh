@@ -16,7 +16,6 @@ FILES="
 	LLC_EncDec.cc
 	Native_FunctionDefs.cc
 	RANAP_EncDec.cc
-	RLCMAC_EncDec.cc
 	SCCP_EncDec.cc
 	SCTPasp_PT.cc
 	TCCConversion.cc

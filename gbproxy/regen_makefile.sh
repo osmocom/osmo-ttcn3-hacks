@@ -16,7 +16,6 @@ FILES="
 	IPL4asp_discovery.cc
 	LLC_EncDec.cc
 	Native_FunctionDefs.cc
-	RLCMAC_EncDec.cc
 	SCCP_EncDec.cc
 	SCTPasp_PT.cc
 	TCCConversion.cc
@@ -27,7 +26,6 @@ FILES="
 export CPPFLAGS_TTCN3="
 	-DBSSGP_EM_L3
 	-DIPA_EMULATION_CTRL
-	-DIPA_EMULATION_GSUP
 	-DNS_EMULATION_FR
 	-DUSE_MTP3_DISTRIBUTOR
 "
