@@ -21,8 +21,10 @@ fi
 kill_rm_pidfile() {
 	# NOTE: This requires you to be root or something like
 	# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
-	if ! [ -e "$1" ] && [ -s "$1" ]; then
-		$SUDOSTR kill "$(cat "$1")" 2>&1 | grep -v "No such process"
+	if [ -e "$1" ]; then
+		if  [ -s "$1" ]; then
+			$SUDOSTR kill "$(cat "$1")" 2>&1 | grep -v "No such process"
+		fi
 		rm $1
 	fi
 }
