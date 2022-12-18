@@ -26,21 +26,11 @@ kill_rm_pidfile() {
 
 date
 
-# -e only works/is required only in Bash; in dash/POSIX shells it isn't required and will be part of the output
-# SHELL environment variable doesn't always give name of current shell (e.g. for dash run inside bash...)
-SHELL_NAME="$(cat /proc/$$/cmdline |  tr -d '\0')"
-if [ "$SHELL_NAME" = "bash" ]; then
-	ESCAPE_OPT="-e"
-else
-	ESCAPE_OPT=""
-fi
-
 if [ x"$VERDICT" = x"pass" ]; then
-	echo $ESCAPE_OPT "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+	printf "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m\n\n"
 else
-	echo $ESCAPE_OPT "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
+	printf "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m\n\n"
 fi
-echo
 
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp

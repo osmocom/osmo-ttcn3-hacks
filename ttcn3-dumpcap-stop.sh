@@ -22,11 +22,10 @@ fi
 date
 
 if [ x"$VERDICT" = x"pass" ]; then
-	echo -e "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m"
+	printf "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m\n\n"
 else
-	echo -e "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m"
+	printf "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m\n\n"
 fi
-echo
 
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
