@@ -3001,6 +3001,72 @@ testcase TC_second_rab_assignment() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* When a HNB that is connected does another HNB Register, make sure the SCCP links for all its UEs are disconnected in
+ * reasonable time. */
+friend function f_tc_hnb_reregister_cleanup_sccp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	var RANAP_PDU tx;
+
+	f_init_handler(pars, t_guard := 30.0);
+
+	/* TODO: HNBAP UE REGISTER */
+	//HNBAP.send(ts_HNBAP_UERegister())
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+
+	f_create_rab(pars.mgcp_pars);
+
+	f_verify_talloc_count(HNBGWVTY, {
+			      "sccp_connection", "hnbgw_context_map" //, "ue_context"
+			      /* TODO: "ue_context" should also be 1, but these tests fail to do HNBAP UE REGISTER */
+			      }, expect_count := 1, attempts := 5);
+	f_sleep(1.0);
+
+	/* Trigger cleanup of HNB, by sending another HNBAP HNB Register Request */
+	var integer cell_id := g_pars.hnb_idx;
+	HNBAP.send(ts_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
+					'00F110'O,
+					int2bit(1 + cell_id, 28),
+					int2oct(2, 2),
+					int2oct(3, 1),
+					int2oct(4, 2)));
+
+	/* At this point I would like to confirm that SCCP was released by osmo-hnbgw:
+	 *    SCCP.receive(RLSD)
+	 * But this seems completely impossible. SCCP_Emulation handles RLSD internally without letting any other layers
+	 * know about it, and it seems impossible to check whether an SCCP connection exists, either.
+	 *
+	 * Since that doesn't work, I am only checking whether the talloc report has any sccp_connection instances left. */
+
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] as_mgcp_dlcx(pars) {}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for DLCX");
+		mtc.stop;
+	}
+	}
+	f_sleep(3.0);
+	f_verify_talloc_count(HNBGWVTY, {
+			      "sccp_connection", "hnbgw_context_map" //, "ue_context"
+			      }, expect_count := 0);
+}
+
+testcase TC_hnb_reregister_cleanup_sccp() runs on test_CT {
+	var ConnHdlr vc_conn;
+	g_num_hnbs := 1;
+	f_init();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_hnb_reregister_cleanup_sccp), t_pars(8));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -3061,6 +3127,8 @@ control {
 	if (f_osmo_repo_is("nightly")) {
 		execute(TC_second_rab_assignment());
 	}
+
+	execute(TC_hnb_reregister_cleanup_sccp());
 
 	/* Run at the end since it makes osmo-hnbgw <= 1.3.0 crash: OS#5676 */
 	execute(TC_hnb_reregister_reuse_sctp_assoc());
