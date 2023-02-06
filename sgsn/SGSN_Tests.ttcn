@@ -1017,6 +1017,65 @@ testcase TC_attach_umts_aka_gsm_sres() runs on test_CT {
 	f_cleanup();
 }
 
+/* Let T3350 expire while the MS holds an active PDP context (OS#4221). Do this by
+ * Establishing a PDP context and then resending an ATTACH REQUEST,
+ * making sure that exactly five ATTACH ACCEPTS are sent */
+private function f_TC_attach_timeout_after_pdp_act(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+	/* Vars needed for triggering T3350 timeouts */
+	const integer ran_index := 0;
+	/* See TS 24.008 Rel. 16 Sect. 4.7.3.1.6 c) */
+	const integer gmm_attach_repeats := 5;
+	/* See TS 24.008 Rel. 16 Table 11.4 */
+	const float T3350 := 6.0;
+	var template PDU_L3_MS_SGSN attach_req;
+	timer t_receive_GMM_ATTACH_ACCEPT;
+	var RoutingAreaIdentificationV rai := f_random_RAI();
+
+	/* First establish PDP context */
+	f_TC_attach(id);
+	f_pdp_ctx_act(apars);
+
+	/* Now, try another GPRS attach procedure. For further code comments up until receiving the attach
+	 * accept from the SGSN, see definition of f_gmm_attach() */
+	attach_req := ts_GMM_ATTACH_REQ(f_mi_get_lv(), rai, false, false, omit, omit);
+	f_send_l3(attach_req, ran_index);
+	f_gmm_auth(false, false, ran_index);
+	f_gmm_gsup_lu_isd();
+
+	BSSGP[ran_index].clear;
+	log("Trying to receive ", gmm_attach_repeats, " ATTACH ACCEPTs");
+	for (var integer i := 1; i <= gmm_attach_repeats; i := i+1) {
+		t_receive_GMM_ATTACH_ACCEPT.start(T3350 + 0.5);
+		alt {
+			[] BSSGP[ran_index].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) {
+				t_receive_GMM_ATTACH_ACCEPT.stop;
+			}
+			[] t_receive_GMM_ATTACH_ACCEPT.timeout {
+				setverdict(fail, "Timeout on receiving ", i, "th ATTACH ACCEPT")
+			}
+		}
+	}
+	log("Have received ", gmm_attach_repeats, " ATTACH ACCEPT messages");
+	log("Make sure not more than ", gmm_attach_repeats, " ATTACH ACCEPT messages are sent");
+	t_receive_GMM_ATTACH_ACCEPT.start(T3350 + 0.5);
+	alt {
+		[] BSSGP[ran_index].receive(tr_GMM_ATTACH_ACCEPT('001'B, ?, ?)) {
+			setverdict(fail, "Received ", gmm_attach_repeats + 1, "th ATTACH ACCEPT")
+		}
+		[] t_receive_GMM_ATTACH_ACCEPT.timeout { }
+	}
+
+	setverdict(pass);
+}
+
+testcase TC_attach_timeout_after_pdp_act() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_attach_timeout_after_pdp_act), testcasename(), g_gb, 21);
+	f_cleanup();
+}
+
 /* MS never responds to ID REQ, expect ATTACH REJECT */
 private function f_TC_attach_auth_id_timeout(charstring id) runs on BSSGP_ConnHdlr {
 	var RoutingAreaIdentificationV old_ra := f_random_RAI();
@@ -3630,6 +3689,7 @@ control {
 	execute( TC_attach_mnc3() );
 	execute( TC_attach_umts_aka_umts_res() );
 	execute( TC_attach_umts_aka_gsm_sres() );
+	execute( TC_attach_timeout_after_pdp_act() );
 	execute( TC_attach_auth_id_timeout() );
 	execute( TC_attach_auth_sai_timeout() );
 	execute( TC_attach_auth_sai_reject() );
