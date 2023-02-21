@@ -15,7 +15,8 @@
 
 ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
-OSMOGIT:=git://git.osmocom.org
+OSMOGERRIT:=https://gerrit.osmocom.org
+OSMOGITEA:=https://gitea.osmocom.org/ttcn3
 
 ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolEmulations.M3UA \
@@ -66,11 +67,12 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
-OSMOGIT_REPOS=		titan.ProtocolModules.MAP \
-			titan.ProtocolModules.BSSMAP \
-			titan.TestPorts.USB \
-			titan.TestPorts.AF_PACKET \
+OSMOGERRIT_REPOS=	titan.ProtocolModules.BSSMAP \
 			osmo-uecups
+
+OSMOGITEA_REPOS=	titan.ProtocolModules.MAP \
+			titan.TestPorts.USB \
+			titan.TestPorts.AF_PACKET
 
 ALL_REPOS=$(ECLIPSEGITLAB_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS) $(FORKEDGITLAB_REPOS)
 
@@ -187,8 +189,11 @@ $(foreach dir,$(ECLIPSEGITLAB_REPOS), \
 $(foreach dir,$(OSMOGITHUB_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(OSMOGITHUB))))
 
-$(foreach dir,$(OSMOGIT_REPOS), \
-	$(eval $(call GIT_template,$(dir),$(OSMOGIT))))
+$(foreach dir,$(OSMOGERRIT_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(OSMOGERRIT))))
+
+$(foreach dir,$(OSMOGITEA_REPOS), \
+	$(eval $(call GIT_template,$(dir),$(OSMOGITEA))))
 
 $(foreach dir,$(FORKEDGITLAB_REPOS), \
 	$(eval $(call GIT_template,$(dir),$(FORKEDGITLAB))))
