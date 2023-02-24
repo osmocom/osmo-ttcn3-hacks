@@ -74,7 +74,11 @@ OSMOGITEA_REPOS=	titan.ProtocolModules.MAP \
 			titan.TestPorts.USB \
 			titan.TestPorts.AF_PACKET
 
-ALL_REPOS=$(ECLIPSEGITLAB_REPOS) $(OSMOGITHUB_REPOS) $(OSMOGIT_REPOS) $(FORKEDGITLAB_REPOS)
+ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
+			$(OSMOGITHUB_REPOS) \
+			$(OSMOGERRIT_REPOS) \
+			$(OSMOGITEA_REPOS) \
+			$(FORKEDGITLAB_REPOS)
 
 # Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
 # Do not put references to branches here, except for local testing: this breaks the caching
