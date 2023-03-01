@@ -45,6 +45,10 @@ fi
 #TITAN_LIBRARY_PATH="$TTCN3_DIR/lib"
 #TTCN3_BIN_DIR="$TTCN3_DIR/bin"
 
+# Limit max num of open file descriptors to workaround titan.core bug:
+# https://gitlab.eclipse.org/eclipse/titan/titan.core/-/issues/690
+ulimit -n 100000
+
 # below is for the debian packages
 TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
