@@ -153,24 +153,27 @@ const RtpemStats c_RtpemStatsReset := {
 	num_pkts_rx_err_payload := 0
 }
 
+type record RtpemConfigPayload {
+	INT7b payload_type,
+	octetstring fixed_payload optional
+};
+
 type record RtpemConfig {
-	INT7b tx_payload_type,
 	integer tx_samplerate_hz,
 	integer tx_duration_ms,
 	BIT32_BO_LAST tx_ssrc,
-	octetstring tx_fixed_payload optional,
-	octetstring rx_fixed_payload optional,
+	record of RtpemConfigPayload tx_payloads,
+	record of RtpemConfigPayload rx_payloads,
 	boolean iuup_mode,
 	IuUP_Config iuup_cfg
 };
 
 const RtpemConfig c_RtpemDefaultCfg := {
-	tx_payload_type := 0,
 	tx_samplerate_hz := 8000,
 	tx_duration_ms := 20,
 	tx_ssrc := '11011110101011011011111011101111'B,
-	tx_fixed_payload := '01020304'O,
-	rx_fixed_payload := '01020304'O,
+	tx_payloads := {{0, '01020304'O}},
+	rx_payloads := {{0, '01020304'O}},
 	iuup_mode := false,
 	iuup_cfg := c_IuUP_Config_def
 }
@@ -342,7 +345,7 @@ template PDU_RTP ts_RTP(BIT32_BO_LAST ssrc, INT7b pt, LIN2_BO_LAST seq, uint32_t
 	data := payload
 }
 
-private function f_tx_rtp(octetstring payload, BIT1 marker := '0'B) runs on RTP_Emulation_CT {
+private function f_tx_rtp(octetstring payload, INT7b rtp_payload_type, BIT1 marker := '0'B) runs on RTP_Emulation_CT {
 	if (g_cfg.iuup_mode) {
 		payload := f_IuUP_Em_tx_encap(g_iuup_ent, payload);
 		if (lengthof(payload) == 0) {
@@ -350,12 +353,64 @@ private function f_tx_rtp(octetstring payload, BIT1 marker := '0'B) runs on RTP_
 			return;
 		}
 	}
-	var PDU_RTP rtp := valueof(ts_RTP(g_cfg.tx_ssrc, g_cfg.tx_payload_type, g_tx_next_seq,
+	var PDU_RTP rtp := valueof(ts_RTP(g_cfg.tx_ssrc, rtp_payload_type, g_tx_next_seq,
 					  g_tx_next_ts, payload, marker));
 	RTP.send(t_RTP_Send(g_rtp_conn_id, RTP_messages_union:{rtp:=rtp}));
 	/* increment sequence + timestamp for next transmit */
 	g_tx_next_seq := g_tx_next_seq + 1;
 	g_tx_next_ts := g_tx_next_ts + (g_cfg.tx_samplerate_hz / (1000 / g_cfg.tx_duration_ms));
+}
+
+private function f_check_fixed_rx_payloads(INT7b rtp_payload_type, octetstring rtp_data) runs on RTP_Emulation_CT {
+	var boolean payload_type_match := false;
+
+	/* The API user has the option to define zero or multiple sets of rx_payloads. Each rx_payload set contains
+	   the payload type number of the expected payload and an optional fixed_payload, which resembles the actual
+	   payload.
+
+	   In case zero rx_payloads are defined nothing is verified and no errors are counted. This is a corner case
+	   and should be avoided since it would not yield any good test coverage.
+
+	   During verification the payload type has the highest priority. It must match before the optional fixed
+	   payload is checked. Since the fixed_payload is optional multiple error situations may apply:
+
+	   |  payload_type  | fixed_payload | result
+	   |     match      |    match      | full match           => no error counter is incremented
+	   |     match      |  not present  | counts as full match => no error counter is incremented
+	   |     match      |   mismatch    | payload type match   => only num_pkts_rx_err_payload is incremented
+	   |                |               |                         unless something of the above is detected later.
+	   |    mismatch    | (not checked) | no match             => num_pkts_rx_err_payload and num_pkts_rx_err_pt
+	   |                |               |                         are increment unless something of the above is
+	   |                |               |                         detected later.
+	*/
+
+	/* In case no rx payloads are defined any payload is accepted and no errors are counted. */
+	if (lengthof(g_cfg.rx_payloads) == 0) {
+		return;
+	}
+
+	/* Evaluate rtp_data and rtp_payload_type */
+	for (var integer i := 0; i < lengthof(g_cfg.rx_payloads); i := i + 1) {
+		if (rtp_payload_type == g_cfg.rx_payloads[i].payload_type) {
+			if (not ispresent(g_cfg.rx_payloads[i].fixed_payload)) {
+				/* full match */
+				return;
+			}
+			if (g_cfg.rx_payloads[i].fixed_payload == rtp_data) {
+				/* counts as full match */
+				return;
+			}
+
+			/* At least the payload type number did match
+			 * (but we still may see a full match later) */
+			payload_type_match := true;
+		}
+	}
+
+	g_stats_rtp.num_pkts_rx_err_payload := g_stats_rtp.num_pkts_rx_err_payload + 1;
+	if (not payload_type_match) {
+		g_stats_rtp.num_pkts_rx_err_pt := g_stats_rtp.num_pkts_rx_err_pt + 1;
+	}
 }
 
 function f_main() runs on RTP_Emulation_CT
@@ -450,7 +505,7 @@ function f_main() runs on RTP_Emulation_CT
 			g_tx_connected := true;
 			/* Send any pending IuUP CTRL message whichwas delayed due to not being connected: */
 			if (isvalue(g_iuup_ent.pending_tx_pdu)) {
-				f_tx_rtp(''O);
+				f_tx_rtp(''O, g_cfg.tx_payloads[0].payload_type);
 			}
 			CTRL.reply(RTPEM_connect:{g_remote_host, g_remote_port});
 		}
@@ -517,7 +572,7 @@ function f_main() runs on RTP_Emulation_CT
 					g_stats_rtp.num_pkts_rx_err_disabled := g_stats_rtp.num_pkts_rx_err_disabled+1;
 				} else if (g_tx_connected and isvalue(g_iuup_ent.pending_tx_pdu)) {
 					/* IuUP Control packet was received and requires sending back something: */
-					f_tx_rtp(''O);
+					f_tx_rtp(''O, g_cfg.tx_payloads[0].payload_type);
 				}
 			} else {
 				g_stats_rtp.num_pkts_rx_err_disabled := g_stats_rtp.num_pkts_rx_err_disabled+1;
@@ -530,9 +585,6 @@ function f_main() runs on RTP_Emulation_CT
 		/* process received RTCP/RTP if receiver enabled */
 		[g_rx_enabled] RTP.receive(tr_rtp) -> value rx_rtp {
 			/* increment counters */
-			if (rx_rtp.msg.rtp.payload_type != g_cfg.tx_payload_type) {
-				g_stats_rtp.num_pkts_rx_err_pt := g_stats_rtp.num_pkts_rx_err_pt+1;
-			}
 			g_stats_rtp.num_pkts_rx := g_stats_rtp.num_pkts_rx+1;
 			g_stats_rtp.bytes_payload_rx := g_stats_rtp.bytes_payload_rx +
 								lengthof(rx_rtp.msg.rtp.data);
@@ -541,14 +593,15 @@ function f_main() runs on RTP_Emulation_CT
 				/* IuUP Control packet was received which may require sending back something: */
 				if (lengthof(rx_rtp.msg.rtp.data) == 0) {
 					if (g_tx_connected and isvalue(g_iuup_ent.pending_tx_pdu)) {
-						f_tx_rtp(''O);
+						f_tx_rtp(''O, g_cfg.tx_payloads[0].payload_type);
 					}
 					repeat;
 				}
 			}
-			if (ispresent(g_cfg.rx_fixed_payload) and rx_rtp.msg.rtp.data != g_cfg.rx_fixed_payload) {
-				g_stats_rtp.num_pkts_rx_err_payload := g_stats_rtp.num_pkts_rx_err_payload + 1;
-			}
+
+			/* Match the received payload against any of the predefined fixed rx payloads */
+			f_check_fixed_rx_payloads(rx_rtp.msg.rtp.payload_type, rx_rtp.msg.rtp.data);
+
 			if (DATA.checkstate("Connected")) {
 				DATA.send(rx_rtp.msg.rtp);
 			}
@@ -563,13 +616,14 @@ function f_main() runs on RTP_Emulation_CT
 
 		/* transmit if timer has expired */
 		[g_tx_connected] T_transmit.timeout {
+			var octetstring payload := g_cfg.tx_payloads[g_tx_next_seq mod lengthof(g_cfg.tx_payloads)].fixed_payload;
+			var INT7b rtp_payload_type := g_cfg.tx_payloads[g_tx_next_seq mod lengthof(g_cfg.tx_payloads)].payload_type;
 			/* send one RTP frame, re-start timer */
-			f_tx_rtp(g_cfg.tx_fixed_payload);
+			f_tx_rtp(payload, rtp_payload_type);
 			T_transmit.start;
 			/* update counters */
 			g_stats_rtp.num_pkts_tx := g_stats_rtp.num_pkts_tx+1;
-			g_stats_rtp.bytes_payload_tx := g_stats_rtp.bytes_payload_tx +
-								lengthof(g_cfg.tx_fixed_payload);
+			g_stats_rtp.bytes_payload_tx := g_stats_rtp.bytes_payload_tx + lengthof(payload);
 		}
 
 		/* connection refused */

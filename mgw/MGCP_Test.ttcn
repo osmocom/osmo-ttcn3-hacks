@@ -341,15 +341,71 @@ module MGCP_Test {
 		MgcpOsmuxCID remote_cid optional,
 		OsmuxemConfig cfg optional
 	}
+	type record RtpCodecDescr {
+		uint7_t pt,
+		charstring codec,
+		charstring fmtp optional
+	}
 	type record RtpFlowData {
 		HostPort em,	/* emulation side */
 		HostPort mgw,	/* mgw side */
-		uint7_t pt,
-		charstring codec,
 		MgcpConnectionId mgcp_conn_id optional,
+		record of RtpCodecDescr codec_descr,
 		RtpemConfig rtp_cfg optional,
-		RtpOsmuxFlowData osmux,
-		charstring fmtp optional
+		RtpOsmuxFlowData osmux
+	}
+
+	/* To be used with f_flow_create/modify... functions */
+	function f_gen_sdp(RtpFlowData flow) runs on dummy_CT return SDP_Message {
+		var template SDP_Message sdp;
+		var SDP_fmt_list fmt_list := {};
+		var SDP_attribute_list attributes := {};
+
+		/* Add SDP RTMAP attributes (codec type, referenced by PT) */
+		for (var integer i := 0; i < lengthof(flow.codec_descr); i := i + 1) {
+			attributes := attributes & { valueof(ts_SDP_rtpmap(flow.codec_descr[i].pt,
+				      flow.codec_descr[i].codec)) };
+		}
+
+		/* Add SDP PTIME attribute, regardless of which codec, the packet intervall remains the same */
+		attributes := attributes & { valueof(ts_SDP_ptime(20)) };
+
+		/* Add SDP FMTP attributes (codec parameters for each codec, referenced by PT) */
+		for (var integer i := 0; i < lengthof(flow.codec_descr); i := i + 1) {
+			if (isvalue(flow.codec_descr[i].fmtp) and flow.codec_descr[i].fmtp != "") {
+				attributes := attributes & { valueof(ts_SDP_fmtp(flow.codec_descr[i].pt,
+							     flow.codec_descr[i].fmtp)) };
+			}
+		}
+
+		/* Final step: Generate SDP */
+		for (var integer i := 0; i < lengthof(flow.codec_descr); i := i + 1) {
+			fmt_list := fmt_list & {int2str(flow.codec_descr[i].pt)};
+		}
+		sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42", flow.em.portnr, fmt_list, attributes);
+
+		return valueof(sdp);
+	}
+
+	/* Generate a valid RTP emulation config from the payload type numbers configured in the flow description and
+	 * the the default configuration of the RTP emulation module. */
+	function f_gen_rtpem_config_from_flow(RtpFlowData flow) return RtpemConfig {
+		var RtpemConfig rtp_cfg := c_RtpemDefaultCfg;
+
+		for (var integer i := 0; i < lengthof(flow.codec_descr); i := i + 1) {
+			var RtpemConfigPayload tx_cfg_payload;
+			var RtpemConfigPayload rx_cfg_payload;
+
+			tx_cfg_payload.payload_type := flow.codec_descr[i].pt;
+			tx_cfg_payload.fixed_payload := c_RtpemDefaultCfg.tx_payloads[0].fixed_payload;
+			rx_cfg_payload.payload_type := flow.codec_descr[i].pt;
+			rx_cfg_payload.fixed_payload := c_RtpemDefaultCfg.rx_payloads[0].fixed_payload;
+
+			rtp_cfg.tx_payloads := rtp_cfg.tx_payloads & {tx_cfg_payload};
+			rtp_cfg.rx_payloads := rtp_cfg.rx_payloads & {rx_cfg_payload};
+		}
+
+		return rtp_cfg;
 	}
 
 	/* Create an RTP flow (bidirectional, or receive-only) */
@@ -358,12 +414,6 @@ module MGCP_Test {
 	runs on dummy_CT {
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
-		var SDP_attribute_list attributes;
-
-		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
-		if (isvalue(flow.fmtp) and flow.fmtp != "") {
-			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
-		}
 
 		/* bind local RTP emulation socket */
 		f_rtpem_bind(pt, flow.em.hostname, flow.em.portnr);
@@ -372,9 +422,7 @@ module MGCP_Test {
 		if (ispresent(flow.rtp_cfg)) {
 			f_rtpem_configure(pt, flow.rtp_cfg);
 		} else {
-			var RtpemConfig rtp_cfg := c_RtpemDefaultCfg;
-			rtp_cfg.tx_payload_type := flow.pt
-			f_rtpem_configure(pt, rtp_cfg);
+			f_rtpem_configure(pt, f_gen_rtpem_config_from_flow(flow));
 		}
 
 		if (one_phase) {
@@ -384,8 +432,7 @@ module MGCP_Test {
 			 * one go. */
 
 			cmd := ts_CRCX(get_next_trans_id(), ep, mode, call_id);
-			cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
-					  flow.em.portnr, { int2str(flow.pt) }, attributes);
+			cmd.sdp := f_gen_sdp(flow);
 
 			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK);
 			flow.mgcp_conn_id := extract_conn_id(resp);
@@ -416,16 +463,10 @@ module MGCP_Test {
 	runs on dummy_CT {
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
-		var SDP_attribute_list attributes;
 		var OsmuxTxHandle tx_hdl;
 		var OsmuxRxHandle rx_hdl;
 		var charstring cid_response;
 		var OsmuxCID cid_resp_parsed
-
-		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
-		if (isvalue(flow.fmtp)) {
-			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
-		}
 
 		/* bind local Osmux emulation socket */
 		f_osmuxem_bind(pt, flow.em.hostname, flow.em.portnr);
@@ -452,8 +493,7 @@ module MGCP_Test {
 				flow.osmux.local_cid_sent := true;
 			}
 			cmd := ts_CRCX_osmux(get_next_trans_id(), ep, mode, call_id, flow.osmux.local_cid);
-			cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
-					  flow.em.portnr, { int2str(flow.pt) }, attributes);
+			cmd.sdp := f_gen_sdp(flow);
   			resp := mgcp_transceive_mgw(cmd, tr_CRCX_ACK_osmux);
 			flow.mgcp_conn_id := extract_conn_id(resp);
 			/* extract port number from response */
@@ -503,12 +543,6 @@ module MGCP_Test {
 	runs on dummy_CT {
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
-		var SDP_attribute_list attributes;
-
-		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
-		if (isvalue(flow.fmtp)) {
-			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
-		}
 
 		/* rebind local RTP emulation socket to the new address */
 		f_rtpem_bind(pt, flow.em.hostname, flow.em.portnr);
@@ -517,15 +551,12 @@ module MGCP_Test {
 		if (ispresent(flow.rtp_cfg)) {
 			f_rtpem_configure(pt, flow.rtp_cfg);
 		} else {
-			var RtpemConfig rtp_cfg := c_RtpemDefaultCfg;
-			rtp_cfg.tx_payload_type := flow.pt
-			f_rtpem_configure(pt, rtp_cfg);
+			f_rtpem_configure(pt, f_gen_rtpem_config_from_flow(flow));
 		}
 
 		/* connect MGW side RTP socket to the emulation-side RTP socket using SDP */
 		cmd := ts_MDCX(get_next_trans_id(), ep, mode, call_id, flow.mgcp_conn_id);
-		cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
-				  flow.em.portnr, { int2str(flow.pt) }, attributes);
+		cmd.sdp := f_gen_sdp(flow);
 		resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
 
 		/* extract MGW-side port number from response. (usually this
@@ -542,15 +573,9 @@ module MGCP_Test {
 	runs on dummy_CT {
 		var template MgcpCommand cmd;
 		var MgcpResponse resp;
-		var SDP_attribute_list attributes;
 		var OsmuxRxHandle rx_hdl;
 		var charstring cid_response;
 		var OsmuxCID cid_resp_parsed
-
-		attributes := { valueof(ts_SDP_rtpmap(flow.pt, flow.codec)), valueof(ts_SDP_ptime(20)) };
-		if (isvalue(flow.fmtp)) {
-			attributes := attributes & { valueof(ts_SDP_fmtp(flow.pt, flow.fmtp)) };
-		}
 
 		/* rebind local Osmux emulation socket to the new address */
 		f_osmuxem_bind(pt, flow.em.hostname, flow.em.portnr);
@@ -573,8 +598,7 @@ module MGCP_Test {
 
 		/* connect MGW side Osmux socket to the emulation-side Osmux socket using SDP */
 		cmd := ts_MDCX_osmux(get_next_trans_id(), ep, mode, call_id, flow.mgcp_conn_id, flow.osmux.local_cid);
-		cmd.sdp := ts_SDP(flow.em.hostname, flow.em.hostname, "23", "42",
-				  flow.em.portnr, { int2str(flow.pt) }, attributes);
+		cmd.sdp := f_gen_sdp(flow);
 		resp := mgcp_transceive_mgw(cmd, tr_MDCX_ACK);
 
 		/* extract MGW-side port number from response. (usually this
@@ -1375,10 +1399,11 @@ module MGCP_Test {
 		/* from us to MGW */
 		flow[0] := valueof(t_RtpFlow(local_ip_rtp, remote_ip_rtp, 112, "AMR/8000"));
 		flow[0].rtp_cfg := c_RtpemDefaultCfg
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
-		flow[0].rtp_cfg.rx_fixed_payload := amr_payload;
-		flow[0].rtp_cfg.tx_fixed_payload := amr_payload;
-		flow[0].fmtp := fmtp;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].fixed_payload := amr_payload;
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].fixed_payload := amr_payload;
+		flow[0].codec_descr[0].fmtp := fmtp;
 		/* bind local RTP emulation sockets */
 		flow[0].em.portnr := 10000;
 		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
@@ -1483,10 +1508,11 @@ module MGCP_Test {
 		/* Create the first connection in receive only mode */
 		flow[0] := valueof(t_RtpFlow(local_ip_rtp, remote_ip_rtp, 112, "AMR/8000"));
 		flow[0].rtp_cfg := c_RtpemDefaultCfg
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
 		/* 0014 is the ToC (CMR=AMR4.75) in front of AMR Payload in RTP Payload */
-		flow[0].rtp_cfg.rx_fixed_payload := '0014'O & f_osmux_gen_expected_rx_rtp_payload(2 /* AMR_FT_2, 5.90 */, c_OsmuxemDefaultCfg.tx_fixed_payload);
-		flow[0].rtp_cfg.tx_fixed_payload := flow[0].rtp_cfg.rx_fixed_payload;
+		flow[0].rtp_cfg.rx_payloads[0].fixed_payload := '0014'O & f_osmux_gen_expected_rx_rtp_payload(2 /* AMR_FT_2, 5.90 */, c_OsmuxemDefaultCfg.tx_fixed_payload);
+		flow[0].rtp_cfg.tx_payloads[0].fixed_payload := flow[0].rtp_cfg.rx_payloads[0].fixed_payload;
 		/* bind local RTP emulation sockets */
 		flow[0].em.portnr := 10000;
 		f_flow_create(RTPEM[0], ep, call_id, "recvonly", flow[0], true);
@@ -1780,8 +1806,10 @@ module MGCP_Test {
 			hostname := host_b,
 			portnr := omit
 		},
-		pt := pt,
-		codec := codec,
+		codec_descr := {{
+			pt := pt,
+			codec := codec
+		}},
 		osmux:= {
 			local_cid_sent := false,
 			local_cid := omit,
@@ -2259,20 +2287,22 @@ module MGCP_Test {
 		/* bind local RTP emulation sockets */
 		flow[0].em.portnr := 10000;
 		flow[0].rtp_cfg := c_RtpemDefaultCfg;
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
-		flow[0].rtp_cfg.rx_fixed_payload := pl0
-		flow[0].rtp_cfg.tx_fixed_payload := pl0
-		flow[0].fmtp := fmtp0;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].fixed_payload := pl0;
+		flow[0].rtp_cfg.tx_payloads[0].fixed_payload := pl0;
+		flow[0].codec_descr[0].fmtp := fmtp0;
 		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
 
 		/* Connection #1 (Bidirectional) */
 		flow[1] := valueof(t_RtpFlow(mp_local_ipv4, mp_remote_ipv4, 111, "GSM-HR-08/8000"));
 		flow[1].em.portnr := 20000;
 		flow[1].rtp_cfg	:= c_RtpemDefaultCfg;
-		flow[1].rtp_cfg.tx_payload_type := flow[1].pt;
-		flow[1].rtp_cfg.rx_fixed_payload := pl1
-		flow[1].rtp_cfg.tx_fixed_payload := pl1
-		flow[1].fmtp := fmtp1;
+		flow[1].rtp_cfg.rx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.tx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.rx_payloads[0].fixed_payload := pl1;
+		flow[1].rtp_cfg.tx_payloads[0].fixed_payload := pl1;
+		flow[1].codec_descr[0].fmtp := fmtp1;
 		f_flow_create(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
 
 		/* Send RTP packets to connection #0, receive on connection #1 */
@@ -2337,20 +2367,22 @@ module MGCP_Test {
 		/* bind local RTP emulation sockets */
 		flow[0].em.portnr := 10000;
 		flow[0].rtp_cfg := c_RtpemDefaultCfg;
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
-		flow[0].rtp_cfg.rx_fixed_payload := pl0;
-		flow[0].rtp_cfg.tx_fixed_payload := pl0;
-		flow[0].fmtp := fmtp0;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].fixed_payload := pl0;
+		flow[0].rtp_cfg.tx_payloads[0].fixed_payload := pl0;
+		flow[0].codec_descr[0].fmtp := fmtp0;
 		f_flow_create(RTPEM[0], ep, call_id, "sendrecv", flow[0]);
 
 		/* Connection #1 (Bidirectional) */
 		flow[1] := valueof(t_RtpFlow(mp_local_ipv4, mp_remote_ipv4, 112, "AMR/8000"));
 		flow[1].em.portnr := 20000;
 		flow[1].rtp_cfg	:= c_RtpemDefaultCfg;
-		flow[1].rtp_cfg.tx_payload_type := flow[1].pt;
-		flow[1].rtp_cfg.rx_fixed_payload := pl1;
-		flow[1].rtp_cfg.tx_fixed_payload := pl1;
-		flow[1].fmtp := fmtp1;
+		flow[1].rtp_cfg.rx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.tx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.rx_payloads[0].fixed_payload := pl1;
+		flow[1].rtp_cfg.tx_payloads[0].fixed_payload := pl1;
+		flow[1].codec_descr[0].fmtp := fmtp1;
 		f_flow_create(RTPEM[1], ep, call_id, "sendrecv", flow[1]);
 
 		/* Send RTP packets to connection #0, receive on connection #1 */
@@ -2682,7 +2714,8 @@ module MGCP_Test {
 		flow[0] := valueof(t_RtpFlow(local_ip_a, remote_ip_a, 96, "VND.3GPP.IUFP/16000"));
 		flow[0].em.portnr := 10000;
 		flow[0].rtp_cfg := c_RtpemDefaultCfg;
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
 		flow[0].rtp_cfg.iuup_mode := true;
 		flow[0].rtp_cfg.iuup_cfg.active_init := true;
 		flow[0].rtp_cfg.iuup_cfg.rab_flow_combs := rfcl_a;
@@ -2694,7 +2727,8 @@ module MGCP_Test {
 		flow[1] := valueof(t_RtpFlow(local_ip_b, remote_ip_b, 96, "VND.3GPP.IUFP/16000"));
 		flow[1].em.portnr := 20000;
 		flow[1].rtp_cfg := c_RtpemDefaultCfg;
-		flow[1].rtp_cfg.tx_payload_type := flow[1].pt;
+		flow[1].rtp_cfg.rx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.tx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
 		flow[1].rtp_cfg.iuup_mode := true;
 		flow[1].rtp_cfg.iuup_cfg.active_init := false;
 		f_flow_create(RTPEM[1], ep, call_id, "recvonly", flow[1], true);
@@ -2816,9 +2850,11 @@ module MGCP_Test {
 		flow[0] := valueof(t_RtpFlow(local_ip_a, remote_ip_a, 96, "VND.3GPP.IUFP/16000"));
 		flow[0].em.portnr := 10000;
 		flow[0].rtp_cfg := c_RtpemDefaultCfg;
-		flow[0].rtp_cfg.tx_payload_type := flow[0].pt;
-		flow[0].rtp_cfg.tx_fixed_payload := '4f28959ffeb80181f5c4e83d176c897b4a4e333298333419a493ca63ded6e0'O;
-		flow[0].rtp_cfg.rx_fixed_payload := '08556d944c71a1a081e7ead204244480000ecd82b81118000097c4794e7740'O; /* flow[1].rtp_cfg.tx_fixed_payload converted AMR-BE-RTP->AMR-IUUP*/
+		flow[0].rtp_cfg.tx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.rx_payloads[0].payload_type := flow[0].codec_descr[0].pt;
+		flow[0].rtp_cfg.tx_payloads[0].fixed_payload := '4f28959ffeb80181f5c4e83d176c897b4a4e333298333419a493ca63ded6e0'O;
+		/* flow[1].rtp_cfg.rx_payloads[0].fixed_payload converted AMR-BE-RTP->AMR-IUUP*/
+		flow[0].rtp_cfg.rx_payloads[0].fixed_payload := '08556d944c71a1a081e7ead204244480000ecd82b81118000097c4794e7740'O;
 		flow[0].rtp_cfg.iuup_mode := true;
 		flow[0].rtp_cfg.iuup_cfg.active_init := true;
 		flow[0].rtp_cfg.iuup_cfg.rab_flow_combs := rfcl_a;
@@ -2830,9 +2866,11 @@ module MGCP_Test {
 		flow[1] := valueof(t_RtpFlow(local_ip_b, remote_ip_b, 112, "AMR/8000"));
 		flow[1].em.portnr := 20000;
 		flow[1].rtp_cfg := c_RtpemDefaultCfg;
-		flow[1].rtp_cfg.tx_payload_type := flow[1].pt;
-		flow[1].rtp_cfg.tx_fixed_payload := '0382155b65131c68682079fab4810911200003b360ae0446000025f11e539dd0'O;
-		flow[1].rtp_cfg.rx_fixed_payload := 'f3d3ca2567ffae00607d713a0f45db225ed2938ccca60ccd066924f298f7b5b8'O; /* flow[0].rtp_cfg.tx_fixed_payload converted AMR-IuUP->AMR-BE-RTP*/
+		flow[1].rtp_cfg.tx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.rx_payloads[0].payload_type := flow[1].codec_descr[0].pt;
+		flow[1].rtp_cfg.tx_payloads[0].fixed_payload := '0382155b65131c68682079fab4810911200003b360ae0446000025f11e539dd0'O;
+		/* flow[0].rtp_cfg.rx_payloads[0].fixed_payload converted AMR-IuUP->AMR-BE-RTP*/
+		flow[1].rtp_cfg.rx_payloads[0].fixed_payload := 'f3d3ca2567ffae00607d713a0f45db225ed2938ccca60ccd066924f298f7b5b8'O;
 		flow[1].rtp_cfg.iuup_mode := false;
 		f_flow_create(RTPEM[1], ep, call_id, "recvonly", flow[1], true);
 		f_rtpem_mode(RTPEM[1], RTPEM_MODE_RXONLY);
