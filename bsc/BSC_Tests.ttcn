@@ -646,6 +646,8 @@ type component test_CT extends CTRL_Adapter_CT {
 	/* are we initialized yet */
 	var boolean g_initialized := false;
 
+	var boolean g_handler_mode := false;
+
 	/* Osmux is enabled through VTY */
 	var boolean g_osmux_enabled_cn := false;
 	var boolean g_osmux_enabled_bts := false;
@@ -1210,6 +1212,27 @@ private function f_vty_msc_allow_attach(TELNETasp_PT pt, my_BooleanList allow_at
 	}
 }
 
+private function f_bssap_idx_init(integer bssap_idx) runs on test_CT {
+	/* Call a function of our 'parent component' RAN_Adapter_CT to start the
+	 * MSC-side BSSAP emulation */
+	if (g_handler_mode) {
+		var RanOps ranops := MSC_RanOps;
+		ranops.use_osmux := g_osmux_enabled_cn;
+		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", ranops);
+		connect(self:SCCPLITE_IPA_CTRL, g_bssap[bssap_idx].vc_RAN:CTRL_CLIENT);
+		f_ran_adapter_start(g_bssap[bssap_idx]);
+	} else {
+		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", omit);
+		connect(self:BSSAP, g_bssap[bssap_idx].vc_SCCP:SCCP_SP_PORT);
+		f_ran_adapter_start(g_bssap[bssap_idx]);
+		f_legacy_bssap_reset();
+	}
+}
+
+private function f_bssap_idx_disconnect(integer bssap_idx) runs on test_CT {
+	f_ran_adapter_cleanup(g_bssap[bssap_idx]);
+}
+
 /* global initialization function
  * \param nr_bts Number of BTSs we should start/bring up
  * \param handler_mode Start an RSL_Emulation_CT component (true) or not (false).
@@ -1238,22 +1261,10 @@ function f_init(integer nr_bts := NUM_BTS, boolean handler_mode := false,
 		f_vty_transceive(BSCVTY, "msc " & int2str(bssap_idx) & " bssmap reset", strict := false);
 	}
 
+	g_handler_mode := handler_mode;
 	for (bssap_idx := 0; bssap_idx < nr_msc; bssap_idx := bssap_idx+1) {
 		allow_attach[bssap_idx] := true;
-		/* Call a function of our 'parent component' RAN_Adapter_CT to start the
-		 * MSC-side BSSAP emulation */
-		if (handler_mode) {
-			var RanOps ranops := MSC_RanOps;
-			ranops.use_osmux := g_osmux_enabled_cn;
-			f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", ranops);
-			connect(self:SCCPLITE_IPA_CTRL, g_bssap[bssap_idx].vc_RAN:CTRL_CLIENT);
-			f_ran_adapter_start(g_bssap[bssap_idx]);
-		} else {
-			f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", omit);
-			connect(self:BSSAP, g_bssap[bssap_idx].vc_SCCP:SCCP_SP_PORT);
-			f_ran_adapter_start(g_bssap[bssap_idx]);
-			f_legacy_bssap_reset();
-		}
+		f_bssap_idx_init(bssap_idx);
 	}
 
 	if (mp_enable_lcs_tests) {
@@ -9190,8 +9201,7 @@ testcase TC_mscpool_sccp_n_pcstate_detaches_msc() runs on test_CT {
 	f_ctrs_msc_expect(1, "mscpool:subscr:new");
 
 	f_logp(BSCVTY, "disconnecting msc0");
-	/* Disconnect the first MSC */
-	f_ran_adapter_cleanup(g_bssap[0]);
+	f_bssap_idx_disconnect(0);
 
 	/* Now round-robin would wrap to the first MSC, but since the first MSC is disconnected, it wraps around to msc
 	 * 2 again. */
@@ -9202,6 +9212,53 @@ testcase TC_mscpool_sccp_n_pcstate_detaches_msc() runs on test_CT {
 	vc_conn3 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars3);
 	vc_conn3.done;
 	f_ctrs_msc_expect(1, "mscpool:subscr:new");
+	f_shutdown_helper();
+}
+
+/* When an MSC point-code gets an SCCP N-PCSTATE saying it is now reachable, immediately trigger RESET and bring up the
+ * MSC. */
+testcase TC_mscpool_sccp_n_pcstate_attaches_msc() runs on test_CT {
+
+	f_init(nr_bts := 3, handler_mode := true, nr_msc := 1);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_transceive(BSCVTY, "mscpool roundrobin next 0");
+
+	f_ctrs_msc_init();
+
+	/* There is only one MSC, round robin stays on msc0 */
+	var MSC_ConnHdlr vc_conn1;
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars1.mscpool.rsl_idx := 0;
+	pars1.mscpool.l3_info := valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(ts_MI_IMSI_LV('0010100230000001'H)), '00F110'O));
+	vc_conn1 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars1);
+	vc_conn1.done;
+	f_ctrs_msc_expect(0, "mscpool:subscr:new");
+
+	var MSC_ConnHdlr vc_conn2;
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars(bssap_idx := 0);
+	pars2.mscpool.rsl_idx := 1;
+	pars2.mscpool.l3_info := valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(ts_MI_IMSI_LV('001010023000002'H))));
+	vc_conn2 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars2);
+	vc_conn2.done;
+	f_ctrs_msc_expect(0, "mscpool:subscr:new");
+
+	f_logp(BSCVTY, "connecting msc1");
+	f_vty_msc_allow_attach(BSCVTY, { true, true });
+	f_bssap_idx_init(1);
+	f_sleep(1.0);
+
+	/* This time round-robin wraps to the second MSC, because it is now online. */
+	var MSC_ConnHdlr vc_conn4;
+	var TestHdlrParams pars4 := f_gen_test_hdlr_pars(bssap_idx := 1);
+	pars4.mscpool.rsl_idx := 2;
+	pars4.mscpool.l3_info := valueof(ts_PAG_RESP(valueof(ts_MI_IMSI_LV('001010023000003'H))));
+	vc_conn4 := f_start_handler(refers(f_tc_mscpool_compl_l3), pars4);
+	vc_conn4.done;
+	f_ctrs_msc_expect(1, "mscpool:subscr:new");
+
 	f_shutdown_helper();
 }
 
@@ -12509,6 +12566,7 @@ control {
 		execute( TC_mscpool_no_allow_attach_valid_nri() );
 
 		execute( TC_mscpool_sccp_n_pcstate_detaches_msc() );
+		execute( TC_mscpool_sccp_n_pcstate_attaches_msc() );
 	}
 
 	execute( TC_early_conn_fail() );
