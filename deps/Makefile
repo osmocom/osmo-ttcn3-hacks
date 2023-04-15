@@ -86,7 +86,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 # file changed.
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		f086e78d74defa044d864f17adaad9433fedc961
-titan.ProtocolEmulations.SCCP_commit=	 	R.7.A-11-gd4b7a6d
+titan.ProtocolEmulations.SCCP_commit=	 	17a894fc6620a0df11d0d98c897fb66168276b16
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A-4-g20cfaf8
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb175a
 titan.ProtocolModules.BSSMAP_commit=		24f967b2f77bfdd2e6eabf1e82fa76239095f772
