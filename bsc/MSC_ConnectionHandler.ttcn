@@ -1088,7 +1088,7 @@ function f_ChDesc2RslChanNr(ChannelDescription2_V ch_desc, out RslChannelNr chan
 
 type record AssignmentState {
 	/* global */
-	boolean voice_call,
+	boolean rtp_stream,
 	boolean is_assignment,
 	/* Assignment related bits */
 	boolean rr_ass_cmpl_seen,
@@ -1104,7 +1104,7 @@ type record AssignmentState {
 }
 
 template (value) AssignmentState ts_AssignmentStateInit := {
-	voice_call := false,
+	rtp_stream := false,
 	is_assignment := false,
 	rr_ass_cmpl_seen := false,
 	old_lchan_deact_sacch_seen := false,
@@ -1246,7 +1246,7 @@ altstep as_modify(inout AssignmentState st) runs on MSC_ConnHdlr {
 	/* no assignment, just mode modify */
 	var RSL_Message rsl;
 
-	[st.voice_call and not st.rr_modify_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
+	[st.rtp_stream and not st.rr_modify_seen] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr)) -> value rsl {
 		var PDU_ML3_NW_MS l3 := dec_PDU_ML3_NW_MS(rsl.ies[2].body.l3_info.payload);
 		log("Rx L3 from net: ", l3);
 		if (ischosen(l3.msgs.rrm.channelModeModify)) {
@@ -1257,7 +1257,7 @@ altstep as_modify(inout AssignmentState st) runs on MSC_ConnHdlr {
 		}
 		repeat;
 		}
-	[st.voice_call and st.rr_modify_seen] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
+	[st.rtp_stream and st.rr_modify_seen] RSL.receive(tr_RSL_MsgTypeD(RSL_MT_MODE_MODIFY_REQ)) -> value rsl {
 		st.rsl_mode_modify_msg := rsl;
 		RSL.send(ts_RSL_MODE_MODIFY_ACK(g_chan_nr));
 		st.modify_done := true;
@@ -1451,9 +1451,9 @@ runs on MSC_ConnHdlr {
 		transid := omit
 	};
 	var AssignmentState st := valueof(ts_AssignmentStateInit);
-	/* if the channel type is SIGNAL, we're not handling a voice call */
+	/* if the channel type is SIGNAL, we're not handling an rtp stream */
 	if (ass_cmd.pdu.bssmap.assignmentRequest.channelType.speechOrDataIndicator != '0011'B) {
-		st.voice_call := true;
+		st.rtp_stream := true;
 		exp_modify := true;
 	}
 
@@ -1483,8 +1483,8 @@ runs on MSC_ConnHdlr {
 		g_media.mgcp_conn[0].mdcx_seen_exp := 0;
 		g_media.mgcp_conn[1].crcx_seen_exp := 0;
 		g_media.mgcp_conn[1].mdcx_seen_exp := 0;
-	} else if (st.voice_call) {
-		/* For voice calls we expect the following MGCP activity */
+	} else if (st.rtp_stream) {
+		/* For RTP streams we expect the following MGCP activity */
 		g_media.mgcp_conn[0].crcx_seen_exp := 1;
 		g_media.mgcp_conn[0].mdcx_seen_exp := 1;
 		g_media.mgcp_conn[1].crcx_seen_exp := 1;
@@ -1511,8 +1511,8 @@ runs on MSC_ConnHdlr {
 	/* modify related bits */
 	[not st.is_assignment and exp_modify] as_modify(st);
 
-	/* voice call related bits (IPA CRCX/MDCX + MGCP) */
-	[st.voice_call] as_Media();
+	/* RTP stream related bits (IPA CRCX/MDCX + MGCP) */
+	[st.rtp_stream] as_Media();
 
 	/* if we receive exactly what we expected, always return + pass */
 	[st.is_assignment and st.assignment_done or (not st.is_assignment and (st.modify_done or not exp_modify))] BSSAP.receive(exp_ass_cpl) -> value bssap {
@@ -1550,11 +1550,11 @@ runs on MSC_ConnHdlr {
 		/* TODO: more precisely expect the different types of speech? */
 		var OCT1 rr_channel_mode := st.rr_channel_mode_modify_msg.msgs.rrm.channelModeModify.channelMode.mode;
 
-		if (st.voice_call and rr_channel_mode == '00'O) {
+		if (st.rtp_stream and rr_channel_mode == '00'O) {
 			setverdict(fail, "f_establish_fully(): Expected RR Channel Mode Modify",
 				   " to a speech mode, but got channelMode == ", rr_channel_mode);
 			mtc.stop;
-		} else if (not st.voice_call and rr_channel_mode != '00'O) {
+		} else if (not st.rtp_stream and rr_channel_mode != '00'O) {
 			setverdict(fail, "f_establish_fully(): Expected RR Channel Mode Modify",
 				   " to signalling mode, but got channelMode == ", rr_channel_mode);
 			mtc.stop;
@@ -1566,11 +1566,11 @@ runs on MSC_ConnHdlr {
 			mtc.stop;
 		}
 		var RSL_SpeechDataInd rsl_spd_ind := chan_mode_ie.chan_mode.spd_ind;
-		if (st.voice_call and rsl_spd_ind != RSL_SPDI_SPEECH) {
+		if (st.rtp_stream and rsl_spd_ind != RSL_SPDI_SPEECH) {
 			setverdict(fail, "f_establish_fully(): Expected RSL MODE MODIFY",
 				   " to a speech mode, but got spd_ind == ", rsl_spd_ind);
 			mtc.stop;
-		} else if (not st.voice_call and rsl_spd_ind != RSL_SPDI_SIGN) {
+		} else if (not st.rtp_stream and rsl_spd_ind != RSL_SPDI_SIGN) {
 			setverdict(fail, "f_establish_fully(): Expected RSL MODE MODIFY",
 				   " to signalling mode, but got spd_ind == ", rsl_spd_ind);
 			mtc.stop;
@@ -1615,7 +1615,7 @@ runs on MSC_ConnHdlr {
 		}
 	}
 
-	if (not exp_fail and st.voice_call and not g_pars.aoip) {
+	if (not exp_fail and st.rtp_stream and not g_pars.aoip) {
 		/* With SCCPLite, connect to BSC-located MGW using a CRCX + SDP.
 		   It is sent in MGCP over IPA in the BSC<->MSC (BSC-NAT)
 		   connection. BSC will forward it to its MGW. */
