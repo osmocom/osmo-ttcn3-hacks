@@ -181,7 +181,8 @@ type record TestHdlrParams {
 	boolean ps_domain,
 	MgcpParameters mgcp_pars optional,
 	HnbConfig hnb optional,
-	boolean separate_sccp_cr,
+	boolean expect_separate_sccp_cr,
+	integer tx_sccp_cr_data_len,
 	charstring pfcp_local_addr
 }
 
@@ -557,7 +558,7 @@ runs on ConnHdlr return RANAP_PDU {
 	}
 
 	/* create an expect on the Iu side for the random NAS portion */
-	if (g_pars.separate_sccp_cr) {
+	if (g_pars.expect_separate_sccp_cr) {
 		f_ran_register_sccp_cr_without_payload();
 	} else {
 		var template (omit) octetstring nas := f_ranap_extract_l3(valueof(tx));
@@ -567,7 +568,7 @@ runs on ConnHdlr return RANAP_PDU {
 	/* send it via Iuh (creating a RUA connection) */
 	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
 
-	if (g_pars.separate_sccp_cr) {
+	if (g_pars.expect_separate_sccp_cr) {
 		/* Acknowledge the empty SCCP CR. RAN_Emulation does the confirmation, no need to respond. */
 		BSSAP.receive(tr_RANAP_Conn_Req());
 	}
@@ -621,8 +622,8 @@ runs on ConnHdlr return RANAP_PDU {
 	return rx;
 }
 
-/* build a RANAP InitialUE based on the TestHdlrParams */
-friend function f_build_initial_ue(TestHdlrParams pars) return RANAP_PDU {
+private function f_build_initial_ue_with_nas(TestHdlrParams pars, octetstring nas)
+  return RANAP_PDU {
 	var LAI lai := {
 		pLMNidentity := hex2oct(pars.hnb.lai.mcc_mnc),
 		lAC := int2oct(pars.hnb.lai.lac, 2),
@@ -634,27 +635,65 @@ friend function f_build_initial_ue(TestHdlrParams pars) return RANAP_PDU {
 		sAC := int2oct(pars.hnb.sac, 2),
 		iE_Extensions := omit
 	}
-	var octetstring nas;
-	if (pars.separate_sccp_cr) {
-		/* SCCP CR has a payload length limit of 130 bytes. To trigger this limit, the RANAP + NAS PDU has to be
-		 * > 130 bytes. It doesn't need to be 131 bytes in the NAS PDU alone, but let's just make it definitely
-		 * large enough. */
-		nas := f_rnd_octstring(131);
-	} else {
-		nas := f_rnd_octstring(10);
-	}
 	var IuSignallingConnectionIdentifier sigc_id := int2bit(f_rnd_int(1000), 24);
 	var GlobalRNC_ID grnc_id := {
 		pLMNidentity := lai.pLMNidentity,
 		rNC_ID := 2342
 	}
-
+	var template RANAP_PDU ret;
 	if (pars.ps_domain) {
 		var RAC rac := '00'O;
-		return valueof(ts_RANAP_initialUE_PS(lai, rac, sai, nas, sigc_id, grnc_id));
+		ret := ts_RANAP_initialUE_PS(lai, rac, sai, nas, sigc_id, grnc_id);
 	} else {
-		return valueof(ts_RANAP_initialUE_CS(lai, sai, nas, sigc_id, grnc_id));
+		ret := ts_RANAP_initialUE_CS(lai, sai, nas, sigc_id, grnc_id);
 	}
+	return valueof(ret);
+}
+
+/* build a RANAP InitialUE based on the TestHdlrParams */
+friend function f_build_initial_ue(TestHdlrParams pars) return RANAP_PDU {
+
+	var octetstring nas;
+
+	if (pars.tx_sccp_cr_data_len == 0) {
+		nas := f_rnd_octstring(10);
+	} else {
+		/* The test asks for an exact number of Optional Data bytes. */
+
+		/* First see what size the RANAP part of the payload data is,
+		 * to adjust the NAS PDU size to the size requested by the test (pars.tx_sccp_cr_data_len). */
+		var RANAP_PDU initial_ue := f_build_initial_ue_with_nas(pars, '00'O);
+
+		var octetstring ranap_plus_one_byte_nas := enc_RANAP_PDU(initial_ue);
+		var integer ranap_length := lengthof(ranap_plus_one_byte_nas) - 1;
+
+		log("ranap_plus_one_byte_nas = ", lengthof(ranap_plus_one_byte_nas), " bytes, ", initial_ue, " = ",
+		    ranap_plus_one_byte_nas);
+		log("ranap_length = ", ranap_length);
+
+		/* SCCP CR has a payload length limit of 130 bytes. To trigger this limit, the RANAP + NAS PDU has to be
+		 * > 130 bytes. It doesn't need to be 131 bytes in the NAS PDU alone, but let's just make it definitely
+		 * large enough. To test for this limit, pars.tx_sccp_cr_data_len asks for a specific amount of data len. */
+		nas := f_rnd_octstring(pars.tx_sccp_cr_data_len - ranap_length);
+	}
+
+	var RANAP_PDU ret := f_build_initial_ue_with_nas(pars, nas);
+
+	if (pars.tx_sccp_cr_data_len != 0) {
+		for (var integer attempts := 0; attempts < 2; attempts := attempts + 1) {
+			var octetstring check_len := enc_RANAP_PDU(ret);
+			log("final RANAP PDU length = ", lengthof(check_len));
+			if (lengthof(check_len) == pars.tx_sccp_cr_data_len) {
+				return ret;
+			}
+			nas := f_rnd_octstring(lengthof(nas) + (pars.tx_sccp_cr_data_len - lengthof(check_len)));
+			log("that was off, changed NAS length to ", lengthof(nas), " and trying again");
+			ret := f_build_initial_ue_with_nas(pars, nas);
+		}
+		setverdict(fail, "Ended up with wrong Optional Data length");
+		mtc.stop;
+	}
+	return ret;
 }
 
 /* build a RANAP RAB AssignmentResponse based on the TestHdlrParams */
@@ -756,12 +795,13 @@ testcase TC_hnb_reregister_reuse_sctp_assoc() runs on test_CT {
 
 private template (value) TestHdlrParams
 t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
-       boolean separate_sccp_cr := false) := {
+       boolean expect_separate_sccp_cr := false, integer tx_sccp_cr_data_len := 0) := {
 	hnb_idx := hnb_idx,
 	imsi := f_gen_imsi(imsi_suffix),
 	ps_domain := ps_domain,
 	hnb := omit,	/* filled in later */
-	separate_sccp_cr := separate_sccp_cr,
+	expect_separate_sccp_cr := expect_separate_sccp_cr,
+	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
 	pfcp_local_addr := mp_pfcp_ip_local
 }
 
@@ -792,11 +832,17 @@ testcase TC_ranap_ps_initial_ue() runs on test_CT {
 	vc_conn.done;
 }
 
-private function f_vty_set_sccp_cr_max_payload_len(TELNETasp_PT pt, integer val := 999999)
+private function f_vty_set_sccp_max_optional_data(TELNETasp_PT pt, integer val := -1)
 {
+	var charstring valstr;
+	if (val < 0) {
+		valstr := "standard";
+	} else {
+		valstr := int2str(val);
+	}
 	f_vty_enter_config(pt);
-	f_vty_transceive(pt, "hnbgw");
-	f_vty_transceive(pt, "sccp cr max-payload-len " & int2str(val));
+	f_vty_transceive(pt, "cs7 instance 0");
+	f_vty_transceive(pt, "sccp max-optional-data " & valstr);
 	f_vty_transceive(pt, "end");
 }
 
@@ -807,13 +853,13 @@ testcase TC_ranap_cs_initial_ue_empty_cr() runs on test_CT {
 	f_init();
 	f_start_hnbs();
 
-	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY, 0);
+	f_vty_set_sccp_max_optional_data(HNBGWVTY, 0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1, separate_sccp_cr := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1, expect_separate_sccp_cr := true));
 	vc_conn.done;
 
 	/* reset */
-	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY);
+	f_vty_set_sccp_max_optional_data(HNBGWVTY);
 }
 testcase TC_ranap_ps_initial_ue_empty_cr() runs on test_CT {
 	var ConnHdlr vc_conn;
@@ -822,13 +868,65 @@ testcase TC_ranap_ps_initial_ue_empty_cr() runs on test_CT {
 	f_init();
 	f_start_hnbs();
 
-	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY, 0);
+	f_vty_set_sccp_max_optional_data(HNBGWVTY, 0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true, separate_sccp_cr := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true, expect_separate_sccp_cr := true));
 	vc_conn.done;
 
 	/* reset */
-	f_vty_set_sccp_cr_max_payload_len(HNBGWVTY);
+	f_vty_set_sccp_max_optional_data(HNBGWVTY);
+}
+
+type record Testdata_CR_Limit {
+	integer data_len,
+	integer max_optional_data,
+	boolean expect_separate_sccp_cr
+};
+type record of Testdata_CR_Limit Testdata_CR_Limits;
+
+testcase TC_sccp_cr_limit() runs on test_CT {
+	g_num_hnbs := 1;
+	f_init();
+	f_start_hnbs();
+
+	const Testdata_CR_Limits tests := {
+		{ data_len := 130, max_optional_data := -1, expect_separate_sccp_cr := false },
+		{ data_len := 131, max_optional_data := -1, expect_separate_sccp_cr := true },
+
+		{ data_len := 100, max_optional_data := 100, expect_separate_sccp_cr := false },
+		{ data_len := 101, max_optional_data := 100, expect_separate_sccp_cr := true },
+
+		{ data_len := 200, max_optional_data := 200, expect_separate_sccp_cr := false },
+		{ data_len := 201, max_optional_data := 200, expect_separate_sccp_cr := true }
+	};
+
+	var integer csps;
+	for (csps := 0; csps < 2; csps := csps + 1) {
+		var boolean ps_domain := (csps > 0);
+
+		var integer i;
+		for (i := 0; i < lengthof(tests); i := i + 1) {
+			var Testdata_CR_Limit t := tests[i];
+			f_logp(HNBGWVTY,
+			       "TEST PART TC_sccp_cr_limit ps_domain=" & f_bool2str(ps_domain)
+			       & " data_len=" & int2str(t.data_len)
+			       & " max_optional_data=" & int2str(t.max_optional_data)
+			       & " expect_separate_sccp_cr=" & f_bool2str(t.expect_separate_sccp_cr)
+			       );
+
+			f_vty_set_sccp_max_optional_data(HNBGWVTY, t.max_optional_data);
+			var ConnHdlr vc_conn;
+			vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue),
+							     t_pars(100 + i,
+								    ps_domain := ps_domain,
+								    expect_separate_sccp_cr := t.expect_separate_sccp_cr,
+								    tx_sccp_cr_data_len := t.data_len));
+			vc_conn.done;
+		}
+	}
+
+	/* reset */
+	f_vty_set_sccp_max_optional_data(HNBGWVTY);
 }
 
 /* Reply to a received CRCX with an OK (or the reply configured in cpars), using the given parameters.
