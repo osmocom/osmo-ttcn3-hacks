@@ -63,7 +63,10 @@ import from PFCP_CodecPort all;
 
 import from TCCConversion_Functions all;
 import from MobileL3_Types all;
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_GMM_SM_Types all;
 import from L3_Templates all;
+import from L3_Common all;
 
 const integer NUM_MSC := 4;
 const integer NUM_SGSN := 4;
@@ -270,7 +273,8 @@ type record TestHdlrParams {
 	HnbConfig hnb optional,
 	boolean expect_separate_sccp_cr,
 	integer tx_sccp_cr_data_len,
-	charstring pfcp_local_addr
+	charstring pfcp_local_addr,
+	octetstring nas_pdu optional
 }
 
 /* We extend:
@@ -324,6 +328,11 @@ type component test_CT extends CTRL_Adapter_CT {
 	port TELNETasp_PT HNBGWVTY;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard := 30.0;
+
+	/* The cnlink type 'msc' or 'sgsn', to be used in CTRL commands to obtain counters */
+	var charstring g_ctr_cn_node_name;
+	/* Counter state */
+	var CounterNameValsList g_ctr_cn;
 }
 
 /* global altstep for global guard timer; */
@@ -976,7 +985,8 @@ t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
 	hnb := omit,	/* filled in later */
 	expect_separate_sccp_cr := expect_separate_sccp_cr,
 	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
-	pfcp_local_addr := mp_pfcp_ip_local
+	pfcp_local_addr := mp_pfcp_ip_local,
+	nas_pdu := omit
 }
 
 /* Create an Iuh connection; send InitialUE; expect it to appear on new SCCP conenction */
@@ -1761,6 +1771,648 @@ testcase TC_ps_rab_assignment_without_pfcp() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Default list of counters for a 'cn' entity to test the cnpool feature. */
+const CounterNameVals counternames_cnpool := {
+	{ "cnpool:subscr:new", 0 },
+	{ "cnpool:subscr:known", 0 },
+	{ "cnpool:subscr:reattach", 0 },
+	{ "cnpool:subscr:attach_lost", 0 },
+	{ "cnpool:subscr:paged", 0 }
+};
+private function f_ctrs_cn_init(boolean ps_domain, integer cn_count := 0,
+				CounterNameVals counternames := counternames_cnpool) runs on test_CT {
+	if (ps_domain) {
+		g_ctr_cn_node_name := "sgsn";
+		if (cn_count == 0) {
+			cn_count := NUM_SGSN;
+		}
+	} else {
+		g_ctr_cn_node_name := "msc";
+		if (cn_count == 0) {
+			cn_count := NUM_MSC;
+		}
+	}
+	g_ctr_cn := f_counter_name_vals_get_n(IPA_CTRL, g_ctr_cn_node_name, cn_count, counternames);
+	log("initial " & g_ctr_cn_node_name & " rate counters: ", g_ctr_cn);
+}
+
+/*  f_ctrs_cn_init();
+ *  f_do_thing(on_cn := 0);
+ *  f_do_thing(on_cn := 0);
+ *  f_do_other(on_cn := 1);
+ *  f_ctrs_cn_add(0, "thing", 2);
+ *  f_ctrs_cn_add(1, "other");
+ *  f_ctrs_cn_verify();
+ */
+private function f_ctrs_cn_verify() runs on test_CT {
+	log("verifying", g_ctr_cn_node_name, " rate counters: ", g_ctr_cn);
+	f_counter_name_vals_expect_n(IPA_CTRL, g_ctr_cn_node_name, g_ctr_cn);
+}
+
+/* convenience: f_ctrs_cn_add() and f_ctrs_cn_verify() in one call.
+ *  f_ctrs_cn_init();
+ *  f_do_thing(on_cn := 0);
+ *  f_do_thing(on_cn := 0);
+ *  f_do_thing(on_cn := 0);
+ *  f_ctrs_cn_expect(0, "thing", 3);
+ */
+private function f_ctrs_cn_expect(integer cn_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_cn_add(cn_nr, countername, val);
+	f_ctrs_cn_verify();
+}
+
+private function f_ctrs_cn_add(integer cn_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_cn, cn_nr, countername, val);
+}
+
+private function f_perform_compl_l3(octetstring nas, boolean do_clear := true, boolean expect_iu_l3 := true)
+runs on ConnHdlr {
+	timer T := 10.0;
+
+	/* create an expect on the Iu side for the random NAS portion */
+	if (g_pars.expect_separate_sccp_cr) {
+		f_ran_register_sccp_cr_without_payload();
+	} else {
+		f_ran_register_exp(nas);
+	}
+
+	/* send Connect via Iuh (creating a RUA connection) */
+	var RANAP_PDU tx := f_build_initial_ue_with_nas(g_pars, nas);
+	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
+
+	if (expect_iu_l3) {
+		/* Expect same message to arrive at CN */
+		f_bssap_expect(tx);
+	}
+}
+
+private function f_tc_cnpool_compl_l3(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	f_init_handler(pars);
+	f_perform_compl_l3(g_pars.nas_pdu);
+}
+
+private function f_TC_cnpool_compl_l3(boolean ps_domain, octetstring nas_pdu, integer cn_nr,
+				      template (omit) charstring inc_countername := omit) runs on test_CT {
+	var ConnHdlr vc_conn;
+	var template (value) TestHdlrParams pars := t_pars(0, ps_domain := ps_domain, cn_nr := cn_nr);
+	pars.nas_pdu := nas_pdu;
+	log("XXX ", pars);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_cnpool_compl_l3), pars);
+	vc_conn.done;
+
+	if (not istemplatekind(inc_countername, "omit")) {
+		f_ctrs_cn_expect(cn_nr, valueof(inc_countername));
+	}
+}
+
+function f_TC_cnpool_compl_l3_list(boolean ps_domain, ro_octetstring compl3, Osmocom_Types.ro_integer cn_nrs,
+				   charstring inc_countername) runs on test_CT {
+	var integer n := lengthof(compl3);
+	if (n < lengthof(cn_nrs)) {
+		n := lengthof(cn_nrs);
+	}
+	for (var integer i := 0; i < n; i := i + 1) {
+		var integer cn_nr := cn_nrs[i mod lengthof(cn_nrs)];
+		f_TC_cnpool_compl_l3(ps_domain, compl3[i mod lengthof(compl3)], cn_nr, inc_countername);
+	}
+}
+
+type enumerated Compl3Type {
+	/* CS */
+	LU,
+	CMSERV,
+	PAGRESP,
+	IMSIDETACH,
+
+	/* PS */
+	ATTACHREQ,
+	RAUREQ,
+	DETREQ
+};
+
+private function f_gen_one_compl_l3(Compl3Type compl3type, template (value) MobileIdentityLV mi,
+		integer ps_nri := -1
+		) return octetstring
+{
+	/* CS */
+	if (compl3type == LU) {
+		return enc_PDU_ML3_MS_NW(valueof(ts_LU_REQ(LU_Type_IMSI_Attach, valueof(mi), '00F110'O)));
+	}
+	if (compl3type == CMSERV) {
+		return enc_PDU_ML3_MS_NW(valueof(ts_CM_SERV_REQ(CM_TYPE_MO_CALL, valueof(mi))));
+	}
+	if (compl3type == PAGRESP) {
+		return enc_PDU_ML3_MS_NW(valueof(ts_PAG_RESP(valueof(mi))));
+	}
+	if (compl3type == IMSIDETACH) {
+		return enc_PDU_ML3_MS_NW(valueof(ts_ML3_MO_MM_IMSI_DET_Ind(valueof(mi))));
+	}
+
+	/* PS */
+	var template (omit) NetworkResourceIdentifierContainerTLV nri := omit;
+	if (ps_nri >= 0) {
+		nri := valueof(ts_GMM_NRI(ps_nri));
+	}
+
+	if (compl3type == ATTACHREQ) {
+		return enc_PDU_L3_MS_SGSN(valueof(ts_GMM_ATTACH_REQ(valueof(mi), f_RAI('001'H, '01'H, '2a2a'O, '17'O),
+						nri := nri)));
+	}
+	if (compl3type == RAUREQ) {
+		return enc_PDU_L3_MS_SGSN(valueof(ts_GMM_RAU_REQ(valueof(mi), GPRS_UPD_T_PERIODIC,
+								 f_RAI('001'H, '01'H, '2a2a'O, '17'O),
+								 nri := nri)));
+	}
+	if (compl3type == DETREQ) {
+		return enc_PDU_L3_MS_SGSN(valueof(ts_GMM_DET_REQ_MO_mi(c_GMM_DTT_MO_GPRS, power_off := false,
+								       p_tmsi := valueof(ts_MI_TLV(mi.mobileIdentityV)))));
+	}
+
+	setverdict(fail, "unknown complete layer 3 type");
+	mtc.stop;
+}
+
+type record of Compl3Type ro_Compl3Type;
+type record of MobileIdentityLV ro_MobileIdentityLV;
+type record of octetstring ro_octetstring;
+
+/* Generate a list of n Complete Layer 3 NAS PDUs,
+ * rotating through the message kinds listed in 'types' and the mobile identities in mis.
+ */
+private function f_gen_compl_l3(ro_Compl3Type types, ro_MobileIdentityLV mis, integer n) return ro_octetstring
+{
+	var ro_octetstring res := {};
+	for (var integer i := 0; i < n; i := i + 1) {
+		var integer ti := i mod lengthof(types);
+		var integer mi := i mod lengthof(mis);
+		res[i] := f_gen_one_compl_l3(types[ti], mis[mi]);
+	}
+	return res;
+}
+
+private function f_gen_mi_imsi(integer n) return MobileIdentityLV
+{
+	return valueof(ts_MI_IMSI_LV(f_gen_imsi(n)));
+}
+
+private function f_gen_mi_imsis(integer n) return ro_MobileIdentityLV
+{
+	var ro_MobileIdentityLV mis := {};
+	for (var integer i := 0; i < n; i := i + 1) {
+		mis[i] := f_gen_mi_imsi(n);
+	}
+	return mis;
+}
+
+function f_vty_set_roundrobin_next(TELNETasp_PT VTY, boolean ps_domain, integer cn_nr)
+{
+	var charstring msc_sgsn;
+	if (ps_domain) {
+		msc_sgsn := "sgsn";
+	} else {
+		msc_sgsn := "msc";
+	}
+	f_vty_transceive(VTY, "cnpool roundrobin next " & msc_sgsn & " " & int2str(cn_nr));
+}
+
+private function f_gen_compl3_by_domain(boolean ps_domain, integer n, template (omit) ro_MobileIdentityLV mis := omit) return ro_octetstring{
+	var ro_Compl3Type types;
+	if (ps_domain) {
+		types := { ATTACHREQ, RAUREQ, DETREQ };
+	} else {
+		types := { LU, CMSERV, PAGRESP, IMSIDETACH };
+	}
+	if (istemplatekind(mis, "omit")) {
+		mis := f_gen_mi_imsis(n);
+	}
+	return f_gen_compl_l3(types, valueof(mis), n);
+}
+
+/* Various Complete Layer 3 by IMSI all end up with the first MSC, because the other MSCs are not connected. */
+testcase TC_mscpool_L3Compl_on_1_cnlink() runs on test_CT {
+	f_TC_cnpool_L3Compl_on_1_cnlink(ps_domain := false);
+}
+testcase TC_sgsnpool_L3Compl_on_1_cnlink() runs on test_CT {
+	f_TC_cnpool_L3Compl_on_1_cnlink(ps_domain := true);
+}
+function f_TC_cnpool_L3Compl_on_1_cnlink(boolean ps_domain) runs on test_CT {
+
+	f_init();
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 4);
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3, {0, 0, 0, 0}, "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* Three Layer 3 Complete by IMSI are round-robin'ed across two connected MSCs */
+testcase TC_mscpool_L3Complete_by_imsi_round_robin() runs on test_CT {
+	f_TC_cnpool_L3Complete_by_imsi_round_robin(ps_domain := false);
+}
+testcase TC_sgsnpool_L3Complete_no_nri_round_robin() runs on test_CT {
+	f_TC_cnpool_L3Complete_by_imsi_round_robin(ps_domain := true);
+}
+function f_TC_cnpool_L3Complete_by_imsi_round_robin(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3);
+
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3,
+				  /* Third Complete Layer 3 wraps back to msc 0 */
+				  cn_nrs := {0, 1, 0},
+				  inc_countername := "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* Three LU by TMSI are round-robin'ed across two connected MSCs, because they contain a NULL-NRI (0, 1)
+ * (configured in osmo-hnbgw.cfg). */
+testcase TC_mscpool_LU_by_tmsi_null_nri_0_round_robin() runs on test_CT {
+	f_TC_cnpool_LU_by_tmsi_null_nri_N_round_robin(ps_domain := false, nri_val := 0);
+}
+/* For NRI == 1, one of the MSC also has the NULL-NRI as part of its owned NRIs, but the NULL-NRI setting is stronger
+ * than that. */
+testcase TC_mscpool_LU_by_tmsi_null_nri_1_round_robin() runs on test_CT {
+	f_TC_cnpool_LU_by_tmsi_null_nri_N_round_robin(ps_domain := false, nri_val := 1);
+}
+function f_TC_cnpool_LU_by_tmsi_null_nri_N_round_robin(boolean ps_domain, integer nri_val) runs on test_CT {
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_MobileIdentityLV mis := { valueof(ts_MI_TMSI_NRI_LV(nri_val)) };
+	var ro_octetstring compl3;
+	if (ps_domain) {
+		compl3 := {
+			f_gen_one_compl_l3(ATTACHREQ, mis[0], nri_val)
+		};
+	} else {
+		compl3 := f_gen_compl_l3({LU}, mis, 1);
+	}
+
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3,
+				  /* The third Complete Layer 3 wraps back to msc 0 */
+				  {0, 1, 0},
+				  "cnpool:subscr:reattach");
+	f_shutdown_helper();
+}
+
+/* Three Layer 3 Complete by TMSI are round-robin'ed across two connected MSCs, because they contain an NRI not
+ * assigned to any MSC (configured in osmo-hnbgw.cfg). */
+testcase TC_mscpool_L3Complete_by_tmsi_unassigned_nri_round_robin() runs on test_CT {
+	f_TC_cnpool_L3Complete_by_tmsi_unassigned_nri_round_robin(ps_domain := false);
+}
+function f_TC_cnpool_L3Complete_by_tmsi_unassigned_nri_round_robin(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	/* 3 NRIs that are not assigned to any MSC */
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(1000)),
+		valueof(ts_MI_TMSI_NRI_LV(768)),
+		valueof(ts_MI_TMSI_NRI_LV(819))
+	};
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3, mis);
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3, { 0, 1, 0 }, "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* Three Layer 3 Complete by TMSI are round-robin'ed across two connected MSCs, because they contain an NRI
+ * assigned to a CN link that is currently not connected (configured in osmo-hnbgw.cfg). */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin() runs on test_CT {
+	f_TC_cnpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin(ps_domain := false);
+}
+function f_TC_cnpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	/* 3 NRIs that are assigned to an unconnected MSC */
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(512)),
+		valueof(ts_MI_TMSI_NRI_LV(767)),
+		valueof(ts_MI_TMSI_NRI_LV(750))
+	};
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3, mis);
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[0], cn_nr := 0);
+	f_ctrs_cn_add(2, "cnpool:subscr:attach_lost");
+	f_ctrs_cn_add(0, "cnpool:subscr:new");
+	f_ctrs_cn_verify();
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[1], cn_nr := 1);
+	f_ctrs_cn_add(2, "cnpool:subscr:attach_lost");
+	f_ctrs_cn_add(1, "cnpool:subscr:new");
+	f_ctrs_cn_verify();
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[2], cn_nr := 0);
+	f_ctrs_cn_add(2, "cnpool:subscr:attach_lost");
+	f_ctrs_cn_add(0, "cnpool:subscr:new");
+	f_ctrs_cn_verify();
+
+	f_shutdown_helper();
+}
+
+/* Three Layer 3 Complete by TMSI with valid NRI for the second MSC are all directed to the second MSC (configured in
+ * osmo-hnbgw.cfg). */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_1() runs on test_CT {
+	f_TC_cnpool_L3Complete_valid_nri_1(ps_domain := false);
+}
+testcase TC_sgsnpool_L3Complete_valid_nri_1() runs on test_CT {
+	f_TC_cnpool_L3Complete_valid_nri_1(ps_domain := true);
+}
+function f_TC_cnpool_L3Complete_valid_nri_1(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* All TMSIs in this test point at the second MSC, set the round robin to point at the first MSC to make sure
+	 * this is not using round-robin. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3;
+
+	/* 3 NRIs of the second MSC's range (256-511) */
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(256)),
+		valueof(ts_MI_TMSI_NRI_LV(260)),
+		valueof(ts_MI_TMSI_NRI_LV(511))
+	};
+	if (ps_domain) {
+		compl3 := {
+			f_gen_one_compl_l3(RAUREQ, mis[0], 256),
+			f_gen_one_compl_l3(RAUREQ, mis[1], 260),
+			f_gen_one_compl_l3(RAUREQ, mis[2], 511)
+		};
+	} else {
+		compl3 := f_gen_compl3_by_domain(ps_domain, 3, mis);
+	}
+
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3, {1, 1, 1}, "cnpool:subscr:known");
+
+	f_shutdown_helper();
+}
+
+/* Layer 3 Complete by TMSI with valid NRI for the third MSC are directed to the third MSC (configured in osmo-hnbgw.cfg),
+ * while a round-robin remains unaffected by that. */
+testcase TC_mscpool_L3Complete_by_tmsi_valid_nri_2() runs on test_CT {
+	f_TC_cnpool_L3Complete_valid_nri_2(ps_domain := false);
+}
+testcase TC_sgsnpool_L3Complete_valid_nri_2() runs on test_CT {
+	f_TC_cnpool_L3Complete_valid_nri_2(ps_domain := true);
+}
+function f_TC_cnpool_L3Complete_valid_nri_2(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 3, nr_sgsn := 3);
+	f_sleep(1.0);
+
+	/* All TMSIs in this test point at the third MSC, set the round robin to point at the second MSC to make sure
+	 * this is not using round-robin. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 1);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3;
+
+	/* 2 NRIs of the third MSC's range (512-767) */
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(512)),
+		valueof(ts_MI_TMSI_NRI_LV(678))
+	};
+	if (ps_domain) {
+		compl3 := {
+			f_gen_one_compl_l3(ATTACHREQ, mis[0], 512),
+			f_gen_one_compl_l3(ATTACHREQ, mis[1], 678)
+		};
+	} else {
+		compl3 := f_gen_compl3_by_domain(ps_domain, 2, mis);
+	}
+
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3, {2, 2}, "cnpool:subscr:known");
+
+	/* The above forwardings to third MSC have not affected the round robin, which still points at the second MSC */
+	f_TC_cnpool_compl_l3_list(ps_domain, f_gen_compl3_by_domain(ps_domain, 1), {1}, "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* LU with a TMSI but indicating a different PLMN in its previous LAI: ignore the NRI. */
+testcase TC_mscpool_LU_by_tmsi_from_other_PLMN() runs on test_CT {
+	f_TC_cnpool_nri_from_other_PLMN(ps_domain := false);
+}
+testcase TC_sgsnpool_nri_from_other_PLMN() runs on test_CT {
+	f_TC_cnpool_nri_from_other_PLMN(ps_domain := true);
+}
+function f_TC_cnpool_nri_from_other_PLMN(boolean ps_domain) runs on test_CT {
+
+	f_init(nr_msc := 3, nr_sgsn := 3);
+	f_sleep(1.0);
+
+	/* The TMSIs in this test points at the second MSC, but since it is from a different PLMN, round-robin is used
+	 * instead, and hits msc 0. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3;
+
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(260)),
+		valueof(ts_MI_TMSI_NRI_LV(555))
+	};
+	if (ps_domain) {
+		compl3 := {
+			/* An NRI of the second MSC's range (256-511), but a PLMN that doesn't match with osmo-hnbgw.cfg */
+			enc_PDU_L3_MS_SGSN(valueof(ts_GMM_ATTACH_REQ(mis[0], f_RAI('999'H, '99'H, '2a2a'O,
+										   '17'O),
+								     nri := ts_GMM_NRI(260)
+								    ))),
+			/* An NRI of the third MSC's range (512-767) and a matching PLMN gets directed by NRI. */
+			f_gen_one_compl_l3(ATTACHREQ, mis[1], 555)
+		}
+	} else {
+		compl3 :=  {
+			/* An NRI of the second MSC's range (256-511), but a PLMN that doesn't match with osmo-hnbgw.cfg */
+			enc_PDU_ML3_MS_NW(valueof(ts_LU_REQ(LU_Type_IMSI_Attach, mis[0], '99F999'O))),
+			/* An NRI of the third MSC's range (512-767) and a matching PLMN gets directed by NRI. */
+			enc_PDU_ML3_MS_NW(valueof(ts_LU_REQ(LU_Type_IMSI_Attach, mis[1], '00F110'O)))
+		};
+	}
+
+	/* Foreign NRI: roundrobin */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[0], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+
+	/* Local NRI: matching msc */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[1], cn_nr := 2, inc_countername := "cnpool:subscr:known");
+
+	f_shutdown_helper();
+}
+
+/* For round-robin, skip a CN link that has 'no allow-attach' set. */
+testcase TC_mscpool_no_allow_attach_round_robin() runs on test_CT {
+
+	f_init(nr_msc := 3);
+	f_sleep(1.0);
+
+	var boolean ps_domain := false;
+
+	/* Mark the second MSC as offloading, round-robin should skip this MSC now. */
+	f_vty_cnlink_allow_attach(HNBGWVTY, ps_domain, {true, false, true});
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	f_TC_cnpool_compl_l3_list(ps_domain, f_gen_compl3_by_domain(ps_domain, 3),
+				  /* msc 1 is skipped */
+				  {0, 2, 0},
+				  "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* An MSC that has 'no allow-attach' set should still serve subscribers that are already attached according to their
+ * TMSI NRI. */
+testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
+
+	f_init(nr_msc := 3);
+	f_sleep(1.0);
+
+	var boolean ps_domain := false;
+
+	/* Mark the second MSC as offloading, round-robin should skip this MSC now. */
+	f_vty_cnlink_allow_attach(HNBGWVTY, ps_domain, {true, false, true});
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_MobileIdentityLV mis := {
+		valueof(ts_MI_TMSI_NRI_LV(260)),
+		valueof(ts_MI_IMSI_LV('001010000000002'H)),
+		valueof(ts_MI_IMSI_LV('001010000000003'H))
+	};
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3, mis);
+
+	/* Round robin points at msc 0, but the valid NRI directs to msc 1, even though msc 1 has 'no allow-attach'. */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[0], cn_nr := 1, inc_countername := "cnpool:subscr:known");
+
+	/* Normal round robin skips msc 1, because it has 'no allow-attach' */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[1], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+	f_TC_cnpool_compl_l3(ps_domain, compl3[2], cn_nr := 2, inc_countername := "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable, immediately mark the CN link as unusable. */
+testcase TC_mscpool_sccp_n_pcstate_detaches_cnlink() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink(ps_domain := false);
+}
+testcase TC_sgsnpool_sccp_n_pcstate_detaches_cnlink() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink(ps_domain := true);
+}
+function f_TC_cnpool_sccp_n_pcstate_detaches_cnlink(boolean ps_domain) runs on test_CT
+{
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3);
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[0], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+	f_TC_cnpool_compl_l3(ps_domain, compl3[1], cn_nr := 1, inc_countername := "cnpool:subscr:new");
+
+	f_logp(HNBGWVTY, "disconnecting msc0");
+	f_cn_idx_disconnect(f_cn_idx(ps_domain, 0));
+
+	/* Now round-robin would wrap to the first MSC, but since the first MSC is disconnected, it wraps around to the
+	 * second. */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[2], cn_nr := 1, inc_countername := "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
+/* When a CN link point-code gets an SCCP N-PCSTATE saying it is now reachable, immediately trigger RESET and bring up the
+ * MSC. */
+testcase TC_mscpool_sccp_n_pcstate_attaches_cnlink() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_attaches_cnlink(ps_domain := false);
+}
+testcase TC_sgsnpool_sccp_n_pcstate_attaches_cnlink() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_attaches_cnlink(ps_domain := true);
+}
+function f_TC_cnpool_sccp_n_pcstate_attaches_cnlink(boolean ps_domain) runs on test_CT
+{
+	f_init(nr_msc := 1, nr_sgsn := 1);
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	/* There is only one MSC, round robin stays on msc0 */
+	f_TC_cnpool_compl_l3(ps_domain := ps_domain, nas_pdu := compl3[0], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+	f_TC_cnpool_compl_l3(ps_domain := ps_domain, nas_pdu := compl3[1], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+
+	f_logp(HNBGWVTY, "connecting cnlink 1");
+	f_cn_nr_init(ps_domain, 1);
+	f_vty_cnlink_allow_attach(HNBGWVTY, ps_domain, { true, true });
+	f_sleep(1.0);
+
+	/* This time round-robin wraps to the second MSC, because it is now online. */
+	f_TC_cnpool_compl_l3(ps_domain := ps_domain, nas_pdu := compl3[2], cn_nr := 1, inc_countername := "cnpool:subscr:new");
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -1783,6 +2435,28 @@ control {
 	} else {
 		execute(TC_ps_rab_assignment_without_pfcp());
 	}
+
+	execute( TC_mscpool_L3Compl_on_1_cnlink() );
+	execute( TC_mscpool_L3Complete_by_imsi_round_robin() );
+	execute( TC_mscpool_LU_by_tmsi_null_nri_0_round_robin() );
+	execute( TC_mscpool_LU_by_tmsi_null_nri_1_round_robin() );
+	execute( TC_mscpool_L3Complete_by_tmsi_unassigned_nri_round_robin() );
+	execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_msc_not_connected_round_robin() );
+	execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_1() );
+	execute( TC_mscpool_L3Complete_by_tmsi_valid_nri_2() );
+	execute( TC_mscpool_LU_by_tmsi_from_other_PLMN() );
+	execute( TC_mscpool_no_allow_attach_round_robin() );
+	execute( TC_mscpool_no_allow_attach_valid_nri() );
+	execute( TC_mscpool_sccp_n_pcstate_detaches_cnlink() );
+	execute( TC_mscpool_sccp_n_pcstate_attaches_cnlink() );
+
+	execute( TC_sgsnpool_L3Compl_on_1_cnlink() );
+	execute( TC_sgsnpool_L3Complete_no_nri_round_robin() );
+	execute( TC_sgsnpool_L3Complete_valid_nri_1() );
+	execute( TC_sgsnpool_L3Complete_valid_nri_2() );
+	execute( TC_sgsnpool_nri_from_other_PLMN() );
+	execute( TC_sgsnpool_sccp_n_pcstate_detaches_cnlink() );
+	execute( TC_sgsnpool_sccp_n_pcstate_attaches_cnlink() );
 
 	/* Run at the end since it makes osmo-hnbgw <= 1.3.0 crash: OS#5676 */
 	execute(TC_hnb_reregister_reuse_sctp_assoc());
