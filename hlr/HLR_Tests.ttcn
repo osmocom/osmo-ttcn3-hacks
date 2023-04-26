@@ -535,12 +535,15 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 	return ret;
 }
 
+/* return_isd -> return the Insert Subscriber Data instead of the Update Location Result */
 function f_perform_UL(hexstring imsi, template hexstring msisdn,
 			template (omit) integer exp_err_cause := omit,
 			GSUP_CnDomain dom := OSMO_GSUP_CN_DOMAIN_PS,
 			template (omit) octetstring source_name := omit)
-runs on HLR_ConnHdlr return GSUP_PDU {
-	var GSUP_PDU ret;
+runs on HLR_ConnHdlr return GSUP_PDUs {
+	var GSUP_PDU pdu;
+	var GSUP_PDU isd;
+	var GSUP_PDUs ret;
 	timer T := 3.0;
 	var boolean exp_fail := false;
 	var boolean isd_done := false;
@@ -551,31 +554,31 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 	GSUP.send(valueof(ts_GSUP_UL_REQ(imsi, dom, source_name := source_name)));
 	T.start;
 	alt {
-	[exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, exp_err_cause, destination_name := source_name)) -> value ret {
+	[exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, exp_err_cause, destination_name := source_name)) -> value pdu {
 		setverdict(pass);
 		}
-	[exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, ?, destination_name := source_name)) -> value ret {
+	[exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, ?, destination_name := source_name)) -> value pdu {
 		setverdict(fail, "Unexpected UL ERROR Cause");
 		mtc.stop;
 		}
-	[exp_fail] GSUP.receive(tr_GSUP_UL_RES(imsi, destination_name := source_name)) -> value ret {
+	[exp_fail] GSUP.receive(tr_GSUP_UL_RES(imsi, destination_name := source_name)) -> value pdu {
 		setverdict(fail, "Unexpected UL.res for unknown IMSI");
 		mtc.stop;
 		}
-	[exp_fail] GSUP.receive(tr_GSUP_ISD_REQ(imsi, destination_name := source_name)) -> value ret {
+	[exp_fail] GSUP.receive(tr_GSUP_ISD_REQ(imsi, destination_name := source_name)) -> value pdu {
 		setverdict(fail, "Unexpected ISD.req in error case");
 		mtc.stop;
 		}
-	[not exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, ?, destination_name := source_name)) -> value ret {
+	[not exp_fail] GSUP.receive(tr_GSUP_UL_ERR(imsi, ?, destination_name := source_name)) -> value pdu {
 		setverdict(fail, "Unexpected UL ERROR");
 		mtc.stop;
 		}
-	[not exp_fail and not isd_done] GSUP.receive(tr_GSUP_ISD_REQ(imsi, msisdn, destination_name := source_name)) -> value ret {
+	[not exp_fail and not isd_done] GSUP.receive(tr_GSUP_ISD_REQ(imsi, msisdn, destination_name := source_name)) -> value isd {
 		GSUP.send(ts_GSUP_ISD_RES(imsi, source_name := source_name));
 		isd_done := true;
 		repeat;
 		}
-	[not exp_fail and isd_done] GSUP.receive(tr_GSUP_UL_RES(imsi, destination_name := source_name)) -> value ret {
+	[not exp_fail and isd_done] GSUP.receive(tr_GSUP_UL_RES(imsi, destination_name := source_name)) -> value pdu {
 		setverdict(pass);
 		}
 	[] GSUP.receive { repeat; }
@@ -584,6 +587,12 @@ runs on HLR_ConnHdlr return GSUP_PDU {
 		mtc.stop;
 		}
 	}
+
+	ret := { pdu };
+	if (isd_done) {
+		ret := ret & { isd };
+	}
+
 	return ret;
 }
 
@@ -990,13 +999,14 @@ testcase TC_gsup_ul_unknown_imsi_via_proxy() runs on test_CT {
 
 /* test UL for a number of different subscriber cases (algo, 2g/3g, ...) */
 private function f_TC_gsup_ul() runs on HLR_ConnHdlr {
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
 	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn, source_name := g_pars.source_name);
 	setverdict(pass);
 }
+
 testcase TC_gsup_ul() runs on test_CT {
 	var HlrSubscriberList sl;
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
 
 	f_init(false);
 	sl := f_gen_subs();
@@ -1011,6 +1021,72 @@ testcase TC_gsup_ul_via_proxy() runs on test_CT {
 	f_init(false);
 	sl := f_gen_subs();
 	f_start_handler_per_sub(refers(f_TC_gsup_ul), sl, via_proxy := true);
+
+	setverdict(pass);
+}
+
+private function f_TC_gsup_ul_subscriber_data() runs on HLR_ConnHdlr {
+	var GSUP_PDUs pdus;
+	var GSUP_PDU isd;
+	log("GSUP ul subscriber_data", isd);
+	pdus := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn, source_name := g_pars.source_name);
+	isd := pdus[1];
+
+	template GSUP_IEs tr_pdp_info_internet := {
+			tr_GSUP_IE_PDP_CONTEXT_ID('01'O),
+			tr_GSUP_IE_APN(str2apn("internet"))
+	}
+	template GSUP_IEs tr_pdp_info_wildcard := {
+			tr_GSUP_IE_PDP_CONTEXT_ID('02'O),
+			tr_GSUP_IE_APN(str2apn("*"))
+	}
+
+	/* Search for PDP info 'internet', '*' */
+	var boolean found := false;
+	var GSUP_IeValue ievalue;
+	var GSUP_IEs pdp_info;
+	found := f_gsup_find_nested_ie_multiple(isd.ies, OSMO_GSUP_PDP_INFO_IE, 0, ievalue);
+	if (not found) {
+		setverdict(fail, "Multiple APNs: Coulnd't find first PDP Info IE in: ", isd);
+		return;
+	}
+	pdp_info := ievalue.pdp_info;
+	if (not match(pdp_info, tr_pdp_info_internet)) {
+		setverdict(fail, "Multiple APNs: first PDP Info doesn't match: ", pdp_info, "on Template: ", tr_pdp_info_internet);
+		return;
+	}
+
+	/* wildcard '*' */
+	found := f_gsup_find_nested_ie_multiple(isd.ies, OSMO_GSUP_PDP_INFO_IE, 1, ievalue);
+	if (not found) {
+		setverdict(fail, "Multiple APNs: Coulnd't find second PDP Info IE in: ", isd);
+		return;
+	}
+	pdp_info := ievalue.pdp_info;
+	if (not match(pdp_info, tr_pdp_info_wildcard)) {
+		setverdict(fail, "Multiple APNs: second PDP Info doesn't match: ", pdp_info, "on Template: ", tr_pdp_info_wildcard);
+		return;
+	}
+
+	setverdict(pass);
+}
+
+testcase TC_gsup_ul_subscriber_data() runs on test_CT {
+	/* Do a GSUP Update Location Request to get a Insert Subscriber Data Request (ISD).
+	 * Check for multiple APN in the ISD:
+	 * SGSN  -> HLR: Update Location Request
+	 * SGSN <-  HLR: Insert Subscriber Data Request (Check the TLV)
+	 * SGSN  -> HLR: Insert Subscriber Data Result
+	 * SGSN <-  HLR: Update Location Result
+	 */
+	var HlrSubscriberList sl;
+
+	f_init(false);
+	f_vty_config2(VTY, {"hlr", "ps"} , "no pdp-profiles default");
+	f_vty_config2(VTY, {"hlr", "ps", "pdp-profiles default", "profile 1"}, "apn internet");
+	f_vty_config2(VTY, {"hlr", "ps", "pdp-profiles default", "profile 2"}, "apn *");
+	sl := f_gen_subs();
+	f_start_handler_per_sub(refers(f_TC_gsup_ul_subscriber_data), sl);
 
 	setverdict(pass);
 }
@@ -1046,7 +1122,7 @@ testcase TC_vty() runs on test_CT {
 /* VTY changes to MSISDN should result in ISD to current VLR */
 private function f_TC_vty_msisdn_isd() runs on HLR_ConnHdlr {
 	var hexstring new_msisdn;
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
 	timer T := 5.0;
 
 	/* Create Subscriber */
@@ -1091,9 +1167,10 @@ testcase TC_vty_msisdn_isd() runs on test_CT {
 
 /* Test PURGE MS for CS services */
 private function f_TC_gsup_purge_cs() runs on HLR_ConnHdlr {
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
+	var GSUP_PDU pdu;
 	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
-	res := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_CS);
+	pdu := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_CS);
 }
 testcase TC_gsup_purge_cs() runs on test_CT {
 	var HlrSubscriberList sl;
@@ -1108,9 +1185,10 @@ testcase TC_gsup_purge_cs() runs on test_CT {
 
 /* Test PURGE MS for PS services */
 private function f_TC_gsup_purge_ps() runs on HLR_ConnHdlr {
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
+	var GSUP_PDU pdu;
 	res := f_perform_UL(g_pars.sub.imsi, g_pars.sub.msisdn);
-	res := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_PS);
+	pdu := f_perform_PURGE(g_pars.sub.imsi, OSMO_GSUP_CN_DOMAIN_PS);
 }
 testcase TC_gsup_purge_ps() runs on test_CT {
 	var HlrSubscriberList sl;
@@ -1540,7 +1618,7 @@ testcase TC_gsup_check_imei_unknown_imsi() runs on test_CT {
 
 /* Test create-subscriber-on-demand during Check IMEI (OsmoMSC would be set to "check-imei-rqd early") */
 private function f_TC_subscr_create_on_demand_check_imei_early() runs on HLR_ConnHdlr {
-	var GSUP_PDU res; /* save various return values to prevent ttcn3 compiler warnings */
+	var GSUP_PDUs res; /* save various return values to prevent ttcn3 compiler warnings */
 	var charstring imsi_pattern := "*IMSI: " & hex2str(g_pars.sub.imsi) & "*";
 
 	/* Random MSISDN and CS+PS NAM (LU must pass) */
@@ -1613,7 +1691,7 @@ testcase TC_subscr_create_on_demand_check_imei_early() runs on test_CT {
 
 /* Test create-subscriber-on-demand during LU (Location Update) */
 private function f_TC_subscr_create_on_demand_ul() runs on HLR_ConnHdlr {
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
 	var charstring imsi_pattern := "*IMSI: " & hex2str(g_pars.sub.imsi) & "*";
 
 	/* Random MSISDN and CS+PS NAM (LU must pass) */
@@ -1680,13 +1758,14 @@ testcase TC_subscr_create_on_demand_ul() runs on test_CT {
 
 /* Test create-subscriber-on-demand during SAI (SendAuthInfo) */
 private function f_TC_subscr_create_on_demand_sai() runs on HLR_ConnHdlr {
-	var GSUP_PDU res;
+	var GSUP_PDUs res;
+	var GSUP_PDU pdu;
 	var charstring imsi_pattern := "*IMSI: " & hex2str(g_pars.sub.imsi) & "*";
 
 	/* HLR creates the subscriber on demand. Then the IMSI is known, but there is no auth data, so the HLR returns
          * the "slightly inaccurate cause 'IMSI Unknown' via GSUP". The MS is able to do a LU afterwards. */
 	f_vty_config(VTY, "hlr", "subscriber-create-on-demand 3 cs+ps");
-	res := f_perform_SAI(g_pars.sub.imsi, 2 /* IMSI Unknown */ );
+	pdu := f_perform_SAI(g_pars.sub.imsi, 2 /* IMSI Unknown */ );
 
 	/* Verify that it was created before the LU */
 	f_vty_subscr_show(VTY, g_pars.sub, pattern imsi_pattern);
@@ -2000,6 +2079,7 @@ control {
 	execute( TC_gsup_sai_err_unknown_imsi() );
 	execute( TC_gsup_ul() );
 	execute( TC_gsup_ul_via_proxy() );
+	execute( TC_gsup_ul_subscriber_data() );
 	execute( TC_vty() );
 	execute( TC_vty_msisdn_isd() );
 	execute( TC_gsup_purge_cs() );
