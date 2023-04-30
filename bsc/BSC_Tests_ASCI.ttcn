@@ -1,0 +1,512 @@
+module BSC_Tests_ASCI {
+
+/* Integration Tests for OsmoBSC
+ * (C) 2023 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from Misc_Helpers all;
+
+import from BSC_Tests all;
+import from BSSAP_Types all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from RSL_Types all;
+import from RSL_Emulation all;
+import from MGCP_Emulation all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
+
+import from MSC_ConnectionHandler all;
+import from RAN_Adapter all;
+import from RAN_Emulation all;
+
+const charstring COORD_VGCS_CALL_EST := "VGCS_CALL_EST";
+const charstring COORD_VGCS_CALL_REL := "VGCS_CALL_REL";
+const charstring COORD_VGCS_CHANNEL_REL := "VGCS_CHANNEL_REL";
+const charstring COORD_VGCS_UPLINK_FREE := "VGCS_UPLINK_FREE";
+const charstring COORD_VGCS_UPLINK_BUSY := "VGCS_UPLINK_BUSY";
+const charstring COORD_VGCS_ASSIGN_RES := "VGCS_ASSIGN_RES";
+const charstring COORD_VGCS_ASSIGN_FAIL := "VGCS_ASSIGN_FAIL";
+
+template (value) DescriptiveGroupOrBroadcastCallReference_V
+			ts_BSSMAP_IE_GroupCallRef(integer cr,
+						  BIT1 sf,
+						  BIT1 af,
+						  BIT3 prio,
+						  BIT4 ci) := {
+	binaryCodingOfGroupOrBroadcastCallReference := int2bit(cr, 27),
+	sF := sf,
+	aF := af,
+	callPriority := prio,
+	cipheringInformation := ci,
+	spare := '0000'B
+}
+
+function f_gen_asci_ass_req(integer bssap_idx := 0,
+			    template (value) BSSMAP_IE_ChannelType ch_type := ts_BSSMAP_IE_ChannelType,
+			    template (value) OCT1 ass_requirement := '00'O,
+			    template (value) BSSMAP_IE_CellIdentifier cell_id := ts_CellId_CI(0),
+			    template (value) GroupCallRef group_call_ref := '0000001000'O,
+			    charstring aoip_tla :="1.2.3.4")
+runs on MSC_ConnHdlr return template (value) PDU_BSSAP {
+	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
+		var template (value) BSSMAP_IE_AoIP_TransportLayerAddress tla :=
+			f_ts_BSSMAP_IE_AoIP_TLA(aoip_tla, 2342);
+		var template (value) BSSMAP_IE_SpeechCodecList codec_list :=
+			ts_BSSMAP_IE_CodecList({ts_CodecFR});
+		return ts_BSSMAP_VGCS_VBS_AssignmentReq(ch_type, ass_requirement, cell_id,
+							    group_call_ref, omit, tla, omit, codec_list);
+	} else {
+		var template (value) BSSMAP_IE_CircuitIdentityCode cic := ts_BSSMAP_IE_CIC(0,1);
+		return ts_BSSMAP_VGCS_VBS_AssignmentReq(ch_type, ass_requirement, cell_id,
+							    group_call_ref, cic, omit, omit, omit);
+	}
+}
+
+/*
+ * VGCS/VBS call controling connection
+ */
+
+private function f_tc_vgcs_vbs_setup(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP rx_bssap;
+	var template (value) DescriptiveGroupOrBroadcastCallReference_V callref :=
+								ts_BSSMAP_IE_GroupCallRef(11, '1'B, '0'B, '000'B, '0000'B);
+	var template (value) PDU_BSSAP setup_req := ts_BSSMAP_VGCS_VBS_Setup(bit2oct(encvalue(callref)), omit);
+	var boolean uplink_free := false;
+	var boolean uplink_busy := false;
+	var boolean uplink_req := false;
+	var boolean uplink_req_conf := false;
+	var boolean uplink_rel_ind := false;
+	var boolean assign_res := false;
+	var boolean assign_fail := false;
+	/* Note: This timer is used to receive messages after the expected event.
+	 * After timeout, the outcome of the test is checked. */
+	timer T := 0.2;
+
+	/* Wait for the COORD ports to be connected. */
+	f_sleep(1.0);
+
+	/* VGCS/VBS SETUP REQ in SCCP CR (must be the first message) */
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc, setup_req));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_SetupAck) -> value rx_bssap {
+		log("VGCS: got setup ack");
+		if (not g_pars.asci_test.vgcs_setup_ok) {
+			COORD.send(COORD_VGCS_CALL_EST);
+			repeat;
+		}
+		BSSAP.send(ts_BSSMAP_ClearCommand(0));
+		BSSAP.receive(tr_BSSMAP_ClearComplete);
+		BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+		setverdict(pass);
+		return;
+		}
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_SetupRefuse) -> value rx_bssap {
+		log("VGCS: got setup refuse");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Expected ASCI Setup to succeed, but got fail");
+		return;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkReq) -> value rx_bssap {
+		log("VGCS: received uplink req");
+		uplink_req := true;
+		BSSAP.send(ts_BSSMAP_UplinkReqAck(omit));
+		if (g_pars.asci_test.vgcs_talker_req) {
+			T.start;
+		}
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkReqConf(?, omit, '1234'O)) -> value rx_bssap {
+		log("VGCS: received uplink req confirm");
+		uplink_req_conf := true;
+		if (g_pars.asci_test.vgcs_talker_est) {
+			T.start;
+		}
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkRelInd(GSM0808_CAUSE_CALL_CONTROL, omit)) -> value rx_bssap {
+		log("VGCS: received uplink rel ind");
+		uplink_rel_ind := true;
+		if (g_pars.asci_test.vgcs_talker_rel) {
+			T.start;
+		}
+		repeat;
+		}
+	[] COORD.receive(COORD_VGCS_ASSIGN_RES) {
+		log("VGCS: got assignment result at call control");
+		assign_res := true;
+		if (g_pars.asci_test.vgcs_assign_ok) {
+			T.start;
+		}
+		repeat;
+		}
+	[] COORD.receive(COORD_VGCS_ASSIGN_FAIL) {
+		log("VGCS: got assignment failure at call control");
+		assign_fail := true;
+		if (g_pars.asci_test.vgcs_assign_fail) {
+			T.start;
+		}
+		repeat;
+		}
+	[] COORD.receive(COORD_VGCS_UPLINK_FREE) {
+		log("VGCS: Got UPLINK FREE at call control");
+		uplink_busy := false;
+		uplink_free := true;
+		repeat;
+		}
+	[] COORD.receive(COORD_VGCS_UPLINK_BUSY) {
+		log("VGCS: Got UPLINK BUSY at call control");
+		uplink_busy := true;
+		uplink_free := false;
+		repeat;
+		}
+	[] T.timeout { }
+	}
+
+	/* After timeout: Release Channel and Call and see if the outcome of the test is as expected. */
+	COORD.send(COORD_VGCS_CHANNEL_REL);
+	BSSAP.send(ts_BSSMAP_ClearCommand(0));
+	BSSAP.receive(tr_BSSMAP_ClearComplete);
+	BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+
+	if (g_pars.asci_test.vgcs_assign_ok) {
+		if (not assign_res) {
+			setverdict(fail, "VGCS: Assignment did not pass as expected!");
+			return;
+		}
+		if (not uplink_free) {
+			setverdict(fail, "VGCS: Uplink not free as expected!");
+			return;
+		}
+		log("VGCS: Channel assigned and uplink marked free as expected!");
+		setverdict(pass);
+		return;
+	}
+	if (g_pars.asci_test.vgcs_assign_fail) {
+		if (not assign_fail) {
+			setverdict(fail, "VGCS: Assignment did not fail as expected!");
+			return;
+		}
+		log("VGCS: Channel assignment failed as expected!");
+		setverdict(pass);
+		return;
+	}
+	if (g_pars.asci_test.vgcs_talker_req) {
+		if (not uplink_req) {
+			setverdict(fail, "VGCS: No uplink request as expected!");
+			return;
+		}
+		if (not uplink_busy) {
+			setverdict(fail, "VGCS: Uplink not busy as expected!");
+			return;
+		}
+		log("VGCS: Uplink requested and uplink marked busy as expected!");
+		setverdict(pass);
+		return;
+	}
+	if (g_pars.asci_test.vgcs_talker_est) {
+		if (not uplink_req_conf) {
+			setverdict(fail, "VGCS: No uplink request confirm as expected!");
+			return;
+		}
+		if (not uplink_busy) {
+			setverdict(fail, "VGCS: Uplink not busy as expected!");
+			return;
+		}
+		log("VGCS: Uplink established and uplink marked busy as expected!");
+		setverdict(pass);
+		return;
+	}
+	if (g_pars.asci_test.vgcs_talker_rel) {
+		if (not uplink_rel_ind) {
+			setverdict(fail, "VGCS: No uplink release indication as expected!");
+			return;
+		}
+		if (not uplink_free) {
+			setverdict(fail, "VGCS: Uplink not free as expected!");
+			return;
+		}
+		log("VGCS: Uplink established+released and uplink marked free as expected!");
+		setverdict(pass);
+		return;
+	}
+}
+
+/*
+ * VGCS/VBS resource controling connection
+ */
+
+private altstep as_eat_rsl_data() runs on MSC_ConnHdlr {
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, ?)) {
+		log("VGCS: Got RSL DATA REQ on channel");
+		repeat;
+	}
+}
+
+private function f_tc_asci_assignment(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP rx_bssap;
+	/* Hack: the proper way would be to wait for the BSSMAP VGCS Assignment Result and extract the
+	 * actual assigned chan_nr from it. But osmo-bsc starts acting on the lchan even before we get a
+	 * chance to evaluate the BSSMAP Handover Request ACK. So we need to assume that osmo-bsc will
+	 * activate TS 1 and already set up this lchan's RSL emulation
+	 * before we get started. */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	f_rslem_register(0, new_chan_nr);
+	g_chan_nr := new_chan_nr;
+	var uint3_t expect_target_tsc := c_BtsParams[0].tsc;
+	var default eat_rsl_data;
+
+	/* Wait for the COORD ports to be connected. */
+	f_sleep(1.0);
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	var default as_media := activate(as_Media());
+
+	log("VGCS: wait for establishment of call controling connection");
+	COORD.receive(COORD_VGCS_CALL_EST);
+	log("VGCS: got establishment of call controling connection");
+
+	/* TODO: Encryption */
+	var template (value) BSSMAP_IE_ChannelType req_ch_type := ts_BSSMAP_IE_ChannelType;
+	var template BSSMAP_IE_ChannelType res_ch_type := tr_BSSMAP_IE_ChannelType('0001'B, ChRate_TCHF, Spdi_TCHF_FR);
+	var template (value) BSSMAP_IE_CellIdentifier req_cell_id := ts_CellId_CI(0);
+	var template BSSMAP_IE_CellIdentifier res_cell_id := tr_CellId_CI(0);
+	var template (value) DescriptiveGroupOrBroadcastCallReference_V callref :=
+								ts_BSSMAP_IE_GroupCallRef(11, '1'B, '0'B, '000'B, '0000'B);
+	if (g_pars.asci_test.vgcs_assign_fail) {
+		callref := ts_BSSMAP_IE_GroupCallRef(10, '1'B, '0'B, '000'B, '0000'B);
+	}
+	var template (value) PDU_BSSAP ass_req := f_gen_asci_ass_req(ch_type := req_ch_type, cell_id := req_cell_id,
+									group_call_ref := bit2oct(encvalue(callref)));
+	/* VGCS/VBS ASS REQ in SCCP CR (must be the first message) */
+	BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc, ass_req));
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_AssignmentRes(res_ch_type, res_cell_id)) -> value rx_bssap {
+		log("VGCS: got assignment result on channel");
+		COORD.send(COORD_VGCS_ASSIGN_RES);
+		if (g_pars.asci_test.vgcs_talker_req or
+		    g_pars.asci_test.vgcs_talker_est or
+		    g_pars.asci_test.vgcs_talker_rel) {
+			log("VGCS: sending talker det");
+			RSL.send(ts_RSL_TALKER_DET(g_chan_nr));
+		}
+		if (g_pars.asci_test.vgcs_talker_est or
+		    g_pars.asci_test.vgcs_talker_rel) {
+			log("VGCS: sending RSL etabish ind");
+			RSL.send(ts_RSL_EST_IND(g_chan_nr, ts_RslLinkID_DCCH(0), '1234'O));
+		}
+		if (g_pars.asci_test.vgcs_talker_rel) {
+			log("VGCS: sending RSL release ind");
+			RSL.send(ts_RSL_REL_IND(g_chan_nr, ts_RslLinkID_DCCH(0)));
+		}
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_AssignmentFail) -> value rx_bssap {
+		log("VGCS: got assignment failure on channel");
+		COORD.send(COORD_VGCS_ASSIGN_FAIL);
+		log("VGCS: got release order after assignment failure");
+		COORD.receive(COORD_VGCS_CHANNEL_REL);
+		BSSAP.send(ts_BSSMAP_ClearCommand(0));
+		BSSAP.receive(tr_BSSMAP_ClearComplete);
+		BSSAP.send(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_REQ);
+		return;
+		}
+	[] COORD.receive(COORD_VGCS_CHANNEL_REL) {
+		log("VGCS: got release order of resource controling connection");
+		eat_rsl_data := activate(as_eat_rsl_data());
+		f_perform_clear_no_rr_rel();
+		deactivate(eat_rsl_data);
+		return;
+		}
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, '082B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B'O)) {
+		log("VGCS: Got UPLINK FREE on channel");
+		COORD.send(COORD_VGCS_UPLINK_FREE);
+		repeat;
+		}
+	[] RSL.receive(tr_RSL_DATA_REQ(g_chan_nr, ?, '062A'O)) {
+		log("VGCS: Got UPLINK BUSY on channel");
+		COORD.send(COORD_VGCS_UPLINK_BUSY);
+		repeat;
+		}
+	}
+
+	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
+
+	/* we're sure that the channel activation is done now, verify the parameters in it */
+	var RSL_Message chan_act := f_rslem_get_last_act(RSL_PROC, 0, g_chan_nr);
+	/* TODO: Encryption */
+	f_chan_act_verify_tsc(chan_act, expect_target_tsc);
+
+	if (ispresent(rx_bssap.pdu.bssmap.vGCS_VBSAssignmentResult.speechCodec)) {
+		if (not g_pars.aoip) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected no Speech Codec (Chosen)");
+		}
+	} else {
+		if (g_pars.aoip) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected Speech Codec (Chosen)");
+		}
+	}
+
+}
+
+testcase TC_vgcs_vbs_setup_only() runs on test_CT {
+	var MSC_ConnHdlr call_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_setup_ok := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+
+	call_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_assignment() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_assign_ok := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_assignment_fail() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_assign_fail := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_req() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_talker_req := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_est() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_talker_est := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_rel() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_talker_rel := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+control {
+	execute( TC_vgcs_vbs_setup_only() );
+	execute( TC_vgcs_vbs_assignment() );
+	execute( TC_vgcs_vbs_assignment_fail() );
+	execute( TC_vgcs_vbs_talker_req() );
+	execute( TC_vgcs_vbs_talker_est() );
+	execute( TC_vgcs_vbs_talker_rel() );
+}
+
+
+}
