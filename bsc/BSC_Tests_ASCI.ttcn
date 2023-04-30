@@ -1,0 +1,148 @@
+module BSC_Tests_ASCI {
+
+/* Integration Tests for OsmoBSC
+ * (C) 2023 by Harald Welte <laforge@gnumonks.org>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This test suite tests OsmoBSC while emulating both multiple BTS + MS as
+ * well as the MSC. See README for more details.
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from GSM_Types all;
+import from Misc_Helpers all;
+
+import from BSC_Tests all;
+import from BSSAP_Types all;
+import from BSSAP_CodecPort all;
+import from BSSMAP_Templates all;
+import from RSL_Types all;
+import from RSL_Emulation all;
+import from MGCP_Emulation all;
+
+import from MobileL3_CommonIE_Types all;
+import from MobileL3_Types all;
+import from L3_Templates all;
+import from GSM_RR_Types all;
+
+import from MSC_ConnectionHandler all;
+import from RAN_Adapter all;
+import from RAN_Emulation all;
+
+
+function f_gen_asci_ass_req(integer bssap_idx := 0,
+			    template (value) BSSMAP_IE_ChannelType ch_type := ts_BSSMAP_IE_ChannelType,
+			    template (value) OCT1 ass_requirement := '00'O,
+			    template (value) BSSMAP_IE_CellIdentifier cell_id := ts_CellID_LAC_CI(1, 0),
+			    template (value) GroupCallRef group_call_ref := '2342'O,
+			    charstring aoip_tla :="1.2.3.4")
+runs on MSC_ConnHdlr return template (value) PDU_BSSAP {
+	if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
+		var template (value) BSSMAP_IE_AoIP_TransportLayerAddress tla :=
+			 f_ts_BSSMAP_IE_AoIP_TLA(aoip_tla, 2342);
+		return ts_BSSMAP_VGCS_VBS_AssignmentReq(ch_type, ass_requirement, cell_id,
+							    group_call_ref, omit, tla);
+	} else {
+		var template (value) BSSMAP_IE_CircuitIdentityCode cic := ts_BSSMAP_IE_CIC(0,1);
+		return ts_BSSMAP_VGCS_VBS_AssignmentReq(ch_type, ass_requirement, cell_id,
+							    group_call_ref, cic, omit);
+	}
+}
+
+
+private function f_tc_asci_assignment(charstring id) runs on MSC_ConnHdlr {
+	var PDU_BSSAP rx_bssap;
+	/* Hack: the proper way would be to wait for the BSSMAP VGCS Assignment Result and extract the
+	 * actual assigned chan_nr from it. But osmo-bsc starts acting on the lchan even before we get a
+	 * chance to evaluate the BSSMAP Handover Request ACK. So we need to assume that osmo-bsc will
+	 * activate TS 1 and already set up this lchan's RSL emulation
+	 * before we get started. */
+	var RslChannelNr new_chan_nr := valueof(t_RslChanNr0(1, RSL_CHAN_NR_Bm_ACCH));
+	f_rslem_register(0, new_chan_nr);
+	g_chan_nr := new_chan_nr;
+	var uint3_t expect_target_tsc := c_BtsParams[0].tsc;
+	f_sleep(1.0);
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	f_MscConnHdlr_init(g_pars.media_nr, "127.0.0.2", "127.0.0.3", FR_AMR);
+	var default as_media := activate(as_Media());
+
+	/* TODO: Encryption */
+	var template (value) BSSMAP_IE_ChannelType ch_type := ts_BSSMAP_IE_ChannelType;
+	var template (value) BSSMAP_IE_CellIdentifier cell_id := ts_CellID_LAC_CI(1, 0);
+	var template (value) PDU_BSSAP ass_req := f_gen_asci_ass_req(ch_type := ch_type, cell_id := cell_id);
+	if (false) {	/* VGCS/VBS ASS REQ in SCCP CR */
+		BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc, ass_req));
+		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+	} else {	/* VGCS/VBS ASS REQ in SCCP DT1 */
+		BSSAP.send(ts_BSSAP_Conn_Req(g_pars.sccp_addr_bsc, g_pars.sccp_addr_msc, omit));
+		BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_CONF_IND);
+		BSSAP.send(ass_req);
+	}
+
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_AssignmentRes(ch_type, cell_id)) -> value rx_bssap {
+		if (g_pars.expect_ho_fail) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected ASCI Assignment to fail, but got success");
+		}
+		}
+	[] BSSAP.receive(tr_BSSMAP_VGCS_VBS_AssignmentFail) -> value rx_bssap {
+		if (not g_pars.expect_ho_fail) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected ASCI Assignment to succeed, but got fail");
+		}
+		/* TOOD: evaluate correct cause value. But osmo-bsc doesn't seem to send meaningful causes * yet! */
+		BSSAP.receive(tr_BSSMAP_ClearRequest);
+		setverdict(pass);
+		return;
+		}
+	}
+
+	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
+
+	/* we're sure that the channel activation is done now, verify the parameters in it */
+	var RSL_Message chan_act := f_rslem_get_last_act(RSL_PROC, 0, g_chan_nr);
+	/* TODO: Encryption */
+	f_chan_act_verify_tsc(chan_act, expect_target_tsc);
+
+	if (ispresent(rx_bssap.pdu.bssmap.vGCS_VBSAssignmentResult.speechCodec)) {
+		if (not g_pars.aoip) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected no Speech Codec (Chosen)");
+		}
+	} else {
+		if (g_pars.aoip) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Expected Speech Codec (Chosen)");
+		}
+	}
+
+}
+
+testcase TC_vbs_assignment() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
+control {
+	execute( TC_vbs_assignment() );
+
+}
+
+
+}
