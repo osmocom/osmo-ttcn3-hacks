@@ -67,10 +67,10 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
-OSMOGERRIT_REPOS=	titan.ProtocolModules.BSSMAP \
-			osmo-uecups
+OSMOGERRIT_REPOS=	osmo-uecups
 
-OSMOGITEA_REPOS=	titan.ProtocolModules.MAP \
+OSMOGITEA_REPOS=	titan.ProtocolModules.BSSMAP \
+			titan.ProtocolModules.MAP \
 			titan.TestPorts.USB \
 			titan.TestPorts.AF_PACKET
 
