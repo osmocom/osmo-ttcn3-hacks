@@ -65,9 +65,11 @@ PARALLEL_MAKE ?= -j$(NPROC)
 
 default: deps all
 
+# Eclipse GitLab has rate limiting and sometimes to many concurrent conns fail.
+# If -jN fails, retry with -j1.
 .PHONY: deps
 deps:
-	$(MAKE) $(PARALLEL_MAKE) -C deps
+	($(MAKE) $(PARALLEL_MAKE) -C deps || $(MAKE) -j1 -C deps)
 
 # deps-update target for backwards compat; now does the same as 'make deps'
 .PHONY: deps-update
