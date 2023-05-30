@@ -5326,6 +5326,66 @@ runs on test_CT {
 	}
 }
 
+/* Catch a L1CTL DL BLOCK.ind with the given parameters */
+private altstep as_l1ctl_dl_block_ind(out L1ctlGprsDlBlockInd block_ind,
+				      template (present) GsmFrameNumber fn := ?,
+				      template (present) uint3_t tn := ?,
+				      template (present) uint3_t usf := ?,
+				      template (present) octetstring data := ?)
+runs on test_CT {
+	var L1ctlMessage l1_dl;
+
+	[] L1CTL.receive(tr_L1CTL_GPRS_DL_BLOCK_IND(fn, tn, usf, data)) -> value l1_dl {
+		block_ind := l1_dl.payload.dl_block_ind;
+	}
+}
+
+/* tuple of TDMA frame number and timeslot number */
+private type record TdmaFnTn {
+	GsmFrameNumber fn,
+	uint3_t tn
+}
+
+/* Wait for a L1CTL DL BLOCK.ind and send an UL BLOCK.req */
+private function f_TC_pcu_tx_ul_block_req(octetstring data,
+					  template (present) uint3_t tn := ?,
+					  template (present) uint3_t usf := ?)
+runs on test_CT return TdmaFnTn {
+	var L1ctlGprsDlBlockInd block_ind;
+	timer T;
+
+	T.start(1.0);
+	alt {
+	[] as_l1ctl_dl_block_ind(block_ind, tn := tn, usf := usf) {
+		var integer fn := block_ind.hdr.fn;
+
+		/* Ignore PTCCH/D blocks, their Fn is too far away */
+		if (fn mod 104 == 12) {
+			repeat;
+		}
+
+		/* Every fn % 13 == 12 we have either a PTCCH or an IDLE slot, thus
+		 * every fn % 13 ==  8 we add 5 frames, or 4 frames othrwise.  The
+		 * resulting value is first fn of the next block. */
+		if (fn mod 13 == 8) {
+			fn := (fn + 5) mod (2048 * 51 * 26);
+		} else {
+			fn := (fn + 4) mod (2048 * 51 * 26);
+		}
+
+		L1CTL.send(ts_L1CTL_GPRS_UL_BLOCK_REQ(fn, block_ind.hdr.tn, data));
+		return {fn, block_ind.hdr.tn};
+		}
+	[] L1CTL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for DL BLOCK.ind (RTS)");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	return {0, 0}; /* make TITAN happy */
+}
+
 /* Tune the L1 to PDCH on the given timeslot number */
 private function f_TC_pcu_l1ctl_est_pdch(uint3_t tn) runs on test_CT {
 	var ConnHdlrPars pars := valueof(t_Pars(ts_RslChanNr_PDCH(tn), ts_RSL_ChanMode_SIGN));
@@ -5890,9 +5950,11 @@ runs on test_CT {
 	var int16_t lqual_cb;
 	timer T := 1.0;
 
-	/* Send a random PDTCH frame over Um
-	 * FIXME: we need to wait for a DL block and user Fn from there. */
-	L1CTL.send(ts_L1CTL_GPRS_UL_BLOCK_REQ(0, 7, '0000'O & f_rnd_octstring(21)));
+	L1CTL.clear;
+	PCU.clear;
+
+	/* Send a random Uplink block over the Um */
+	f_TC_pcu_tx_ul_block_req('0000'O & f_rnd_octstring(21), tn := 7);
 
 	T.start;
 	alt {
