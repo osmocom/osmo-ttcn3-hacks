@@ -3373,7 +3373,7 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req() runs on RAW_PCU_Test_CT {
  * ending, by means of sending a Packet Resource Request on ul slot provided by
  * last Pkt Ul ACK's RRBP. new Pkt Ul Ass is never confirmed by the MS in this test.
  * See 3GPP TS 44.060 sec 9.3.2.4.2 "Non-extended uplink TBF mode" */
-testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU_Test_CT {
+testcase TC_ul_tbf_reestablish_with_pkt_resource_req_t3168() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind;
 	var RlcmacDlBlock dl_block;
 	var octetstring data := f_rnd_octstring(10);
@@ -3383,9 +3383,10 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 	var BTS_PDTCH_Block data_msg;
 	var template RlcmacDlBlock acknack_tmpl;
 	var GprsMS ms;
-	const integer N3105_MAX := 2;
-	var integer N3105 := 0;
-	timer T_3195 := 1.0 + 0.5; /* 0.5: extra offset since we cannot match exactly */
+	var integer cnt_rrbp := 0;
+	var integer cnt_dummy_after_timeout := 0;
+	/* Maximum T3168 value = 8 * 500 ms = 4s => * 4 retrans = 16s */
+	timer T_3168 := 16.0 + 0.5; /* 0.5: extra offset since we cannot match exactly */
 
 	/* Initialize NS/BSSGP side */
 	f_init_bssgp();
@@ -3395,9 +3396,7 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 
 	/* Initialize the PCU interface abstraction */
 	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
-	/* Speedup test: */
-	info_ind.n3105 := N3105_MAX;
-	info_ind.t3195 := 1;
+	/* TODO: Speedup test by sending a PCU_IF_SAPI_BCCH SI13 with T3168=0 (500ms) */
 	f_init_raw(testcasename(), info_ind);
 
 	/* Establish BSSGP connection to the PCU */
@@ -3423,6 +3422,7 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 	/* TODO: verify TBF_EST and FinalACK are both '1' above */
 
 	/* Send PACKET RESOURCE REQUEST to request a new UL TBF */
+	T_3168.start;
 	f_ms_tx_ul_block(ms, ts_RLC_UL_CTRL_ACK(ts_RlcMacUlCtrl_PKT_RES_REQ(ms.tlli, omit)), sched_fn);
 
 	/* Now Keep ignoring the Pkt Ul Ass on PACCH: */
@@ -3433,12 +3433,18 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
 				  block_nr := nr.blk_nr));
 	alt {
-	[not T_3195.running] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
 					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
 					   tr_RLCMAC_UL_PACKET_ASS)) -> value data_msg {
+		/* We should not be receiving PKT UL ASS anymore after T3168 timeout */
+		if (not T_3168.running) {
+			setverdict(fail, log2str("Unexpected PKT UL ASS after T3168 timeout: ", data_msg));
+			f_shutdown(__BFILE__, __LINE__);
+		}
+
 		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
-			log("Ignoring RRBP N3105 ", N3105);
-			N3105 := N3105 + 1;
+			log("Ignoring RRBP ", cnt_rrbp);
+			cnt_rrbp := cnt_rrbp + 1;
 		}
 		nr := ts_TsTrxBtsNum;
 		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
@@ -3447,15 +3453,9 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 					  block_nr := nr.blk_nr));
 		repeat;
 	}
-	/* At this point in time (N3105_MAX reached), PCU already moved TBF to
-	 * RELEASE state so no data for it is tx'ed, hence the dummy blocks:
-	 */
-	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
 					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
 					   tr_RLCMAC_DL_DUMMY_CTRL)) -> value data_msg {
-		if (not T_3195.running) {
-			T_3195.start;
-		}
 		nr := ts_TsTrxBtsNum;
 		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
 					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
@@ -3463,42 +3463,23 @@ testcase TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() runs on RAW_PCU
 					  block_nr := nr.blk_nr));
 		repeat;
 	}
-	[N3105 == N3105_MAX] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
 					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
 					   omit)) -> value data_msg {
-		/* We may already receive idle blocks before our own TTCN3 timer
-		 * triggers due to the TBF being released. Keep going until our T_3195 triggers. */
-		nr := ts_TsTrxBtsNum;
-		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
-					  block_nr := nr.blk_nr));
-		repeat;
+
+		/* T3168 expired and we are not receiving blocks anymore, meaning PCU released the TBF. */
+		break;
 	}
-	/* We receive Dummy blocks in between Pkt Ul Ass while PCU waits for us to ack it */
-	[not T_3195.running] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
-					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
-					   tr_RLCMAC_DL_DUMMY_CTRL)) -> value data_msg {
-		log("Ignoring Dummy block FN ", data_msg.raw.fn);
-		nr := ts_TsTrxBtsNum;
-		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
-					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
-					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
-					  block_nr := nr.blk_nr));
-		repeat;
-	}
-	[T_3195.running] T_3195.timeout {
-		log("T_3195 timeout");
-		/* Done in alt, wait for pending RTS initiated previously in
-		 * above case before continuing (expect nothing to be sent since there's no active TBF): */
-		BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
-						tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
-						omit));
-		}
 	[] BTS.receive {
 		setverdict(fail, "Unexpected BTS message");
 		f_shutdown(__BFILE__, __LINE__);
 	}
+	}
+
+	/* Check that we received at least a few PKT UL ASS before T3168 expiration */
+	if (cnt_rrbp <= 3) {
+		setverdict(fail, log2str("Received only ", cnt_rrbp, " before T3168 timeout!"));
+		f_shutdown(__BFILE__, __LINE__);
 	}
 
 	f_shutdown(__BFILE__, __LINE__, final := true);
@@ -7145,7 +7126,7 @@ control {
 	execute( TC_dl_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_tbf_reestablish_with_pkt_resource_req() );
-	execute( TC_ul_tbf_reestablish_with_pkt_resource_req_n3105_max() );
+	execute( TC_ul_tbf_reestablish_with_pkt_resource_req_t3168() );
 	execute( TC_ul_tbf_reestablish_with_pkt_dl_ack_nack() );
 	execute( TC_ul_tbf_reestablish_with_pkt_dl_ack_nack_egprs() );
 
