@@ -12140,6 +12140,15 @@ private function f_vty_mgw_block(integer mgw_nr := 1, boolean blocked := true) r
 	}
 	f_vty_transceive(BSCVTY, "mgw " & int2str(mgw_nr) & " " & arg);
 }
+private function f_vty_mgw_cfg_keepalive(integer mgw_nr := 1, integer req_intval := 0, charstring req_endp := "null", integer rx_timeout := 0) runs on test_CT {
+	var charstring arg;
+	var rof_charstring cmds := {
+		"keepalive request-interval " & int2str(req_intval),
+		"keepalive request-endpoint " & req_endp,
+		"keepalive timeout " & int2str(rx_timeout)
+	};
+	f_vty_config3(BSCVTY, {"network", "mgw " & int2str(mgw_nr)}, cmds);
+}
 private const charstring COORD_CMD_ESTABLISHED := "COORD_CMD_ESTABLISHED";
 private function f_TC_mgwpool_call_seq_1(charstring id) runs on MSC_ConnHdlr {
 	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
@@ -12253,6 +12262,66 @@ testcase TC_mgwpool_pin_bts() runs on test_CT {
 
 	f_vty_cfg_bts(BSCVTY, 0, { "no mgw pool-target" } );
 	f_vty_mgw_disable(1);
+
+	f_shutdown_helper();
+}
+
+/* Test keepalive procedure on the MGW */
+private function f_TC_mgwpool_keepalive_mgw0(charstring id) runs on MSC_ConnHdlr {
+	/* Make sure the MGW is considered DOWN by the keepalive. See "timeout"
+	 * param in TC_mgwpool_keepalive. */
+	f_sleep(3.0);
+
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	/* Wait for signal that call was established successfully over the other MSC/MGW: */
+	COORD.receive(COORD_CMD_ESTABLISHED);
+}
+private function f_TC_mgwpool_keepalive_mgw1(charstring id) runs on MSC_ConnHdlr {
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	/* Wait for other MSC/MGW component to tell us the timeout is done and
+	 * we can start the call, which will be assigned to use because the other
+	 * MGW will be seen as DOWN. */
+	COORD.receive(COORD_CMD_ESTABLISHED);
+	f_establish_fully(ass_cmd, exp_compl);
+	/* signal that call was established successfully over the other MSC/MGW: */
+	COORD.send(COORD_CMD_ESTABLISHED);
+
+	f_perform_clear()
+	f_create_mgcp_delete_ep(g_media.mgcp_ep);
+}
+testcase TC_mgwpool_keepalive_down_not_used() runs on test_CT {
+	var TestHdlrParams pars1 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn1;
+	pars1.mgwpool_idx := 0;
+
+	var TestHdlrParams pars2 := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn2;
+	pars2.mgwpool_idx := 1; /* expect it in the second one, since the first will be considered DOWN */
+	pars2.media_nr := 2;
+
+	f_init(1, true, nr_mgw := 2);
+	f_sleep(1.0);
+
+	f_vty_mgw_enable(1);
+	f_vty_mgw_block(1, false);
+	f_vty_mgw_cfg_keepalive(0, req_intval := 1, req_endp := "null", rx_timeout := 3);
+
+	vc_conn1 := f_start_handler_create(pars1);
+	vc_conn2 := f_start_handler_create(pars2);
+	connect(vc_conn1:COORD, vc_conn2:COORD);
+	f_start_handler_run(vc_conn1, refers(f_TC_mgwpool_keepalive_mgw0), pars1);
+	f_start_handler_run(vc_conn2, refers(f_TC_mgwpool_keepalive_mgw1), pars2);
+	vc_conn1.done;
+	vc_conn2.done;
+
+	f_vty_mgw_disable(1);
+	/* disable keepalive (default status): */
+	f_vty_mgw_cfg_keepalive(0, req_intval := 0, req_endp := "null", rx_timeout := 0);
 
 	f_shutdown_helper();
 }
@@ -12680,6 +12749,7 @@ control {
 	execute( TC_mgwpool_all_used() );
 	execute( TC_mgwpool_blocked_not_used() );
 	execute( TC_mgwpool_pin_bts() );
+	execute( TC_mgwpool_keepalive_down_not_used() );
 
 	execute( TC_ho_meas_rep_multi_band() );
 
