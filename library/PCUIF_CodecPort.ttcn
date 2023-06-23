@@ -15,6 +15,7 @@ import from Osmocom_Types all;
 import from PCUIF_Types all;
 import from UD_PortType all;
 import from UD_Types all;
+import from General_Types all;
 
 type record PCUIF_send_data {
 	PCUIF_Message	data,
@@ -139,18 +140,27 @@ function f_pcuif_listen(PCUIF_CODEC_PT pt, charstring sock) return integer {
 }
 
 function f_PCUIF_tx_imm_ass_pch(PCUIF_CODEC_PT pt, integer conn_id, octetstring imm_ass, hexstring imsi,
-				uint8_t bts_nr := 0, boolean wait_for_cnf := true) return uint32_t {
+				uint8_t bts_nr := 0, boolean wait_for_cnf := true, OCT4 tlli := '01020304'O) return uint32_t {
 	var PCUIF_send_data sd;
 	timer T := 3.0;
-	/* append 3 last imsi digits so BTS can compute pagng group */
-	var hexstring last_digits := substr(imsi, lengthof(imsi)-3, 3);
-	var octetstring prefix := ''O;
-	log("3 last imsi digits: ", last_digits);
-	for (var integer i := 0; i < 3; i := i+1) {
-		prefix := prefix & int2oct(hex2int('30'H) + hex2int(last_digits[i]), 1);
-	}
-	pt.send(t_SD_PCUIF(conn_id,
+
+	if (mp_pcuif_version < 11) {
+		/* append 3 last imsi digits so that the BTS is able to compute paging group */
+		var hexstring last_digits := substr(imsi, lengthof(imsi)-3, 3);
+		log("3 last imsi digits: ", last_digits);
+		var octetstring prefix := ''O;
+		for (var integer i := 0; i < 3; i := i+1) {
+			prefix := prefix & int2oct(hex2int('30'H) + hex2int(last_digits[i]), 1);
+		}
+		pt.send(t_SD_PCUIF(conn_id,
 			ts_PCUIF_DATA_REQ(bts_nr, 0, 0, 0, 0, PCU_IF_SAPI_PCH, prefix & imm_ass)));
+	} else {
+		var PCUIF_pch_dt pch_dt;
+		pch_dt.tlli := tlli;
+		pch_dt.imsi := hex2str(imsi);
+		pch_dt.data := imm_ass;
+		pt.send(t_SD_PCUIF(conn_id, ts_PCUIF_DATA_REQ(bts_nr, 0, 0, 0, 0, PCU_IF_SAPI_PCH_DT, enc_PCUIF_pch_dt(pch_dt))));
+	}
 
 	/* Exit early when the caller is not interested in the confirmation message */
 	if (wait_for_cnf == false) {
@@ -159,10 +169,23 @@ function f_PCUIF_tx_imm_ass_pch(PCUIF_CODEC_PT pt, integer conn_id, octetstring 
 
 	T.start;
 	alt {
-	[] pt.receive(t_SD_PCUIF(conn_id,
-				tr_PCUIF_DATA_CNF(bts_nr, 0, 0, PCU_IF_SAPI_PCH))) -> value sd {
-		log("IMM.ASS was sent on fn ", sd.data.u.data_cnf.fn);
-		return sd.data.u.data_cnf.fn;
+	[] pt.receive(t_SD_PCUIF(conn_id, tr_PCUIF_DATA_CNF(bts_nr, 0, 0, PCU_IF_SAPI_PCH))) -> value sd {
+		if (mp_pcuif_version >= 11) {
+			setverdict(fail, "expecting tr_PCUIF_DATA_CNF_DT in PCUIF v.11 or later");
+			mtc.stop;
+		} else {
+			log("IMM.ASS was sent on fn ", sd.data.u.data_cnf.fn);
+			return sd.data.u.data_cnf.fn;
+		}
+		}
+	[] pt.receive(t_SD_PCUIF(conn_id, tr_PCUIF_DATA_CNF_DT(bts_nr, 0, 0, PCU_IF_SAPI_PCH_DT))) -> value sd {
+		if (mp_pcuif_version < 11) {
+			setverdict(fail, "expecting tr_PCUIF_DATA_CNF in PCUIF v.10 or earlier");
+			mtc.stop;
+		} else {
+			log("IMM.ASS was sent on fn ", sd.data.u.data_cnf_dt.fn);
+			return sd.data.u.data_cnf_dt.fn;
+		}
 		}
 	[] pt.receive { repeat; }
 	[] T.timeout {
