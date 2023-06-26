@@ -408,6 +408,60 @@ function f_init_hnodeb(charstring id, integer hnb_idx, RuaOps rua_ops) runs on t
 	vc_RUA[hnb_idx].start(RUA_Emulation.main(rua_ops, id & "-RUA"));
 }
 
+private type record of boolean BooleanList;
+
+private function f_vty_cnlink_allow_attach(TELNETasp_PT pt, boolean ps_domain, BooleanList allow_attach_list)
+{
+	var charstring config := f_vty_transceive_ret(pt, "show running-config");
+
+	var charstring msc_sgsn;
+	if (ps_domain) {
+		msc_sgsn := "sgsn";
+	} else {
+		msc_sgsn := "msc";
+	}
+
+	f_vty_enter_config(pt);
+	for (var integer cn_nr := 0; cn_nr < sizeof(allow_attach_list); cn_nr := cn_nr+1) {
+		if (f_strstr(config, "\n" & msc_sgsn & " " & int2str(cn_nr) & "\n") < 0) {
+			/* There is no 'msc N' for this cn_nr in the running config, so don't create an empty cn by
+			 * stepping into that config node. */
+			log(msc_sgsn, cn_nr, " is not configured, skipping");
+			continue;
+		}
+		f_vty_transceive(pt, msc_sgsn & " " & int2str(cn_nr));
+
+		if (allow_attach_list[cn_nr]) {
+			/* strict := false: ignore if osmo-hnbgw does not support this config option (latest build) */
+			f_vty_transceive(pt, "allow-attach", strict := false);
+		} else {
+			f_vty_transceive(pt, "no allow-attach", strict := false);
+		}
+		f_vty_transceive(pt, "exit");
+	}
+	f_vty_transceive(pt, "exit");
+}
+
+/* Start RAN adapter for CN link N.
+ * e.g. link for 'msc 0' = (ps_domain := false, cn_nr := 0)
+ * link for 'sgsn 3' = (ps_domain := true, cn_nr := 3)
+ */
+private function f_cn_nr_init(boolean ps_domain, integer cn_nr) runs on test_CT {
+	var RanOps ranops := MSC_RanOps;
+	ranops.ps_domain := ps_domain;
+	var integer cn_idx := f_cn_idx(ps_domain, cn_nr);
+	var charstring msc_sgsn := "msc";
+	if (ps_domain) {
+		msc_sgsn := "sgsn";
+	}
+	f_ran_adapter_init(g_cn[cn_idx], mp_cn_cfg[cn_idx], "HNBGW_Test." & msc_sgsn & int2str(cn_nr), ranops);
+	f_ran_adapter_start(g_cn[cn_idx]);
+}
+
+private function f_cn_idx_disconnect(integer cn_idx) runs on test_CT {
+	f_ran_adapter_cleanup(g_cn[cn_idx]);
+}
+
 /* global initialization function */
 function f_init(charstring id := "HNBGW", float guard_timeout := 30.0, integer nr_msc := 1, integer nr_sgsn := 1,
 		boolean start_hnb := true) runs on test_CT {
@@ -431,26 +485,41 @@ function f_init(charstring id := "HNBGW", float guard_timeout := 30.0, integer n
 		f_init_hnodeb(testcasename(), i, rua_ops);
 	}
 
+	f_init_vty("VirtHNBGW");
 	f_ipa_ctrl_start_client(mp_hnbgw_ip, mp_hnbgw_ctrl_port);
 
 	/* MSC emulation */
-	var RanOps ranops := MSC_RanOps;
+
+	/* Make sure each MSC's internal state is "DISCONNECTED" at first */
+	for (var integer i := 0; i < NUM_MSC; i := i + 1) {
+		f_vty_transceive(HNBGWVTY, "msc " & int2str(i) & " ranap reset", strict := false);
+	}
+
+	var BooleanList allow_attach := { false, false, false, false };
 	for (var integer i := 0; i < nr_msc; i := i + 1) {
 		var integer cn_idx := FIRST_MSC_IDX + i;
-		f_ran_adapter_init(g_cn[cn_idx], mp_cn_cfg[cn_idx], "HNBGW_Test", ranops);
-		f_ran_adapter_start(g_cn[cn_idx]);
+		allow_attach[i] := true;
+		f_cn_nr_init(ps_domain := false, cn_nr := i);
 	}
+	/* start the test with exactly all enabled MSCs allowed to attach */
+	f_vty_cnlink_allow_attach(HNBGWVTY, false, allow_attach);
 
 	/* SGSN emulation */
-	ranops.ps_domain := true;
-	for (var integer i := 0; i < nr_sgsn; i := i + 1) {
-		var integer cn_idx := FIRST_SGSN_IDX + i;
-		f_ran_adapter_init(g_cn[cn_idx], mp_cn_cfg[cn_idx], "HNBGW_Test", ranops);
-		f_ran_adapter_start(g_cn[cn_idx]);
+
+	/* Make sure each SGSN's internal state is "DISCONNECTED" at first */
+	for (var integer i := 0; i < NUM_SGSN; i := i + 1) {
+		f_vty_transceive(HNBGWVTY, "sgsn " & int2str(i) & " ranap reset", strict := false);
 	}
 
+	allow_attach := { false, false, false, false };
+	for (var integer i := 0; i < nr_sgsn; i := i + 1) {
+		var integer cn_idx := FIRST_SGSN_IDX + i;
+		allow_attach[i] := true;
+		f_cn_nr_init(ps_domain := true, cn_nr := i);
+	}
+	f_vty_cnlink_allow_attach(HNBGWVTY, true, allow_attach);
+
 	f_init_mgcp(id);
-	f_init_vty("VirtHNBGW");
 
 	if (start_hnb) {
 		f_start_hnbs();
