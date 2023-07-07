@@ -1,22 +1,25 @@
 module S1AP_Emulation {
 
-/* S1AP Emulation, runs on top of S1AP_CodecPort.  It multiplexes/demultiplexes
- * the individual IMSIs/subscribers, so there can be separate TTCN-3 components handling
- * each of them.
+/* S1AP Emulation, runs on top of S1AP_CodecPort. It multiplexes/demultiplexes
+ * the individual subscribers by their UE association (MME_UE_S1AP_ID/
+ * ENB_UE_S1AP_ID identifiers), so there can be separate TTCN-3 components
+ * handling each of them.
  *
  * The S1AP_Emulation.main() function processes S1AP primitives from the S1AP
- * socket via the S1AP_CodecPort, and dispatches them to the per-IMSI components.
+ * socket via the S1AP_CodecPort, and dispatches them to the per-subscriber
+ * components.
  *
- * For each new IMSI, the S1apOps.create_cb() is called.  It can create
- * or resolve a TTCN-3 component, and returns a component reference to which that IMSI
- * is routed/dispatched.
+ * For each new subscruber, the S1apOps.create_cb() is called. It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which
+ * that subscriber traffic is routed/dispatched.
  *
- * If a pre-existing component wants to register to handle a future inbound IMSI, it can
- * do so by registering an "expect" with the expected IMSI.
+ * If a pre-existing component wants to register to handle a future inbound UE
+ * association, it can do so by registering an "expect" with the expected
+ * MME_UE_S1AP_ID/ENB_UE_S1AP_ID identifiers.
  *
- * Inbound non-UE related S1AP messages (such as RESET, SETUP, OVERLOAD) are dispatched to
- * the S1apOps.unitdata_cb() callback, which is registered with an argument to the
- * main() function below.
+ * Inbound non-UE related S1AP messages (such as RESET, SETUP, OVERLOAD) are
+ * dispatched to the S1apOps.unitdata_cb() callback, which is registered with
+ * an argument to the main() function below.
  *
  * (C) 2019 by Harald Welte <laforge@gnumonks.org>
  * All rights reserved.
@@ -393,7 +396,8 @@ function main(S1APOps ops, S1AP_conn_parameters p, charstring id) runs on S1AP_E
 	while (true) {
 		var S1AP_ConnHdlr vc_conn;
 		var PDU_NAS_EPS nas;
-		var hexstring imsi;
+		var MME_UE_S1AP_ID mme_id;
+		var ENB_UE_S1AP_ID enb_id;
 		var S1AP_RecvFrom mrf;
 		var S1AP_PDU msg;
 		var S1APEM_Config s1cfg;
@@ -460,7 +464,7 @@ function main(S1APOps ops, S1AP_conn_parameters p, charstring id) runs on S1AP_E
 				if (f_s1ap_ids_known(mme_ue_id, enb_ue_id)) {
 					/* if yes, dispatch to the ConnHdlr for this Ue-Connection */
 					var template (omit) octetstring nas_enc;
-					var integer assoc_id  := f_assoc_id_by_s1ap_ids(mme_ue_id, enb_ue_id);
+					var integer assoc_id := f_assoc_id_by_s1ap_ids(mme_ue_id, enb_ue_id);
 					vc_conn := S1apAssociationTable[assoc_id].comp_ref;
 					nas_enc := f_S1AP_get_NAS_PDU(mrf.msg);
 					if (isvalue(nas_enc)) {
@@ -484,9 +488,9 @@ function main(S1APOps ops, S1AP_conn_parameters p, charstring id) runs on S1AP_E
 			}
 		[] S1AP.receive(tr_SctpAssocChange) { }
 		[] S1AP.receive(tr_SctpPeerAddrChange)  { }
-		[] S1AP_PROC.getcall(S1APEM_register:{?,?}) -> param(imsi, vc_conn) {
-			f_create_expect(imsi, vc_conn);
-			S1AP_PROC.reply(S1APEM_register:{imsi, vc_conn}) to vc_conn;
+		[] S1AP_PROC.getcall(S1APEM_register:{?,?,?}) -> param(mme_id, enb_id, vc_conn) {
+			f_create_expect(mme_id, enb_id, vc_conn);
+			S1AP_PROC.reply(S1APEM_register:{mme_id, enb_id, vc_conn}) to vc_conn;
 			}
 		}
 
@@ -496,30 +500,35 @@ function main(S1APOps ops, S1AP_conn_parameters p, charstring id) runs on S1AP_E
 /* "Expect" Handling */
 
 type record ExpectData {
-	hexstring imsi optional,
+	MME_UE_S1AP_ID mme_id optional,
+	ENB_UE_S1AP_ID enb_id optional,
 	S1AP_ConnHdlr vc_conn
 }
 
-signature S1APEM_register(in hexstring imsi, in S1AP_ConnHdlr hdlr);
+signature S1APEM_register(in MME_UE_S1AP_ID mme_id, in ENB_UE_S1AP_ID enb_id, in S1AP_ConnHdlr hdlr);
 
 type port S1APEM_PROC_PT procedure {
 	inout S1APEM_register;
 } with { extension "internal" };
 
 /* Function that can be used as create_cb and will use the expect table */
-function ExpectedCreateCallback(S1AP_PDU msg, hexstring imsi, charstring id)
+function ExpectedCreateCallback(S1AP_PDU msg,
+				template (omit) MME_UE_S1AP_ID mme_id,
+				template (omit) ENB_UE_S1AP_ID enb_id, charstring id)
 runs on S1AP_Emulation_CT return S1AP_ConnHdlr {
 	var S1AP_ConnHdlr ret := null;
 	var integer i;
 
 	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
-		if (not ispresent(S1apExpectTable[i].imsi)) {
+		if (not ispresent(S1apExpectTable[i].mme_id) and not ispresent(S1apExpectTable[i].enb_id)) {
 			continue;
 		}
-		if (imsi == S1apExpectTable[i].imsi) {
+
+		if (valueof(mme_id) == S1apExpectTable[i].mme_id and valueof(enb_id) == S1apExpectTable[i].enb_id) {
 			ret := S1apExpectTable[i].vc_conn;
 			/* Release this entry */
-			S1apExpectTable[i].imsi := omit;
+			S1apExpectTable[i].mme_id := omit;
+			S1apExpectTable[i].enb_id := omit;
 			S1apExpectTable[i].vc_conn := null;
 			log("Found Expect[", i, "] for ", msg, " handled at ", ret);
 			return ret;
@@ -529,22 +538,28 @@ runs on S1AP_Emulation_CT return S1AP_ConnHdlr {
 	mtc.stop;
 }
 
-private function f_create_expect(hexstring imsi, S1AP_ConnHdlr hdlr)
+private function f_create_expect(template (omit) MME_UE_S1AP_ID mme_id,
+				 template (omit) ENB_UE_S1AP_ID enb_id,
+				 S1AP_ConnHdlr hdlr)
 runs on S1AP_Emulation_CT {
 	var integer i;
 
 	/* Check an entry like this is not already presnt */
 	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
-		if (imsi == S1apExpectTable[i].imsi) {
-			setverdict(fail, "IMSI already present", imsi);
+		if (not ispresent(S1apExpectTable[i].mme_id) and not ispresent(S1apExpectTable[i].enb_id)) {
+			continue;
+		}
+		if (valueof(mme_id) == S1apExpectTable[i].mme_id and valueof(enb_id) == S1apExpectTable[i].enb_id) {
+			setverdict(fail, "UE MME id / UE ENB id pair already present", mme_id, enb_id);
 			mtc.stop;
 		}
 	}
 	for (i := 0; i < sizeof(S1apExpectTable); i := i+1) {
-		if (not ispresent(S1apExpectTable[i].imsi)) {
-			S1apExpectTable[i].imsi := imsi;
+		if (not ispresent(S1apExpectTable[i].mme_id) and not ispresent(S1apExpectTable[i].enb_id)) {
+			S1apExpectTable[i].mme_id := valueof(mme_id);
+			S1apExpectTable[i].enb_id := valueof(enb_id);
 			S1apExpectTable[i].vc_conn := hdlr;
-			log("Created Expect[", i, "] for ", imsi, " to be handled at ", hdlr);
+			log("Created Expect[", i, "] for UE MME id:", mme_id, ", UE ENB id:", enb_id, " to be handled at ", hdlr);
 			return;
 		}
 	}
@@ -552,9 +567,10 @@ runs on S1AP_Emulation_CT {
 }
 
 /* client/conn_hdlr side function to use procedure port to create expect in emulation */
-function f_create_s1ap_expect(hexstring imsi) runs on S1AP_ConnHdlr {
-	S1AP_PROC.call(S1APEM_register:{imsi, self}) {
-		[] S1AP_PROC.getreply(S1APEM_register:{?,?}) {};
+function f_create_s1ap_expect(template (omit) MME_UE_S1AP_ID mme_id,
+			      template (omit) ENB_UE_S1AP_ID enb_id) runs on S1AP_ConnHdlr {
+	S1AP_PROC.call(S1APEM_register:{mme_id, enb_id, self}) {
+		[] S1AP_PROC.getreply(S1APEM_register:{?,?,?}) {};
 	}
 }
 
@@ -563,7 +579,9 @@ private function f_expect_table_init()
 runs on S1AP_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(S1apExpectTable); i := i + 1) {
-		S1apExpectTable[i].imsi := omit;
+		S1apExpectTable[i].mme_id := omit;
+		S1apExpectTable[i].enb_id := omit;
+		S1apExpectTable[i].vc_conn := null;
 	}
 }
 
