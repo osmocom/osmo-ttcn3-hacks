@@ -40,7 +40,15 @@ FILES="GTPv2_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
-FILES="GTPC_EncDec.cc   GTPC_Types.ttcn  GTPU_EncDec.cc   GTPU_Types.ttcn"
+FILES="GTPC_EncDec.cc GTPC_Types.ttcn GTPU_EncDec.cc GTPU_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.NS_v7.3.0/src
+FILES="NS_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
+FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
@@ -54,12 +62,14 @@ FILES+="S1AP_EncDec.cc  S1AP_Types.ttcn  S1AP_Templates.ttcn "
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
+FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="L3_Templates.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Emulation.ttcn "
 FILES+="NAS_Templates.ttcn GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "
+FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn Osmocom_Gb_Types.ttcn "
+FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

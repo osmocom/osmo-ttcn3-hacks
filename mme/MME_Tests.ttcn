@@ -11,7 +11,8 @@
 module MME_Tests {
 
 import from General_Types all;
-
+import from Native_Functions all;
+import from IPL4asp_Types all;
 import from S1AP_Types all;
 import from S1AP_Templates all;
 import from S1AP_Emulation all;
@@ -28,6 +29,11 @@ import from DIAMETER_Emulation all;
 import from SGsAP_Types all;
 import from SGsAP_Templates all;
 import from SGsAP_Emulation all;
+
+import from GTP_Emulation all;
+import from GTP_Templates all;
+import from GTP_CodecPort all;
+import from GTPC_Types all;
 
 import from LTE_CryptoFunctions all;
 
@@ -72,12 +78,17 @@ type component MTC_CT {
 	port SGsAP_PT SGsAP_UNIT;
 	port SGsAPEM_PROC_PT SGsAP_PROC;
 
+	/* Gn interface (GTPv1C) of emulated SGSN (Rel. 7) */
+	var GTP_Emulation_CT vc_GTP;
+
 	var UeParams g_ue_pars[NUM_UE];
 }
 
-type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr {
+type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr, GTP_ConnHdlr {
 	var ConnHdlrPars g_pars;
 	timer g_Tguard := 30.0;
+
+	var GtpPeer g_gn_iface_peer := { connId := 1, remName := mp_gn_remote_ip, remPort := mp_gn_local_port };
 }
 
 type record ConnHdlrPars {
@@ -105,6 +116,11 @@ modulepar {
 	integer mp_sgs_local_port := 29118;
 	charstring mp_vlr_name := "vlr.example.net";
 	charstring mp_mme_name := "mmec01.mmegi0001.mme.epc.mnc070.mcc901.3gppnetwork.org";
+
+	/* Gn interface (GTPv1C) */
+	charstring mp_gn_local_ip := "127.0.0.22";
+	integer mp_gn_local_port := 2123;
+	charstring mp_gn_remote_ip := "127.0.0.2";
 }
 
 /* send incoming unit data messages (like reset) to global SGsAP_UNIT port */
@@ -227,6 +243,21 @@ friend function f_init_diameter(charstring id) runs on MTC_CT {
 	f_diameter_wait_capability(DIAMETER_UNIT);
 }
 
+friend function f_init_gtp(charstring id) runs on MTC_CT {
+	id := id & "-GTP";
+
+	var GtpEmulationCfg gtp_cfg := {
+		gtpc_bind_ip := mp_gn_local_ip,
+		gtpc_bind_port := mp_gn_local_port,
+		gtpu_bind_ip := omit,
+		gtpu_bind_port := omit,
+		sgsn_role := true
+	};
+
+	vc_GTP := GTP_Emulation_CT.create(id);
+	vc_GTP.start(GTP_Emulation.main(gtp_cfg));
+}
+
 friend template (value) TAI ts_enb_S1AP_TAI(EnbParams enb) := {
 	pLMNidentity := enb.global_enb_id.pLMNidentity,
 	tAC := enb.supported_tas[0].tAC,
@@ -271,6 +302,10 @@ runs on MTC_CT return ConnHdlr {
 	if (isbound(vc_DIAMETER)) {
 		connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
 		connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+	}
+	if (isbound(vc_GTP)) {
+		connect(vc_conn:GTP, vc_GTP:CLIENT);
+		connect(vc_conn:GTP_PROC, vc_GTP:CLIENT_PROC);
 	}
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
@@ -561,11 +596,45 @@ testcase TC_s1ap_attach() runs on MTC_CT {
 	vc_conn.done;
 }
 
+private function f_TC_gn_echo_request(ConnHdlrPars pars) runs on ConnHdlr {
+	timer T := 5.0;
+	f_init_handler(pars);
+	f_gtp_register_teid('00000000'O);
+
+	GTP.send(ts_GTPC_PING(g_gn_iface_peer, 1));
+	T.start;
+	alt {
+	[] GTP.receive(tr_GTPC_PONG(?)) {
+		setverdict(pass);
+		}
+	[] GTP.receive {
+		setverdict(fail, "unexpected GTPC message from MME");
+		}
+	[] T.timeout {
+		setverdict(fail, "no GTPC ECHO RESPONSE from MME");
+		}
+	}
+}
+testcase TC_gn_echo_request() runs on MTC_CT {
+	var charstring id := testcasename();
+
+	f_init_diameter(id);
+	f_init_s1ap(id, 4);
+	f_s1ap_setup(0);
+	f_init_gtp(id);
+
+	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_with_pars(refers(f_TC_gn_echo_request), pars);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_s1ap_setup_wrong_plmn() );
 	execute( TC_s1ap_setup_wrong_tac() );
 	execute( TC_s1ap_setup() );
 	execute( TC_s1ap_attach() );
+	execute( TC_gn_echo_request() );
 }
 
 

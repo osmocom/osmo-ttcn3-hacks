@@ -6,10 +6,12 @@ FILES="
 	*.asn
 	*.c
 	*.ttcn
+	BSSGP_EncDec.cc
 	DIAMETER_CodecPort_CtrlFunctDef.cc
 	DIAMETER_EncDec.cc
 	GTPC_EncDec.cc
 	GTPU_EncDec.cc
+	GTP_CodecPort_CtrlFunctDef.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	LTE_CryptoFunctionDefs.cc
@@ -22,6 +24,7 @@ FILES="
 	TCCInterface.cc
 	TELNETasp_PT.cc
 "
+
 
 export CPPFLAGS_TTCN3="
 "
