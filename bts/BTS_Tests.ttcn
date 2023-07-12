@@ -8235,7 +8235,8 @@ testcase TC_ms_pwr_ctrl_pf_ewma() runs on test_CT {
 }
 
 private function f_TC_speech_no_rtp(charstring id) runs on ConnHdlr {
-	var template L1ctlMessage tr_bad_frame;
+	var template L1ctlMessage tr_dummy_frame;
+	var integer dummy_frame_num := 0;
 	var L1ctlMessage l1_dl;
 	timer T := 8.0;
 
@@ -8248,24 +8249,30 @@ private function f_TC_speech_no_rtp(charstring id) runs on ConnHdlr {
 	f_sleep(2.0); /* ... so let's give the L1 some time to stabilize */
 	L1CTL.clear;
 
-	/* A universal template for bad Downlink frame: {DATA,TRAFFIC}.ind */
-	tr_bad_frame := tr_L1CTL_TRAFFIC_IND(g_chan_nr, tr_RslLinkID_DCCH(0));
-	tr_bad_frame.header.msg_type := (L1CTL_DATA_IND, L1CTL_TRAFFIC_IND);
-	tr_bad_frame.dl_info.fire_crc := (1..255); /* != 0 */
-	tr_bad_frame.payload := ?;
+	/* Expect empty TRAFFIC.ind with no bit errors and bad CRC.  In the absence
+	 * of RTP, osmo-bts is transmitting dummy speech frames with inverted CRC3.
+	 * This is a beautiful hack inducing a BFI condition in the MS receiver.
+	 * See https://osmocom.org/issues/4823#note-13 for more details. */
+	tr_dummy_frame := tr_L1CTL_TRAFFIC_IND(g_chan_nr, tr_RslLinkID_DCCH(0));
+	tr_dummy_frame.dl_info.fire_crc := (1..255); /* != 0 */
+	tr_dummy_frame.dl_info.num_biterr := 0;
+	tr_dummy_frame.payload := omit;
 
 	T.start;
 	alt {
-	/* OS#4823: DATA.ind or TRAFFIC.ind with bad CRC most likely means that
-	 * the IUT is sending *dummy bursts*, so the L1 fails to decode them. */
-	[] L1CTL.receive(tr_bad_frame) -> value l1_dl {
-		setverdict(fail, "Received {DATA,TRAFFIC}.ind with bad CRC: ", l1_dl);
+	[] L1CTL.receive(tr_dummy_frame) -> value l1_dl {
+		dummy_frame_num := dummy_frame_num + 1;
+		log("Rx dummy TRAFFIC.ind (num ", dummy_frame_num, "): ", l1_dl);
+		/* break the loop if we got 5 dummy frames */
+		if (dummy_frame_num < 5)
+			{ repeat; }
+		}
+	[] L1CTL.receive(tr_L1CTL_TRAFFIC_IND(g_chan_nr)) -> value l1_dl {
+		setverdict(fail, "Rx unexpected TRAFFIC.ind: ", l1_dl);
 		}
 	[] as_l1_sacch();
-	[] L1CTL.receive { repeat; }
 	[] T.timeout {
-		/* We're done, break the loop */
-		setverdict(pass);
+		setverdict(fail, "Timeout waiting for TRAFFIC.ind");
 		}
 	}
 
