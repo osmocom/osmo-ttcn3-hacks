@@ -190,9 +190,110 @@ testcase TC_vgcs_uplink_free_and_busy() runs on test_CT
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
+/* Sub function to test talker detect. */
+private function f_vgcs_talker_detect() runs on ConnHdlr
+{
+	var octetstring uplink_free := '082B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B'O;
+	var octetstring uplink_access := 'C0'O;
+	var template octetstring uplink_grant := '0609C0*'O;
+	var RSL_Message rm;
+	var GsmFrameNumber fn;
+
+	f_l1_tune(L1CTL);
+	RSL.clear;
+
+	/* Activate channel on the BTS side. */
+	log("Activating VGCS channel.");
+	f_rsl_chan_act(g_pars.chan_mode);
+
+	/* Enable dedicated mode. */
+	f_l1ctl_est_dchan(L1CTL, g_pars);
+
+	/* Send one UPLINK FREE message and expect them to be repeated. */
+	log("Send UPLINK FREE.");
+	RSL.send(ts_RSL_UNITDATA_REQ(g_chan_nr, ts_RslLinkID_DCCH(0), uplink_free));
+	f_l1_exp_lapdm(tr_LAPDm_Bter_UI(uplink_free));
+	log("Received UPLINK FREE.");
+
+	/* Send UPLINK ACCESS on VGCS channel. */
+	log("Send UPLINK ACCESS.");
+	fn := f_L1CTL_RACH(L1CTL, oct2int(uplink_access), chan_nr := g_pars.chan_nr);
+
+	/* Receive UPLINK GRANT by the MS. */
+	f_l1_exp_lapdm(tr_LAPDm_UI(0, cr_MT_CMD, uplink_grant));
+	log("Received VGCS UPLINK GRANT.");
+
+	/* Wait for talker detection. */
+	timer T := 1.0;
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_TALKER_DET(g_pars.chan_nr, ?)) -> value rm {
+		log("RSL Talker Detect has been detected: ", rm);
+		T.stop;
+		}
+	[] RSL.receive(tr_RSL_CHAN_RQD(?, ?, ?, ?)) -> value rm {
+		setverdict(fail, "RSL_CHAN_RQD was not expected: ", rm);
+		T.stop;
+		}
+	[] RSL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RSL Talker Detect.");
+		}
+	}
+}
+
+/* A VGCS channel is activated. The BSC sends UPLINK FREE message. The MS sends RACH on VGCS channel.
+ * The MS receives VGCS UPLINK GRAND, but does not respond to it. It is expeced that the BSC receivce RSL CONN FAIL.
+ */
+private function f_TC_vgcs_talker_fail(charstring id) runs on ConnHdlr
+{
+	var RSL_Message rm;
+
+	/* Perform link establishment and talker detection. */
+	f_vgcs_talker_detect();
+
+	/* Leave dedicated channel, to force link timeout. */
+	f_L1CTL_RESET(L1CTL);
+	f_l1_tune(L1CTL);
+
+	/* Wait for link timeout. */
+	timer T := 40.0;
+	T.start;
+	alt {
+	[] RSL.receive(tr_RSL_CONN_FAIL_IND(g_pars.chan_nr, ?)) -> value rm {
+		log("RSL Conn Fail Ind has been detected as expected: ", rm);
+		T.stop;
+		}
+	[] RSL.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for RSL Conn Fail Ind.");
+		}
+	}
+
+	/* Deactivate and cleanup. */
+	f_vgcs_cleanup();
+}
+testcase TC_vgcs_talker_fail() runs on test_CT
+{
+	var template RSL_IE_ChannelMode ch_mode;
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init();
+
+	ch_mode := ts_RSL_ChanMode(RSL_CHRT_TCH_F_GROUP, RSL_CMOD_SP_GSM1);
+	pars := valueof(t_Pars(t_RslChanNr_Bm(1), ch_mode));
+	pars.t_guard := 60.0;
+	vc_conn := f_start_handler(refers(f_TC_vgcs_talker_fail), pars);
+	vc_conn.done;
+
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+}
+
 control {
 	execute( TC_vbs_notification() );
 	execute( TC_vgcs_uplink_free_and_busy() );
+	execute( TC_vgcs_talker_fail() );
 
 }
 
