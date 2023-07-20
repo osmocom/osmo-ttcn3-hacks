@@ -42,6 +42,7 @@ const charstring COORD_VGCS_UPLINK_FREE := "VGCS_UPLINK_FREE";
 const charstring COORD_VGCS_UPLINK_BUSY := "VGCS_UPLINK_BUSY";
 const charstring COORD_VGCS_ASSIGN_RES := "VGCS_ASSIGN_RES";
 const charstring COORD_VGCS_ASSIGN_FAIL := "VGCS_ASSIGN_FAIL";
+const charstring COORD_UPLINK_REQUEST_CONFIRM := "UPLINK_REQUEST_CONFIRM";
 
 template (value) DescriptiveGroupOrBroadcastCallReference_V
 			ts_BSSMAP_IE_GroupCallRef(integer cr,
@@ -81,6 +82,18 @@ runs on MSC_ConnHdlr return template (value) PDU_BSSAP {
 /*
  * VGCS/VBS call controling connection
  */
+
+private function f_delay_msc() runs on MSC_ConnHdlr {
+	var PDU_BSSAP rx_bssap;
+	timer T := 2.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_BSSAP_BSSMAP) -> value rx_bssap {
+		setverdict(fail, "Got BSSAP message from BSC. This is unexpected:", rx_bssap);
+		}
+	[] T.timeout { }
+	}
+}
 
 private function f_tc_vgcs_vbs_setup(charstring id) runs on MSC_ConnHdlr {
 	var PDU_BSSAP rx_bssap;
@@ -129,6 +142,11 @@ private function f_tc_vgcs_vbs_setup(charstring id) runs on MSC_ConnHdlr {
 	[] BSSAP.receive(tr_BSSMAP_UplinkReq) -> value rx_bssap {
 		log("VGCS: received uplink req");
 		uplink_req := true;
+		if (g_pars.asci_test.delay_msc) {
+			log("VGCS: delay uplink req ack");
+			f_delay_msc();
+		}
+		log("VGCS: sending uplink req ack");
 		BSSAP.send(ts_BSSMAP_UplinkReqAck(omit));
 		if (g_pars.asci_test.vgcs_talker_req) {
 			T.start;
@@ -138,6 +156,7 @@ private function f_tc_vgcs_vbs_setup(charstring id) runs on MSC_ConnHdlr {
 	[] BSSAP.receive(tr_BSSMAP_UplinkReqConf(?, omit, '1234'O)) -> value rx_bssap {
 		log("VGCS: received uplink req confirm");
 		uplink_req_conf := true;
+		COORD.send(COORD_UPLINK_REQUEST_CONFIRM);
 		if (g_pars.asci_test.vgcs_talker_est) {
 			T.start;
 		}
@@ -158,6 +177,9 @@ private function f_tc_vgcs_vbs_setup(charstring id) runs on MSC_ConnHdlr {
 			T.start;
 		}
 		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkRelInd(?, omit)) -> value rx_bssap {
+		setverdict(fail, "VGCS: received uplink rel ind, caused by failure with invalid cause: ", rx_bssap);
 		}
 	[] COORD.receive(COORD_VGCS_ASSIGN_RES) {
 		log("VGCS: got assignment result at call control");
@@ -322,6 +344,17 @@ private altstep as_eat_rsl_data() runs on MSC_ConnHdlr {
 	}
 }
 
+private function f_delay_bts() runs on MSC_ConnHdlr {
+	timer T := 2.0;
+	T.start;
+	alt {
+	[] COORD.receive(COORD_UPLINK_REQUEST_CONFIRM) {
+		setverdict(fail, "Got UPLINK REQUEST CONFIRM from BSC. This is unexpected.");
+		}
+	[] T.timeout { }
+	}
+}
+
 private function f_tc_asci_assignment(charstring id) runs on MSC_ConnHdlr {
 	var PDU_BSSAP rx_bssap;
 	/* Hack: the proper way would be to wait for the BSSMAP VGCS Assignment Result and extract the
@@ -374,11 +407,19 @@ private function f_tc_asci_assignment(charstring id) runs on MSC_ConnHdlr {
 			RSL.send(ts_RSL_TALKER_DET(g_chan_nr));
 		}
 		if (g_pars.asci_test.vgcs_talker_fail) {
+			if (g_pars.asci_test.delay_bts) {
+				log("VGCS: delay sending RSL failure ind");
+				f_delay_bts();
+			}
 			log("VGCS: sending RSL failure ind");
 			RSL.send(ts_RSL_CONN_FAIL_IND(g_chan_nr, RSL_ERR_TALKER_ACC_FAIL));
 		}
 		if (g_pars.asci_test.vgcs_talker_est or
 		    g_pars.asci_test.vgcs_talker_rel) {
+			if (g_pars.asci_test.delay_bts) {
+				log("VGCS: delay sending RSL estblish ind");
+				f_delay_bts();
+			}
 			log("VGCS: sending RSL etabish ind");
 			RSL.send(ts_RSL_EST_IND(g_chan_nr, ts_RslLinkID_DCCH(0), '1234'O));
 		}
@@ -415,6 +456,7 @@ private function f_tc_asci_assignment(charstring id) runs on MSC_ConnHdlr {
 		COORD.send(COORD_VGCS_UPLINK_BUSY);
 		repeat;
 		}
+	[] COORD.receive(COORD_UPLINK_REQUEST_CONFIRM) { repeat; }
 	}
 
 	/* The RSL Emulation magically accepts the Chan Activ behind the scenes. */
@@ -531,7 +573,33 @@ testcase TC_vgcs_vbs_talker_fail() runs on test_CT {
 	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
 	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
 
+	/* MSC sends acknowledge before link on BTS fail. */
 	pars.asci_test.vgcs_talker_fail := true;
+	pars.asci_test.delay_bts := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_fail_late_msc() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	/* MSC sends acknowledge after link on BTS fail. */
+	pars.asci_test.vgcs_talker_fail := true;
+	pars.asci_test.delay_msc := true;
 
 	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
 	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
@@ -553,7 +621,33 @@ testcase TC_vgcs_vbs_talker_est() runs on test_CT {
 	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
 	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
 
+	/* MSC sends acknowledge before BTS establishes the uplink. */
 	pars.asci_test.vgcs_talker_est := true;
+	pars.asci_test.delay_bts := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_est_late_msc() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	/* MSC sends acknowledge after BTS established the uplink. */
+	pars.asci_test.vgcs_talker_est := true;
+	pars.asci_test.delay_msc := true;
 
 	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
 	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
@@ -576,6 +670,30 @@ testcase TC_vgcs_vbs_talker_rel() runs on test_CT {
 	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
 
 	pars.asci_test.vgcs_talker_rel := true;
+	pars.asci_test.delay_bts := true;
+
+	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
+	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
+	/* Connect COORD ports of both functions. The functions will delay before using them. */
+	connect(call_conn:COORD, chan_conn:COORD);
+
+	call_conn.done;
+	chan_conn.done;
+
+	f_shutdown_helper();
+}
+
+testcase TC_vgcs_vbs_talker_rel_late_msc() runs on test_CT {
+	var MSC_ConnHdlr call_conn, chan_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	f_init(1, true);
+
+	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+
+	pars.asci_test.vgcs_talker_rel := true;
+	pars.asci_test.delay_msc := true;
 
 	call_conn := f_start_handler(refers(f_tc_vgcs_vbs_setup), pars);
 	chan_conn := f_start_handler(refers(f_tc_asci_assignment), pars);
@@ -638,8 +756,11 @@ control {
 	execute( TC_vgcs_vbs_assignment_fail() );
 	execute( TC_vgcs_vbs_talker_req() );
 	execute( TC_vgcs_vbs_talker_fail() );
+	execute( TC_vgcs_vbs_talker_fail_late_msc() );
 	execute( TC_vgcs_vbs_talker_est() );
+	execute( TC_vgcs_vbs_talker_est_late_msc() );
 	execute( TC_vgcs_vbs_talker_rel() );
+	execute( TC_vgcs_vbs_talker_rel_late_msc() );
 	execute( TC_vgcs_vbs_uplink_seized() );
 	execute( TC_vgcs_vbs_uplink_release() );
 }
