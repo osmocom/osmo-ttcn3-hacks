@@ -18,6 +18,8 @@ import from S1AP_Templates all;
 import from S1AP_Emulation all;
 import from S1AP_PDU_Descriptions all;
 import from S1AP_IEs all;
+import from S1AP_PDU_Contents all;
+import from S1AP_Constants all;
 
 import from NAS_EPS_Types all;
 import from NAS_Templates all;
@@ -40,6 +42,7 @@ import from LTE_CryptoFunctions all;
 import from L3_Templates all;
 import from DNS_Helpers all;
 import from Osmocom_Types all;
+import from Osmocom_Gb_Types all;
 
 friend module MME_Tests_SGsAP;
 
@@ -82,6 +85,35 @@ type component MTC_CT {
 	var GTP_Emulation_CT vc_GTP;
 
 	var UeParams g_ue_pars[NUM_UE];
+}
+
+/* Encode an S1AP Global-ENB-ID into an octetstring */
+private function enc_S1AP_Global_ENB_ID(Global_ENB_ID global_enb_id) return octetstring {
+
+	/* Due to the limitations of libfftranscode, we can not define encoders (or decoders) for individual
+	 * information elements (in S1AP_Types.cc). Unfortuantely Global-ENB-ID also appears in BSSGP in its
+	 * encoded form. (see also: GTP-C 3GPP TS 48.018, section 11.3.70). To encode a given Global-ENB-ID
+	 * we craft a full S1AP PDU and encode it. Then we can cut out the encoded Global-ENB-ID from the
+	 * generated octetstring. */
+
+	var SupportedTAs supported_tas_dummy := {{
+				tAC := '0000'O,
+				broadcastPLMNs := { '00f000'O },
+				iE_Extensions := omit
+				}};
+	var octetstring encoded;
+	var integer global_enb_id_len;
+
+	if (ispresent(global_enb_id.eNB_ID.macroENB_ID)) {
+		global_enb_id_len := 8;
+	} else {
+		/* All other ENB ID types fit into 8 byte (homeENB_ID, short_macroENB_ID, long_macroENB_ID) */
+		global_enb_id_len := 9;
+	}
+
+	encoded := enc_S1AP_PDU(valueof(ts_S1AP_SetupReq(global_enb_id, supported_tas_dummy, v32)));
+
+	return substr(encoded, 11, global_enb_id_len);
 }
 
 type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr, GTP_ConnHdlr {
@@ -629,13 +661,257 @@ testcase TC_gn_echo_request() runs on MTC_CT {
 	vc_conn.done;
 }
 
+external function enc_PDU_GTPC_RAN_INF_REQ(in PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_pdu) return octetstring
+with { extension "prototype(convert)"
+       extension "encode(RAW)"
+     }
+
+external function enc_PDU_GTPC_RAN_INF(in PDU_BSSGP_RAN_INFORMATION_GTPC gtpc_pdu) return octetstring
+with { extension "prototype(convert)"
+       extension "encode(RAW)"
+     }
+
+function f_convert_plmn(OCT3 pLMNidentity) return hexstring {
+	var hexstring pLMNidentity_hex := oct2hex(pLMNidentity);
+	var hexstring pLMNidentity_hex_swapped;
+	pLMNidentity_hex_swapped[0] := pLMNidentity_hex[1];
+	pLMNidentity_hex_swapped[1] := pLMNidentity_hex[0];
+	pLMNidentity_hex_swapped[2] := pLMNidentity_hex[3];
+	pLMNidentity_hex_swapped[3] := pLMNidentity_hex[2];
+	pLMNidentity_hex_swapped[4] := pLMNidentity_hex[5];
+	pLMNidentity_hex_swapped[5] := pLMNidentity_hex[4];
+	return pLMNidentity_hex_swapped;
+}
+
+/* Make a template for a GTPC BSSGP container that contains a RAN INFORMATION REQUEST. The template can be used to
+ * craft the request for the S1AP/S1-MME interface and also to verfify the contents of the coresponding request on
+ * the GTPC/Gn interface */
+private function f_make_ts_GTPC_RAN_Information_Request(GTP_CellId geran_gtp_ci)
+		 runs on ConnHdlr return template (value) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC {
+	var template (value) RIM_Routing_Address_GTPC gtpc_dst_addr, gtpc_src_addr;
+	var template (value) RAN_Information_Request_RIM_Container_GTPC gtpc_rim_req_cont;
+	var template (value) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_bssgp_cont;
+	var octetstring gnbid;
+	var GTP_CellId eutran_gtp_ci;
+	eutran_gtp_ci.ra_id.lai.mcc_mnc := f_convert_plmn(g_pars.enb_pars[g_pars.mme_idx].global_enb_id.pLMNidentity);
+
+	gnbid := enc_S1AP_Global_ENB_ID(g_pars.enb_pars[g_pars.mme_idx].global_enb_id);
+	gtpc_dst_addr := t_GTPC_RIM_Routing_Address_cid(geran_gtp_ci);
+	gtpc_src_addr := t_GTPC_RIM_Routing_Address_enbid(eutran_gtp_ci,
+							  oct2int(g_pars.enb_pars[g_pars.mme_idx].supported_tas[0].tAC),
+							  gnbid);
+
+	gtpc_rim_req_cont := ts_GTPC_RAN_Information_Request_RIM_Container(
+				ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+				ts_GTPC_RIM_Sequence_Number(1),
+				ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+				ts_GTPC_RIM_Protocol_Version_Number(1),
+				tsu_GTPC_RAN_Information_Request_Application_Container_NACC(geran_gtp_ci),
+				omit);
+	gtpc_bssgp_cont := ts_GTPC_RAN_Information_Request(
+				ts_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+				ts_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+				gtpc_rim_req_cont);
+
+	return gtpc_bssgp_cont;
+}
+
+private function f_make_tr_GTPC_RAN_Information_Request(GTP_CellId geran_gtp_ci)
+		 runs on ConnHdlr return template (present) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC {
+	var template (present) RIM_Routing_Address_GTPC gtpc_dst_addr, gtpc_src_addr;
+	var template (present) RAN_Information_Request_RIM_Container_GTPC gtpc_rim_req_cont;
+	var template (present) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_bssgp_cont;
+	var octetstring gnbid;
+	var GTP_CellId eutran_gtp_ci;
+	eutran_gtp_ci.ra_id.lai.mcc_mnc := f_convert_plmn(g_pars.enb_pars[g_pars.mme_idx].global_enb_id.pLMNidentity);
+
+	gnbid := enc_S1AP_Global_ENB_ID(g_pars.enb_pars[g_pars.mme_idx].global_enb_id);
+	gtpc_dst_addr := t_GTPC_RIM_Routing_Address_cid(geran_gtp_ci);
+	gtpc_src_addr := t_GTPC_RIM_Routing_Address_enbid(eutran_gtp_ci,
+							  oct2int(g_pars.enb_pars[g_pars.mme_idx].supported_tas[0].tAC),
+							  gnbid);
+
+	gtpc_rim_req_cont := tr_GTPC_RAN_Information_Request_RIM_Container(
+				ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+				ts_GTPC_RIM_Sequence_Number(1),
+				ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+				ts_GTPC_RIM_Protocol_Version_Number(1),
+				tru_GTPC_RAN_Information_Request_Application_Container_NACC(geran_gtp_ci));
+	gtpc_bssgp_cont := tr_GTPC_RAN_Information_Request(
+				tr_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+				tr_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+				gtpc_rim_req_cont);
+
+	return gtpc_bssgp_cont;
+}
+
+/* Make initial RAN INFORMATION REQUEST message that is sent on the S1AP/S1-MME interface */
+private function f_make_ts_S1AP_eNBDirectInfTrans(GTP_CellId geran_gtp_ci)
+						  runs on ConnHdlr return template (value) S1AP_PDU {
+	var template (value) Inter_SystemInformationTransferType inf;
+
+	inf.rIMTransfer.rIMInformation := enc_PDU_GTPC_RAN_INF_REQ(valueof(f_make_ts_GTPC_RAN_Information_Request(geran_gtp_ci)));
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.pLMNidentity := hex2oct(f_convert_plmn(hex2oct(geran_gtp_ci.ra_id.lai.mcc_mnc)));
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.lAC := int2oct(geran_gtp_ci.ra_id.lai.lac, 2);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.iE_Extensions := omit;
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.rAC := int2oct(geran_gtp_ci.ra_id.rac, 1);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.cI := int2oct(geran_gtp_ci.cell_id, 2);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.iE_Extensions := omit;
+	inf.rIMTransfer.iE_Extensions := omit;
+
+	return ts_S1AP_eNBDirectInfTrans(inf);
+}
+
+/* Make RAN INFORMATION (response) message that is sent on the GTPC/Gn interface */
+private function f_make_ts_GTPC_RANInfoRelay(template Gtp1cUnitdata req_gtpc_pdu,
+					     GTP_CellId geran_gtp_ci, octetstring geran_si)
+					     runs on ConnHdlr return template (value) Gtp1cUnitdata {
+	var template Gtp1cUnitdata res_gtpc_pdu;
+	var template RAN_Information_RIM_Container_GTPC gtpc_rim_res_cont;
+	var template PDU_BSSGP_RAN_INFORMATION_GTPC gtpc_bssgp_rim_res_pdu;
+	var template RIM_Routing_Information_GTPC gtpc_rim_dst_cell_id, gtpc_rim_src_cell_id;
+	var template RIM_RoutingAddress gtpc_rim_ra;
+	var template RIM_RoutingAddress_Discriminator gtpc_rim_ra_discr;
+
+	/* Assemble GTPC RAN Information */
+	gtpc_rim_res_cont := ts_GTPC_RAN_Information_RIM_Container(ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+			     ts_GTPC_RIM_Sequence_Number(2),
+			     ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+			     ts_GTPC_RIM_Protocol_Version_Number(1),
+			     tsu_GTPC_ApplContainer_or_ApplErrContainer_NACC(tsu_GTPC_ApplContainer_NACC(geran_gtp_ci, false, 3, geran_si)),
+			     omit);
+
+	/* The source becomes the destination and vice versa */
+	gtpc_rim_dst_cell_id := req_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.transparentContainer.
+			        rANTransparentContainerField.pDU_BSSGP_RAN_INFORMATION_REQUEST.source_Cell_Identifier
+	gtpc_rim_src_cell_id := req_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.transparentContainer.
+			        rANTransparentContainerField.pDU_BSSGP_RAN_INFORMATION_REQUEST.destination_Cell_Identifier
+	gtpc_bssgp_rim_res_pdu := ts_GTPC_RAN_Information(gtpc_rim_dst_cell_id,
+							  gtpc_rim_src_cell_id,
+							  gtpc_rim_res_cont);
+
+	/* Assemble RIM Routing Address (essentially a copy of the destination cell identifier)*/
+	gtpc_rim_ra := ts_RIM_RoutingAddress(enc_RIM_Routing_Address_GTPC(valueof(gtpc_rim_dst_cell_id.rIM_Routing_Address)));
+	gtpc_rim_ra_discr := ts_RIM_RoutingAddress_Discriminator(hex2bit(valueof(gtpc_rim_dst_cell_id.rIMRoutingAddressDiscriminator)));
+
+	res_gtpc_pdu := ts_GTPC_RANInfoRelay(g_gn_iface_peer,
+					     ts_RANTransparentContainer_RAN_INFO(gtpc_bssgp_rim_res_pdu),
+					     gtpc_rim_ra, gtpc_rim_ra_discr);
+
+	return res_gtpc_pdu;
+}
+
+/* Make template to verify the RAN INFORMATION REQUEST as it appears on the GTPC/Gn interface */
+private function f_make_tr_GTPC_MsgType(GTP_CellId geran_gtp_ci)
+					runs on ConnHdlr return template (present) Gtp1cUnitdata {
+	var template Gtp1cUnitdata msg;
+	var template GTPC_PDUs pdus;
+	var template RANTransparentContainer ran_transp_cont;
+
+	ran_transp_cont := tr_RANTransparentContainer_RAN_INFO_REQ(
+			   f_make_tr_GTPC_RAN_Information_Request(geran_gtp_ci));
+	pdus := tr_RANInfoRelay(ran_transp_cont);
+	msg := tr_GTPC_MsgType(g_gn_iface_peer, rANInformationRelay, '00000000'O, pdus);
+
+	return msg;
+}
+
+/* Make template to verify the RAN INFORMATION (response) as it appears on the S1AP/S1-MME interface */
+private function f_make_tr_S1AP_MMEDirectInfTrans(Gtp1cUnitdata ran_information_gtpc_pdu)
+						  runs on ConnHdlr return template (present) S1AP_PDU {
+	var template S1AP_PDU msg;
+	var template Inter_SystemInformationTransferType inf;
+
+	inf.rIMTransfer.rIMInformation := enc_PDU_GTPC_RAN_INF(
+					  ran_information_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.
+					  transparentContainer.rANTransparentContainerField.
+					  pDU_BSSGP_RAN_INFORMATION);
+	inf.rIMTransfer.rIMRoutingAddress := omit;
+	inf.rIMTransfer.iE_Extensions := omit;
+	msg := tr_S1AP_MMEDirectInfTrans(inf);
+
+	return msg;
+}
+
+private function f_TC_RIM_RAN_INF(ConnHdlrPars pars) runs on ConnHdlr {
+	timer T := 5.0;
+	f_init_handler(pars);
+	f_gtp_register_teid('00000000'O);
+	var Gtp1cUnitdata req_gtpc_pdu;
+	var Gtp1cUnitdata resp_gtpc_pdu;
+	var GTP_CellId geran_gtp_ci;
+
+	/* Assemble data of a fictitiously GERAN cell */
+	geran_gtp_ci.ra_id.rac := oct2int('BB'O);
+	geran_gtp_ci.ra_id.lai.mcc_mnc := '262f42'H
+	geran_gtp_ci.ra_id.lai.lac := oct2int('AAAA'O);
+	geran_gtp_ci.cell_id := oct2int('04C7'O);
+	const octetstring geran_si1 := '198fb100000000000000000000000000007900002b'O;
+	const octetstring geran_si3 := '1b753000f110236ec9033c2747407900003c0b2b2b'O;
+	const octetstring geran_si13 := '009000185a6fc9e08410ab2b2b2b2b2b2b2b2b2b2b'O;
+	const octetstring geran_si := geran_si1 & geran_si3 & geran_si13;
+
+	/* Send initial RAN information request via S1AP to MME and expect the MME to forward the request on GTP-C
+	 * (eNB -> MME -> SGSN) */
+	S1AP.send(f_make_ts_S1AP_eNBDirectInfTrans(geran_gtp_ci));
+	T.start;
+	alt {
+	[] GTP.receive(f_make_tr_GTPC_MsgType(geran_gtp_ci)) -> value req_gtpc_pdu {
+		setverdict(pass);
+		}
+	[] GTP.receive {
+		setverdict(fail, "unexpected GTPC message from MME");
+		}
+	[] T.timeout {
+		setverdict(fail, "no GTPC RAN INFORMATION REQUEST from MME");
+		}
+	}
+
+	/* Send RAN information response via GTP-C to MME and expect the MME to forward the respnse on S1AP
+	 * (SGSN -> MME -> eNB) */
+	f_create_s1ap_expect_proc(id_MMEDirectInformationTransfer, self);
+	resp_gtpc_pdu := valueof(f_make_ts_GTPC_RANInfoRelay(req_gtpc_pdu, geran_gtp_ci, geran_si));
+	GTP.send(resp_gtpc_pdu);
+	T.start;
+	alt {
+	[] S1AP.receive(f_make_tr_S1AP_MMEDirectInfTrans(resp_gtpc_pdu)) {
+		setverdict(pass);
+		}
+	[] S1AP.receive {
+		setverdict(fail, "unexpected S1AP message from MME");
+		}
+	[] T.timeout {
+		setverdict(fail, "no S1AP RAN INFORMATION from MME");
+		}
+	}
+
+	setverdict(pass);
+}
+
+testcase TC_RIM_RAN_INF() runs on MTC_CT {
+	var charstring id := testcasename();
+
+	f_init_diameter(id);
+	f_init_s1ap(id, 4);
+	f_s1ap_setup(0);
+	f_init_gtp(id);
+
+	timer T := 3.0;
+
+	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_with_pars(refers(f_TC_RIM_RAN_INF), pars);
+
+	vc_conn.done;
+}
+
 control {
 	execute( TC_s1ap_setup_wrong_plmn() );
 	execute( TC_s1ap_setup_wrong_tac() );
 	execute( TC_s1ap_setup() );
 	execute( TC_s1ap_attach() );
 	execute( TC_gn_echo_request() );
+	execute( TC_RIM_RAN_INF() );
 }
-
 
 }
