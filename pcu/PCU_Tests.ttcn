@@ -3596,6 +3596,159 @@ testcase TC_ul_tbf_reestablish_with_pkt_dl_ack_nack_egprs() runs on RAW_PCU_Test
 	f_TC_ul_tbf_reestablish_with_pkt_dl_ack_nack(true);
 }
 
+/* Test UL data blocks BSN 0..127 and then continue again at BSN 0... up to 300
+ * BSNs in total to test several wrap arounds. */
+testcase TC_ul_tbf_bsn_wraparound_gprs() runs on RAW_PCU_Test_CT
+{
+	var PCUIF_info_ind info_ind;
+	var RlcmacDlBlock dl_block;
+	var octetstring payload;
+	var template (value) RlcmacUlBlock ul_data;
+	var template (value) LlcBlockHdr blk_hdr;
+	var template (value) LlcBlocks blocks;
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var template (value) TsTrxBtsNum nr;
+	var BTS_PDTCH_Block data_msg;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+	var integer blocks_sent := 0;
+	var integer blocks_received := 0;
+	const integer target_bsn_set := 300;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Wait until PCU starts requesting for UL block on this TBF: */
+	dl_fn := f_ms_wait_usf(ms);
+	sched_fn := f_next_pdch_block(dl_fn);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	   contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(16); /* 16 bytes fills the llc block (because TLLI takes 4 bytes) */
+	blk_hdr := t_RLCMAC_LLCBLOCK_HDR(length_ind := lengthof(payload),
+					 more := false, e := true);
+	blocks := { t_RLCMAC_LLCBLOCK(payload, blk_hdr) };
+	/* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+	ul_data := t_RLCMAC_UL_DATA_TLLI(cs := ms.ul_tbf.tx_cs_mcs,
+					 tfi := ms.ul_tbf.tfi,
+					 cv := 15,
+					 bsn := ms.ul_tbf.bsn,
+					 blocks := blocks,
+					 tlli := ms.tlli);
+	f_ultbf_inc_bsn(ms.ul_tbf);
+	f_ms_tx_ul_block(ms, ul_data, f_next_pdch_block(sched_fn));
+	blocks_sent := blocks_sent + 1;
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	acknack_tmpl := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+						   tr_UlAckNackGprs(ms.tlli,
+								    tr_AckNackDescription(final_ack := '0'B)))
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn, acknack_tmpl);
+
+	ul_data := t_RLCMAC_UL_DATA(cs := ms.ul_tbf.tx_cs_mcs,
+					 tfi := ms.ul_tbf.tfi,
+					 cv := 15,
+					 bsn := ms.ul_tbf.bsn,
+					 blocks := blocks);
+
+	nr := f_ms_tx_TsTrxBtsNum(ms);
+	BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+				  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+				  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+				  block_nr := nr.blk_nr));
+	alt {
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_UL_ACK_NACK_GPRS)) -> value data_msg {
+
+		if (f_dl_block_rrbp_valid(data_msg.dl_block)) {
+			var uint32_t ack_fn := f_dl_block_ack_fn(data_msg.dl_block, data_msg.raw.fn)
+			log("ACKING FN ", data_msg.raw.fn, " on FN ", ack_fn);
+			f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), ack_fn);
+		}
+		ul_data.data.mac_hdr.bsn := ms.ul_tbf.bsn;
+		f_ms_tx_ul_block(ms, ul_data, 0);
+		f_ultbf_inc_bsn(ms.ul_tbf);
+		blocks_sent := blocks_sent + 1;
+
+		if (blocks_sent == target_bsn_set) {
+			break;
+		}
+
+		nr := f_ms_tx_TsTrxBtsNum(ms);
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   tr_RLCMAC_DL_DUMMY_CTRL)) -> value data_msg {
+
+		ul_data.data.mac_hdr.bsn := ms.ul_tbf.bsn;
+		f_ms_tx_ul_block(ms, ul_data, 0);
+		f_ultbf_inc_bsn(ms.ul_tbf);
+		blocks_sent := blocks_sent + 1;
+
+		if (blocks_sent == target_bsn_set) {
+			break;
+		}
+
+		nr := f_ms_tx_TsTrxBtsNum(ms);
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+					   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+					   omit)) -> value data_msg {
+		nr := f_ms_tx_TsTrxBtsNum(ms);
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					  sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					  arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					  block_nr := nr.blk_nr));
+		repeat;
+	}
+	[] BTS.receive {
+		setverdict(fail, "Unexpected BTS message");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	[] BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id)) {
+		blocks_received := blocks_received + 1;
+		repeat;
+	}
+	}
+
+	/* Validate most part of them were accepted and forwarded: */
+	if (blocks_received < target_bsn_set * 95 / 100) {
+		setverdict(fail, "Forwarded ", blocks_received, " out of ", target_bsn_set, " transmitted");
+		f_shutdown(__BFILE__, __LINE__);
+	}
+	log("Forwarded ", blocks_received, " out of ", target_bsn_set, " transmitted");
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 /* Test CS paging over the BTS<->PCU socket.
  * When a (class B or C, not A) MS has an active TBF (or is on the PDCH), the MS can not react on CS paging over CCCH.
  * Paging should be send on the PACCH.
@@ -7258,6 +7411,7 @@ control {
 	execute( TC_ul_flow_multiple_llc_blocks() );
 	execute( TC_dl_no_ack_retrans_imm_ass() );
 	execute( TC_dl_llc_sapi_priority() );
+	execute( TC_ul_tbf_bsn_wraparound_gprs());
 	execute( TC_paging_cs_from_bts() );
 	execute( TC_paging_cs_from_sgsn_sign_ptmsi() );
 	execute( TC_paging_cs_from_sgsn_sign() );
