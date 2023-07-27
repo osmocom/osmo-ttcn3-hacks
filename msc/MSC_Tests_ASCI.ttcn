@@ -1,0 +1,704 @@
+module MSC_Tests_ASCI {
+
+/* Osmocom MSC test suite for ASCI support in TTCN-3
+ * (C) 2023 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All Rights Reserved
+ *
+ * Author: Andreas Eversberg
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from BSC_ConnectionHandler all;
+import from MSC_Tests all;
+
+import from Osmocom_VTY_Functions all;
+
+import from GSUP_Emulation all;
+import from RAN_Emulation all;
+import from MGCP_Emulation all;
+
+import from RANAP_Templates all;
+
+import from BSSAP_Types all;
+import from BSSMAP_Templates all;
+
+import from L3_Templates all;
+
+import from MobileL3_CommonIE_Types all;
+
+
+/* Call control for VGCS and VBS
+ *
+ * There are 3 connection:
+ * - "call" = voice group/broadcast call initiated by the calling subscriber
+ * - "control" = VGCS/VBS call control connection
+ * - "channel" = VGCS/VBS channel resource connection
+ *
+ * All 3 connections have their own handlers. They send their test results via
+ * COORD messages to the main test function. There the result is collected and
+ * the outcome of the test is checked.
+ */
+
+/* Test functions */
+const charstring COORD_TEST_NO_CALLREF := "TEST_NO_CALLREF";
+const charstring COORD_TEST_SETUP_REFUSE := "TEST_SETUP_REFUSE";
+const charstring COORD_TEST_ASSIGN_FAIL := "TEST_ASSIGN_FAIL";
+const charstring COORD_TEST_COMPLETE_VGCS := "TEST_COMPLETE_VGCS";
+const charstring COORD_TEST_COMPLETE_VBS := "TEST_COMPLETE_VBS";
+
+/* COORD pipes for each connection */
+type component asci_CT extends MTC_CT {
+	port BSC_ConnHdlr_Coord_PT COORD_call;
+	port BSC_ConnHdlr_Coord_PT COORD_control;
+	port BSC_ConnHdlr_Coord_PT COORD_channel;
+}
+
+/* COORD messages for test events */
+const charstring COORD_SETUP := "SETUP";
+const charstring COORD_VGCS_SETUP := "VGCS_SETUP";
+const charstring COORD_VGCS_ASSIGN := "VGCS_ASSIGN";
+const charstring COORD_UPLINK_SEIZED := "UPLINK_SEIZED";
+const charstring COORD_GCC_CONNECT := "GCC_CONNECT";
+const charstring COORD_BCC_CONNECT := "BCC_CONNECT";
+const charstring COORD_GCC_SET_PARAM := "GCC_SET_PARAM";
+const charstring COORD_BCC_SET_PARAM := "BCC_SET_PARAM";
+const charstring COORD_UPLINK_REQ_ACK := "UPLINK_REQ_ACK";
+const charstring COORD_GCC_TERMINATION := "GCC_TERMINATION";
+const charstring COORD_BCC_TERMINATION := "BCC_TERMINATION";
+const charstring COORD_GCC_TERMINATION_FAIL := "GCC_TERMINATION_FAIL";
+const charstring COORD_BCC_TERMINATION_FAIL := "BCC_TERMINATION_FAIL";
+const charstring COORD_ASSIGNMENT := "ASSIGNMENT";
+const charstring COORD_CLEAR := "CLEAR";
+
+template (value) DescriptiveGroupOrBroadcastCallReference_V
+                        ts_BSSMAP_IE_GroupCallRef(integer cr,
+                                                  BIT1 sf,
+                                                  BIT1 af,
+                                                  BIT3 prio,
+                                                  BIT4 ci) := {
+        binaryCodingOfGroupOrBroadcastCallReference := int2bit(cr, 27),
+        sF := sf,
+        aF := af,
+        callPriority := prio,
+        cipheringInformation := ci,
+        spare := '0000'B
+}
+
+function f_gen_asci_ass_res(integer bssap_idx := 0,
+			    template (value) BSSMAP_IE_ChannelType ch_type := ts_BSSMAP_IE_ChannelType,
+			    template (value) BSSMAP_IE_CellIdentifier cell_id := ts_CellId_CI(0),
+			    template (omit) BSSMAP_IE_AoIP_TransportLayerAddress aoip_tla := omit,
+			    template (omit) BSSMAP_IE_SpeechCodec codec := omit,
+			    template (omit) OCT4 call_id := omit)
+runs on BSC_ConnHdlr return template (value) PDU_BSSAP {
+        if (mp_bssap_cfg[bssap_idx].transport == BSSAP_TRANSPORT_AoIP) {
+                return ts_BSSMAP_VGCS_VBS_AssignmentRes(ch_type, cell_id, omit, omit, aoip_tla, codec, call_id);
+        } else {
+                var template (value) BSSMAP_IE_CircuitIdentityCode cic := ts_BSSMAP_IE_CIC(0,1);
+                return ts_BSSMAP_VGCS_VBS_AssignmentRes(ch_type, cell_id, omit, cic, omit, omit, omit);
+        }
+}
+
+/* "call" connection handling */
+private function f_tc_vgcs_call(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr
+{
+	/* Receive test case from main function. */
+	var charstring test;
+	COORD.receive(charstring:?) -> value test;
+
+	/* Initialize variables and templates. */
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	var template (value) DescriptiveGroupOrBroadcastCallReference_V callref :=
+					ts_BSSMAP_IE_GroupCallRef(oct2int('190000'O), '1'B, '0'B, '000'B, '0000'B);
+	if (test == COORD_TEST_COMPLETE_VBS) {
+		callref := ts_BSSMAP_IE_GroupCallRef(oct2int('1a0000'O), '0'B, '0'B, '000'B, '0000'B);
+	}
+	var template BSSMAP_IE_ChannelType tr_ch_type := tr_BSSMAP_IE_ChannelType('0001'B, ChRate_TCHF, Spdi_TCHF_FR);
+	var template PDU_BSSAP tr_assignment_req := tr_BSSMAP_AssignmentReq();
+	tr_assignment_req.pdu.bssmap.assignmentRequest.channelType := tr_ch_type;
+	tr_assignment_req.pdu.bssmap.assignmentRequest.groupCallReference :=
+								tr_BSSMAP_IE_GroupCallRef(bit2oct(encvalue(callref)));
+	/* Due to a bug in dec_PDU_BSSAP(), we do not get the callref IE, so we need to match it with omit. */
+	tr_assignment_req.pdu.bssmap.assignmentRequest.groupCallReference := omit;
+	var template (value) PDU_BSSAP ts_assignment_cpl := ts_BSSMAP_AssignmentComplete(omit, omit, omit, omit);
+	var octetstring xcc_termination_21 := '340121'O;
+	var octetstring xcc_termination_11 := '340111'O;
+	var PDU_BSSAP rx_bssap;
+
+	f_init_handler(pars);
+
+	/* Location Update to make subscriber known. */
+	f_perform_lu();
+
+	/* MGW */
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+	var default crcx := activate(as_optional_mgcp_crcx(cpars));
+	var default mdcx := activate(as_optional_mgcp_mdcx(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_port));
+	var default dlcx := activate(as_optional_mgcp_dlcx(cpars));
+
+	/* Establish connection using the service type, defined by the test. */
+	if (test == COORD_TEST_COMPLETE_VBS) {
+		f_establish_fully(EST_TYPE_VBS);
+	} else {
+		f_establish_fully(EST_TYPE_VGCS);
+	}
+
+	/* Send incorrect call reference, if selected by test. */
+	log("Sending SETUP.");
+	select (test) {
+	case (COORD_TEST_NO_CALLREF) {
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_GCC(cpars.transaction_id, '3200002900'O)));
+		}
+	case (COORD_TEST_COMPLETE_VBS) {
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_BCC(cpars.transaction_id, '3200001a00'O)));
+		}
+	case else {
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_GCC(cpars.transaction_id, '3200001900'O)));
+		}
+	}
+	COORD.send(COORD_SETUP);
+
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_assignment_req) -> value rx_bssap {
+		/* The MSC sends and Assignment Request to assign the calling subscriber to the VGCS/VBS channel. */
+		log("Got Assignment Request: ", rx_bssap);
+		COORD.send(COORD_ASSIGNMENT);
+		log("Sending Assignment Complete: ", ts_assignment_cpl);
+		BSSAP.send(ts_assignment_cpl);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_GCC(cpars.transaction_id, xcc_termination_21))) {
+		/* The MSC terminates the group call with cause 21 = requested service not subscribed. */
+		log("Got GCC Termination with failure.");
+		COORD.send(COORD_GCC_TERMINATION_FAIL);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_BCC(cpars.transaction_id, xcc_termination_21))) {
+		/* The MSC terminates the broadcast call with cause 21 = requested service not subscribed. */
+		log("Got BCC Termination with failure.");
+		COORD.send(COORD_BCC_TERMINATION_FAIL);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_GCC(cpars.transaction_id, xcc_termination_11))) {
+		/* The MSC terminates the group call with cause 11 = network failure. */
+		log("Got GCC Termination with failure.");
+		COORD.send(COORD_GCC_TERMINATION_FAIL);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_BCC(cpars.transaction_id, xcc_termination_11))) {
+		/* The MSC terminates the broadcast call with cause 11 = network failure. */
+		log("Got BCC Termination with failure.");
+		COORD.send(COORD_BCC_TERMINATION_FAIL);
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		/* The SCCP connection is released. */
+		log("Got Clear Command on initial connection.");
+		COORD.send(COORD_CLEAR);
+		repeat;
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Got unexpected message on initial connection.");
+		}
+	[] COORD.receive(COORD_CLEAR) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Message");
+		}
+	}
+
+	deactivate(crcx);
+	deactivate(mdcx);
+	deactivate(dlcx);
+}
+
+/* "control" connection handling */
+private function f_tc_vgcs_control(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr
+{
+	/* Receive test case from main function. */
+	var charstring test;
+	COORD.receive(charstring:?) -> value test;
+
+	/* Initialize variables and templates. */
+	var CallParameters cpars := valueof(t_CallParams('12345'H, 0));
+	var template (value) DescriptiveGroupOrBroadcastCallReference_V callref :=
+					ts_BSSMAP_IE_GroupCallRef(oct2int('190000'O), '1'B, '0'B, '000'B, '0000'B);
+	if (test == COORD_TEST_COMPLETE_VBS) {
+		callref := ts_BSSMAP_IE_GroupCallRef(oct2int('1a0000'O), '0'B, '0'B, '000'B, '0000'B);
+	}
+	var template PDU_BSSAP tr_vgcs_vbs_setup := tr_BSSMAP_VGCS_VBS_Setup(bit2oct(encvalue(callref)));
+	var template (value) PDU_BSSAP ts_vgcs_vbs_setup_ack := ts_BSSMAP_VGCS_VBS_SetupAck(omit);
+	var myBSSMAP_Cause cause_fail := GSM0808_CAUSE_EQUIPMENT_FAILURE;
+	var template (value) PDU_BSSAP ts_vgcs_vbs_setup_refuse := ts_BSSMAP_VGCS_VBS_SetupRefuse(enum2int(cause_fail));
+	var octetstring gcc_connect := '330000190001'O;
+	var octetstring bcc_connect := '3300001a0001'O;
+	var octetstring xcc_set_param := '3A07'O;
+	var octetstring gcc_term_req := '3500001900'O;
+	var octetstring bcc_term_req := '3500001a00'O;
+	var octetstring xcc_termination := '340110'O;
+	var myBSSMAP_Cause cause_success := GSM0808_CAUSE_CALL_CONTROL;
+	var template (value) PDU_BSSAP ts_uplink_rel_ind := ts_BSSMAP_UplinkRelInd(enum2int(cause_success), omit);
+	var template (value) PDU_BSSAP ts_uplink_req := ts_BSSMAP_UplinkReq;
+	var PDU_BSSAP rx_bssap;
+
+	f_init_handler(pars);
+
+	f_create_bssmap_exp_n_connect(193);
+
+	timer T := 7.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_vgcs_vbs_setup) -> value rx_bssap {
+		/* The MSC sets up call control on the BSC. The test case will send an ack or a refuse. */
+		log("Got VGCS/VBS Setup: ", rx_bssap);
+		COORD.send(COORD_VGCS_SETUP);
+		if (test == COORD_TEST_SETUP_REFUSE) {
+			log("Sending VGCS/VBS Setup Refuse: ", ts_vgcs_vbs_setup_refuse);
+			BSSAP.send(ts_vgcs_vbs_setup_refuse);
+		} else {
+			log("Sending VGCS/VBS Setup Ack: ", ts_vgcs_vbs_setup_ack);
+			BSSAP.send(ts_vgcs_vbs_setup_ack);
+		}
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkSeizedCmd(GSM0808_CAUSE_CALL_CONTROL)) -> value rx_bssap {
+		/* After setting up the call, the MSC marks the call as busy. */
+		log("Got Uplink Seized Cmd: ", rx_bssap);
+		COORD.send(COORD_UPLINK_SEIZED);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_GCC(cpars.transaction_id, gcc_connect))) {
+		/* The GCC CONNECT message is sent to the calling MS. */
+		log("Got GCC Connect.");
+		COORD.send(COORD_GCC_CONNECT);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_BCC(cpars.transaction_id, bcc_connect))) {
+		/* The BCC CONNECT message is sent to the calling MS. */
+		log("Got BCC Connect.");
+		COORD.send(COORD_BCC_CONNECT);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_GCC(cpars.transaction_id, xcc_set_param))) {
+		/* The GCC SET PARAMETER message is sent to the calling MS. */
+		log("Got GCC Set Parameter.");
+		COORD.send(COORD_GCC_SET_PARAM);
+		f_sleep(0.2);
+		/* The MS releases the uplink. */
+		log("Sending Uplink Release Ind: ", ts_uplink_rel_ind);
+		BSSAP.send(ts_uplink_rel_ind);
+		f_sleep(0.2);
+		/* The MS requests the uplink again. */
+		log("Sending Uplink Req: ", ts_uplink_req);
+		BSSAP.send(ts_uplink_req);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_BCC(cpars.transaction_id, xcc_set_param))) {
+		/* The BCC SET PARAMETER message is sent to the calling MS. */
+		log("Got BCC Set Parameter");
+		COORD.send(COORD_BCC_SET_PARAM);
+		f_sleep(0.2);
+		/* The MS requests termination of the call. */
+		log("Sending BCC Termination Request: ", bcc_term_req);
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_BCC(cpars.transaction_id, bcc_term_req)));
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_UplinkReqAck(*)) -> value rx_bssap {
+		/* The uplink was granted by the MSC. */
+		log("Got Uplink Request Acknowledge: ", rx_bssap);
+		COORD.send(COORD_UPLINK_REQ_ACK);
+		f_sleep(0.2);
+		/* The MS requests termination of the call. */
+		log("Sending GCC Termination Request: ", gcc_term_req);
+		BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_GCC(cpars.transaction_id, gcc_term_req)));
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_GCC(cpars.transaction_id, xcc_termination))) {
+		/* The MSC terminates the call towards the MS. */
+		log("Got GCC Termination.");
+		COORD.send(COORD_GCC_TERMINATION);
+		repeat;
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_BCC(cpars.transaction_id, xcc_termination))) {
+		/* The MSC terminates the call towards the MS. */
+		log("Got BCC Termination.");
+		COORD.send(COORD_BCC_TERMINATION);
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		/* The SCCP connection is released. */
+		log("Got Clear Command on control connection.");
+		COORD.send(COORD_CLEAR);
+		repeat;
+		}
+	[] BSSAP.receive(PDU_BSSAP:?) -> value rx_bssap {
+		setverdict(fail, "Got unexpected BSSAP message on control connection: ", rx_bssap);
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Got unexpected message on control connection.");
+		}
+	[] COORD.receive(COORD_CLEAR) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout on control connection.");
+		}
+	}
+}
+
+/* "channel" connection handling */
+private function f_tc_vgcs_channel(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr
+{
+	/* Receive test case from main function. */
+	var charstring test;
+	COORD.receive(charstring:?) -> value test;
+
+	/* Initialize variables and templates. */
+	var template (value) DescriptiveGroupOrBroadcastCallReference_V callref :=
+					ts_BSSMAP_IE_GroupCallRef(oct2int('190000'O), '1'B, '0'B, '000'B, '0000'B);
+	if (test == COORD_TEST_COMPLETE_VBS) {
+		callref := ts_BSSMAP_IE_GroupCallRef(oct2int('1a0000'O), '0'B, '0'B, '000'B, '0000'B);
+	}
+	var template (present) BSSMAP_IE_ChannelType tr_ch_type :=
+							tr_BSSMAP_IE_ChannelType('0001'B, ChRate_TCHF, Spdi_TCHF_FR);
+	var template (value) BSSMAP_IE_ChannelType ts_ch_type := valueof(ts_BSSMAP_IE_ChannelTypeCTM);
+	var template (present) BSSMAP_IE_CellIdentifier tr_cell_id := tr_CellId_CI(42);
+	var template (value) BSSMAP_IE_CellIdentifier ts_cell_id := ts_CellId_CI(42);
+	var template (value) BSSMAP_IE_AoIP_TransportLayerAddress ts_tla := f_ts_BSSMAP_IE_AoIP_TLA("1.2.3.4", 2342);
+	var template (value) BSSMAP_IE_SpeechCodec ts_codec := ts_BSSMAP_IE_SpeechCodec({ts_CodecFR});
+	var template PDU_BSSAP tr_vgcs_vbs_ass_req :=
+		tr_BSSMAP_VGCS_VBS_AssignmentReq(tr_ch_type, '01'O, tr_cell_id, bit2oct(encvalue(callref)), *, *, *);
+	var template (value) PDU_BSSAP ts_vgcs_vbs_ass_res :=
+					f_gen_asci_ass_res(0, ts_ch_type, ts_cell_id, ts_tla, ts_codec, '01000000'O);
+	var myBSSMAP_Cause cause_fail := GSM0808_CAUSE_EQUIPMENT_FAILURE;
+	var template (value) PDU_BSSAP ts_vgcs_vbs_ass_fail := ts_BSSMAP_VGCS_VBS_AssignmentFail(enum2int(cause_fail));
+	var PDU_BSSAP rx_bssap;
+
+	f_init_handler(pars);
+
+	/* Wait some time before registering, because this has to be the second connection to be registered. */
+	f_sleep(0.5);
+	f_create_bssmap_exp_n_connect(193);
+
+	timer T := 7.0;
+	T.start;
+	alt {
+	[] BSSAP.receive(tr_vgcs_vbs_ass_req) -> value rx_bssap {
+		/* The MSC allocates channel on the given BTS. The test case will send a result or a failure. */
+		log("Got VGCS/VBS Assignment Request: ", rx_bssap);
+		COORD.send(COORD_VGCS_ASSIGN);
+		if (test == COORD_TEST_ASSIGN_FAIL) {
+			log("Sending VGCS/VBS Assignment Failure: ", ts_vgcs_vbs_ass_fail);
+			BSSAP.send(ts_vgcs_vbs_ass_fail);
+		} else {
+			log("Sending VGCS/VBS Assignment Result: ", ts_vgcs_vbs_ass_res);
+			BSSAP.send(ts_vgcs_vbs_ass_res);
+		}
+		repeat;
+		}
+	[] BSSAP.receive(tr_BSSMAP_ClearCommand) {
+		/* The SCCP connection is released. */
+		log("Got Clear Command on channel connection.");
+		COORD.send(COORD_CLEAR);
+		repeat;
+		}
+	[] BSSAP.receive(PDU_BSSAP:?) -> value rx_bssap {
+		setverdict(fail, "Got unexpected BSSAP message on channel connection: ", rx_bssap);
+		}
+	[] BSSAP.receive {
+		setverdict(fail, "Got unexpected message on channel connection.");
+		}
+	[] COORD.receive(COORD_CLEAR) { }
+	[] T.timeout {
+		setverdict(fail, "Timeout on channel connection.");
+		}
+	}
+}
+
+/* Main function for call test */
+private function f_TC_asci_call(charstring test) runs on asci_CT
+{
+        var BSC_ConnHdlr vc_conn_call, vc_conn_control, vc_conn_channel;
+	var boolean got_vgcs_setup := false;
+	var boolean got_vgcs_assign := false;
+	var boolean got_uplink_seized := false;
+	var boolean got_gcc_connect := false;
+	var boolean got_bcc_connect := false;
+	var boolean got_gcc_set_param := false;
+	var boolean got_bcc_set_param := false;
+	var boolean got_uplink_req_ack := false;
+	var boolean got_gcc_termination := false;
+	var boolean got_bcc_termination := false;
+	var boolean got_gcc_termination_fail := false;
+	var boolean got_bcc_termination_fail := false;
+	var boolean got_assignment := false;
+	var boolean connection_call := false;
+	var boolean connection_control := false;
+	var boolean connection_channel := false;
+	var charstring event;
+
+        f_init();
+
+	/* Enable ASCI in VTY and setup a VGC and a VBS. */
+        f_vty_config(MSCVTY, "asci", "enable");
+	f_vty_config2(MSCVTY, { "asci", "gcr", "vgc 200"}, "cell 0.24.1 42");
+	f_vty_config2(MSCVTY, { "asci", "gcr", "vbc 208"}, "cell 0.24.1 42");
+
+        vc_conn_call := f_start_handler(refers(f_tc_vgcs_call), 33);
+        vc_conn_control := f_start_handler(refers(f_tc_vgcs_control), 34);
+        vc_conn_channel := f_start_handler(refers(f_tc_vgcs_channel), 35);
+
+	connect(self:COORD_call, vc_conn_call:COORD);
+	connect(self:COORD_control, vc_conn_control:COORD);
+	connect(self:COORD_channel, vc_conn_channel:COORD);
+
+	COORD_call.send(test);
+	COORD_control.send(test);
+	COORD_channel.send(test);
+
+	/* Receive the test events until all three connections are released or not established. */
+	timer T := 7.0, Texit := 0.5;
+	T.start;
+	alt {
+	[] COORD_call.receive(COORD_SETUP) -> value event {
+		log("Got test event: ", event);
+		connection_call := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_VGCS_SETUP) -> value event {
+		log("Got test event: ", event);
+		got_vgcs_setup := true;
+		connection_control := true;
+		repeat;
+		}
+	[] COORD_channel.receive(COORD_VGCS_ASSIGN) -> value event {
+		log("Got test event: ", event);
+		got_vgcs_assign := true;
+		connection_channel := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_UPLINK_REQ_ACK) -> value event {
+		log("Got test event: ", event);
+		got_uplink_req_ack := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_GCC_CONNECT) -> value event {
+		log("Got test event: ", event);
+		got_gcc_connect := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_BCC_CONNECT) -> value event {
+		log("Got test event: ", event);
+		got_bcc_connect := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_GCC_SET_PARAM) -> value event {
+		log("Got test event: ", event);
+		got_gcc_set_param := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_BCC_SET_PARAM) -> value event {
+		log("Got test event: ", event);
+		got_bcc_set_param := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_UPLINK_SEIZED) -> value event {
+		log("Got test event: ", event);
+		got_uplink_seized := true;
+		repeat;
+		}
+	[] COORD_call.receive(COORD_GCC_TERMINATION_FAIL) -> value event {
+		log("Got test event: ", event);
+		got_gcc_termination_fail := true;
+		repeat;
+		}
+	[] COORD_call.receive(COORD_BCC_TERMINATION_FAIL) -> value event {
+		log("Got test event: ", event);
+		got_bcc_termination_fail := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_GCC_TERMINATION) -> value event {
+		log("Got test event: ", event);
+		got_gcc_termination := true;
+		repeat;
+		}
+	[] COORD_control.receive(COORD_BCC_TERMINATION) -> value event {
+		log("Got test event: ", event);
+		got_bcc_termination := true;
+		repeat;
+		}
+	[] COORD_call.receive(COORD_ASSIGNMENT) -> value event {
+		log("Got test event: ", event);
+		got_assignment := true;
+		repeat;
+		}
+	[not connection_call] COORD_call.receive(COORD_CLEAR) -> value event {
+		setverdict(fail, "Received CLEAR COMMAND of initial call twice.");
+		}
+	[] COORD_call.receive(COORD_CLEAR) -> value event {
+		log("Got test event: ", event);
+		connection_call := false;
+		if (connection_call or connection_control or connection_channel) {
+			repeat;
+		}
+		Texit.start;
+		repeat;
+		}
+	[not connection_control] COORD_control.receive(COORD_CLEAR) -> value event {
+		setverdict(fail, "Received CLEAR COMMAND control connection twice.");
+		}
+	[] COORD_control.receive(COORD_CLEAR) -> value event {
+		log("Got test event: ", event);
+		connection_control := false;
+		if (connection_call or connection_control or connection_channel) {
+			repeat;
+		}
+		Texit.start;
+		repeat;
+		}
+	[not connection_channel] COORD_channel.receive(COORD_CLEAR) -> value event {
+		setverdict(fail, "Received CLEAR COMMAND of channel connection twice.");
+		}
+	[] COORD_channel.receive(COORD_CLEAR) -> value event {
+		log("Got test event: ", event);
+		connection_channel := false;
+		if (connection_call or connection_control or connection_channel) {
+			repeat;
+		}
+		Texit.start;
+		repeat;
+		}
+	[] COORD_call.receive {
+		setverdict(fail, "Unhandled COORD_call, please fix!");
+		}
+	[] COORD_control.receive {
+		setverdict(fail, "Unhandled COORD_control, please fix!");
+		}
+	[] COORD_channel.receive {
+		setverdict(fail, "Unhandled COORD_channel, please fix!");
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for Test result");
+		}
+	[] Texit.timeout {
+		log("All connection are cleared now.");
+		}
+	}
+
+	/* Tell the connection handlers to exit. */
+	COORD_call.send(COORD_CLEAR);
+	COORD_control.send(COORD_CLEAR);
+	COORD_channel.send(COORD_CLEAR);
+
+        vc_conn_call.done;
+        vc_conn_control.done;
+        vc_conn_channel.done;
+
+	if (getverdict == fail) {
+		return;
+	}
+
+	/* Check if the outcome of each test is as expected. */
+	select (test) {
+	case (COORD_TEST_NO_CALLREF) {
+		if (not got_vgcs_setup and
+		    not got_vgcs_assign and
+		    got_gcc_termination_fail) {
+			setverdict(pass);
+		}
+		}
+	case (COORD_TEST_SETUP_REFUSE) {
+		if (got_vgcs_setup and
+		    not got_vgcs_assign and
+		    got_gcc_termination_fail) {
+			setverdict(pass);
+		}
+		}
+	case (COORD_TEST_ASSIGN_FAIL) {
+		if (got_vgcs_setup and
+		    got_vgcs_assign and
+		    got_gcc_termination_fail) {
+			setverdict(pass);
+		}
+		}
+	case (COORD_TEST_COMPLETE_VGCS) {
+		if (got_vgcs_setup and
+		    got_vgcs_assign and
+		    got_uplink_req_ack and
+		    got_gcc_connect and
+		    got_gcc_set_param and
+		    got_uplink_seized and
+		    got_gcc_termination and
+		    got_assignment) {
+			setverdict(pass);
+		}
+		}
+	case (COORD_TEST_COMPLETE_VBS) {
+		if (got_vgcs_setup and
+		    got_vgcs_assign and
+		    not got_uplink_req_ack and
+		    got_bcc_connect and
+		    got_bcc_set_param and
+		    got_uplink_seized and
+		    got_bcc_termination and
+		    got_assignment) {
+			setverdict(pass);
+		}
+		}
+	case else {
+		setverdict(fail, "Test case has no check for the outcome, please fix! Test was: ", test);
+		}
+	}
+
+	if (getverdict == pass) {
+		log("All expected events have been received. The test passed.");
+	} else {
+		setverdict(fail, "Not all expected event received.");
+	}
+}
+
+/* A call is tried, but the given call reference does not exit. */
+testcase TC_no_callref() runs on asci_CT
+{
+	f_TC_asci_call(COORD_TEST_NO_CALLREF);
+}
+
+/* The VGCS/VBS is refused by the BSC. */
+testcase TC_setup_refuse() runs on asci_CT
+{
+	f_TC_asci_call(COORD_TEST_SETUP_REFUSE);
+}
+
+/* The VGCS/VBS channel is refused by the BSC. */
+testcase TC_assign_fail() runs on asci_CT
+{
+	f_TC_asci_call(COORD_TEST_ASSIGN_FAIL);
+}
+
+/* The VGCS call is completed and the MS releases and requests the uplink again. Then it terminates the call. */
+testcase TC_complete_vgcs() runs on asci_CT
+{
+	f_TC_asci_call(COORD_TEST_COMPLETE_VGCS);
+}
+
+/* The VBS call is completed and the MS terminates the call. */
+testcase TC_complete_vbs() runs on asci_CT
+{
+	f_TC_asci_call(COORD_TEST_COMPLETE_VBS);
+}
+
+control {
+	execute( TC_no_callref() );
+	execute( TC_setup_refuse() );
+	execute( TC_assign_fail() );
+	execute( TC_complete_vgcs() );
+	execute( TC_complete_vbs() );
+}
+
+}
