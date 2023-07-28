@@ -3252,6 +3252,75 @@ testcase TC_dl_multislot_tbf_ms_class_from_sgsn() runs on RAW_PCU_Test_CT {
 	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
+/* Test DL TBF assignment over PACCH if Multislot class is unknown both at PCU
+ * and SGSN (eg. because MS started 1-phase access and SGSN answered back).
+ * Since the msclass is unknown, it shouldn't assign multiple timeslots since
+ * the MS may not support it. Related OS#6118. */
+testcase TC_dl_multislot_tbf_ms_class_unknown() runs on RAW_PCU_Test_CT
+{
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	var RlcmacDlBlock dl_block;
+	var octetstring payload;
+	var template (value) LlcBlockHdr blk_hdr;
+	var template (value) LlcBlocks blocks;
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+	var octetstring data := f_rnd_octstring(10);
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Only 1 TRX with 8 PDCH */
+	f_PCUIF_PDCHMask_set(info_ind, '11111111'B, 0);
+	f_PCUIF_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF. 1 TS is assigned over AGCH. */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Wait until PCU starts requesting for UL block on this TBF: */
+	dl_fn := f_ms_wait_usf(ms, nr := f_ms_tx_TsTrxBtsNum(ms));
+	sched_fn := f_next_pdch_block(dl_fn);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	 * contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(16); /* 16 bytes fills the llc block (because TLLI takes 4 bytes) */
+	blk_hdr := t_RLCMAC_LLCBLOCK_HDR(length_ind := lengthof(payload),
+					 more := false, e := true);
+	blocks := { t_RLCMAC_LLCBLOCK(payload, blk_hdr) };
+	/* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+	f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, fn := sched_fn, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	acknack_tmpl := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+						   tr_UlAckNackGprs(ms.tlli,
+								    tr_AckNackDescription(final_ack := '0'B)))
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn, acknack_tmpl, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, racap := omit));
+	dl_block := f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_DL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
+	if (f_dltbf_num_slots(ms.dl_tbf) != 1) {
+		setverdict(fail, "Expected 1 PDCH slots allocated but got ", f_dltbf_num_slots(ms.dl_tbf));
+		f_shutdown(__BFILE__, __LINE__);
+	}
+
+	f_shutdown(__BFILE__, __LINE__, final := true);
+}
+
 testcase TC_dl_multislot_tbf_ms_class_from_2phase() runs on RAW_PCU_Test_CT {
 	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
 	var RlcmacDlBlock dl_block;
@@ -7436,6 +7505,7 @@ control {
 	execute( TC_pcuif_fh_pkt_ass_dl() );
 	execute( TC_multitrx_multims_alloc() );
 	execute( TC_dl_multislot_tbf_ms_class_from_sgsn() );
+	execute( TC_dl_multislot_tbf_ms_class_unknown() );
 	execute( TC_dl_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_multislot_tbf_ms_class_from_2phase() );
 	execute( TC_ul_tbf_reestablish_with_pkt_resource_req() );
