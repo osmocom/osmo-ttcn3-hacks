@@ -70,6 +70,12 @@ type record AssociationData {
 	hexstring	imsi optional
 };
 
+/* represents a single DIAMETER message identified by ete_id field */
+type record ETEIDData {
+	DIAMETER_ConnHdlr	comp_ref,
+	UINT32			ete_id optional
+};
+
 type component DIAMETER_Emulation_CT {
 	/* Port facing to the UDP SUT */
 	port DIAMETER_CODEC_PT DIAMETER;
@@ -79,6 +85,8 @@ type component DIAMETER_Emulation_CT {
 	port DIAMETER_Conn_PT DIAMETER_CLIENT;
 	/* currently tracked connections */
 	var AssociationData DiameterAssocTable[256];
+	/* Forward reply messages not containing IMSI to correct client port */
+	var ETEIDData DiameterETEIDTable[256];
 	/* pending expected CRCX */
 	var ExpectData DiameterExpectTable[256];
 	/* procedure based port to register for incoming connections */
@@ -202,12 +210,72 @@ runs on DIAMETER_Emulation_CT {
 	mtc.stop;
 }
 
-
 private function f_imsi_table_init()
 runs on DIAMETER_Emulation_CT {
 	for (var integer i := 0; i < sizeof(DiameterAssocTable); i := i+1) {
 		DiameterAssocTable[i].comp_ref := null;
 		DiameterAssocTable[i].imsi := omit;
+	}
+}
+
+/* End-to-End ID table matching. */
+private function f_ete_id_known(UINT32 ete_id)
+runs on DIAMETER_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(DiameterETEIDTable); i := i+1) {
+		if (DiameterETEIDTable[i].ete_id == ete_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_ete_id(UINT32 ete_id)
+runs on DIAMETER_Emulation_CT return DIAMETER_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(DiameterETEIDTable); i := i+1) {
+		if (DiameterETEIDTable[i].ete_id == ete_id) {
+			return DiameterETEIDTable[i].comp_ref;
+		}
+	}
+	setverdict(fail, "DIAMETER ETEID Table not found by ete_id", ete_id);
+	mtc.stop;
+}
+
+private function f_eteid_table_add(DIAMETER_ConnHdlr comp_ref, UINT32 ete_id)
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(DiameterETEIDTable); i := i+1) {
+		if (not isvalue(DiameterETEIDTable[i].ete_id)) {
+			DiameterETEIDTable[i].ete_id := ete_id;
+			DiameterETEIDTable[i].comp_ref := comp_ref;
+			return;
+		}
+	}
+	testcase.stop("DIAMETER ETEID Table full!");
+}
+
+private function f_eteid_table_del(DIAMETER_ConnHdlr comp_ref, UINT32 ete_id)
+runs on DIAMETER_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(DiameterETEIDTable); i := i+1) {
+		if (DiameterETEIDTable[i].comp_ref == comp_ref and
+		    DiameterETEIDTable[i].ete_id == ete_id) {
+			DiameterETEIDTable[i].ete_id := omit;
+			DiameterETEIDTable[i].comp_ref := null;
+			return;
+		}
+	}
+	setverdict(fail, "DIAMETER ETEID Table: Couldn't find to-be-deleted entry!");
+	mtc.stop;
+}
+
+
+private function f_eteid_table_init()
+runs on DIAMETER_Emulation_CT {
+	for (var integer i := 0; i < sizeof(DiameterETEIDTable); i := i+1) {
+		DiameterETEIDTable[i].comp_ref := null;
+		DiameterETEIDTable[i].ete_id := omit;
 	}
 }
 
@@ -280,6 +348,7 @@ function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs o
 	var Result res;
 	g_diameter_id := id;
 	f_imsi_table_init();
+	f_eteid_table_init();
 	f_expect_table_init();
 
 	map(self:DIAMETER, system:DIAMETER_CODEC_PT);
@@ -311,6 +380,7 @@ function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs o
 		var DIAMETER_ConnHdlr vc_conn;
 		var template IMSI imsi_t;
 		var hexstring imsi;
+		var UINT32 ete_id;
 		var DIAMETER_RecvFrom mrf;
 		var PDU_DIAMETER msg;
 		var charstring vlr_name, mme_name;
@@ -357,7 +427,13 @@ function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs o
 		/* DIAMETER from remote peer (IMSI based routing) */
 		[not ops.raw] DIAMETER.receive(tr_DIAMETER_RecvFrom_R(?)) -> value mrf {
 			imsi_t := f_DIAMETER_get_imsi(mrf.msg);
-			if (isvalue(imsi_t)) {
+			ete_id := mrf.msg.end_to_end_id;
+			if (f_ete_id_known(ete_id)) {
+				vc_conn := f_comp_by_ete_id(ete_id);
+				/* The ete_id is a single-time expect: */
+				f_eteid_table_del(vc_conn, ete_id);
+				DIAMETER_CLIENT.send(mrf.msg) to vc_conn;
+			} else if (isvalue(imsi_t)) {
 				imsi := valueof(imsi_t);
 				if (f_imsi_known(imsi)) {
 					vc_conn := f_comp_by_imsi(imsi);
@@ -377,9 +453,13 @@ function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs o
 			}
 		[] DIAMETER.receive(tr_SctpAssocChange) { }
 		[] DIAMETER.receive(tr_SctpPeerAddrChange)  { }
-		[] DIAMETER_PROC.getcall(DIAMETEREM_register:{?,?}) -> param(imsi, vc_conn) {
+		[] DIAMETER_PROC.getcall(DIAMETEREM_register_imsi:{?,?}) -> param(imsi, vc_conn) {
 			f_create_expect(imsi, vc_conn);
-			DIAMETER_PROC.reply(DIAMETEREM_register:{imsi, vc_conn}) to vc_conn;
+			DIAMETER_PROC.reply(DIAMETEREM_register_imsi:{imsi, vc_conn}) to vc_conn;
+			}
+		[] DIAMETER_PROC.getcall(DIAMETEREM_register_eteid:{?,?}) -> param(ete_id, vc_conn) {
+			f_eteid_table_add(vc_conn, ete_id);
+			DIAMETER_PROC.reply(DIAMETEREM_register_eteid:{ete_id, vc_conn}) to vc_conn;
 			}
 
 		}
@@ -387,18 +467,29 @@ function main(DIAMETEROps ops, DIAMETER_conn_parameters p, charstring id) runs o
 	}
 }
 
-/* "Expect" Handling */
+/* "E2E ID Expect" Handling */
+type record ExpectDataE2EID {
+	UINT32 ete_id optional,
+	DIAMETER_ConnHdlr vc_conn
+}
+
+signature DIAMETEREM_register_eteid(in UINT32 ete_id, in DIAMETER_ConnHdlr hdlr);
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_diameter_expect_eteid(UINT32 ete_id) runs on DIAMETER_ConnHdlr {
+	DIAMETER_PROC.call(DIAMETEREM_register_eteid:{ete_id, self}) {
+		[] DIAMETER_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+	}
+}
+
+/* "IMSI Expect" Handling */
 
 type record ExpectData {
 	hexstring imsi optional,
 	DIAMETER_ConnHdlr vc_conn
 }
 
-signature DIAMETEREM_register(in hexstring imsi, in DIAMETER_ConnHdlr hdlr);
-
-type port DIAMETEREM_PROC_PT procedure {
-	inout DIAMETEREM_register;
-} with { extension "internal" };
+signature DIAMETEREM_register_imsi(in hexstring imsi, in DIAMETER_ConnHdlr hdlr);
 
 /* Function that can be used as create_cb and will use the expect table */
 function ExpectedCreateCallback(PDU_DIAMETER msg, hexstring imsi, charstring id)
@@ -446,9 +537,9 @@ runs on DIAMETER_Emulation_CT {
 }
 
 /* client/conn_hdlr side function to use procedure port to create expect in emulation */
-function f_diameter_expect(hexstring imsi) runs on DIAMETER_ConnHdlr {
-	DIAMETER_PROC.call(DIAMETEREM_register:{imsi, self}) {
-		[] DIAMETER_PROC.getreply(DIAMETEREM_register:{?,?}) {};
+function f_diameter_expect_imsi(hexstring imsi) runs on DIAMETER_ConnHdlr {
+	DIAMETER_PROC.call(DIAMETEREM_register_imsi:{imsi, self}) {
+		[] DIAMETER_PROC.getreply(DIAMETEREM_register_imsi:{?,?}) {};
 	}
 }
 
@@ -466,6 +557,10 @@ runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
 	return omit;
 }
 
+type port DIAMETEREM_PROC_PT procedure {
+	inout DIAMETEREM_register_imsi;
+	inout DIAMETEREM_register_eteid;
+} with { extension "internal" };
 
 function f_diameter_wait_capability(DIAMETER_PT pt)
 {
