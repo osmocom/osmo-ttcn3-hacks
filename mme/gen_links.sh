@@ -51,6 +51,14 @@ DIR=$BASEDIR/titan.ProtocolModules.BSSGP_v13.0.0/src
 FILES="BSSGP_EncDec.cc  BSSGP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.GTPv2_v13.7.0/src
+FILES="GTPv2_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/osmo-uecups/ttcn3
+FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
 FILES="DIAMETER_EncDec.cc"
 gen_links $DIR $FILES
@@ -69,6 +77,8 @@ FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFu
 FILES+="NAS_Templates.ttcn GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn DIAMETER_Templates.ttcn "
 FILES+="GTP_CodecPort.ttcn GTP_CodecPort_CtrlFunct.ttcn GTP_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTP_Templates.ttcn Osmocom_Gb_Types.ttcn "
+FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
+FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 FILES+="BSSGP_Emulation.ttcnpp Osmocom_Gb_Types.ttcn "
 gen_links $DIR $FILES
 

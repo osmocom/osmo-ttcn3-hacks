@@ -12,6 +12,7 @@ FILES="
 	GTPC_EncDec.cc
 	GTPU_EncDec.cc
 	GTP_CodecPort_CtrlFunctDef.cc
+	GTPv2_CodecPort_CtrlFunctDef.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	LTE_CryptoFunctionDefs.cc
@@ -23,6 +24,7 @@ FILES="
 	TCCEncoding.cc
 	TCCInterface.cc
 	TELNETasp_PT.cc
+	UECUPS_CodecPort_CtrlFunctDef.cc
 "
 
 
