@@ -229,6 +229,10 @@ OCTETSTRING enc__MNCC__PDU(const MNCC__PDU& in)
 		}
 		rtp.payload_type = in.u().rtp().payload__type();
 		rtp.payload_msg_type = in.u().rtp().payload__msg__type();
+		if (in.u().rtp().sdp().is_value()) {
+			const CHARSTRING &sdp = in.u().rtp().sdp();
+			strncpy(rtp.sdp, sdp, sizeof(rtp.sdp));
+		}
 		ret_val = OCTETSTRING(sizeof(rtp), (uint8_t *) &rtp);
 		break;
 	case MNCC__MsgUnion::ALT_hello:
