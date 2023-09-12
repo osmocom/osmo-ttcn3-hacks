@@ -66,7 +66,12 @@ type record CallPars {
 	charstring sip_rtp_addr,
 	uint16_t sip_rtp_port,
 	charstring cn_rtp_addr,
-	uint16_t cn_rtp_port
+	uint16_t cn_rtp_port,
+
+	/* Send SDP to MNCC, and expect to receive SDP from MNCC. mncc_with_sdp := false tests legacy compatibility to
+	 * the time when we did not include SDP in MNCC messages. mncc_with_sdp := true expects SDP to pass through the
+	 * SUT osmo-sip-connector unchanged. */
+	boolean mncc_with_sdp
 }
 
 type record CallParsComputed {
@@ -77,7 +82,7 @@ type record CallParsComputed {
 	integer sip_seq_nr
 }
 
-private template (value) CallPars t_CallPars(boolean is_mo) := {
+private template (value) CallPars t_CallPars(boolean is_mo, boolean mncc_with_sdp := false) := {
 	is_mo := is_mo,
 	calling := "12345",
 	called := "98766",
@@ -87,7 +92,8 @@ private template (value) CallPars t_CallPars(boolean is_mo) := {
 	sip_rtp_addr := "1.2.3.4",
 	sip_rtp_port := 1234,
 	cn_rtp_addr := "5.6.7.8",
-	cn_rtp_port := 5678
+	cn_rtp_port := 5678,
+	mncc_with_sdp := mncc_with_sdp
 }
 
 private function f_CallPars_compute(inout CallPars cp) {
@@ -210,11 +216,63 @@ function f_SIP_expect_req(template PDU_SIP_Request sip_expect) runs on ConnHdlr 
 	return rx;
 }
 
+/* Update 'last_sdp', and match with expectation of what the current SDP should be.
+ * Useful to ensure that MNCC or SIP send and possibly resend only the expected SDP.
+ * last_sdp keeps the last non-empty rx_sdp, across multiple check_sdp() invocations.
+ * rx_sdp is the SDP charstring just received. If it is nonempty, update last_sdp to rx_sdp.
+ * After updating last_sdp as appropriate, match last_sdp with expect_sdp. */
+private function check_sdp(inout charstring last_sdp,
+			   charstring rx_sdp,
+			   template charstring expect_sdp)
+{
+	/* If there is new SDP, store it. */
+	if (lengthof(rx_sdp) > 0) {
+		if (last_sdp != rx_sdp) {
+			log("SDP update from ", last_sdp, " to ", rx_sdp);
+		}
+
+		/* If MNCC sent SDP data, remember it as the last valid SDP */
+		last_sdp := rx_sdp;
+	}
+	/* Validate expectations of the SDP data */
+	if (not match(last_sdp, expect_sdp)) {
+		log("FAIL: expected SDP ", expect_sdp, " but got ", last_sdp);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "unexpected SDP");
+	}
+}
+
 /* Establish a mobile terminated call described in 'cp' */
 function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	var template SipAddr sip_addr_gsm := tr_SipAddr_from_val(cp.comp.sip_url_gsm);
 	var template SipAddr sip_addr_ext := tr_SipAddr_from_val(cp.comp.sip_url_ext);
 	var MNCC_PDU mncc;
+
+	/* The last SDP that the MSC received via MNCC from osmo-sip-connector */
+	var charstring sdp_to_msc := "";
+	/* At first, allow any empty and nonempty SDP. As the test progresses, this may expect specific SDP instead. */
+	var template charstring expect_sdp_to_msc := *;
+
+	/* If cp.mncc_with_sdp == true, expect SDP forwarding like this:
+	 *
+	 *  SDP1: SIP agent's RTP and codec info
+	 *  SDP2: osmo-msc's RTP and codec info
+	 *
+	 *            MNCC   osmo-sip-connector   SIP
+	 *                         |<--SDP1-----           SIP Invite
+	 *                         |----------->           SIP (Invite) Trying
+	 *           <--SDP1-------|                       MNCC SETUP req
+	 *           ------------->|                       MNCC CALL CONF ind
+	 *           <-------------|                       MNCC RTP CREATE (SDP optional, still unchanged from SDP1)
+	 *           -------SDP2-->|                       MNCC RTP CREATE
+	 *           ------------->|                       MNCC ALERT ind
+	 *                         |-------------->        SIP (Invite) Ringing
+	 *  (MT picks up)          |
+	 *           ------------->|                       MNCC SETUP CNF
+	 *           <-------------|                       MNCC RTP CONNECT (SDP optional, still unchanged from SDP1)
+	 *                         |--------SDP2-->        SIP (Invite) OK
+	 *                         |<--------------        SIP ACK
+	 *           <-------------|                       MNCC SETUP COMPL (SDP optional, still unchanged from SDP1)
+	 */
 
 	/* Ask MNCC_Emulation to "expect" a call to the given called number */
 	f_create_mncc_expect(cp.called);
@@ -222,6 +280,11 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	/* OSC <- SIP: A party sends SIP invite for a MT-call into OSC */
 	SIP.send(ts_SIP_INVITE(cp.comp.sip_call_id, cp.comp.sip_url_ext, cp.comp.sip_url_gsm,
 				cp.comp.sip_seq_nr, cp.comp.sip_body));
+	if (cp.mncc_with_sdp) {
+		/* We just sent SDP via SIP, now expect the same SDP in MNCC to the MSC */
+		expect_sdp_to_msc := cp.comp.sip_body;
+	}
+
 	/* OSC -> SIP */
 	as_SIP_expect_resp(tr_SIP_Response(cp.comp.sip_call_id, sip_addr_ext, sip_addr_gsm, *,
 					   "INVITE", 100, ?, "Trying", *));
@@ -229,7 +292,9 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	alt {
 	/* MSC <- OSC: OSC generates MNCC_SETUP_REQ from INVITE */
 	[] MNCC.receive(tr_MNCC_SETUP_req) -> value mncc {
-		cp.mncc_call_id := mncc.u.signal.callref;
+			cp.mncc_call_id := mncc.u.signal.callref;
+			/* Expect the SDP sent via SIP to arrive in MNCC */
+			check_sdp(sdp_to_msc, mncc.u.signal.sdp, expect_sdp_to_msc);
 		}
 	[] SIP.receive {
 		setverdict(fail, "Received unexpected SIP response");
@@ -242,38 +307,65 @@ function f_establish_mt(inout CallPars cp) runs on ConnHdlr {
 	/* MSC -> OSC: After MS sends CALL CONF in response to SETUP */
 	MNCC.send(ts_MNCC_CALL_CONF_ind(cp.mncc_call_id));
 	/* MSC <- OSC: OSC asks MSC to create RTP socket */
-	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id));
+	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.rtp.sdp, expect_sdp_to_msc);
+	}
+
+	/* MSC -> OSC: SDP that the MSC will send via MNCC */
+	var charstring cn_sdp := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+		f_mgcp_addr2addrtype(cp.cn_rtp_addr) & " " & cp.cn_rtp_addr &
+		"\r\nt=0 0\r\nm=audio " & int2str(cp.cn_rtp_port) &
+		" RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
+	/* OSC -> SIP: what SDP to expect in SIP from osmo-sip-connector */
+	var template charstring expect_sdp_to_sip := pattern "*" & cp.cn_rtp_addr & "*";
+
 	mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
 	mncc.u.rtp.is_ipv6 := f_addr_is_ipv6(cp.cn_rtp_addr);
 	mncc.u.rtp.ip := f_addrstr2addr(cp.cn_rtp_addr);
 	mncc.u.rtp.rtp_port := cp.cn_rtp_port;
+	if (cp.mncc_with_sdp) {
+		/* MSC -> OSC: tell OSC our RTP info in SDP form */
+		mncc.u.rtp.sdp := cn_sdp;
+		/* OSC -> SIP: and expect it unchanged on SIP later, but allow osmo-sip-connector to append an
+		 * "a=sendrecv;" */
+		expect_sdp_to_sip := pattern cn_sdp & "*";
+	}
 	MNCC.send(mncc);
 
 	/* MSC -> OSC: After MS is ringing and sent CC ALERTING */
 	MNCC.send(ts_MNCC_ALERT_ind(cp.mncc_call_id));
+
+	/* Now expect SIP response "Ringing" back to MO, containing the same SDP information as in the MNCC RTP CREATE
+	 * sent to OSC above */
 	SIP.clear;
 
+	/* 180 Ringing should not contain any SDP. */
 	as_SIP_expect_resp(tr_SIP_Response(cp.comp.sip_call_id, sip_addr_ext, sip_addr_gsm, *,
-					   "INVITE", 180, ?, "Ringing", *));
+					   "INVITE", 180, ?, "Ringing", omit));
 
 	/* MSC -> OSC: After MT user has picked up and sent CC CONNECT */
 	MNCC.send(ts_MNCC_SETUP_CNF(cp.mncc_call_id));
 
 	SIP.clear;
 	/* MSC <- OSC: OSC asks MSC to connect its RTP stream to remote end */
-	MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id, f_addrstr2addr(cp.sip_rtp_addr), cp.sip_rtp_port));
+	MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id, f_addrstr2addr(cp.sip_rtp_addr), cp.sip_rtp_port))
+		-> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.rtp.sdp, expect_sdp_to_msc);
+	}
 
 	/* OSC -> SIP: OSC confirms call establishment to SIP side */
 	as_SIP_expect_resp(tr_SIP_Response(cp.comp.sip_call_id, sip_addr_ext, sip_addr_gsm, contact_addr := ?,
 					   method := "INVITE", status_code := 200,
 					   seq_nr := ?, reason := "OK",
-					   body := pattern "*" & cp.cn_rtp_addr & "*"));
+					   body := expect_sdp_to_sip));
 
 	/* OSC <- SIP: SIP world acknowledges "200 OK" */
 	SIP.send(ts_SIP_ACK(cp.comp.sip_call_id, cp.comp.sip_url_ext, cp.comp.sip_url_gsm,
 			    cp.comp.sip_seq_nr, omit));
 	/* MSC <- OSC: OSC sends SETUP COMPL to MNCC (which triggers CC CONNECT ACK */
-	MNCC.receive(tr_MNCC_SETUP_COMPL_req(cp.mncc_call_id));
+	MNCC.receive(tr_MNCC_SETUP_COMPL_req(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.signal.sdp, expect_sdp_to_msc);
+	}
 }
 
 /* Establish a mobile originated call described in 'cp' */
@@ -284,15 +376,53 @@ function f_establish_mo(inout CallPars cp) runs on ConnHdlr {
 	var template SipAddr sip_addr_ext := tr_SipAddr_from_val(cp.comp.sip_url_ext);
 	var PDU_SIP_Request sip_req;
 	var integer seq_nr;
+	var MNCC_PDU mncc;
+
+	/* The last SDP that the MSC received via MNCC from osmo-sip-connector */
+	var charstring sdp_to_msc := "";
+	/* At first, allow any empty and nonempty SDP. As the test progresses, this may expect specific SDP instead. */
+	var template charstring expect_sdp_to_msc := *;
+
+	/* If cp.mncc_with_sdp == true, expect SDP forwarding like this:
+	 *
+	 *  SDP1: osmo-msc's RTP and codec info
+	 *  SDP2: SIP agent's RTP and codec info
+	 *
+	 *            MNCC   osmo-sip-connector   SIP
+	 *           -------SDP1-->|                       MNCC SETUP ind
+	 *           <-------------|                       MNCC RTP CREATE (?)
+	 *                         |-----SDP1-->           SIP Invite
+	 *                         |<-----------           SIP (Invite) Trying
+	 *           <-------------|                       MNCC CALL PROC req
+	 *                         |<-----------           SIP (Invite) Ringing
+	 *           <-------------|                       MNCC ALERT req
+	 *                         |        (MT picks up)
+	 *                         |<--SDP2-----           SIP (Invite) OK
+	 *           <--SDP2-------|                       MNCC RTP CONNECT (SDP optional, still unchanged from SDP2)
+	 *           <-------------|                       MNCC SETUP rsp (SDP optional, still unchanged from SDP2)
+	 *           ------------->|                       MNCC SETUP COMPL ind (SDP optional, still unchanged from SDP1)
+	 *                         |------------>          SIP ACK
+	 */
+
+	var charstring cn_sdp := "v=0\r\no=Osmocom 0 0 IN IP4 1.1.1.1\r\ns=GSM Call\r\nc=IN " &
+		f_mgcp_addr2addrtype(cp.cn_rtp_addr) & " " & cp.cn_rtp_addr &
+		"\r\nt=0 0\r\nm=audio " & int2str(cp.cn_rtp_port) &
+		" RTP/AVP 0\r\na=rtpmap:0 GSM/8000\r\n";
 
 	f_create_sip_expect(cp.comp.sip_url_ext.addr.nameAddr.addrSpec);
 
 	/* MSC -> OSC: MSC sends SETUP.ind after CC SETUP was received from MS */
-	MNCC.send(ts_MNCC_SETUP_ind(cp.mncc_call_id, dst, src, "262420123456789"));
+	mncc := valueof(ts_MNCC_SETUP_ind(cp.mncc_call_id, dst, src, "262420123456789"));
+	if (cp.mncc_with_sdp) {
+		mncc.u.signal.sdp := cn_sdp;
+	}
+	MNCC.send(mncc);
+
 	/* MSC <- OSC: Create GSM side RTP socket */
 	MNCC.receive(tr_MNCC_RTP_CREATE(cp.mncc_call_id)) {
-		var MNCC_PDU mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
+		mncc := valueof(ts_MNCC_RTP_CREATE(cp.mncc_call_id));
 		mncc.u.rtp.payload_msg_type := oct2int('0300'O);
+		/* FIXME: makes no sense to send cp.cn_rtp_addr back to the cn. */
 		mncc.u.rtp.is_ipv6 := f_addr_is_ipv6(cp.cn_rtp_addr);
 		mncc.u.rtp.ip := f_addrstr2addr(cp.cn_rtp_addr);
 		mncc.u.rtp.rtp_port := cp.cn_rtp_port;
@@ -300,7 +430,13 @@ function f_establish_mo(inout CallPars cp) runs on ConnHdlr {
 		}
 
 	/* OSC -> SIP: Send INVITE with GSM side IP/Port in SDP */
-	sip_req := f_SIP_expect_req(tr_SIP_INVITE(?, sip_addr_gsm, sip_addr_ext, ?, ?));
+	var template charstring expect_sdp_to_sip := ?;
+	if (cp.mncc_with_sdp) {
+		/* Expect the same SDP as sent to osmo-sip-connector in MNCC, and allow osmo-sip-connector to append an
+		 * "a=sendrecv;" */
+		expect_sdp_to_sip := pattern cn_sdp & "*";
+	}
+	sip_req := f_SIP_expect_req(tr_SIP_INVITE(?, sip_addr_gsm, sip_addr_ext, ?, expect_sdp_to_sip));
 	cp.comp.sip_url_gsm.params := sip_req.msgHeader.fromField.fromParams;
 	cp.comp.sip_call_id := sip_req.msgHeader.callId.callid;
 	seq_nr := sip_req.msgHeader.cSeq.seqNumber;
@@ -309,22 +445,37 @@ function f_establish_mo(inout CallPars cp) runs on ConnHdlr {
 	SIP.send(ts_SIP_Response(cp.comp.sip_call_id, cp.comp.sip_url_gsm, cp.comp.sip_url_ext,
 				 "INVITE", 100, seq_nr, "Trying", sip_req.msgHeader.via));
 	/* MSC <- OSC: "100 Trying" translated to MNCC_CALL_PROC_REQ */
-	MNCC.receive(tr_MNCC_CALL_PROC_req(cp.mncc_call_id));
+	MNCC.receive(tr_MNCC_CALL_PROC_req(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.signal.sdp, "");
+	}
 
-	/* OSC <- SIP: SIP-terminated user is ringing now */
+	/* OSC <- SIP: SIP-terminated user is ringing now. 180 Ringing should not contain any SDP. */
 	SIP.send(ts_SIP_Response(cp.comp.sip_call_id, cp.comp.sip_url_gsm, cp.comp.sip_url_ext,
-				 "INVITE", 180, seq_nr, "Ringing", sip_req.msgHeader.via));
+				 "INVITE", 180, seq_nr, "Ringing", sip_req.msgHeader.via, omit));
 
 	/* MSC <- OSC: "180 Ringing" translated to MNCC_ALERT_REQ */
-	MNCC.receive(tr_MNCC_ALERT_req(cp.mncc_call_id)) {}
+	MNCC.receive(tr_MNCC_ALERT_req(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.signal.sdp, expect_sdp_to_msc);
+	}
 
 	/* OSC <- SIP: SIP-terminated user has accepted the call */
 	SIP.send(ts_SIP_Response(cp.comp.sip_call_id, cp.comp.sip_url_gsm, cp.comp.sip_url_ext,
 				 "INVITE", 200, seq_nr, "OK", sip_req.msgHeader.via,
 				 cp.comp.sip_body));
-	MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id));
+
+	if (cp.mncc_with_sdp) {
+		/* If we expect SDP forwarding, from now on expect MNCC to reflect the SDP that we just sent on SIP. */
+		expect_sdp_to_msc := cp.comp.sip_body;
+	}
+	/* If we don't expect SDP forwarding, just keep expect_sdp_to_msc := *. */
+
+	MNCC.receive(tr_MNCC_RTP_CONNECT(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.rtp.sdp, expect_sdp_to_msc);
+	}
 	/* MSC <- OSC: "200 OK" translated to MNCC_SETUP_RSP */
-	MNCC.receive(tr_MNCC_SETUP_rsp(cp.mncc_call_id));
+	MNCC.receive(tr_MNCC_SETUP_rsp(cp.mncc_call_id)) -> value mncc {
+		check_sdp(sdp_to_msc, mncc.u.signal.sdp, expect_sdp_to_msc);
+	}
 
 	/* MSC -> OSC: CC CONNECT ACK was received from MS */
 	MNCC.send(ts_MNCC_SETUP_COMPL_ind(cp.mncc_call_id));
@@ -553,6 +704,26 @@ testcase TC_mo_setup_disc_late_rtp() runs on test_CT {
 	vc_conn.done;
 }
 
+testcase TC_mt_with_sdp() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(is_mo := false, mncc_with_sdp := true));
+	vc_conn := f_start_handler(refers(f_TC_mt_success_rel_gsm), pars);
+	vc_conn.done;
+}
+
+testcase TC_mo_with_sdp() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	f_init();
+	pars := valueof(t_Pars);
+	pars.g_cp := valueof(t_CallPars(is_mo := true, mncc_with_sdp := true));
+	vc_conn := f_start_handler(refers(f_TC_mo_success_rel_sip), pars);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_mt_success_rel_gsm() );
 	execute( TC_mt_success_rel_gsm_ipv6() );
@@ -561,6 +732,8 @@ control {
 	execute( TC_mo_success_rel_gsm_ipv6() );
 	execute( TC_mo_success_rel_sip() );
 	execute( TC_mo_setup_disc_late_rtp() );
+	execute( TC_mt_with_sdp() );
+	execute( TC_mo_with_sdp() );
 }
 
 
