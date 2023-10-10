@@ -1,0 +1,246 @@
+module HSS_Tests {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Native_Functions all;
+import from Misc_Helpers all;
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_Emulation all;
+
+type record of hexstring SubscriberConfigs;
+
+modulepar {
+	charstring mp_hss_hostname := "127.0.0.4";
+	integer mp_hss_port := 3868;
+	charstring mp_diam_local_hostname := "127.0.0.1";
+	integer mp_diam_local_port := 3868;
+	charstring mp_diam_orig_realm := "localdomain";
+	charstring mp_diam_orig_host := "mme.localdomain";
+	charstring mp_diam_dest_realm := "localdomain";
+	charstring mp_diam_dest_host := "hss.localdomain";
+	SubscriberConfigs subscribers := {
+		/* Existing subscriber, ULA returns SERVICE_GRANTED */
+		'001010000000000'H
+	};
+}
+
+/* main component, we typically have one per testcase */
+type component MTC_CT {
+
+	/* emulated MME/SGSN */
+	var DIAMETER_Emulation_CT vc_S6a;
+	port DIAMETER_PT S6a_UNIT;
+	port DIAMETEREM_PROC_PT S6a_PROC;
+	/* global test case guard timer (actual timeout value is set in f_init()) */
+	timer T_guard;
+}
+
+/* global altstep for global guard timer; */
+altstep as_Tguard() runs on MTC_CT {
+	[] T_guard.timeout {
+			setverdict(fail, "Timeout of T_guard");
+			mtc.stop;
+		}
+}
+
+type component DIAMETER_ConnHdlr_CT extends DIAMETER_ConnHdlr {
+	port DIAMETER_Conn_PT DIAMETER_CLIENT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC_CLIENT;
+}
+
+function f_diam_connhldr_ct_main(hexstring imsi) runs on DIAMETER_ConnHdlr_CT {
+	var DIAMETER_ConnHdlr vc_conn_unused;
+	var PDU_DIAMETER msg;
+	var UINT32 ete_id;
+
+	f_diameter_expect_imsi(imsi);
+
+	while (true) {
+		alt {
+		[] DIAMETER_CLIENT.receive(PDU_DIAMETER:?) -> value msg {
+			DIAMETER.send(msg);
+			}
+		[] DIAMETER.receive(PDU_DIAMETER:?) -> value msg {
+			DIAMETER_CLIENT.send(msg);
+			}
+		[] DIAMETER_PROC_CLIENT.getcall(DIAMETEREM_register_eteid:{?,?}) -> param(ete_id, vc_conn_unused) {
+			DIAMETER_PROC.call(DIAMETEREM_register_eteid:{ete_id, self}) {
+				[] DIAMETER_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+				}
+			DIAMETER_PROC_CLIENT.reply(DIAMETEREM_register_eteid:{ete_id, vc_conn_unused});
+			}
+		}
+	}
+}
+
+/* per-session component; we typically have 1..N per testcase */
+type component Cli_Session_CT {
+	var SessionPars	g_pars;
+
+	port DIAMETER_Conn_PT S6a;
+	port DIAMETEREM_PROC_PT S6a_PROC;
+}
+function f_diam_connhldr_expect_eteid(UINT32 ete_id) runs on Cli_Session_CT {
+	S6a_PROC.call(DIAMETEREM_register_eteid:{ete_id, null}) {
+		[] S6a_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+	}
+}
+
+/* configuration data for a given Session */
+type record SessionPars {
+	hexstring	imsi,
+	uint32_t	s6a_next_hbh_id,
+	uint32_t	s6a_next_ete_id
+}
+
+template (value) SessionPars
+t_SessionPars(hexstring imsi, uint32_t	s6a_next_hbh_id := 1000, uint32_t s6a_next_ete_id := 22220) := {
+	imsi := imsi,
+	s6a_next_hbh_id := s6a_next_hbh_id,
+	s6a_next_ete_id := s6a_next_ete_id
+}
+
+type function void_fn() runs on Cli_Session_CT;
+
+friend function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_diameter(charstring id) runs on MTC_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback),
+		raw := false /* handler mode (IMSI based routing) */
+	};
+	var DIAMETER_conn_parameters pars;
+
+	/* S6a setup: */
+	pars := {
+		remote_ip := mp_hss_hostname,
+		remote_sctp_port := mp_hss_port,
+		local_ip := mp_diam_local_hostname,
+		local_sctp_port := mp_diam_local_port,
+		origin_host := mp_diam_orig_host,
+		origin_realm := mp_diam_orig_realm,
+		auth_app_id := omit,
+		vendor_app_id := c_DIAMETER_3GPP_S6_AID
+	};
+	vc_S6a := DIAMETER_Emulation_CT.create(id);
+	map(vc_S6a:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_S6a:DIAMETER_UNIT, self:S6a_UNIT);
+	connect(vc_S6a:DIAMETER_PROC, self:S6a_PROC);
+	vc_S6a.start(DIAMETER_Emulation.main(ops, pars, id));
+
+	f_diameter_wait_capability(S6a_UNIT);
+	/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdong ping-pongs):
+	 * RFC6733 sec 5.1
+	 * RFC3539 sec 3.4.1 [5]
+	 * https://github.com/freeDiameter/freeDiameter/blob/master/libfdcore/p_psm.c#L49
+	 */
+	f_sleep(1.0);
+}
+
+private function f_init(float guard_timeout := 60.0) runs on MTC_CT {
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+	f_init_diameter(testcasename());
+}
+
+function f_start_handler(void_fn fn, template (omit) SessionPars pars_tmpl := omit)
+runs on MTC_CT return Cli_Session_CT {
+	var charstring id := testcasename();
+	var DIAMETER_ConnHdlr_CT vc_conn_s6a;
+	var Cli_Session_CT vc_conn;
+	var SessionPars pars;
+
+	if (isvalue(pars_tmpl)) {
+		pars := valueof(pars_tmpl);
+	} else {
+		/*TODO: set default values */
+	}
+
+	vc_conn := Cli_Session_CT.create(id);
+
+	vc_conn_s6a := DIAMETER_ConnHdlr_CT.create(id);
+	connect(vc_conn_s6a:DIAMETER, vc_S6a:DIAMETER_CLIENT);
+	connect(vc_conn_s6a:DIAMETER_PROC, vc_S6a:DIAMETER_PROC);
+	connect(vc_conn:S6a, vc_conn_s6a:DIAMETER_CLIENT);
+	connect(vc_conn:S6a_PROC, vc_conn_s6a:DIAMETER_PROC_CLIENT);
+	vc_conn_s6a.start(f_diam_connhldr_ct_main(pars.imsi));
+
+	vc_conn.start(f_handler_init(fn, pars));
+	return vc_conn;
+}
+
+private function f_handler_init(void_fn fn, SessionPars pars)
+runs on Cli_Session_CT {
+	g_pars := valueof(pars);
+	fn.apply();
+}
+
+/* ULR + ULA against HSS */
+private function f_dia_ulr_ula() runs on Cli_Session_CT {
+	var octetstring sess_id := char2oct("foobar");
+	var template (present) AVP_list sub_data;
+	var PDU_DIAMETER rx_dia;
+	var UINT32 hbh_id := int2oct(g_pars.s6a_next_hbh_id, 4);
+	var UINT32 ete_id := int2oct(g_pars.s6a_next_ete_id, 4);
+
+	/* Unlike ULR, ULA contains no IMSI. Register ete_id in DIAMETER_Emulation,
+	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
+	 */
+	f_diam_connhldr_expect_eteid(ete_id);
+
+	/* TODO: change this into a ts_DIA_ULR */
+	S6a.send(ts_DIA_ULR(g_pars.imsi, '111F11'O, sess_id,
+				mp_diam_orig_host, mp_diam_orig_realm,
+				mp_diam_dest_realm, hbh_id, ete_id));
+	g_pars.s6a_next_hbh_id := g_pars.s6a_next_hbh_id + 1;
+	g_pars.s6a_next_ete_id := g_pars.s6a_next_ete_id + 1;
+
+	sub_data := superset(
+		tr_AVP_3GPP_SubscriberStatus(SERVICE_GRANTED),
+		tr_AVP_3GPP_SubscrRauTauTmr(?),
+		tr_AVP_3GPP_AMBR(?, ?),
+		tr_AVP_3GPP_ApnConfigProfile(superset(
+			tr_AVP_3GPP_ContextId(?),
+			tr_AVP_3GPP_AllApnConfigsIncl,
+			tr_AVP_3GPP_ApnConfig(?, ?, ?)
+			))
+		);
+
+	alt {
+	[] S6a.receive(tr_DIA_ULA(sub_data, sess_id, ?, ?, hbh_id, ete_id)) -> value rx_dia {
+		setverdict(pass);
+		}
+	[] S6a.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER ", rx_dia));
+		}
+	}
+}
+
+/* create a session, expect it to succeed */
+private function f_TC_ulr_ula() runs on Cli_Session_CT {
+	f_dia_ulr_ula();
+	setverdict(pass);
+}
+testcase TC_ulr_ula() runs on MTC_CT {
+	var Cli_Session_CT vc_conn;
+	var SessionPars pars := valueof(t_SessionPars(subscribers[0]));
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_ulr_ula), pars);
+	vc_conn.done;
+}
+
+
+control {
+	execute( TC_ulr_ula() );
+}
+
+
+}

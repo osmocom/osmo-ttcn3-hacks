@@ -27,6 +27,7 @@ SUBDIRS= \
 	hlr \
 	hnbgw \
 	hnodeb \
+	hss \
 	mgw \
 	mme \
 	msc \
