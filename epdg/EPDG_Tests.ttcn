@@ -1,0 +1,394 @@
+module EPDG_Tests {
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from L3_Common all;
+
+import from IPA_Emulation all;
+import from GSUP_Emulation all;
+import from GSUP_Types all;
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_Emulation all;
+
+import from GTPv2_Emulation all;
+
+modulepar {
+	/* our emulated GSUP strongswan (CEAI iface) */
+	charstring mp_gsup_local_ip := "127.0.0.100";
+	integer mp_gsup_local_port := 0;
+	charstring mp_gsup_remote_ip := "127.0.0.1";
+	integer mp_gsup_remote_port := 4222;
+
+	/* our emulated HSS */
+	charstring mp_swx_local_ip := "127.0.0.100";
+	integer mp_swx_local_port := 3868;
+
+	/* our emulated PGW (Diameter S6b) */
+	charstring mp_s6b_local_ip := "127.0.0.100";
+	integer mp_s6b_local_port := 3869;
+
+	/* our emulated PGW (GTPv2C S2b) */
+	charstring mp_s2b_local_ip := "127.0.0.100";
+	integer mp_s2b_local_port := GTP2C_PORT;
+	charstring mp_s2b_remote_ip := "127.0.0.1";
+	integer mp_s2b_remote_port := GTP2C_PORT;
+
+	charstring mp_diam_realm := "localdomain";
+}
+
+
+type component MTC_CT {
+	var DIAMETER_Emulation_CT vc_SWx;
+	port DIAMETER_PT SWx_UNIT;
+	port DIAMETEREM_PROC_PT SWx_PROC;
+
+	var DIAMETER_Emulation_CT vc_S6b;
+	port DIAMETER_PT S6b_UNIT;
+	port DIAMETEREM_PROC_PT S6b_PROC;
+
+	var GSUP_Emulation_CT vc_GSUP;
+	var IPA_Emulation_CT vc_GSUP_IPA;
+	port IPA_CTRL_PT GSUP_IPA_EVENT;
+
+	var GTPv2_Emulation_CT vc_GTP2;
+	port GTP2EM_PT TEID0;
+
+	timer g_Tguard;
+};
+
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+type component DIAMETER_ConnHdlr_CT extends DIAMETER_ConnHdlr {
+	port DIAMETER_Conn_PT DIAMETER_CLIENT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC_CLIENT;
+}
+
+function f_diam_connhldr_ct_main(hexstring imsi) runs on DIAMETER_ConnHdlr_CT {
+	var DIAMETER_ConnHdlr vc_conn_unused;
+	var PDU_DIAMETER msg;
+	var UINT32 ete_id;
+
+	f_diameter_expect_imsi(imsi);
+
+
+	while (true) {
+		alt {
+		[] DIAMETER_CLIENT.receive(PDU_DIAMETER:?) -> value msg {
+			DIAMETER.send(msg);
+			}
+		[] DIAMETER.receive(PDU_DIAMETER:?) -> value msg {
+			DIAMETER_CLIENT.send(msg);
+			}
+		[] DIAMETER_PROC_CLIENT.getcall(DIAMETEREM_register_eteid:{?,?}) -> param(ete_id, vc_conn_unused) {
+			DIAMETER_PROC.call(DIAMETEREM_register_eteid:{ete_id, self}) {
+				[] DIAMETER_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+				}
+			DIAMETER_PROC_CLIENT.reply(DIAMETEREM_register_eteid:{ete_id, vc_conn_unused});
+			}
+		}
+	}
+}
+
+type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_ConnHdlr {
+	var EPDG_ConnHdlrPars g_pars;
+
+	port DIAMETER_Conn_PT SWx;
+	port DIAMETEREM_PROC_PT SWx_PROC;
+	port DIAMETER_Conn_PT S6b;
+	port DIAMETEREM_PROC_PT S6b_PROC;
+};
+
+
+type record EPDG_ConnHdlrPars {
+	hexstring imsi,
+	AuthVector vec optional
+};
+
+private function f_epdg_connhldr_SWx_expect_eteid(UINT32 ete_id) runs on EPDG_ConnHdlr {
+	SWx_PROC.call(DIAMETEREM_register_eteid:{ete_id, null}) {
+		[] SWx_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+	}
+}
+private function f_epdg_connhldr_S6b_expect_eteid(UINT32 ete_id) runs on EPDG_ConnHdlr {
+	S6b_PROC.call(DIAMETEREM_register_eteid:{ete_id, null}) {
+		[] S6b_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
+	}
+}
+
+
+private function f_init_pars(integer imsi_suffix := 1)
+runs on MTC_CT return EPDG_ConnHdlrPars {
+	var EPDG_ConnHdlrPars pars := {
+		imsi := f_gen_imsi(imsi_suffix),
+		vec := f_gen_auth_vec_3g()
+	};
+	return pars;
+}
+
+private function f_init_gsup(charstring id) runs on MTC_CT {
+	id := id & "-GSUP";
+	var GsupOps ops := {
+		create_cb := refers(GSUP_Emulation.ExpectedCreateCallback)
+	};
+
+	vc_GSUP_IPA := IPA_Emulation_CT.create(id & "-IPA");
+	vc_GSUP := GSUP_Emulation_CT.create(id);
+
+	map(vc_GSUP_IPA:IPA_PORT, system:IPA_CODEC_PT);
+	connect(vc_GSUP:GSUP, vc_GSUP_IPA:IPA_GSUP_PORT);
+	/* we use this hack to get events like ASP_IPA_EVENT_UP */
+	connect(vc_GSUP_IPA:IPA_CTRL_PORT, self:GSUP_IPA_EVENT);
+
+	vc_GSUP.start(GSUP_Emulation.main(ops, id));
+	vc_GSUP_IPA.start(IPA_Emulation.main_client(mp_gsup_remote_ip, mp_gsup_remote_port,
+						    mp_gsup_local_ip, mp_gsup_local_port));
+
+	/* wait for incoming connection to GSUP port before proceeding */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] GSUP_IPA_EVENT.receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP)) { }
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "No connection to GSUP Port");
+		}
+	}
+}
+
+private function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+private function f_init_diameter(charstring id) runs on MTC_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback),
+		raw := false /* handler mode (IMSI based routing) */
+	};
+	var DIAMETER_conn_parameters pars;
+
+	/* SWx setup: */
+	pars := {
+		remote_ip := "",
+		remote_sctp_port := -1, /* server mode */
+		local_ip := mp_swx_local_ip,
+		local_sctp_port := mp_swx_local_port,
+		origin_host := "hss." & mp_diam_realm,
+		origin_realm := mp_diam_realm,
+		auth_app_id := omit,
+		vendor_app_id := c_DIAMETER_3GPP_SWx_AID
+	};
+	vc_SWx := DIAMETER_Emulation_CT.create(id);
+	map(vc_SWx:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_SWx:DIAMETER_UNIT, self:SWx_UNIT);
+	connect(vc_SWx:DIAMETER_PROC, self:SWx_PROC);
+	vc_SWx.start(DIAMETER_Emulation.main(ops, pars, id));
+
+	/* S6b setup: */
+	pars := {
+		remote_ip := "",
+		remote_sctp_port := -1, /* server mode */
+		local_ip := mp_s6b_local_ip,
+		local_sctp_port := mp_s6b_local_port,
+		origin_host := "hss." & mp_diam_realm,
+		origin_realm := mp_diam_realm,
+		auth_app_id := omit,
+		vendor_app_id := c_DIAMETER_3GPP_S6_AID
+	};
+	vc_S6b := DIAMETER_Emulation_CT.create(id);
+	map(vc_S6b:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_S6b:DIAMETER_UNIT, self:S6b_UNIT);
+	connect(vc_S6b:DIAMETER_PROC, self:S6b_PROC);
+	vc_S6b.start(DIAMETER_Emulation.main(ops, pars, id));
+
+	f_diameter_wait_capability(SWx_UNIT);
+	// FIXME: osmo-epdg doesn't connect to S6b yet.
+	//f_diameter_wait_capability(S6b_UNIT);
+
+	/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdog ping-pongs):
+	 * RFC6733 sec 5.1
+	 * RFC3539 sec 3.4.1 [5]
+	 * https://github.com/freeDiameter/freeDiameter/blob/master/libfdcore/p_psm.c#L49
+	 */
+	f_sleep(1.0);
+}
+
+private function f_init_gtp(charstring id) runs on MTC_CT {
+	var Gtp2EmulationCfg cfg := {
+		gtpc_bind_ip := mp_s2b_local_ip,
+		gtpc_bind_port := mp_s2b_local_port,
+		gtpc_remote_ip := mp_s2b_remote_ip,
+		gtpc_remote_port := mp_s2b_remote_port,
+		sgw_role := false,
+		use_gtpu_daemon := false /* TODO: maybe use, set to true */
+	};
+
+	vc_GTP2 := GTPv2_Emulation_CT.create("GTP2_EM");
+	map(vc_GTP2:GTP2C, system:GTP2C);
+	connect(vc_GTP2:TEID0, self:TEID0);
+	vc_GTP2.start(GTPv2_Emulation.main(cfg));
+}
+
+private function f_init(float t_guard := 40.0) runs on MTC_CT {
+
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+
+	f_init_gsup(testcasename());
+	f_init_diameter(testcasename());
+	f_init_gtp(testcasename());
+}
+
+private type function void_fn(charstring id) runs on EPDG_ConnHdlr;
+
+private function f_init_handler(void_fn fn, charstring id, EPDG_ConnHdlrPars pars) runs on EPDG_ConnHdlr {
+	g_pars := pars;
+
+	/* tell GSUP dispatcher to send this IMSI to us */
+	f_create_gsup_expect(hex2str(g_pars.imsi));
+
+	fn.apply(id);
+}
+
+private function f_start_handler(void_fn fn, EPDG_ConnHdlrPars pars)
+runs on MTC_CT return EPDG_ConnHdlr {
+	var EPDG_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+	var DIAMETER_ConnHdlr_CT vc_conn_swx, vc_conn_s6b;
+
+	vc_conn := EPDG_ConnHdlr.create(id);
+
+	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
+	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	/* SWx */
+	vc_conn_swx := DIAMETER_ConnHdlr_CT.create(id);
+	connect(vc_conn_swx:DIAMETER, vc_SWx:DIAMETER_CLIENT);
+	connect(vc_conn_swx:DIAMETER_PROC, vc_SWx:DIAMETER_PROC);
+	connect(vc_conn:SWx, vc_conn_swx:DIAMETER_CLIENT);
+	connect(vc_conn:SWx_PROC, vc_conn_swx:DIAMETER_PROC_CLIENT);
+	vc_conn_swx.start(f_diam_connhldr_ct_main(pars.imsi));
+
+	/* S6b */
+	vc_conn_s6b := DIAMETER_ConnHdlr_CT.create(id);
+	connect(vc_conn_s6b:DIAMETER, vc_S6b:DIAMETER_CLIENT);
+	connect(vc_conn_s6b:DIAMETER_PROC, vc_S6b:DIAMETER_PROC);
+	connect(vc_conn:S6b, vc_conn_s6b:DIAMETER_CLIENT);
+	connect(vc_conn:S6b_PROC, vc_conn_s6b:DIAMETER_PROC_CLIENT);
+	vc_conn_s6b.start(f_diam_connhldr_ct_main(pars.imsi));
+
+	vc_conn.start(f_init_handler(fn, id, pars));
+	return vc_conn;
+}
+
+/* Diameter SWx MAR + MAA. */
+private altstep as_DIA_SWx_MA_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	var template (value) GenericAVP sip_auth_data_item;
+	[] SWx.receive(tr_DIA_SWx_MAR(g_pars.imsi)) -> value rx_dia {
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		sip_auth_data_item := ts_AVP_3GPP_SIPAuthDataItem(0,
+								  g_pars.vec.rand,
+								  g_pars.vec.ik,
+								  g_pars.vec.ck,
+								  g_pars.vec.autn,
+								  g_pars.vec.auts);
+		/* Send MAA to translator; expect it to show up on GSUP side */
+		SWx.send(ts_DIA_SWx_MAA(g_pars.imsi, sip_auth_data_item,
+					sess_id := sess_id,
+					hbh_id := rx_dia.hop_by_hop_id,
+					ete_id := rx_dia.end_to_end_id));
+		setverdict(pass);
+	}
+	[] SWx.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter msg rx: ", rx_dia));
+	}
+}
+
+/* Diameter SWx SAR + SAA. */
+private altstep as_DIA_SWx_SA_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	[] SWx.receive(tr_DIA_SWx_SAR(g_pars.imsi)) -> value rx_dia {
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		/* Send SAA to translator; expect it to show up on GSUP side */
+		SWx.send(ts_DIA_SWx_SAA(g_pars.imsi,
+					sess_id := sess_id,
+					hbh_id := rx_dia.hop_by_hop_id,
+					ete_id := rx_dia.end_to_end_id));
+		setverdict(pass);
+	}
+	[] SWx.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter msg rx: ", rx_dia));
+	}
+}
+
+/* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
+private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+	var template (present) GSUP_IE auth_tuple_ie := tr_GSUP_IE_AuthTuple3G(g_pars.vec.rand,
+									       g_pars.vec.ik,
+									       g_pars.vec.ck,
+									       g_pars.vec.autn,
+									       g_pars.vec.rand  & g_pars.vec.auts);
+
+	GSUP.send(ts_GSUP_SAI_REQ(g_pars.imsi));
+	as_DIA_SWx_MA_success();
+	/* Expect a positive response back to the translator; expect AIA */
+	alt {
+	[] GSUP.receive(tr_GSUP_SAI_RES(g_pars.imsi, auth_tuple_ie));
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+		}
+	}
+	setverdict(pass);
+}
+
+/* GSUP LU Req + Resp, triggers SWx SAR + SAA (Server Assignment). */
+private function f_GSUP_LU_success() runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+	var template octetstring destination_name := *;
+	GSUP.send(ts_GSUP_UL_REQ(g_pars.imsi));
+	as_DIA_SWx_SA_success();
+	/* Expect a positive response back to the translator; expect AIA */
+	alt {
+	[] GSUP.receive(tr_GSUP_UL_RES(g_pars.imsi, destination_name));
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+		}
+	}
+	setverdict(pass);
+}
+
+private function f_TC_authinfo_normal(charstring id) runs on EPDG_ConnHdlr {
+	f_GSUP_AI_success();
+	f_GSUP_LU_success();
+}
+
+testcase TC_authinfo_normal() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_authinfo_normal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+control {
+	execute ( TC_authinfo_normal() );
+}
+
+}

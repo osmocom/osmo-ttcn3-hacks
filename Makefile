@@ -22,6 +22,7 @@ SUBDIRS= \
 	dia2gsup \
 	fr \
 	fr-net \
+	epdg \
 	gbproxy \
 	ggsn_tests \
 	hlr \
