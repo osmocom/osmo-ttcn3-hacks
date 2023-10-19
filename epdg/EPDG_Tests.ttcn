@@ -2,6 +2,7 @@ module EPDG_Tests {
 
 import from Misc_Helpers all;
 import from General_Types all;
+import from Native_Functions all;
 import from Osmocom_Types all;
 import from L3_Common all;
 
@@ -13,6 +14,8 @@ import from DIAMETER_Types all;
 import from DIAMETER_Templates all;
 import from DIAMETER_Emulation all;
 
+import from GTPv2_Types all;
+import from GTPv2_Templates all;
 import from GTPv2_Emulation all;
 
 modulepar {
@@ -108,6 +111,17 @@ type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_Conn
 
 type record EPDG_ConnHdlrPars {
 	hexstring imsi,
+	charstring ue_ip,
+
+	/* TEI (Data) local side */
+	OCT4 teid,
+	/* TEI (Control) local side */
+	OCT4 teic,
+	/* TEI (Data) remote side */
+	OCT4 teid_remote optional,
+	/* TEI (Control) remote side */
+	OCT4 teic_remote optional,
+
 	AuthVector vec optional
 };
 
@@ -122,11 +136,15 @@ private function f_epdg_connhldr_S6b_expect_eteid(UINT32 ete_id) runs on EPDG_Co
 	}
 }
 
-
 private function f_init_pars(integer imsi_suffix := 1)
 runs on MTC_CT return EPDG_ConnHdlrPars {
 	var EPDG_ConnHdlrPars pars := {
 		imsi := f_gen_imsi(imsi_suffix),
+		ue_ip := "192.168.123.50",
+		teid := '00000000'O,
+		teic := '00000000'O,
+		teid_remote := omit,
+		teic_remote := omit,
 		vec := f_gen_auth_vec_3g()
 	};
 	return pars;
@@ -231,7 +249,7 @@ private function f_init_gtp(charstring id) runs on MTC_CT {
 		use_gtpu_daemon := false /* TODO: maybe use, set to true */
 	};
 
-	vc_GTP2 := GTPv2_Emulation_CT.create("GTP2_EM");
+	vc_GTP2 := GTPv2_Emulation_CT.create(id & "-GTPV2");
 	map(vc_GTP2:GTP2C, system:GTP2C);
 	connect(vc_GTP2:TEID0, self:TEID0);
 	vc_GTP2.start(GTPv2_Emulation.main(cfg));
@@ -255,6 +273,9 @@ private function f_init_handler(void_fn fn, charstring id, EPDG_ConnHdlrPars par
 	/* tell GSUP dispatcher to send this IMSI to us */
 	f_create_gsup_expect(hex2str(g_pars.imsi));
 
+	/* tell GTPv2 dispatcher to send this IMSI to us */
+	f_gtp2_register_imsi(g_pars.imsi);
+
 	fn.apply(id);
 }
 
@@ -266,8 +287,13 @@ runs on MTC_CT return EPDG_ConnHdlr {
 
 	vc_conn := EPDG_ConnHdlr.create(id);
 
+	/* GSUP */
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
+
+	/* GTP2 */
+	connect(vc_conn:GTP2, vc_GTP2:CLIENT);
+	connect(vc_conn:GTP2_PROC, vc_GTP2:CLIENT_PROC);
 
 	/* SWx */
 	vc_conn_swx := DIAMETER_ConnHdlr_CT.create(id);
@@ -336,6 +362,36 @@ private altstep as_DIA_SWx_SA_success() runs on EPDG_ConnHdlr {
 	}
 }
 
+/* Diameter SWx SAR + SAA. */
+private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) PDN_AddressAllocation paa;
+
+	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi)) -> value rx_msg {
+		/* TODO: parse TEIC and TEID and store it in g_pars.remote_tei{c,d} */
+
+		/* allocate + register TEID-C on local side */
+		g_pars.teic := f_gtp2_allocate_teid();
+		g_pars.teid := g_pars.teic;
+
+		fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic, 0,
+					f_inet_addr(mp_s2b_local_ip), omit);
+		fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.teid, 2,
+					f_inet_addr(mp_s2b_local_ip), omit);
+		paa := ts_GTP2C_PdnAddrAlloc_v4(f_inet_addr(g_pars.ue_ip));
+		GTP2.send(ts_GTP2C_CreateSessionResp({ fteid_c_ie }, paa));
+		setverdict(pass);
+	}
+	[] GTP2.receive(PDU_GTPCv2:?) -> value rx_msg {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GTP2C msg rx: ", rx_msg));
+	}
+}
+private function f_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
+	f_gtp2_register_udmsg('20'O);
+	as_GTP2C_CreateSession_success();
+}
+
 /* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
 private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
@@ -363,9 +419,24 @@ private function f_GSUP_LU_success() runs on EPDG_ConnHdlr {
 	var template octetstring destination_name := *;
 	GSUP.send(ts_GSUP_UL_REQ(g_pars.imsi));
 	as_DIA_SWx_SA_success();
-	/* Expect a positive response back to the translator; expect AIA */
+	/* Expect a positive response back to the translator */
 	alt {
 	[] GSUP.receive(tr_GSUP_UL_RES(g_pars.imsi, destination_name));
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+		}
+	}
+	setverdict(pass);
+}
+
+/* GSUP TunnelEPDG Tunnel Req + Resp, triggers S2b CreateSession Req + Response. */
+private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+	GSUP.send(ts_GSUP_EPDGTunnel_REQ(g_pars.imsi));
+	f_GTP2C_CreateSession_success();
+	/* Expect a positive response back to the translator; */
+	alt {
+	[] GSUP.receive(tr_GSUP_EPDGTunnel_RES(g_pars.imsi));
 	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
 		}
@@ -376,6 +447,7 @@ private function f_GSUP_LU_success() runs on EPDG_ConnHdlr {
 private function f_TC_authinfo_normal(charstring id) runs on EPDG_ConnHdlr {
 	f_GSUP_AI_success();
 	f_GSUP_LU_success();
+	f_GSUP_EPDGTunnel_success();
 }
 
 testcase TC_authinfo_normal() runs on MTC_CT {
