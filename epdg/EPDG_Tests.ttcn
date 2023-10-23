@@ -32,6 +32,8 @@ modulepar {
 	/* our emulated PGW (Diameter S6b) */
 	charstring mp_s6b_local_ip := "127.0.0.100";
 	integer mp_s6b_local_port := 3869;
+	charstring mp_s6b_remote_ip := "127.0.0.1";
+	integer mp_s6b_remote_port := 3869;
 
 	/* our emulated PGW (GTPv2C S2b) */
 	charstring mp_s2b_local_ip := "127.0.0.100";
@@ -212,14 +214,14 @@ private function f_init_diameter(charstring id) runs on MTC_CT {
 
 	/* S6b setup: */
 	pars := {
-		remote_ip := "",
-		remote_sctp_port := -1, /* server mode */
+		remote_ip := mp_s6b_remote_ip,
+		remote_sctp_port := mp_s6b_remote_port, /* client mode */
 		local_ip := mp_s6b_local_ip,
 		local_sctp_port := mp_s6b_local_port,
-		origin_host := "hss." & mp_diam_realm,
+		origin_host := "pgw." & mp_diam_realm,
 		origin_realm := mp_diam_realm,
-		auth_app_id := omit,
-		vendor_app_id := c_DIAMETER_3GPP_S6_AID
+		auth_app_id := c_DIAMETER_3GPP_S6b_AID,
+		vendor_app_id := c_DIAMETER_3GPP_S6b_AID
 	};
 	vc_S6b := DIAMETER_Emulation_CT.create(id);
 	map(vc_S6b:DIAMETER, system:DIAMETER_CODEC_PT);
@@ -228,8 +230,7 @@ private function f_init_diameter(charstring id) runs on MTC_CT {
 	vc_S6b.start(DIAMETER_Emulation.main(ops, pars, id));
 
 	f_diameter_wait_capability(SWx_UNIT);
-	// FIXME: osmo-epdg doesn't connect to S6b yet.
-	//f_diameter_wait_capability(S6b_UNIT);
+	f_diameter_wait_capability(S6b_UNIT);
 
 	/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdog ping-pongs):
 	 * RFC6733 sec 5.1
@@ -362,6 +363,26 @@ private altstep as_DIA_SWx_SA_success() runs on EPDG_ConnHdlr {
 	}
 }
 
+/* Send AAR as PGW to AAA server, expect back AAA */
+private function f_S6b_AA_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var UINT32 hbh_id := f_rnd_octstring(4);
+	var UINT32 ete_id := f_rnd_octstring(4);
+
+	/* Unlike AAR, AAA contains no IMSI. Register ete_id in DIAMETER_Emulation,
+	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
+	 */
+	f_epdg_connhldr_S6b_expect_eteid(ete_id);
+
+	S6b.send(ts_DIA_S6b_AAR(g_pars.imsi, hbh_id := hbh_id, ete_id := ete_id));
+	alt {
+	[] S6b.receive(tr_DIA_S6b_AAA) -> value rx_dia {}
+	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
+		}
+	}
+}
+
 /* Diameter SWx SAR + SAA. */
 private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	var PDU_GTPCv2 rx_msg;
@@ -375,11 +396,15 @@ private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 		g_pars.teic := f_gtp2_allocate_teid();
 		g_pars.teid := g_pars.teic;
 
+		/* Upon rx of CreateSession, emulate PGW asking the AAA server. */
+		f_S6b_AA_success();
+
 		fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic, 0,
 					f_inet_addr(mp_s2b_local_ip), omit);
 		fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.teid, 2,
 					f_inet_addr(mp_s2b_local_ip), omit);
 		paa := ts_GTP2C_PdnAddrAlloc_v4(f_inet_addr(g_pars.ue_ip));
+
 		GTP2.send(ts_GTP2C_CreateSessionResp({ fteid_c_ie }, paa));
 		setverdict(pass);
 	}
