@@ -16,6 +16,7 @@ $AVP_SH_PATH \
         CreditControl_IETF_RFC4006.ddf \
         CxDxInterface_3GPP_TS29229_c30.ddf \
         GiSGiInterface_3GPP_TS29061_d70.ddf \
-        ChargingApplications_3GPP_TS32299_d90.ddf
+        ChargingApplications_3GPP_TS32299_d90.ddf \
+        MobileIPv6_NAS_IETF_RFC5447.ddf
 
 mv -v $AVP_SH_DIR/DIAMETER_Types.ttcn $SELF_DIR/
