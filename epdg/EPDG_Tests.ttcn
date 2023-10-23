@@ -112,19 +112,26 @@ type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_Conn
 };
 
 
+type record BearerConfig {
+	 /* EPS Bearer ID */
+	uint4_t		ebi optional,
+	/* TEI (Data) local side */
+	OCT4 		teid_local optional,
+	/* TEI (Data) remote side */
+	OCT4 teid_remote optional
+};
+
 type record EPDG_ConnHdlrPars {
 	hexstring imsi,
 	charstring apn,
 	charstring ue_ip,
 
-	/* TEI (Data) local side */
-	OCT4 teid,
 	/* TEI (Control) local side */
-	OCT4 teic,
-	/* TEI (Data) remote side */
-	OCT4 teid_remote optional,
+	OCT4 teic_local,
 	/* TEI (Control) remote side */
 	OCT4 teic_remote optional,
+
+	BearerConfig bearer optional,
 
 	AuthVector vec optional
 };
@@ -146,10 +153,13 @@ runs on MTC_CT return EPDG_ConnHdlrPars {
 		imsi := f_gen_imsi(imsi_suffix),
 		apn := "internet",
 		ue_ip := "192.168.123.50",
-		teid := '00000000'O,
-		teic := '00000000'O,
-		teid_remote := omit,
+		teic_local := '00000000'O,
 		teic_remote := omit,
+		bearer := {
+			ebi := omit,
+			teid_local := omit,
+			teid_remote := omit
+		},
 		vec := f_gen_auth_vec_3g()
 	};
 	return pars;
@@ -391,31 +401,34 @@ private function f_S6b_AA_success() runs on EPDG_ConnHdlr {
 /* Diameter SWx SAR + SAA. */
 private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	var PDU_GTPCv2 rx_msg;
+	var BearerContextIEs rx_bctx_ies;
 	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
 	var template (value) PDN_AddressAllocation paa;
-	var uint4_t bid;
 	var template (value) BearerContextIEs bctx_ies;
 
 	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi)) -> value rx_msg {
-		/* TODO: parse TEIC and TEID and store it in g_pars.remote_tei{c,d} */
-		bid := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs.ePS_Bearer_ID.ePS_Bearer_ID_Value;
+		/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
+		g_pars.teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
+		rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
+		g_pars.bearer.ebi := rx_bctx_ies.ePS_Bearer_ID.ePS_Bearer_ID_Value;
+		g_pars.bearer.teid_remote := rx_bctx_ies.fullyQualifiedTEID[0].tEID_GRE_Key;
 
 		/* allocate + register TEID-C on local side */
-		g_pars.teic := f_gtp2_allocate_teid();
-		g_pars.teid := g_pars.teic;
+		g_pars.teic_local := f_gtp2_allocate_teid();
+		g_pars.bearer.teid_local := g_pars.teic_local;
 
 		/* Upon rx of CreateSession, emulate PGW asking the AAA server. */
 		f_S6b_AA_success();
 
-		fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic, 0,
+		fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic_local, 0,
 					f_inet_addr(mp_s2b_local_ip), omit);
-		fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.teid, 2,
+		fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.bearer.teid_local, 2,
 					f_inet_addr(mp_s2b_local_ip), omit);
 		paa := ts_GTP2C_PdnAddrAlloc_v4(f_inet_addr(g_pars.ue_ip));
-		bctx_ies := ts_GTP2C_BcContextIE(bid := bid,
+		bctx_ies := ts_GTP2C_BcContextIE(ebi := g_pars.bearer.ebi,
 						 teid_list := { fteid_u_ie },
 						 qos := ts_GTP2C_BearerQos('09'O, 0,0,0,0),
-						 charging_id := ts_GTP2C_ChargingID(g_pars.teic));
+						 charging_id := ts_GTP2C_ChargingID(g_pars.teic_local));
 		GTP2.send(ts_GTP2C_CreateSessionResp({ fteid_c_ie }, paa, { ts_GTP2C_BcGrouped(bctx_ies) } ));
 		setverdict(pass);
 	}
@@ -426,6 +439,25 @@ private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 private function f_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	f_gtp2_register_udmsg('20'O);
 	as_GTP2C_CreateSession_success();
+}
+
+/* Expect DeleteBearerResponse */
+private altstep as_GTP2C_DeleteBearer_success() runs on EPDG_ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) PDN_AddressAllocation paa;
+
+	[] GTP2.receive(tr_GTP2C_DeleteBearerResp(g_pars.teic_local)) -> value rx_msg {
+		setverdict(pass);
+	}
+	[] GTP2.receive(PDU_GTPCv2:?) -> value rx_msg {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GTP2C msg rx: ", rx_msg));
+	}
+}
+private function f_GTP2C_DeleteBearer_success() runs on EPDG_ConnHdlr {
+	var integer proc_trans_id := 3;
+	GTP2.send(ts_GTP2C_DeleteBearerReq(g_pars.teic_remote, proc_trans_id, g_pars.bearer.ebi, Access_changed_from_Non_3GPP_to_3GPP));
+	as_GTP2C_DeleteBearer_success();
 }
 
 /* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
@@ -495,8 +527,25 @@ testcase TC_authinfo_normal() runs on MTC_CT {
 	setverdict(pass);
 }
 
+private function f_TC_ho_wifi_to_lte(charstring id) runs on EPDG_ConnHdlr {
+	f_TC_authinfo_normal(id);
+	/* Whenever UE goes back to 3GPP, PGW will notify ePDG with a Delete Bearer Request
+	 * cause="Access changed from non-3gpp to 3gpp" */
+	f_GTP2C_DeleteBearer_success();
+}
+
+testcase TC_ho_wifi_to_lte() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_ho_wifi_to_lte), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute ( TC_authinfo_normal() );
+	execute ( TC_ho_wifi_to_lte() );
 }
 
 }
