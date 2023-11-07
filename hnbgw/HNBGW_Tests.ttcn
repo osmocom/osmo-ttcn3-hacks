@@ -2596,6 +2596,130 @@ testcase TC_apply_sccp() runs on test_CT
 	f_shutdown_helper();
 }
 
+/* When a HNB that is connected does another HNB Register, make sure the SCCP links for all its UEs are disconnected in
+ * reasonable time. */
+friend function f_tc_hnb_reregister_cleanup_sccp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	var RANAP_PDU tx;
+
+	f_init_handler(pars, t_guard := 30.0);
+
+	/* TODO: HNBAP UE REGISTER */
+	//HNBAP.send(ts_HNBAP_UERegister())
+
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+
+	f_create_rab(pars.mgcp_pars);
+
+	f_verify_talloc_count(HNBGWVTY, {
+			      "sccp_connection", "hnbgw_context_map" //, "ue_context"
+			      /* TODO: "ue_context" should also be 1, but these tests fail to do HNBAP UE REGISTER */
+			      }, expect_count := 1, attempts := 5);
+	f_sleep(1.0);
+
+	/* Trigger cleanup of HNB, by sending another HNBAP HNB Register Request */
+	var integer cell_id := g_pars.hnb_idx;
+	HNBAP.send(ts_HNBAP_HNBRegisterRequest(char2oct("TTCN3 HNodeB"),
+					'00F110'O,
+					int2bit(1 + cell_id, 28),
+					int2oct(2, 2),
+					int2oct(3, 1),
+					int2oct(4, 2)));
+
+	/* At this point I would like to confirm that SCCP was released by osmo-hnbgw:
+	 *    SCCP.receive(RLSD)
+	 * But this seems completely impossible. SCCP_Emulation handles RLSD internally without letting any other layers
+	 * know about it, and it seems impossible to check whether an SCCP connection exists, either.
+	 *
+	 * Since that doesn't work, I am only checking whether the talloc report has any sccp_connection instances left. */
+
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] as_mgcp_dlcx(pars) {}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for DLCX");
+		mtc.stop;
+	}
+	}
+	f_sleep(3.0);
+	f_verify_talloc_count(HNBGWVTY, {
+			      "sccp_connection", "hnbgw_context_map" //, "ue_context"
+			      }, expect_count := 0);
+}
+
+testcase TC_hnb_reregister_cleanup_sccp() runs on test_CT {
+	var ConnHdlr vc_conn;
+	g_num_hnbs := 1;
+	f_init();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_hnb_reregister_cleanup_sccp), t_pars(8));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
+/* In the field, we encountered a "normal" RAB Assignment that concludes successfully, followed by another RAB
+ * Assignment that has different SDU subflow parameters, and does not contain RTP information. At the time of writing,
+ * it seems that the second RAB Assignment causes a crash. Play through this scenario. */
+friend function f_tc_second_rab_assignment(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	var MgcpCommand mgcp_cmd;
+	var RANAP_PDU tx;
+	timer T := 5.0;
+
+	f_init_handler(pars);
+	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+
+	f_create_rab(pars.mgcp_pars);
+
+	/* Now send a second RAB Assignment with different subflows and omitting transportLayerAddress. (Assuming the
+	 * first RAB Assignment's transportLayerAddress remains in use unchanged.) */
+	var template RAB_SetupOrModifyList rab_sml;
+	rab_sml := ts_RAB_SML2(t_RAB_id(23),
+			       ts_RabParams,
+			       user_plane_info := omit,
+			       transport_layer_info := omit);
+	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	BSSAP.send(tx);
+	T.start;
+
+	// TODO: expect response
+
+	f_sleep(5.0);
+
+	/* Send Iu Release */
+	tx := valueof(ts_RANAP_IuReleaseCommand(ts_RanapCause_om_intervention));
+	f_iu2iuh(tx);
+
+	T.start;
+	alt {
+	[] as_mgcp_dlcx(pars) {}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for DLCX");
+	}
+	}
+
+	tx := valueof(ts_RANAP_IuReleaseComplete());
+	f_iuh2iu(tx);
+}
+
+testcase TC_second_rab_assignment() runs on test_CT {
+	var ConnHdlr vc_conn;
+	g_num_hnbs := 1;
+	f_init();
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_second_rab_assignment), t_pars(3));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -2642,6 +2766,8 @@ control {
 	execute( TC_sgsnpool_nri_from_other_PLMN() );
 	execute( TC_sgsnpool_sccp_n_pcstate_detaches_cnlink() );
 	execute( TC_sgsnpool_sccp_n_pcstate_attaches_cnlink() );
+
+	execute(TC_second_rab_assignment());
 
 	/* Run at the end since it makes osmo-hnbgw <= 1.3.0 crash: OS#5676 */
 	execute(TC_hnb_reregister_reuse_sctp_assoc());
