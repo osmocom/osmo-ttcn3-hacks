@@ -979,6 +979,7 @@ type record CallParameters {
 	BearerCapability_TLV bearer_cap,		/* which bearer capabilities to claim */
 	boolean emergency,				/* is this an emergency call? */
 	boolean csd,					/* is this a circuit switched data call? */
+	BSSMAP_FIELD_CodecElement tch_codec_chosen,	/* If TCH, which codec to send in BSSMAP Assignment Complete. */
 
 	/* MNCC related parameters */
 	uint32_t mncc_callref optional,			/* call reference on the MNCC side */
@@ -1016,6 +1017,7 @@ template (value) CallParameters t_CallParams(hexstring called := '12345'H, integ
 	bearer_cap := valueof(ts_Bcap_voice),
 	emergency := false,
 	csd := false,
+	tch_codec_chosen := valueof(ts_CodecFR),
 	mncc_callref := omit,
 	mncc_bearer_cap := valueof(ts_MNCC_bcap_voice),
 	mncc_rtp_ip := "42.23.11.5",
@@ -1056,6 +1058,7 @@ template CallParameters tr_CallParams := {
 	bearer_cap := ?,
 	emergency := ?,
 	csd := ?,
+	tch_codec_chosen := ?,
 	mncc_callref := *,
 	mncc_bearer_cap := ?,
 	mncc_rtp_ip := ?,
@@ -1606,6 +1609,63 @@ altstep as_optional_mgcp_dlcx(CallParameters cpars) runs on BSC_ConnHdlr {
 	}
 }
 
+private function f_mo_call_establish__handle_assignment_request(inout CallParameters cpars, PDU_BSSAP ass_req)
+runs on BSC_ConnHdlr {
+	var BSSMAP_IE_AoIP_TransportLayerAddress tla;
+	var BSSMAP_IE_SpeechCodec codec;
+	var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
+
+	if (not ispresent(ass_req.pdu.bssmap.assignmentRequest.aoIPTransportLayer)) {
+		setverdict(fail, "MSC sent Assignment Request without AoIP Transport Layer IE");
+		mtc.stop;
+	}
+
+	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass1 :=
+		f_tr_BSSMAP_IE_AoIP_TLA(cpars.mgw_conn_1.mgw_rtp_ip, ?);
+	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass2 :=
+		f_tr_BSSMAP_IE_AoIP_TLA(cpars.mgw_conn_2.mgw_rtp_ip, ?);
+
+	if (not match(ass_req.pdu.bssmap.assignmentRequest.aoIPTransportLayer, tla_ass1)
+	    and not match(ass_req.pdu.bssmap.assignmentRequest.aoIPTransportLayer, tla_ass2)) {
+		log("Expected one of: 1:", tla_ass1, " 2:", tla_ass2);
+		log("Got:", ass_req.pdu.bssmap.assignmentRequest.aoIPTransportLayer);
+		setverdict(fail, "MSC sent Assignment Request with unexpected AoIP Transport Layer IE");
+		mtc.stop;
+	}
+
+	if (cpars.csd and not match(ass_req.pdu.bssmap.assignmentRequest.codecList.codecElements,
+			{ts_CodecCSData})) {
+		setverdict(fail, "MSC sent Assignment Request with unexpected codec list for CSD ",
+			   ass_req.pdu.bssmap.assignmentRequest.codecList);
+		mtc.stop;
+	}
+
+	tla := valueof(f_ts_BSSMAP_IE_AoIP_TLA(cpars.bss_rtp_ip, cpars.bss_rtp_port));
+
+	if (cpars.csd) {
+		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecCSData}));
+	} else {
+		codec := valueof(ts_BSSMAP_IE_SpeechCodec({cpars.tch_codec_chosen}));
+	}
+
+	var PDU_BSSAP bssap;
+	if (cpars.use_osmux) {
+		if (not ispresent(ass_req.pdu.bssmap.assignmentRequest.osmuxCID)) {
+			setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+			mtc.stop;
+		}
+		osmuxCID := valueof(ts_OsmuxCID(0));
+		if (cpars.use_osmux and not match(ass_req.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
+			setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
+			mtc.stop;
+		}
+		bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec, osmuxCID));
+	} else {
+		bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
+	}
+	BSSAP.send(bssap);
+}
+
 function f_mo_call_establish(inout CallParameters cpars)
 runs on BSC_ConnHdlr {
 
@@ -1641,11 +1701,6 @@ runs on BSC_ConnHdlr {
 	if (cpars.stop_after_cc_setup) {
 		return;
 	}
-
-	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass1 :=
-		f_tr_BSSMAP_IE_AoIP_TLA(cpars.mgw_conn_1.mgw_rtp_ip, ?);
-	var template BSSMAP_IE_AoIP_TransportLayerAddress tla_ass2 :=
-		f_tr_BSSMAP_IE_AoIP_TLA(cpars.mgw_conn_2.mgw_rtp_ip, ?);
 
 	var default mdcx := activate(as_optional_mgcp_mdcx(cpars.mgw_conn_2.mgw_rtp_ip, cpars.mgw_conn_2.mgw_rtp_port));
 	var boolean got_mncc_setup_compl_ind := false;
@@ -1687,52 +1742,7 @@ runs on BSC_ConnHdlr {
 	//[g_pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap
 	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit)) -> value bssap {
 		log("f_mo_call_establish 4: rx Assignment Request");
-		var BSSMAP_IE_AoIP_TransportLayerAddress tla;
-		var BSSMAP_IE_SpeechCodec codec;
-		var BSSMAP_IE_Osmo_OsmuxCID osmuxCID;
-
-		if (not ispresent(bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer)) {
-			setverdict(fail, "MSC sent Assignment Request without AoIP Transport Layer IE");
-			mtc.stop;
-		}
-		if (not match(bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer, tla_ass1)
-		    and not match(bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer, tla_ass2)) {
-			log("Expected one of: 1:", tla_ass1, " 2:", tla_ass2);
-			log("Got:", bssap.pdu.bssmap.assignmentRequest.aoIPTransportLayer);
-			setverdict(fail, "MSC sent Assignment Request with unexpected AoIP Transport Layer IE");
-			mtc.stop;
-		}
-
-		if (cpars.csd and not match(bssap.pdu.bssmap.assignmentRequest.codecList.codecElements,
-				{ts_CodecCSData})) {
-			setverdict(fail, "MSC sent Assignment Request with unexpected codec list for CSD ",
-				   bssap.pdu.bssmap.assignmentRequest.codecList);
-			mtc.stop;
-		}
-
-		tla := valueof(f_ts_BSSMAP_IE_AoIP_TLA(cpars.bss_rtp_ip, cpars.bss_rtp_port));
-
-		if (cpars.csd) {
-			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecCSData}));
-		} else {
-			codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecFR}));
-		}
-
-		if (cpars.use_osmux) {
-			if (not ispresent(bssap.pdu.bssmap.assignmentRequest.osmuxCID)) {
-				setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
-				mtc.stop;
-			}
-			osmuxCID := valueof(ts_OsmuxCID(0));
-			if (cpars.use_osmux and not match(bssap.pdu.bssmap.assignmentRequest.osmuxCID, osmuxCID)) {
-				setverdict(fail, "MSC sent AssignReq without expected OsmuxCID IE");
-				mtc.stop;
-			}
-			bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec, osmuxCID));
-		} else {
-			bssap := valueof(ts_BSSMAP_AssignmentComplete(omit, tla, codec));
-		}
-		BSSAP.send(bssap);
+		f_mo_call_establish__handle_assignment_request(cpars, bssap);
 		}
 	[] BSSAP.receive(tr_RANAP_RabAssReq(*)) -> value ranap {
 		log("f_mo_call_establish 4.iu: rx RANAP RAB Assignment Request");
