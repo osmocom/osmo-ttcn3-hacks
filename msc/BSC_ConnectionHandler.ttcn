@@ -979,7 +979,11 @@ type record CallParameters {
 	BearerCapability_TLV bearer_cap,		/* which bearer capabilities to claim */
 	boolean emergency,				/* is this an emergency call? */
 	boolean csd,					/* is this a circuit switched data call? */
-	BSSMAP_FIELD_CodecElement tch_codec_chosen,	/* If TCH, which codec to send in BSSMAP Assignment Complete. */
+	BSSMAP_FIELD_CodecElement ass_compl_chosen_codec, /* If TCH, which codec to send in BSSMAP Assignment Complete. */
+	charstring mncc_alert_req_sends_remote_sdp,	/* SDP string. MNCC_ALERT_REQ is when MO learns MT's codec capabilities */
+	boolean expect_re_assignment,			/* Set to true when mncc_alert_req_sends_remote_sdp should trigger a 2nd Assignment to adjust the codec */
+	BSSMAP_FIELD_CodecElements re_ass_req_codecs,	/* If expect_re_assignment: verify codecs seen in 2nd Assignment Request */
+	BSSMAP_FIELD_CodecElement re_ass_compl_chosen_codec, /* If expect_re_assignment: What Codec (Chosen) to send back in 2nd Assignment Complete */
 
 	/* MNCC related parameters */
 	uint32_t mncc_callref optional,			/* call reference on the MNCC side */
@@ -1017,7 +1021,11 @@ template (value) CallParameters t_CallParams(hexstring called := '12345'H, integ
 	bearer_cap := valueof(ts_Bcap_voice),
 	emergency := false,
 	csd := false,
-	tch_codec_chosen := valueof(ts_CodecFR),
+	ass_compl_chosen_codec := ts_CodecFR,
+	mncc_alert_req_sends_remote_sdp := "",
+	expect_re_assignment := false,
+	re_ass_req_codecs := {ts_CodecFR},
+	re_ass_compl_chosen_codec := ts_CodecFR,
 	mncc_callref := omit,
 	mncc_bearer_cap := valueof(ts_MNCC_bcap_voice),
 	mncc_rtp_ip := "42.23.11.5",
@@ -1058,7 +1066,11 @@ template CallParameters tr_CallParams := {
 	bearer_cap := ?,
 	emergency := ?,
 	csd := ?,
-	tch_codec_chosen := ?,
+	ass_compl_chosen_codec := ?,
+	mncc_alert_req_sends_remote_sdp := ?,
+	expect_re_assignment := ?,
+	re_ass_req_codecs := ?,
+	re_ass_compl_chosen_codec := ?,
 	mncc_callref := *,
 	mncc_bearer_cap := ?,
 	mncc_rtp_ip := ?,
@@ -1609,7 +1621,8 @@ altstep as_optional_mgcp_dlcx(CallParameters cpars) runs on BSC_ConnHdlr {
 	}
 }
 
-private function f_mo_call_establish__handle_assignment_request(inout CallParameters cpars, PDU_BSSAP ass_req)
+private function f_mo_call_establish__handle_assignment_request(inout CallParameters cpars, PDU_BSSAP ass_req,
+								BSSMAP_FIELD_CodecElement tch_codec_chosen)
 runs on BSC_ConnHdlr {
 	var BSSMAP_IE_AoIP_TransportLayerAddress tla;
 	var BSSMAP_IE_SpeechCodec codec;
@@ -1645,7 +1658,7 @@ runs on BSC_ConnHdlr {
 	if (cpars.csd) {
 		codec := valueof(ts_BSSMAP_IE_SpeechCodec({ts_CodecCSData}));
 	} else {
-		codec := valueof(ts_BSSMAP_IE_SpeechCodec({cpars.tch_codec_chosen}));
+		codec := valueof(ts_BSSMAP_IE_SpeechCodec({tch_codec_chosen}));
 	}
 
 	var PDU_BSSAP bssap;
@@ -1736,13 +1749,31 @@ runs on BSC_ConnHdlr {
 		BSSAP.receive(tr_PDU_DTAP_MT(tr_ML3_MT_CC_CALL_PROC(cpars.transaction_id)));
 
 		/* Alerting */
-		MNCC.send(ts_MNCC_ALERT_req(cpars.mncc_callref));
+		var MNCC_PDU mncc_alert_req := valueof(ts_MNCC_ALERT_req(cpars.mncc_callref));
+
+		/* Tell the MO call leg about MT's codecs, via SDP in MNCC */
+		mncc_alert_req.u.signal.sdp := cpars.mncc_alert_req_sends_remote_sdp;
+
+		MNCC.send(mncc_alert_req);
+
+		if (cpars.expect_re_assignment) {
+			/* Another Assignment Request is expected after telling the MO call leg about MT's codecs */
+			BSSAP.receive(tr_BSSMAP_AssignmentReq(omit)) -> value bssap;
+
+			if (not match(bssap.pdu.bssmap.assignmentRequest.codecList.codecElements,
+				      cpars.re_ass_req_codecs)) {
+				setverdict(fail, "MSC sent Assignment Request with unexpected codec list");
+				mtc.stop;
+			}
+
+			f_mo_call_establish__handle_assignment_request(cpars, bssap, cpars.re_ass_compl_chosen_codec);
+		}
 		}
 
 	//[g_pars.ran_is_geran] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit, tla_ass)) -> value bssap
 	[] BSSAP.receive(tr_BSSMAP_AssignmentReq(omit)) -> value bssap {
 		log("f_mo_call_establish 4: rx Assignment Request");
-		f_mo_call_establish__handle_assignment_request(cpars, bssap);
+		f_mo_call_establish__handle_assignment_request(cpars, bssap, cpars.ass_compl_chosen_codec);
 		}
 	[] BSSAP.receive(tr_RANAP_RabAssReq(*)) -> value ranap {
 		log("f_mo_call_establish 4.iu: rx RANAP RAB Assignment Request");
