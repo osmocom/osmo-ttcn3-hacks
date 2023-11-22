@@ -8529,7 +8529,8 @@ private altstep as_rsl_ack_all_rel_req() runs on MSC_ConnHdlr {
 }
 
 friend function f_perform_clear(RSL_DCHAN_PT rsl_pt := RSL, RSLEM_PROC_PT rsl_proc_pt := RSL_PROC,
-                                template PDU_ML3_NW_MS exp_rr_rel_tmpl := tr_RRM_RR_RELEASE)
+				template PDU_ML3_NW_MS exp_rr_rel_tmpl := tr_RRM_RR_RELEASE,
+				boolean send_rel_ack := true)
 runs on MSC_ConnHdlr {
 	var default ack_dlcx := activate(as_mgcp_ack_all_dlcx());
 	var default ack_rel_req := activate(as_rsl_ack_all_rel_req());
@@ -8549,8 +8550,10 @@ runs on MSC_ConnHdlr {
 		}
 	[] rsl_pt.receive(tr_RSL_RF_CHAN_REL(g_chan_nr)) {
 			f_logp(BSCVTY, "Got RSL RF Chan Rel, sending Rel Ack");
-			rsl_pt.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
-			f_rslem_unregister(0, g_chan_nr, PT := rsl_proc_pt);
+			if (send_rel_ack) {
+				rsl_pt.send(ts_RSL_RF_CHAN_REL_ACK(g_chan_nr));
+				f_rslem_unregister(0, g_chan_nr, PT := rsl_proc_pt);
+			}
 		}
 	}
 	deactivate(ack_dlcx);
@@ -12439,6 +12442,125 @@ testcase TC_ho_meas_rep_multi_band() runs on test_CT {
 	f_shutdown_helper(ho := true);
 }
 
+private function f_vty_expect_borken(TELNETasp_PT pt, boolean expect_borken)
+{
+	var charstring lchan_summary;
+	lchan_summary := f_vty_transceive_ret(pt, "show lchan summary");
+	var boolean found_borken := (f_strstr(lchan_summary, "State BORKEN") >= 0);
+	if (found_borken != expect_borken) {
+		if (expect_borken) {
+			setverdict(fail, "Expected 'BORKEN' state in ", lchan_summary);
+		} else {
+			setverdict(fail, "Expected no 'BORKEN' state in ", lchan_summary);
+		}
+		mtc.stop;
+	}
+}
+
+private function f_tc_unbreak_lchan_after_missing_rel_ack(integer test_variant) runs on MSC_ConnHdlr {
+
+	/* Establish a channel, so we can mess with the release of it. */
+	var template PDU_BSSAP exp_compl := f_gen_exp_compl();
+	var PDU_BSSAP ass_cmd := f_gen_ass_req();
+
+	ass_cmd.pdu.bssmap.assignmentRequest.channelType := valueof(ts_BSSMAP_IE_ChannelType);
+	ass_cmd.pdu.bssmap.assignmentRequest.codecList := valueof(ts_BSSMAP_IE_CodecList({ts_CodecFR}));
+
+	f_establish_fully(ass_cmd, exp_compl);
+
+	/* shorten X28, the time after which a BORKEN lchan recovers, from 30s to something short */
+	f_vty_enter_cfg_network(BSCVTY);
+	f_vty_transceive(BSCVTY, "timer X28 3");
+	f_vty_transceive(BSCVTY, "end");
+
+	/* Allow us to include handling of Channel Activation in this component, to test recovery from BORKEN */
+	f_rslem_set_auto_chan_act_ack(RSL_PROC, false);
+
+	/* give a moment before releasing */
+	f_sleep(2.0);
+
+	/* Perform a channel release, but omit the RF CHAN REL ACK. The aim is to get the lchan to go BORKEN. */
+	f_perform_clear(send_rel_ack := false);
+
+	f_vty_expect_borken(BSCVTY, false);
+
+	/* After a timeout of X6, the lchan ends up in LCHAN_ST_BORKEN */
+	f_sleep(6.0);
+
+	f_vty_expect_borken(BSCVTY, true);
+
+	/* Now within two seconds, we expect OsmoBSC to attempt recovering from the broken state.
+	 *
+	 * test_variant == 1:
+	 * It will first attempt a Channel Activation. If the BTS accepts that, it means the state is back in sync.
+	 * Then OsmoBSC releases the lchan again and makes it available for use.
+	 *
+	 * test_variant == 2:
+	 * It will first attempt a Channel Activation and the BTS NACKs that.
+	 * It will then attempt a release, which we ACK, and the channel will be available again.
+	 */
+
+	/* Receive the Channel Activation */
+	var ASP_RSL_Unitdata rx_rsl_ud;
+	RSL.receive(tr_ASP_RSL_UD(tr_RSL_MsgTypeD(RSL_MT_CHAN_ACTIV), sid := ?)) -> value rx_rsl_ud;
+
+	var RslChannelNr chan_nr;
+	var RSL_IE_Body ie;
+	if (f_rsl_find_ie(rx_rsl_ud.rsl, RSL_IE_CHAN_NR, ie) == true) {
+		chan_nr := ie.chan_nr;
+	} else {
+		setverdict(fail, "Unable to find RSL_IE_CHAN_NR in ", rx_rsl_ud);
+		return;
+	}
+
+	if (test_variant == 1) {
+		RSL.send(ts_ASP_RSL_UD(ts_RSL_CHAN_ACT_ACK(chan_nr, 23), rx_rsl_ud.streamId));
+
+		/* Back in sync, receive the Channel Release */
+		RSL.receive(tr_RSL_RF_CHAN_REL(chan_nr));
+		RSL.send(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+	} else if (test_variant == 2) {
+		RSL.send(ts_ASP_RSL_UD(ts_RSL_CHAN_ACT_NACK(chan_nr, RSL_ERR_EQUIPMENT_FAIL), rx_rsl_ud.streamId));
+
+		/* Instead tries a release */
+		RSL.receive(tr_RSL_RF_CHAN_REL(chan_nr));
+		RSL.send(ts_RSL_RF_CHAN_REL_ACK(chan_nr));
+		/* That worked, channel usable again */
+	} else {
+		setverdict(fail, "undefined test_variant ", test_variant);
+	}
+
+	f_vty_expect_borken(BSCVTY, false);
+	setverdict(pass);
+}
+
+/* Test recovery path from a BORKEN lchan */
+private function f_TC_unbreak_lchan_after_missing_rel_ack_1(charstring id) runs on MSC_ConnHdlr {
+	f_tc_unbreak_lchan_after_missing_rel_ack(test_variant := 1);
+}
+testcase TC_unbreak_lchan_after_missing_rel_ack_1() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_unbreak_lchan_after_missing_rel_ack_1), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
+private function f_TC_unbreak_lchan_after_missing_rel_ack_2(charstring id) runs on MSC_ConnHdlr {
+	f_tc_unbreak_lchan_after_missing_rel_ack(test_variant := 2);
+}
+testcase TC_unbreak_lchan_after_missing_rel_ack_2() runs on test_CT {
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+	var MSC_ConnHdlr vc_conn;
+	f_init(1, true);
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_unbreak_lchan_after_missing_rel_ack_2), pars);
+	vc_conn.done;
+	f_shutdown_helper();
+}
+
 control {
 	/* CTRL interface testing */
 	execute( TC_ctrl_msc_connection_status() );
@@ -12792,6 +12914,9 @@ control {
 	/* Run TC_ho_out_of_this_bsc last, because it may trigger a segfault before osmo-bsc's patch
 	 * with change-id I5a3345ab0005a73597f5c27207480912a2f5aae6 */
 	execute( TC_ho_out_of_this_bsc() );
+
+	execute( TC_unbreak_lchan_after_missing_rel_ack_1() );
+	execute( TC_unbreak_lchan_after_missing_rel_ack_2() );
 }
 
 }
