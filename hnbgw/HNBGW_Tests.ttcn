@@ -606,7 +606,6 @@ private function f_start_handler_run(ConnHdlr vc_conn, void_fn fn, TestHdlrParam
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 *  a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
 	pars.hnb := g_hnb_cfg[pars.hnb_idx];
-	pars.mgcp_pars := valueof(t_MgcpParams);
 	vc_conn.start(derefers(fn)(id, pars));
 }
 
@@ -993,6 +992,7 @@ t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
 	cn_idx := f_cn_idx(ps_domain, cn_nr),
 	imsi := f_gen_imsi(imsi_suffix),
 	ps_domain := ps_domain,
+	mgcp_pars := t_MgcpParams,
 	hnb := omit,	/* filled in later */
 	expect_separate_sccp_cr := expect_separate_sccp_cr,
 	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
@@ -1276,9 +1276,13 @@ friend function f_rab_ass_resp(inout MgcpParameters pars) runs on ConnHdlr {
 	/* Expect MDCX with IP/port from RAB Assignment Response */
 	[] MGCP.receive(tr_MDCX(tr_SDP(pars.hnb_rtp_ip, pars.hnb_rtp_port))) -> value mgcp_cmd {
 		var HostName mgw_rtp_ip;
+		var boolean exp_rua_rab_reass := false;
 		log("MDCX1", mgcp_cmd);
 		if (ispresent(pars.mgw_conn_ran.mgw_rtp_ip_mdcx)) {
 			mgw_rtp_ip := pars.mgw_conn_ran.mgw_rtp_ip_mdcx;
+			if (pars.mgw_conn_ran.mgw_rtp_ip != pars.mgw_conn_ran.mgw_rtp_ip_mdcx) {
+				exp_rua_rab_reass := true;
+			}
 		} else {
 			mgw_rtp_ip := pars.mgw_conn_ran.mgw_rtp_ip;
 		}
@@ -1288,6 +1292,21 @@ friend function f_rab_ass_resp(inout MgcpParameters pars) runs on ConnHdlr {
 			{ int2str(pars.rtp_payload_type) }, { valueof(ts_SDP_rtpmap(pars.rtp_payload_type, pars.rtp_sdp_format)), valueof(ts_SDP_ptime(20)) } ));
 		var template MgcpResponse mgcp_rsp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, pars.mgw_conn_ran.mgcp_connection_id, sdp);
 		MGCP.send(valueof(mgcp_rsp));
+
+		/* If IP address changed, we expect HNBGW to Modify the RAB through RAB-Ass-Req: */
+		if (exp_rua_rab_reass) {
+			var template RAB_SetupOrModifyList rab_sml;
+			/* Expect RAB Assignment Request with IP/port from MDCX ACK via Iuh */
+			rab_sml := ts_RAB_SML(t_RAB_id(23), f_ts_RAB_TLA(pars.mgw_conn_ran.mgw_rtp_ip_mdcx), t_RAB_binding_port(pars.mgw_conn_ran.mgw_rtp_port));
+			tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+
+			f_rua_expect(tx);
+			/* Send back RAB Assignment Response via Iuh */
+			rab_smdl := ts_RAB_SMdL(t_RAB_id(23), f_ts_RAB_TLA(pars.hnb_rtp_ip), t_RAB_binding_port(pars.hnb_rtp_port));
+			tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
+			RUA.send(tx);
+			/* This shouldn't trigger any MGCP, since nothing changed on the HNB IP side. Continue below. */
+		}
 		}
 	/* Handle CRCX for second leg of endpoint, answer with IP/port */
 	[] MGCP.receive(tr_CRCX(pars.mgcp_ep, tr_SDP(pars.cn_rtp_ip, pars.cn_rtp_port))) -> value mgcp_cmd {
@@ -1482,6 +1501,23 @@ testcase TC_rab_assign_mgcp_to() runs on test_CT {
 	f_init();
 
 	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_mgcp_to), t_pars(6));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
+/* Test case where IuUP IP address announced by HNB and updated through MDCX
+ * makes MGW select a new local IuUP address. HNBGW is expected to update the HNB
+ * through RAB-Modify-Req. */
+testcase TC_rab_assign_mgw_iuup_addr_chg() runs on test_CT {
+	var ConnHdlr vc_conn;
+	g_num_hnbs := 1;
+	f_init();
+	var template (value) TestHdlrParams pars := t_pars(3);
+	/* Emulate change of local IuUP IP address after rx MDCX: */
+	pars.mgcp_pars.mgw_conn_ran.mgw_rtp_ip_mdcx := "127.3.2.1";
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assignment), pars);
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -2688,6 +2724,7 @@ control {
 	execute(TC_rab_release());
 	execute(TC_rab_assign_fail());
 	execute(TC_rab_assign_mgcp_to());
+	execute(TC_rab_assign_mgw_iuup_addr_chg());
 	execute(TC_ranap_cs_mo_disconnect());
 	execute(TC_ranap_ps_mo_disconnect());
 
