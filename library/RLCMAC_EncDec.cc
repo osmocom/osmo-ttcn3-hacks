@@ -455,6 +455,7 @@ static void encode_trailing_padding_spb(TTCN_Buffer& ttcn_buffer, CodingScheme c
 	if (data_len > blk_len_no_spb) {
 		fprintf(stderr, "Buffer too large for requested CS! %s (%s:%u)\n", __func__, __FILE__, __LINE__);
 		// TODO: throw exception?
+		return;
 	}
 
 	for (int i = 0; i < blk_len_no_spb - data_len; i++)
