@@ -178,6 +178,9 @@ modulepar {
 	/* S6 interface */
 	charstring mp_s6_local_ip := "127.0.0.4";
 	integer mp_s6_local_port := 3868;
+	charstring mp_s6_diam_realm := "localdomain";
+	charstring mp_s6_local_diam_host := "hss.localdomain";
+	charstring mp_s6_remote_diam_host := "mme.localdomain";
 
 	/* SGs interface */
 	charstring mp_sgs_local_ip := "127.0.0.1";
@@ -643,6 +646,30 @@ private altstep as_s1ap_handle_IntialCtxSetupReq() runs on ConnHdlr {
 	}
 }
 
+private altstep as_s1ap_handle_UeContextReleaseCmd(template S1AP_IEs.Cause cause := ?) runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_UeContextReleaseCmd(?, cause)) -> value rx_msg {
+		var template MME_UE_S1AP_ID mme_ue_id;
+		var template ENB_UE_S1AP_ID enb_ue_id;
+		if (not ispresent(rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair)) {
+			/* TODO: The UE CONTEXT RELEASE COMMAND (see also: 3GPP TS 36.413, section 9.1.4.6), may identify the
+			* context by either an uE_S1AP_ID_pair (MME_UE_S1AP_ID and ENB_UE_S1AP_ID) or an MME_UE_S1AP_ID alone.
+			* The latter case is not implemented here yet. */
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("complete implementation of UeContextReleaseCmd handling"));
+			return;
+		}
+
+		mme_ue_id := rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair.mME_UE_S1AP_ID;
+		enb_ue_id := rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair.eNB_UE_S1AP_ID;
+
+		S1AP.send(ts_S1AP_UeContextReleaseCompl(mme_ue_id, enb_ue_id));
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
 /* Exepect AuthInfoReq (AIR) from HSS; respond with AuthInforAnswer (AIA) */
 private altstep as_DIA_AuthInfo() runs on ConnHdlr {
 	var PDU_DIAMETER rx_dia;
@@ -695,6 +722,33 @@ private altstep as_DIA_UpdLoc() runs on ConnHdlr {
 		DIAMETER.send(ts_DIA_ULA(sub_data, avp.avp_data.avp_BASE_NONE_Session_Id,
 					 hbh_id := rx_dia.hop_by_hop_id,
 					 ete_id := rx_dia.end_to_end_id));
+	}
+}
+
+private function f_DIA_CancelLocation(integer idx := 0, template S1AP_IEs.Cause cause := omit) runs on ConnHdlr {
+
+	var UINT32 hbh_id := f_rnd_octstring(4);
+	var UINT32 ete_id := f_rnd_octstring(4);
+	var PDU_DIAMETER rx_dia;
+
+	/* Unlike CLR, CLA contains no IMSI. Register ete_id in DIAMETER_Emulation,
+	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
+	 */
+	f_diameter_expect_eteid(ete_id);
+
+	DIAMETER.send(ts_DIA_CLR(g_pars.ue_pars.imsi, SGSN_UPDATE_PROCEDURE,
+		      orig_host := mp_s6_local_diam_host,
+		      orig_realm := mp_s6_diam_realm,
+		      dest_host := mp_s6_remote_diam_host,
+		      dest_realm := mp_s6_diam_realm,
+		      hbh_id := hbh_id,
+		      ete_id := ete_id));
+
+	alt {
+	[] DIAMETER.receive(tr_DIA_CLA) -> value rx_dia {}
+	[] DIAMETER.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
+		}
 	}
 }
 
@@ -781,6 +835,57 @@ private altstep as_GTP2C_ModifyBearer_success() runs on ConnHdlr {
 	}
 }
 
+private altstep as_GTP2C_DeleteSession_success() runs on ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+
+	[] GTP2.receive(tr_GTP2C_DeleteSessionReq(g_pars.ue_pars.s11_teic_local)) -> value rx_msg {
+		GTP2.send(ts_GTP2C_DeleteSessionResp(g_pars.ue_pars.s11_teic_remote,
+						     rx_msg.sequenceNumber,
+						     Request_accepted));
+		setverdict(pass);
+	}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unexpected GTPv2/S11 message from MME"));
+	}
+}
+
+private function f_gtp_sgsn_context_4g_to_2g(OCT4 new_sgsn_local_teid := '12345678'O) runs on ConnHdlr {
+	var template (value) GTPC_PDUs SGSNContextReqPDU;
+	var RoutingAreaIdentity rai;
+	var OCT4 ptmsi;
+	var OCT3 ptmsi_sig;
+	var Gtp1cUnitdata gtpc_pdu;
+	var OCT4 old_mme_local_teid;
+
+	guti2rai_ptmsi(g_pars.ue_pars.guti, rai, ptmsi, ptmsi_sig);
+
+	SGSNContextReqPDU := ts_SGSNContextReqPDU(rai, new_sgsn_local_teid, f_inet_addr(mp_gn_local_ip),
+						  ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig));
+	GTP.send(ts_GTPC_SGSNContextReq(g_gn_iface_peer, 0, SGSNContextReqPDU));
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] GTP.receive(tr_GTPC_SGSNContextResp(g_gn_iface_peer, new_sgsn_local_teid,
+					       tr_SGSNContextRespPDU(GTP_CAUSE_REQUEST_ACCEPTED,
+					       g_pars.ue_pars.imsi))) -> value gtpc_pdu {
+		old_mme_local_teid := gtpc_pdu.gtpc.gtpc_pdu.sgsn_ContextResponse.teidControlPlane.teidControlPlane;
+		setverdict(pass);
+		}
+	[] GTP.receive {
+		setverdict(fail, "unexpected GTPC message from MME");
+		}
+	[] T.timeout {
+		setverdict(fail, "no SGSN Context Response from MME");
+		}
+	}
+
+	GTP.send(ts_GTPC_SGSNContextAck(g_gn_iface_peer, old_mme_local_teid,
+					oct2int(gtpc_pdu.gtpc.opt_part.sequenceNumber),
+					ts_SGSNContextAckPDU(GTP_CAUSE_REQUEST_ACCEPTED)));
+
+}
 
 private function f_attach() runs on ConnHdlr {
 	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI(g_pars.ue_pars.imsi);
@@ -1231,47 +1336,26 @@ private function guti2rai_ptmsi(in NAS_EPS_Types.GUTI guti, out RoutingAreaIdent
 	/* TODO: mMEC "also copied into the 8 Most Significant Bits of the NRI field within the P-TMSI" */
 }
 private function f_TC_ue_cell_reselect_eutran_to_geran(ConnHdlrPars pars) runs on ConnHdlr {
-	var template (value) GTPC_PDUs SGSNContextReqPDU;
-	var RoutingAreaIdentity rai;
-	var OCT4 ptmsi;
-	var OCT3 ptmsi_sig;
-	var Gtp1cUnitdata gtpc_pdu;
-	var OCT4 new_sgsn_local_teid := '12345678'O;
-	var OCT4 old_mme_local_teid;
-
 	f_init_handler(pars);
 	f_gtp_register_imsi(g_pars.ue_pars.imsi);
 	f_attach();
 
-	/* TODO: take GUTI from as_s1ap_handle_IntialCtxSetupReq() in g_pars,
-	 * convert it to P-TMSI and pass P-TMSI below */
-	guti2rai_ptmsi(g_pars.ue_pars.guti, rai, ptmsi, ptmsi_sig);
+	/* TS 23.401 Figure D.3.5-1 Steps 1,2,3,4: */
+	f_gtp_sgsn_context_4g_to_2g();
 
-	SGSNContextReqPDU := ts_SGSNContextReqPDU(rai, new_sgsn_local_teid, f_inet_addr(mp_gn_local_ip),
-						  ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig));
-	GTP.send(ts_GTPC_SGSNContextReq(g_gn_iface_peer, 0, SGSNContextReqPDU));
+	/* TS 23.401 Figure D.3.5-1 Step 8: */
+	f_DIA_CancelLocation();
 
-	timer T := 5.0;
-	T.start;
-	alt {
-	[] GTP.receive(tr_GTPC_SGSNContextResp(g_gn_iface_peer, new_sgsn_local_teid,
-					       tr_SGSNContextRespPDU(GTP_CAUSE_REQUEST_ACCEPTED,
-					       g_pars.ue_pars.imsi))) -> value gtpc_pdu {
-		old_mme_local_teid := gtpc_pdu.gtpc.gtpc_pdu.sgsn_ContextResponse.teidControlPlane.teidControlPlane;
-		setverdict(pass);
-		}
-	[] GTP.receive {
-		setverdict(fail, "unexpected GTPC message from MME");
-		}
-	[] T.timeout {
-		setverdict(fail, "no SGSN Context Response from MME");
-		}
-	}
+	/* TS 23.401 Figure D.3.5-1 Step 13:
+	 * Upon rx of SGSN Context Acknowledge, MME released the ENB/UE context:
+	 */
+	as_s1ap_handle_UeContextReleaseCmd();
 
-	GTP.send(ts_GTPC_SGSNContextAck(g_gn_iface_peer, old_mme_local_teid,
-					oct2int(gtpc_pdu.gtpc.opt_part.sequenceNumber),
-					ts_SGSNContextAckPDU(GTP_CAUSE_REQUEST_ACCEPTED)));
-	/* Give some time to process the SGSNContextACK: */
+	/* TS 23.401 Figure D.3.5-1 Step 13:
+	 * After Gn timer triggers, the SGW session is deleted:
+	 */
+	as_GTP2C_DeleteSession_success();
+	/* Let MME some time to handle the Create Session Response: */
 	f_sleep(3.0);
 }
 testcase TC_ue_cell_reselect_eutran_to_geran() runs on MTC_CT {
