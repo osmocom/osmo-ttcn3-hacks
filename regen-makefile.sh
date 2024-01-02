@@ -37,7 +37,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -g -p -l -U 5 -f $*
+ttcn3_makefilegen -g -p -l -U 8 -f $*
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
 sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan/' Makefile
