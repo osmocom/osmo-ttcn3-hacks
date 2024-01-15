@@ -19,3 +19,5 @@ void mme_kdf_nas(uint8_t algorithm_type_distinguishers,
 void mme_kdf_enb(const uint8_t *kasme, uint32_t ul_count, uint8_t *kenb);
 
 void mme_kdf_nh(const uint8_t *kasme, const uint8_t *sync_input, uint8_t *kenb);
+
+void mme_kdf_nas_token(const uint8_t *kasme, uint32_t ul_count, uint8_t *nas_token);

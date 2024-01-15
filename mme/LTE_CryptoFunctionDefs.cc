@@ -184,6 +184,14 @@ OCTETSTRING f__kdf__nh(const OCTETSTRING &kasme, const OCTETSTRING &sync_inp)
 	return OCTETSTRING(sizeof(kenb), kenb);
 }
 
+OCTETSTRING f__kdf__nas__token(const OCTETSTRING &kasme, const INTEGER &ul_count)
+{
+	TTCN_Buffer ttcn_buf_kasme(kasme);
+	uint8_t nas_token[32];
+
+	mme_kdf_nas_token(ttcn_buf_kasme.get_data(), (int)ul_count, nas_token);
+	return OCTETSTRING(sizeof(nas_token), nas_token);
+}
 
 
 } // namespace

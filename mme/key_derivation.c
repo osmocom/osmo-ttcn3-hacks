@@ -80,3 +80,19 @@ void hss_auc_kasme(const uint8_t *ck, const uint8_t *ik, const uint8_t plmn_id[3
 
 	gnutls_hmac_fast(GNUTLS_MAC_SHA256, k, 32, s, 14, kasme);
 }
+
+/* TS33.401 Annex A.9: NAS token derivation for inter-RAT mobility */
+void mme_kdf_nas_token(const uint8_t *kasme, uint32_t ul_count, uint8_t *nas_token)
+{
+	uint8_t s[7];
+
+	s[0] = 0x17; /* FC Value */
+
+	ul_count = htonl(ul_count);
+	memcpy(s+1, &ul_count, 4);
+
+	s[5] = 0x00;
+	s[6] = 0x04;
+
+	gnutls_hmac_fast(GNUTLS_MAC_SHA256, kasme, 32, s, 7, nas_token);
+}
