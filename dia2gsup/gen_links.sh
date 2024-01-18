@@ -40,7 +40,7 @@ FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct
 FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc
 IPA_Emulation.ttcnpp "
-FILES+="GSUP_Types.ttcn GSUP_Emulation.ttcn "
+FILES+="GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
