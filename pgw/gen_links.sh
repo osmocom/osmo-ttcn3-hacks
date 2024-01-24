@@ -64,7 +64,7 @@ FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 FILES+="DNS_Helpers.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
-FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
+FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn DIAMETER_ts32_299_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
