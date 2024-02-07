@@ -41,6 +41,7 @@ DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="Osmocom_CTRL_Types.ttcn "
 FILES+="L3_Common.ttcn "
+FILES+="DNS_Helpers.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
 FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc5447_Templates.ttcn DIAMETER_ts29_273_Templates.ttcn "
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc
