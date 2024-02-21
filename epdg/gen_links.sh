@@ -46,7 +46,7 @@ FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct
 FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc5447_Templates.ttcn DIAMETER_ts29_273_Templates.ttcn "
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc
 IPA_Emulation.ttcnpp "
-FILES+="GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
+FILES+="PCO_Types.ttcn GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
 FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 gen_links $DIR $FILES
