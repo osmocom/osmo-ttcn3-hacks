@@ -46,6 +46,10 @@ modulepar {
 	integer mp_s2b_local_port := GTP2C_PORT;
 	charstring mp_s2b_remote_ip := "127.0.0.1";
 	integer mp_s2b_remote_port := GTP2C_PORT;
+	charstring mp_s2b_dns_ipv4 := "1.2.3.4";
+	charstring mp_s2b_dns_ipv6 := "::1";
+	charstring mp_s2b_pcscf_ipv4 := "5.6.7.8";
+	charstring mp_s2b_pcscf_ipv6 := "::2";
 
 	charstring mp_diam_realm := "localdomain";
 	integer mp_diam_watchdog_initial_wait_sec := 6*3;
@@ -433,6 +437,45 @@ private function f_S6b_ST_success() runs on EPDG_ConnHdlr {
 	}
 }
 
+private function f_exp_tr_GTP2C_APCO_in_CreateSessionReq()
+		runs on EPDG_ConnHdlr return template (present) APCO {
+	var template ProtocolIDs_and_ContainerIDs protos, protosV4, protosV6, protosV46;
+	protosV4 := {tr_GTP2C_PCO_P_DNS_IPv4(''O), tr_GTP2C_PCO_P_PCSCF_IPv4(''O)};
+	protosV6 := {tr_GTP2C_PCO_P_DNS_IPv6(''O), tr_GTP2C_PCO_P_PCSCF_IPv6(''O)};
+	protosV46 := {tr_GTP2C_PCO_P_DNS_IPv4(''O), tr_GTP2C_PCO_P_PCSCF_IPv4(''O),
+		      tr_GTP2C_PCO_P_DNS_IPv6(''O), tr_GTP2C_PCO_P_PCSCF_IPv6(''O)}
+	/* TODO: pick proto based on req_type v4, v6 or v4v6 */
+	protos := protosV4;
+	return tr_GTP2C_APCO('0000'B, protos);
+}
+
+private function f_GTPv2C_gen_APCO_response(APCO apco_req) runs on EPDG_ConnHdlr return template (value) APCO {
+	var ProtocolIDs_and_ContainerIDs proto_list_resp := {};
+
+	for (var integer i := 0; i < lengthof(apco_req.protocolIDs_and_ContainerIDs); i := i + 1) {
+		var ProtocolID_or_ContainerID proto_req := apco_req.protocolIDs_and_ContainerIDs[i];
+		select (proto_req.protocolID_or_ContainerID) {
+		case (PCO_P_to_OCT2(PCO_P_DNS_IPv4_ADDR)) {
+			proto_list_resp := proto_list_resp & { valueof(ts_GTP2C_PCO_P_DNS_IPv4(f_inet_addr(mp_s2b_dns_ipv4))) };
+		}
+		case (PCO_P_to_OCT2(PCO_P_DNS_IPv6_ADDR)) {
+			proto_list_resp := proto_list_resp & { valueof(ts_GTP2C_PCO_P_DNS_IPv6(f_inet_addr(mp_s2b_dns_ipv6))) };
+		}
+		case (PCO_P_to_OCT2(PCO_P_PCSCF_IPv4_ADDR)) {
+			proto_list_resp := proto_list_resp & { valueof(ts_GTP2C_PCO_P_PCSCF_IPv4(f_inet_addr(mp_s2b_pcscf_ipv4))) };
+		}
+		case (PCO_P_to_OCT2(PCO_P_PCSCF_ADDR)) {
+			proto_list_resp := proto_list_resp & { valueof(ts_GTP2C_PCO_P_PCSCF_IPv6(f_inet_addr(mp_s2b_pcscf_ipv6))) };
+		}
+		case else {
+			log("Ignoring unknown PCO Protocol ID: ", proto_req);
+		}
+		}
+	}
+
+	return ts_GTP2C_APCO(apco_req.instance, proto_list_resp);
+}
+
 /* ePDG Creates session at the PGW. PGW sends Diameter s6b AAR + AAA. */
 private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	var PDU_GTPCv2 rx_msg;
@@ -441,7 +484,7 @@ private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	var template (value) PDN_AddressAllocation paa;
 	var template (value) BearerContextIEs bctx_ies;
 
-	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi)) -> value rx_msg {
+	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi, apco := f_exp_tr_GTP2C_APCO_in_CreateSessionReq())) -> value rx_msg {
 		/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
 		g_pars.teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
 		rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
@@ -466,7 +509,8 @@ private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 						 charging_id := ts_GTP2C_ChargingID(g_pars.teic_local));
 		GTP2.send(ts_GTP2C_CreateSessionResp(g_pars.teic_remote, rx_msg.sequenceNumber,
 						     { fteid_c_ie }, paa,
-						     { ts_GTP2C_BcGrouped(bctx_ies) } ));
+						     { ts_GTP2C_BcGrouped(bctx_ies) },
+						     f_GTPv2C_gen_APCO_response(rx_msg.gtpcv2_pdu.createSessionRequest.aPCO) ));
 		setverdict(pass);
 	}
 	[] GTP2.receive(PDU_GTPCv2:?) -> value rx_msg {
@@ -605,15 +649,20 @@ private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
 	GSUP.send(ts_GSUP_EPDGTunnel_REQ(g_pars.imsi, pco));
 	as_GTP2C_CreateSession_success();
 	/* Expect a positive response back to the translator; */
-	var template (present) GSUP_IEs pdp_info := {
+	var template (present) GSUP_IEs exp_pdp_info := {
 			tr_GSUP_IE_PDP_CONTEXT_ID(?),
 			tr_GSUP_IE_PDP_ADDRESS(tr_GSUP_PDP_Address_IPv4(f_inet_addr(g_pars.ue_ip))),
 			tr_GSUP_IE_APN(f_enc_dns_hostname(g_pars.apn)),
 			tr_GSUP_IE_PDP_QOS(?),
 			tr_GSUP_IE_Charging_Characteristics(?)
 			};
+	var template (present) PCO_DATA exp_pco := tr_PCO({
+			tr_PCO_P_DNS_IPv4(f_inet_addr(mp_s2b_dns_ipv4)),
+			tr_PCO_P_PCSCF_IPv4(f_inet_addr(mp_s2b_pcscf_ipv4))
+			});
+	/* TODO: check for v6 and v4v6 types ^ */
 	alt {
-	[] GSUP.receive(tr_GSUP_EPDGTunnel_RES(g_pars.imsi, pdp_info));
+	[] GSUP.receive(tr_GSUP_EPDGTunnel_RES(g_pars.imsi, exp_pdp_info));
 	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
 		}
