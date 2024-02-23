@@ -20,6 +20,7 @@ import from DIAMETER_Types all;
 import from DIAMETER_Templates all;
 import from DIAMETER_ts29_212_Templates all;
 import from DIAMETER_ts29_272_Templates all;
+import from DIAMETER_ts29_273_Templates all;
 import from DIAMETER_ts32_299_Templates all;
 import from DIAMETER_Emulation all;
 
@@ -39,6 +40,9 @@ modulepar {
 	charstring mp_ocs_local_ip := "127.0.0.9";
 	integer mp_ocs_local_port := 3869;
 
+	charstring mp_aaa_local_ip := "127.0.0.9";
+	integer mp_aaa_local_port := 3870;
+
 	charstring mp_diam_realm := "localdomain";
 }
 
@@ -55,6 +59,10 @@ type component PGW_Test_CT extends GTP2_ConnHdlr {
 	var DIAMETER_Emulation_CT vc_Gy;
 	port DIAMETER_PT Gy_UNIT;
 	port DIAMETEREM_PROC_PT Gy_PROC;
+	/* emulated AAA-Server */
+	var DIAMETER_Emulation_CT vc_S6b;
+	port DIAMETER_PT S6b_UNIT;
+	port DIAMETEREM_PROC_PT S6b_PROC;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard;
 }
@@ -97,6 +105,7 @@ type component PGW_Session_CT extends GTP2_ConnHdlr {
 
 	port DIAMETER_Conn_PT Gx;
 	port DIAMETER_Conn_PT Gy;
+	port DIAMETER_Conn_PT S6b;
 
 	/* GTP-U IPv4 address remote sie */
 	var OCT4	g_gtpu4_remote;
@@ -128,7 +137,7 @@ type record SessionPars {
 	hexstring	imsi,
 	hexstring	msisdn optional,
 	// serving network
-	integer		rat_type,
+	GTP2C_RAT_Type	rat_type,
 	// flags?
 	charstring	apn,
 	/* Apn subscribed or non-subscribed */
@@ -155,8 +164,13 @@ type record SessionPars {
 }
 
 template (value) SessionPars
-t_SessionPars(hexstring imsi, charstring tundev, template (omit) hexstring msisdn := '1234'H, integer rat_type := 6, charstring apn := "internet",
-	      boolean selection_mode := false, BIT3 pdn_type := '001'B) := {
+t_SessionPars(hexstring imsi,
+	     charstring tundev,
+	     template (omit) hexstring msisdn := '1234'H,
+	     GTP2C_RAT_Type rat_type := GTP2C_RAT_EUTRAN,
+	     charstring apn := "internet",
+	     boolean selection_mode := false,
+	     BIT3 pdn_type := '001'B) := {
 	imsi := imsi,
 	msisdn := msisdn,
 	rat_type := rat_type,
@@ -228,8 +242,26 @@ friend function f_init_diameter(charstring id) runs on PGW_Test_CT {
 	connect(vc_Gy:DIAMETER_PROC, self:Gy_PROC);
 	vc_Gy.start(DIAMETER_Emulation.main(ops, pars, id));
 
+	/* S6b setup: */
+	pars := {
+		remote_ip := mp_pgw_hostname,
+		remote_sctp_port := -1,
+		local_ip := mp_aaa_local_ip,
+		local_sctp_port := mp_aaa_local_port,
+		origin_host := "aaa." & mp_diam_realm,
+		origin_realm := mp_diam_realm,
+		auth_app_id := c_DIAMETER_3GPP_S6b_AID,
+		vendor_app_id := c_DIAMETER_3GPP_S6b_AID
+	};
+	vc_S6b := DIAMETER_Emulation_CT.create(id);
+	map(vc_S6b:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_S6b:DIAMETER_UNIT, self:S6b_UNIT);
+	connect(vc_S6b:DIAMETER_PROC, self:S6b_PROC);
+	vc_S6b.start(DIAMETER_Emulation.main(ops, pars, id));
+
 	f_diameter_wait_capability(Gx_UNIT);
 	f_diameter_wait_capability(Gy_UNIT);
+	f_diameter_wait_capability(S6b_UNIT);
 	/* Give some time for our emulation to get out of SUSPECT list of SUT (3 watchdong ping-pongs):
 	 * RFC6733 sec 5.1
 	 * RFC3539 sec 3.4.1 [5]
@@ -266,7 +298,7 @@ private function f_init(float guard_timeout := 60.0) runs on PGW_Test_CT {
 function f_start_handler(void_fn fn, template (omit) SessionPars pars_tmpl := omit)
 runs on PGW_Test_CT return PGW_Session_CT {
 	var charstring id := testcasename();
-	var DIAMETER_ConnHdlr_CT vc_conn_gx, vc_conn_gy;
+	var DIAMETER_ConnHdlr_CT vc_conn_gx, vc_conn_gy, vc_conn_s6b;
 	var PGW_Session_CT vc_conn;
 	var SessionPars pars;
 
@@ -294,6 +326,14 @@ runs on PGW_Test_CT return PGW_Session_CT {
 		connect(vc_conn_gy:DIAMETER_PROC, vc_Gy:DIAMETER_PROC);
 		connect(vc_conn:Gy, vc_conn_gy:DIAMETER_CLIENT);
 		vc_conn_gy.start(f_diam_connhldr_ct_main(pars.imsi));
+	}
+
+	if (isbound(vc_S6b)) {
+		vc_conn_s6b := DIAMETER_ConnHdlr_CT.create(id);
+		connect(vc_conn_s6b:DIAMETER, vc_S6b:DIAMETER_CLIENT);
+		connect(vc_conn_s6b:DIAMETER_PROC, vc_S6b:DIAMETER_PROC);
+		connect(vc_conn:S6b, vc_conn_s6b:DIAMETER_CLIENT);
+		vc_conn_s6b.start(f_diam_connhldr_ct_main(pars.imsi));
 	}
 
 	vc_conn.start(f_handler_init(fn, pars));
@@ -325,6 +365,28 @@ function f_gen_imsi(integer suffix) return hexstring {
 	return f_concat_pad(15, '26242'H, suffix);
 }
 
+/* S6b emulation (AAA-Server) */
+private altstep as_DIA_S6b_AAR() runs on PGW_Session_CT {
+	var PDU_DIAMETER rx_dia;
+	[] S6b.receive(tr_DIA_S6b_AAR()) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+		S6b.send(ts_DIA_S6b_AAA(sess_id, "aaa." & mp_diam_realm,
+					mp_diam_realm, mp_diam_realm,
+					rx_dia.hop_by_hop_id, rx_dia.end_to_end_id));
+		setverdict(pass);
+	}
+	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER ", rx_dia));
+	}
+}
+
+/* Gx emulation (PCRF)*/
 private altstep as_DIA_Gx_CCR(DCC_NONE_CC_Request_Type req_type) runs on PGW_Session_CT {
 	var PDU_DIAMETER rx_dia;
 	[] Gx.receive(tr_DIA_Gx_CCR(req_type := req_type)) -> value rx_dia {
@@ -347,6 +409,7 @@ private altstep as_DIA_Gx_CCR(DCC_NONE_CC_Request_Type req_type) runs on PGW_Ses
 	}
 }
 
+/* Gy emulation (OCS) */
 function f_tr_DIA_Gy_CCR(DCC_NONE_CC_Request_Type req_type)
 runs on PGW_Session_CT return template (present) PDU_DIAMETER
 {
@@ -359,7 +422,7 @@ runs on PGW_Session_CT return template (present) PDU_DIAMETER
 	var template (present) OCT1 nsapi := ?;
 	imsi := char2oct(f_dec_TBCD(imsi_hex2oct(g_pars.imsi)));
 	//msisdn := char2oct(f_dec_TBCD(substr(ctx_val.msisdn, 1, lengthof(ctx_val.msisdn) -1)));
-	rat_type := int2oct(g_pars.rat_type, 1);
+	rat_type := int2oct(enum2int(g_pars.rat_type), 1);
 	charging_char := char2oct(oct2str('0000'O));  // f_s5s8_create_session() uses hardcoded chg_car := '0000'O
 	nsapi := int2oct(g_pars.bearer.ebi, 1);
 	select (req_type) {
@@ -538,6 +601,10 @@ runs on PGW_Session_CT {
 	}
 }
 
+/* GTPv2C */
+private function is_s2b_iface() runs on PGW_Session_CT return boolean {
+	return (g_pars.rat_type == GTP2C_RAT_WLAN or g_pars.rat_type == GTP2C_RAT_Virtual);
+}
 
 /* find TEID of given interface type (and optionally instance) */
 private function f_find_teid(FullyQualifiedTEID_List list,
@@ -558,12 +625,23 @@ return template (omit) FullyQualifiedTEID
 /* process one to-be-created bearer context */
 private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Session_CT
 {
-	/* FIXME: EPS Bearer ID */
+	g_pars.bearer.ebi := bctx.bearerContextIEs.ePS_Bearer_ID.ePS_Bearer_ID_Value;
 	/* FIXME: Cause */
+
+	var integer exp_fteid_if_type;
+	var BIT4 exp_fteid_instance;
+	if (is_s2b_iface()) {
+		exp_fteid_if_type := 33;
+		exp_fteid_instance := '0100'B;
+	} else {
+		exp_fteid_if_type := 5;
+		exp_fteid_instance := '0010'B;
+	}
 
 	/* find F-TEID of the P-GW U side */
 	var FullyQualifiedTEID rx_fteid;
-	rx_fteid := valueof(f_find_teid(bctx.bearerContextIEs.fullyQualifiedTEID, 5, '0010'B));
+	rx_fteid := valueof(f_find_teid(bctx.bearerContextIEs.fullyQualifiedTEID,
+					exp_fteid_if_type, exp_fteid_instance));
 	g_pars.bearer.teid_remote := rx_fteid.tEID_GRE_Key;
 	if (rx_fteid.v4_Flag == '1'B) {
 		g_gtpu4_remote := rx_fteid.iPv4_Address;
@@ -601,10 +679,19 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 				  template (omit) UserLocationInfo uli_ie := omit) runs on PGW_Session_CT {
 	var PDU_GTPCv2 rx;
 
+	/* Defaults used for s5/s8: */
+	var boolean do_s6b := false;
+	var template APN_Restriction apn_restriction := ?;
+	/* Change behavior when on S2b: */
+	if (is_s2b_iface()) {
+		do_s6b := true;
+		apn_restriction := omit;
+	}
+
 	var template (value) PDU_GTPCv2 g2c :=
 		ts_GTP2C_CreateSessionReq(imsi := g_pars.imsi,
 					  msisdn := g_pars.msisdn,
-					  rat_type := g_pars.rat_type,
+					  rat_type := enum2int(g_pars.rat_type),
 					  sender_fteid := fteid_c_ie,
 					  apn := f_enc_dns_hostname(g_pars.apn),
 					  pdn_type := g_pars.pdn_type,
@@ -615,14 +702,20 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 	g2c.gtpcv2_pdu.createSessionRequest.servingNetwork := ts_GTP2C_ServingNetwork('001'H, '01F'H);
 
 	GTP2.send(g2c);
+	if (do_s6b and S6b.checkstate("Connected")) {
+		as_DIA_S6b_AAR();
+	}
 	if (Gx.checkstate("Connected")) {
 		as_DIA_Gx_CCR(INITIAL_REQUEST);
 	}
+	/* FIXME: When on S2b interface, SMF is not using the Gy interface, unknown reason. */
 	if (Gy.checkstate("Connected")) {
 		as_DIA_Gy_CCR(INITIAL_REQUEST);
 	}
 	alt {
-	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_pars.teic_local, cause:=Request_accepted)) -> value rx {
+	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid := g_pars.teic_local,
+						   cause := Request_accepted,
+						   apn_restriction := apn_restriction)) -> value rx {
 		/* extract TEIDs */
 		var CreateSessionResponse resp := rx.gtpcv2_pdu.createSessionResponse;
 		g_pars.teic_remote := resp.fullyQualifiedTEID[0].tEID_GRE_Key;
@@ -677,6 +770,25 @@ private function f_s5s8_create_session() runs on PGW_Session_CT {
 					f_inet_addr(mp_local_hostname_u), omit);
 
 
+	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
+	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
+	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
+	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+
+	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie);
+
+}
+
+/* create a session on the PGW on a S2b interface (from ePDG)*/
+private function f_s2b_create_session() runs on PGW_Session_CT {
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) UserLocationInfo uli_ie;
+
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic_local, 0,
+					f_inet_addr(mp_local_hostname_c), omit);
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.bearer.teid_local, 5,
+					f_inet_addr(mp_local_hostname_u), omit);
+	f_create_session(fteid_c_ie, fteid_u_ie);
 	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
 	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
 	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
@@ -934,6 +1046,21 @@ testcase TC_gy_charging_cc_time() runs on PGW_Test_CT {
 	vc_conn.done;
 }
 
+/* create a session, expect it to succeed */
+private function f_TC_s2b_createSession_v4_noapco() runs on PGW_Session_CT {
+	f_s2b_create_session();
+	setverdict(pass);
+}
+testcase TC_s2b_createSession_v4_noapco() runs on PGW_Test_CT {
+	var PGW_Session_CT vc_conn;
+	var SessionPars pars := valueof(t_SessionPars('001010123456789'H,
+						      "tun22",
+						      rat_type := GTP2C_RAT_WLAN));
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_s2b_createSession_v4_noapco), pars);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_tx_echo() );
 	execute( TC_createSession() );
@@ -942,6 +1069,7 @@ control {
 	execute( TC_createSession_deleteSession() );
 	execute( TC_deleteSession_unknown() );
 	execute( TC_gy_charging_cc_time() );
+	execute( TC_s2b_createSession_v4_noapco() );
 }
 
 
