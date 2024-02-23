@@ -98,14 +98,6 @@ type component PGW_Session_CT extends GTP2_ConnHdlr {
 	port DIAMETER_Conn_PT Gx;
 	port DIAMETER_Conn_PT Gy;
 
-	/* TEI (Data) local side */
-	var OCT4	g_teid;
-	/* TEI (Control) local side */
-	var OCT4	g_teic;
-	/* TEI (Data) remote side */
-	var OCT4	g_teid_remote;
-	/* TEI (Control) remote side */
-	var OCT4	g_teic_remote;
 	/* GTP-U IPv4 address remote sie */
 	var OCT4	g_gtpu4_remote;
 	var OCT16	g_gtpu6_remote;
@@ -121,6 +113,15 @@ type component PGW_Session_CT extends GTP2_ConnHdlr {
 	/* number of programs started, used as identifier. */
 	var integer 	g_start_prog_count := 0;
 }
+
+type record BearerConfig {
+	 /* EPS Bearer ID */
+	uint4_t		ebi optional,
+	/* TEI (Data) local side */
+	OCT4 		teid_local optional,
+	/* TEI (Data) remote side */
+	OCT4 		teid_remote optional
+};
 
 /* configuration data for a given Session */
 type record SessionPars {
@@ -138,7 +139,13 @@ type record SessionPars {
 	/* APN-AMBR */
 	octetstring	pco optional,
 	octetstring	epco optional,
+
+	/* TEI (Control) local side */
+	OCT4 		teic_local,
+	/* TEI (Control) remote side */
+	OCT4 		teic_remote optional,
 	/* Bearer Contexts to be created */
+	BearerConfig 	bearer optional,
 
 	charstring	tun_dev_name,
 	charstring	tun_netns_name optional,
@@ -148,24 +155,28 @@ type record SessionPars {
 }
 
 template (value) SessionPars
-t_SessionPars(hexstring imsi, charstring tundev, integer rat_type := 6, charstring apn := "internet",
+t_SessionPars(hexstring imsi, charstring tundev, template (omit) hexstring msisdn := '1234'H, integer rat_type := 6, charstring apn := "internet",
 	      boolean selection_mode := false, BIT3 pdn_type := '001'B) := {
 	imsi := imsi,
-	msisdn := '1234'H,
+	msisdn := msisdn,
 	rat_type := rat_type,
 	apn := apn,
 	selection_mode := selection_mode,
 	pdn_type := pdn_type,
 	pco := omit,
 	epco := omit,
+	teic_local := '00000000'O,
+	teic_remote := omit,
+	bearer := {
+		ebi := 5,
+		teid_local := omit,
+		teid_remote := omit
+	},
 	tun_dev_name := tundev,
 	tun_netns_name := tundev,
 	gy_validity_time := 0
 }
 
-type record BearerConfig {
-	integer		eps_bearer_id
-}
 
 type function void_fn() runs on PGW_Session_CT;
 
@@ -292,6 +303,9 @@ runs on PGW_Test_CT return PGW_Session_CT {
 private function f_handler_init(void_fn fn, SessionPars pars)
 runs on PGW_Session_CT {
 	g_pars := valueof(pars);
+	/* allocate + register TEID-C on local side */
+	g_pars.teic_local := f_gtp2_allocate_teid();
+	g_pars.bearer.teid_local := g_pars.teic_local;
 	fn.apply();
 }
 
@@ -346,8 +360,8 @@ runs on PGW_Session_CT return template (present) PDU_DIAMETER
 	imsi := char2oct(f_dec_TBCD(imsi_hex2oct(g_pars.imsi)));
 	//msisdn := char2oct(f_dec_TBCD(substr(ctx_val.msisdn, 1, lengthof(ctx_val.msisdn) -1)));
 	rat_type := int2oct(g_pars.rat_type, 1);
-	charging_char := char2oct(oct2str('0000'O));  // f_create_session() uses hardcoded chg_car := '0000'O
-	nsapi := '01'O; // f_create_session() uses hardcoded bearer_id := 1
+	charging_char := char2oct(oct2str('0000'O));  // f_s5s8_create_session() uses hardcoded chg_car := '0000'O
+	nsapi := int2oct(g_pars.bearer.ebi, 1);
 	select (req_type) {
 		case (INITIAL_REQUEST) {
 			tpl := tr_DIAMETER(flags:='11000000'B, cmd_code:=Credit_Control,
@@ -550,7 +564,7 @@ private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Sess
 	/* find F-TEID of the P-GW U side */
 	var FullyQualifiedTEID rx_fteid;
 	rx_fteid := valueof(f_find_teid(bctx.bearerContextIEs.fullyQualifiedTEID, 5, '0010'B));
-	g_teid_remote := rx_fteid.tEID_GRE_Key;
+	g_pars.bearer.teid_remote := rx_fteid.tEID_GRE_Key;
 	if (rx_fteid.v4_Flag == '1'B) {
 		g_gtpu4_remote := rx_fteid.iPv4_Address;
 	}
@@ -559,8 +573,8 @@ private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Sess
 	}
 
 	var UECUPS_CreateTun uecups_create := {
-		tx_teid := oct2int(g_teid_remote),
-		rx_teid := oct2int(g_teid),
+		tx_teid := oct2int(g_pars.bearer.teid_remote),
+		rx_teid := oct2int(g_pars.bearer.teid_local),
 		user_addr_type := IPV4,
 		user_addr := '00000000'O,
 		local_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u))),
@@ -582,28 +596,22 @@ private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Sess
 }
 
 /* create a session on the PGW */
-private function f_create_session() runs on PGW_Session_CT {
+private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie,
+				  template (value) FullyQualifiedTEID fteid_u_ie,
+				  template (omit) UserLocationInfo uli_ie := omit) runs on PGW_Session_CT {
 	var PDU_GTPCv2 rx;
 
-	/* allocate + register TEID-C on local side */
-	g_teic := f_gtp2_allocate_teid();
-	g_teid := g_teic;
-
-	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
-	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_teic, 0,
-					f_inet_addr(mp_local_hostname_c), omit);
-	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPU, g_teid, 2,
-					f_inet_addr(mp_local_hostname_u), omit);
 	var template (value) PDU_GTPCv2 g2c :=
-		ts_GTP2C_CreateSessionReq(imsi := g_pars.imsi, msisdn := g_pars.msisdn, rat_type := 6,
+		ts_GTP2C_CreateSessionReq(imsi := g_pars.imsi,
+					  msisdn := g_pars.msisdn,
+					  rat_type := g_pars.rat_type,
 					  sender_fteid := fteid_c_ie,
 					  apn := f_enc_dns_hostname(g_pars.apn),
-					  pdn_type := g_pars.pdn_type, teid_list := { fteid_u_ie },
-					  chg_car := '0000'O, bearer_id := 1);
-	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
-	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
-	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
-	g2c.gtpcv2_pdu.createSessionRequest.userLocationInfo := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+					  pdn_type := g_pars.pdn_type,
+					  teid_list := { fteid_u_ie },
+					  chg_car := '0000'O,
+					  bearer_id := g_pars.bearer.ebi,
+					  uli := uli_ie);
 	g2c.gtpcv2_pdu.createSessionRequest.servingNetwork := ts_GTP2C_ServingNetwork('001'H, '01F'H);
 
 	GTP2.send(g2c);
@@ -614,10 +622,10 @@ private function f_create_session() runs on PGW_Session_CT {
 		as_DIA_Gy_CCR(INITIAL_REQUEST);
 	}
 	alt {
-	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_teic, cause:=Request_accepted)) -> value rx {
+	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_pars.teic_local, cause:=Request_accepted)) -> value rx {
 		/* extract TEIDs */
 		var CreateSessionResponse resp := rx.gtpcv2_pdu.createSessionResponse;
-		g_teic_remote := resp.fullyQualifiedTEID[0].tEID_GRE_Key;
+		g_pars.teic_remote := resp.fullyQualifiedTEID[0].tEID_GRE_Key;
 
 		/* extract allocated address[es] */
 		var PDN_Address_and_Prefix paa := resp.pDN_AddressAllocation.pDN_Address_and_Prefix;
@@ -645,7 +653,7 @@ private function f_create_session() runs on PGW_Session_CT {
 			}
 		}
 		}
-	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_teic, cause:=?)) -> value rx {
+	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_pars.teic_local, cause:=?)) -> value rx {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Unexpected  CreateSessionResp(cause=",
 						rx.gtpcv2_pdu.createSessionResponse.cause.causeValue, ")"));
@@ -658,18 +666,38 @@ private function f_create_session() runs on PGW_Session_CT {
 
 }
 
+/* create a session on the PGW on a S5/S8 interface (from SGW )*/
+private function f_s5s8_create_session() runs on PGW_Session_CT {
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) UserLocationInfo uli_ie;
+
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
+					f_inet_addr(mp_local_hostname_c), omit);
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPU, g_pars.bearer.teid_local, 2,
+					f_inet_addr(mp_local_hostname_u), omit);
+
+
+	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
+	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
+	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
+	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+
+	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie);
+
+}
+
 /* delete the session from the PGW */
 private function f_delete_session(template (omit) GTP2C_Cause tx_cause := omit,
 				  template (present) OCT4 exp_teid,
 				  template (present) GTP2C_Cause exp_cause,
 				  boolean expect_diameter := true) runs on PGW_Session_CT {
 	var template (value) FullyQualifiedTEID fteid_c_ie
-	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_teic, 0,
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
 					f_inet_addr(mp_local_hostname_c), omit);
 	var template PDU_GTPCv2 g2c :=
-		ts_GTP2C_DeleteSessionReq(d_teid := g_teic_remote, cause := tx_cause,
+		ts_GTP2C_DeleteSessionReq(d_teid := g_pars.teic_remote, cause := tx_cause,
 					  sender_fteid := fteid_c_ie,
-					  teid_list := {}, bearer_id := 1);
+					  teid_list := {}, bearer_id := g_pars.bearer.ebi);
 
 	GTP2.send(g2c);
 	if (Gx.checkstate("Connected") and expect_diameter) {
@@ -693,10 +721,10 @@ private function f_delete_session(template (omit) GTP2C_Cause tx_cause := omit,
 	}
 
 	/* destroy tunnel in daemon */
-	if (isbound(g_teid)) {
+	if (isbound(g_pars.bearer.teid_local)) {
 		var UECUPS_DestroyTun uecups_destroy := {
 			local_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u))),
-			rx_teid := oct2int(g_teid)
+			rx_teid := oct2int(g_pars.bearer.teid_local)
 		};
 		/* FIXME: what about IPv4/IPv6 differentiation? */
 		f_gtp2_destroy_tunnel(uecups_destroy);
@@ -803,7 +831,7 @@ testcase TC_tx_echo() runs on PGW_Test_CT {
 
 /* create a session, expect it to succeed */
 private function f_TC_createSession() runs on PGW_Session_CT {
-	f_create_session();
+	f_s5s8_create_session();
 	setverdict(pass);
 }
 testcase TC_createSession() runs on PGW_Test_CT {
@@ -816,7 +844,7 @@ testcase TC_createSession() runs on PGW_Test_CT {
 
 /* create a session, then execute a ping command on the user plane */
 private function f_TC_createSession_ping4() runs on PGW_Session_CT {
-	f_create_session();
+	f_s5s8_create_session();
 	f_ping4(mp_ping_hostname);
 	setverdict(pass);
 }
@@ -847,8 +875,8 @@ testcase TC_createSession_ping4_256() runs on PGW_Test_CT {
 
 /* create a session, then delete it again */
 private function f_TC_createSession_deleteSession() runs on PGW_Session_CT {
-	f_create_session();
-	f_delete_session(omit, g_teic, Request_accepted);
+	f_s5s8_create_session();
+	f_delete_session(omit, g_pars.teic_local, Request_accepted);
 	setverdict(pass);
 }
 testcase TC_createSession_deleteSession() runs on PGW_Test_CT {
@@ -861,8 +889,7 @@ testcase TC_createSession_deleteSession() runs on PGW_Test_CT {
 
 /* send a DeleteSessionReq for an unknown/invalid TEID */
 private function f_TC_deleteSession_unknown() runs on PGW_Session_CT {
-	g_teic := f_gtp2_allocate_teid();
-	g_teic_remote := f_rnd_octstring(4);
+	g_pars.teic_remote := f_rnd_octstring(4);
 	f_delete_session(omit, '00000000'O, Context_Not_Found, false);
 	setverdict(pass);
 }
@@ -878,7 +905,7 @@ testcase TC_deleteSession_unknown() runs on PGW_Test_CT {
 private function f_TC_gy_charging_cc_time() runs on PGW_Session_CT {
 	var default d;
 
-	f_create_session();
+	f_s5s8_create_session();
 
 	/* We should receive an update even if no traffic is sent: */
 	as_DIA_Gy_CCR(UPDATE_REQUEST);
@@ -894,7 +921,7 @@ private function f_TC_gy_charging_cc_time() runs on PGW_Session_CT {
 	as_DIA_Gy_CCR(UPDATE_REQUEST);
 	f_validate_gy_cc_report(g_rx_gy, VALIDITY_TIME, (3..4), ?, ?);
 
-	f_delete_session(omit, g_teic, Request_accepted);
+	f_delete_session(omit, g_pars.teic_local, Request_accepted);
 	f_validate_gy_cc_report(g_rx_gy, FINAL, (0..1), 0, 0);
 	setverdict(pass);
 }
