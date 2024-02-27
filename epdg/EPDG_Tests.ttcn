@@ -55,6 +55,14 @@ modulepar {
 	integer mp_diam_watchdog_initial_wait_sec := 6*3;
 }
 
+type port Coord_PT message
+{
+	inout charstring;
+} with { extension "internal" };
+private const charstring COORD_CMD_READY := "COORD_CMD_READY";
+private const charstring COORD_CMD_START := "COORD_CMD_START";
+private const charstring COORD_CMD_ATTACHED := "COORD_CMD_ATTACHED";
+private const charstring COORD_CMD_STOP := "COORD_CMD_STOP";
 
 type component MTC_CT {
 	var DIAMETER_Emulation_CT vc_SWx;
@@ -71,6 +79,8 @@ type component MTC_CT {
 
 	var GTPv2_Emulation_CT vc_GTP2;
 	port GTP2EM_PT TEID0;
+
+	port Coord_PT COORD;
 
 	timer g_Tguard;
 };
@@ -118,8 +128,9 @@ type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_Conn
 	port DIAMETEREM_PROC_PT SWx_PROC;
 	port DIAMETER_Conn_PT S6b;
 	port DIAMETEREM_PROC_PT S6b_PROC;
+	port Coord_PT COORD;
 };
-
+type record of EPDG_ConnHdlr EPDG_ConnHdlrList;
 
 type record BearerConfig {
 	 /* EPS Bearer ID */
@@ -156,12 +167,22 @@ private function f_epdg_connhldr_S6b_expect_eteid(UINT32 ete_id) runs on EPDG_Co
 	}
 }
 
-private function f_init_pars(integer imsi_suffix := 1)
+private function f_gen_addr_in_pool(integer idx := 0) return charstring
+{
+	/* Skip first 2 addresses reserved for TUN */
+	var integer internal_idx := idx + 2;
+	var integer suffix := internal_idx rem (256*256);
+	var integer C := suffix / 256;
+	var integer D := suffix rem 256;
+	return "192.168." & int2str(C) & "." & int2str(D);
+}
+
+private function f_init_pars(integer idx := 0)
 runs on MTC_CT return EPDG_ConnHdlrPars {
 	var EPDG_ConnHdlrPars pars := {
-		imsi := f_gen_imsi(imsi_suffix),
+		imsi := f_rnd_imsi('26242'H),
 		apn := "internet",
-		ue_ip := "192.168.123.50",
+		ue_ip := f_gen_addr_in_pool(idx),
 		teic_local := '00000000'O,
 		teic_remote := omit,
 		bearer := {
@@ -333,6 +354,9 @@ runs on MTC_CT return EPDG_ConnHdlr {
 	connect(vc_conn:S6b, vc_conn_s6b:DIAMETER_CLIENT);
 	connect(vc_conn:S6b_PROC, vc_conn_s6b:DIAMETER_PROC_CLIENT);
 	vc_conn_s6b.start(f_diam_connhldr_ct_main(pars.imsi));
+
+	/* COORD */
+	connect(vc_conn:COORD, self:COORD);
 
 	vc_conn.start(f_init_handler(fn, id, pars));
 	return vc_conn;
@@ -750,10 +774,64 @@ testcase TC_ho_wifi_to_lte() runs on MTC_CT {
 	setverdict(pass);
 }
 
+private function f_TC_concurrent_ues(charstring id) runs on EPDG_ConnHdlr {
+	COORD.send(COORD_CMD_READY);
+	COORD.receive(COORD_CMD_START);
+	f_initial_attach();
+	COORD.send(COORD_CMD_ATTACHED);
+	COORD.receive(COORD_CMD_STOP);
+	f_GSUP_PurgeMS_success();
+}
+private function f_TC_concurrent_ues_MTC(integer num_ues) runs on MTC_CT {
+	var EPDG_ConnHdlrList vc_conn_list := {};
+	var EPDG_ConnHdlr vc_conn;
+	f_init(t_guard := 100.0);
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		var EPDG_ConnHdlrPars pars := f_init_pars(i);
+		vc_conn := f_start_handler(refers(f_TC_concurrent_ues), pars);
+		vc_conn_list := vc_conn_list & { vc_conn };
+	}
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		COORD.receive(COORD_CMD_READY) from vc_conn_list[i];
+	}
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		COORD.send(COORD_CMD_START) to vc_conn_list[i];
+		f_sleep(0.1);
+	}
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		COORD.receive(COORD_CMD_ATTACHED) from vc_conn_list[i];
+	}
+
+	log("All attached!");
+	f_sleep(1.0);
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		COORD.send(COORD_CMD_STOP) to vc_conn_list[i];
+	}
+
+	for (var integer i := 0; i < num_ues; i := i + 1) {
+		vc_conn_list[i].done;
+	}
+
+	setverdict(pass);
+}
+testcase TC_concurrent_ues2() runs on MTC_CT {
+	f_TC_concurrent_ues_MTC(2)
+}
+testcase TC_concurrent_ues100() runs on MTC_CT {
+	f_TC_concurrent_ues_MTC(100)
+}
+
 control {
 	execute ( TC_authinfo_normal() );
 	execute ( TC_ho_lte_to_wifi() );
 	execute ( TC_ho_wifi_to_lte() );
+	execute ( TC_concurrent_ues2() );
+	execute ( TC_concurrent_ues100() );
 }
 
 }
