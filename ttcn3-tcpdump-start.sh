@@ -84,9 +84,9 @@ fi
 
 # Log stderr to CMD_OUTFILE and a dedicated error log file
 tee $CMD_OUTFILE < $FIFO > $CMD_OUTFILE_ERR &
-CMD_STR="$CMD -s 1500 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE 2>$FIFO &"
+CMD_STR="$CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE 2>$FIFO &"
 eval $CMD_STR
-# $CMD -s 1500 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE &
+# $CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE &
 PID=$!
 echo $PID > $PIDFILE_PCAP
 if [ -f $CMD_OUTFILE_ERR ] && [ $(wc -l $CMD_OUTFILE_ERR | awk '{print $1}') -ne 0 ]; then

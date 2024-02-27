@@ -80,7 +80,7 @@ for f in /sys/class/net/*; do
 	fi
 done
 
-$CMD -s 1500 -n ${ADDL_ARGS} -w "$TTCN3_PCAP_PATH/$TESTCASE.pcapng" >$TTCN3_PCAP_PATH/$TESTCASE.pcapng.stdout 2>&1 &
+$CMD -s 1520 -n ${ADDL_ARGS} -w "$TTCN3_PCAP_PATH/$TESTCASE.pcapng" >$TTCN3_PCAP_PATH/$TESTCASE.pcapng.stdout 2>&1 &
 PID=$!
 echo $PID > $PIDFILE_PCAP
 
