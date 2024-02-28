@@ -499,24 +499,29 @@ private function f_GTPv2C_gen_APCO_response(APCO apco_req) runs on EPDG_ConnHdlr
 	return ts_GTP2C_APCO(apco_req.instance, proto_list_resp);
 }
 
+private function f_EPDG_ConnHdlr_parse_CreateSessionReq(PDU_GTPCv2 rx_msg) runs on EPDG_ConnHdlr {
+	var BearerContextIEs rx_bctx_ies;
+
+	/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
+	g_pars.teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
+	rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
+	g_pars.bearer.ebi := rx_bctx_ies.ePS_Bearer_ID.ePS_Bearer_ID_Value;
+	g_pars.bearer.teid_remote := rx_bctx_ies.fullyQualifiedTEID[0].tEID_GRE_Key;
+
+	/* allocate + register TEID-C on local side */
+	g_pars.teic_local := f_gtp2_allocate_teid();
+	g_pars.bearer.teid_local := g_pars.teic_local;
+}
+
 /* ePDG Creates session at the PGW. PGW sends Diameter s6b AAR + AAA. */
 private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 	var PDU_GTPCv2 rx_msg;
-	var BearerContextIEs rx_bctx_ies;
 	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
 	var template (value) PDN_AddressAllocation paa;
 	var template (value) BearerContextIEs bctx_ies;
 
 	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi, apco := f_exp_tr_GTP2C_APCO_in_CreateSessionReq())) -> value rx_msg {
-		/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
-		g_pars.teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
-		rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
-		g_pars.bearer.ebi := rx_bctx_ies.ePS_Bearer_ID.ePS_Bearer_ID_Value;
-		g_pars.bearer.teid_remote := rx_bctx_ies.fullyQualifiedTEID[0].tEID_GRE_Key;
-
-		/* allocate + register TEID-C on local side */
-		g_pars.teic_local := f_gtp2_allocate_teid();
-		g_pars.bearer.teid_local := g_pars.teic_local;
+		f_EPDG_ConnHdlr_parse_CreateSessionReq(rx_msg);
 
 		/* Upon rx of CreateSession, emulate PGW asking the AAA server. */
 		f_S6b_AA_success();
@@ -531,9 +536,38 @@ private altstep as_GTP2C_CreateSession_success() runs on EPDG_ConnHdlr {
 						 qos := ts_GTP2C_BearerQos('09'O, 0,0,0,0),
 						 charging_id := ts_GTP2C_ChargingID(g_pars.teic_local));
 		GTP2.send(ts_GTP2C_CreateSessionResp(g_pars.teic_remote, rx_msg.sequenceNumber,
+						     Request_accepted,
 						     { fteid_c_ie }, paa,
 						     { ts_GTP2C_BcGrouped(bctx_ies) },
 						     f_GTPv2C_gen_APCO_response(rx_msg.gtpcv2_pdu.createSessionRequest.aPCO) ));
+		setverdict(pass);
+	}
+	[] GTP2.receive(PDU_GTPCv2:?) -> value rx_msg {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GTP2C msg rx: ", rx_msg));
+	}
+}
+
+/* ePDG Creates session at the PGW. PGW sends Diameter s6b AAR + AAA. */
+private altstep as_GTP2C_CreateSession_error(GTP2C_Cause resp_cause, boolean do_s6b_aar := false) runs on EPDG_ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) PDN_AddressAllocation paa;
+	var template (value) BearerContextIEs bctx_ies;
+
+	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.imsi, apco := f_exp_tr_GTP2C_APCO_in_CreateSessionReq())) -> value rx_msg {
+		f_EPDG_ConnHdlr_parse_CreateSessionReq(rx_msg);
+
+		/* Upon rx of CreateSession, emulate PGW asking the AAA server. */
+		if (do_s6b_aar) {
+			f_S6b_AA_success();
+		}
+
+		fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_PGW_GTPC, g_pars.teic_local, 1,
+					f_inet_addr(mp_s2b_local_ip), omit);
+		fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_PGW_GTPU, g_pars.bearer.teid_local, 4,
+					f_inet_addr(mp_s2b_local_ip), omit);
+		GTP2.send(ts_GTP2C_CreateSessionResp(g_pars.teic_remote, rx_msg.sequenceNumber,
+						     resp_cause));
 		setverdict(pass);
 	}
 	[] GTP2.receive(PDU_GTPCv2:?) -> value rx_msg {
@@ -693,6 +727,21 @@ private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
 	setverdict(pass);
 }
 
+/* GSUP TunnelEPDG Tunnel Req + Resp, triggers S2b CreateSession Req + Response (rejected). */
+private function f_GSUP_EPDGTunnel_error() runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+	var template (value) PCO_DATA pco := ts_PCO({ ts_PCO_P_DNS_IPv4, ts_PCO_P_PCSCF_IPv4 });
+	GSUP.send(ts_GSUP_EPDGTunnel_REQ(g_pars.imsi, pco));
+	as_GTP2C_CreateSession_error(APN_access_denied__no_subscription);
+	alt {
+	[] GSUP.receive(tr_GSUP_EPDGTunnel_ERR(g_pars.imsi));
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+		}
+	}
+	setverdict(pass);
+}
+
 /* GSUP Purge MS Req + Resp, triggers S2b DeleteSession Req + Response. */
 private function f_GSUP_PurgeMS_success() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
@@ -774,6 +823,20 @@ testcase TC_ho_wifi_to_lte() runs on MTC_CT {
 	setverdict(pass);
 }
 
+private function f_TC_s2b_CreateSession_rejected(charstring id) runs on EPDG_ConnHdlr {
+	f_GSUP_AI_success();
+	f_GSUP_LU_success();
+	f_GSUP_EPDGTunnel_error();
+}
+testcase TC_s2b_CreateSession_rejected() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_s2b_CreateSession_rejected), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 private function f_TC_concurrent_ues(charstring id) runs on EPDG_ConnHdlr {
 	COORD.send(COORD_CMD_READY);
 	COORD.receive(COORD_CMD_START);
@@ -830,6 +893,7 @@ control {
 	execute ( TC_authinfo_normal() );
 	execute ( TC_ho_lte_to_wifi() );
 	execute ( TC_ho_wifi_to_lte() );
+	execute ( TC_s2b_CreateSession_rejected() );
 	execute ( TC_concurrent_ues2() );
 	execute ( TC_concurrent_ues100() );
 }
