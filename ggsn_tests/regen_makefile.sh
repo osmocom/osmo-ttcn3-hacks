@@ -9,7 +9,8 @@ FILES="
 	DIAMETER_EncDec.cc
 	GTPC_EncDec.cc
 	GTPU_EncDec.cc
-	GTP_CodecPort_CtrlFunctDef.cc
+	GTPv1C_CodecPort_CtrlFunctDef.cc
+	GTPv1U_CodecPort_CtrlFunctDef.cc
 	ICMP_EncDec.cc
 	ICMPv6_EncDec.cc
 	IPL4asp_PT.cc

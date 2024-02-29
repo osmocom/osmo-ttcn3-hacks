@@ -10,7 +10,8 @@ FILES="
 	BSSGP_EncDec.cc
 	GTPC_EncDec.cc
 	GTPU_EncDec.cc
-	GTP_CodecPort_CtrlFunctDef.cc
+	GTPv1C_CodecPort_CtrlFunctDef.cc
+	GTPv1U_CodecPort_CtrlFunctDef.cc
 	IPA_CodecPort_CtrlFunctDef.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
