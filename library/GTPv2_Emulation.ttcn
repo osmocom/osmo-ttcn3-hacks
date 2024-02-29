@@ -14,6 +14,9 @@ module GTPv2_Emulation {
 import from IPL4asp_Types all;
 import from General_Types all;
 import from Osmocom_Types all;
+import from GTPU_Types all;
+import from GTPv1U_CodecPort all;
+import from GTPv1U_CodecPort_CtrlFunct all;
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
 import from GTPv2_CodecPort all;
@@ -40,8 +43,8 @@ type record Gtp2EmulationCfg {
 	IPL4asp_Types.PortNumber gtpc_bind_port,
 	HostName gtpc_remote_ip,
 	IPL4asp_Types.PortNumber gtpc_remote_port,
-	//HostName gtpu_bind_ip,
-	//PortNumber gtpu_bind_port,
+	HostName gtpu_bind_ip optional,
+	IPL4asp_Types.PortNumber gtpu_bind_port optional,
 	boolean sgw_role,
 	boolean use_gtpu_daemon
 };
@@ -49,6 +52,7 @@ type record Gtp2EmulationCfg {
 type component GTPv2_Emulation_CT {
 	/* Communication with underlying GTP CodecPort */
 	port GTPv2C_PT GTP2C;
+	port GTPU_PT GTPU;
 
 	/* Control port to GTP-U Daemon */
 	port UECUPS_CODEC_PT UECUPS;
@@ -63,7 +67,7 @@ type component GTPv2_Emulation_CT {
 
 	/* State */
 	var Gtp2cPeer g_peer;
-	var integer g_gtp2c_id;
+	var integer g_gtp2c_id, g_gtp1u_id;
 	var OCT1 g_restart_ctr;
 	var uint16_t g_c_seq_nr;
 	var TidTableRec TidTable[256];
@@ -508,6 +512,11 @@ private function f_init(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 
 		/* clear all tunnel state in the daemon at start */
 		f_uecups_xceive({reset_all_state := {}}, {reset_all_state_res:=?}, 30.0);
+	} else if (isvalue(cfg.gtpu_bind_ip) and isvalue(cfg.gtpu_bind_port)) {
+		map(self:GTPU, system:GTPU);
+		res := GTPv1U_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, cfg.gtpu_bind_ip,
+								cfg.gtpu_bind_port, {udp:={}});
+		g_gtp1u_id := res.connId;
 	}
 
 	/* make sure we always pass incoming UECUPS indications whenever receiving fom the UECUPS port */
@@ -543,6 +552,7 @@ private function SendToUdMsgTable(Gtp2cUnitdata g2c_ud) runs on GTPv2_Emulation_
 
 function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 	var Gtp2cUnitdata g2c_ud;
+	var Gtp1uUnitdata g1u_ud;
 	var PDU_GTPCv2 g2c;
 	var GTP2_ConnHdlr vc_conn;
 	var hexstring imsi;
@@ -589,6 +599,16 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		}
 
 		}
+	[] GTPU.receive(Gtp1uUnitdata:?) -> value g1u_ud {
+		if (f_teid_known(g1u_ud.gtpu.teid)) {
+			vc_conn := f_comp_by_teid(g1u_ud.gtpu.teid);
+			CLIENT.send(g1u_ud) to vc_conn;
+		} else if (g1u_ud.gtpu.teid == '00000000'O) {
+			TEID0.send(g1u_ud);
+		} else {
+			log("No client registered for TEID=", g1u_ud.gtpu.teid, "!");
+		}
+		}
 
 	[] TEID0.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
 		/* patch in the next sequence number on outbound Initial message */
@@ -603,6 +623,9 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
 		}
 		}
+	[] TEID0.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
+		GTPU.send(g1u_ud);
+		}
 
 	[] CLIENT.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
 		/* patch in the next sequence number on outbound Initial message */
@@ -616,6 +639,9 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		if (match(g2c, tr_PDU_GTP2C_msgtypes(gtp2_requests))) {
 			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
 		}
+		}
+	[] CLIENT.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
+		GTPU.send(g1u_ud);
 		}
 
 	[] CLIENT_PROC.getcall(GTP2EM_register_imsi:{?}) -> param(imsi) sender vc_conn {
@@ -662,7 +688,7 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
  * Interaction between Main and Client Components
  ***********************************************************************/
 type port GTP2EM_PT message {
-	inout PDU_GTPCv2, UECUPS_ProgramTermInd;
+	inout PDU_GTPCv2, Gtp1uUnitdata, UECUPS_ProgramTermInd;
 } with { extension "internal" };
 
 signature GTP2EM_register_imsi(hexstring imsi);
