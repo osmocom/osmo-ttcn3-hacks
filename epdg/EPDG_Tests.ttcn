@@ -144,7 +144,9 @@ type record BearerConfig {
 	/* TEI (Data) local side */
 	OCT4 		teid_local optional,
 	/* TEI (Data) remote side */
-	OCT4 teid_remote optional
+	OCT4 		teid_remote optional,
+	/* GTP-U address of the peer (ePDG) */
+	charstring	gtpu_addr_remote optional
 };
 
 type record EPDG_ConnHdlrPars {
@@ -194,7 +196,8 @@ runs on MTC_CT return EPDG_ConnHdlrPars {
 		bearer := {
 			ebi := omit,
 			teid_local := omit,
-			teid_remote := omit
+			teid_remote := omit,
+			gtpu_addr_remote := omit
 		},
 		vec := f_gen_auth_vec_3g()
 	};
@@ -509,12 +512,21 @@ private function f_GTPv2C_gen_APCO_response(APCO apco_req) runs on EPDG_ConnHdlr
 
 private function f_EPDG_ConnHdlr_parse_CreateSessionReq(PDU_GTPCv2 rx_msg) runs on EPDG_ConnHdlr {
 	var BearerContextIEs rx_bctx_ies;
+	var FullyQualifiedTEID rx_fteid_gtpu;
 
 	/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
 	g_pars.teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
 	rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
 	g_pars.bearer.ebi := rx_bctx_ies.ePS_Bearer_ID.ePS_Bearer_ID_Value;
-	g_pars.bearer.teid_remote := rx_bctx_ies.fullyQualifiedTEID[0].tEID_GRE_Key;
+
+	rx_fteid_gtpu := rx_bctx_ies.fullyQualifiedTEID[0];
+	g_pars.bearer.teid_remote := rx_fteid_gtpu.tEID_GRE_Key;
+	if (rx_fteid_gtpu.v4_Flag == '1'B) {
+		g_pars.bearer.gtpu_addr_remote := f_inet_ntoa(rx_fteid_gtpu.iPv4_Address);
+	}
+	/*if (rx_fteid_gtpu.v6_Flag == '1'B) {
+		g_gtpu6_remote := rx_fteid_gtpu.iPv6_Address;
+	}*/
 
 	/* allocate + register TEID-C on local side */
 	g_pars.teic_local := f_gtp2_allocate_teid();
@@ -666,6 +678,21 @@ private function f_GTP2C_DeleteBearer_success() runs on EPDG_ConnHdlr {
 	as_GTP2C_DeleteBearer_success();
 }
 
+private template (value) Gtp1uPeer ts_GtpPeerU(octetstring ip) := {
+	connId := 1,
+	remName := f_inet_ntoa(ip),
+	remPort := GTP1U_PORT
+}
+private function f_GTP1U_send(octetstring payload) runs on EPDG_ConnHdlr {
+	var Gtp1uPeer peer := valueof(ts_GtpPeerU(f_inet_addr(g_pars.bearer.gtpu_addr_remote)));
+	GTP2.send(ts_GTP1U_GPDU(peer, 0 /*seq*/, g_pars.bearer.teid_remote, payload));
+}
+private function f_GTP1U_echo_ping_pong(uint16_t seq_nr := 0) runs on EPDG_ConnHdlr {
+	var Gtp1uPeer peer := valueof(ts_GtpPeerU(f_inet_addr(g_pars.bearer.gtpu_addr_remote)));
+	GTP2.send(ts_GTPU_PING(peer, seq := seq_nr));
+	GTP2.receive(tr_GTPU_PONG(peer));
+}
+
 /* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
 private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
@@ -710,7 +737,7 @@ private function f_GSUP_LU_success() runs on EPDG_ConnHdlr {
 /* GSUP TunnelEPDG Tunnel Req + Resp, triggers S2b CreateSession Req + Response. */
 private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
-	var template (value) PCO_DATA pco := ts_PCO({ ts_PCO_P_DNS_IPv4, ts_PCO_P_PCSCF_IPv4 });
+	var template (value) PCO_DATA pco := PCO_Types.ts_PCO({ ts_PCO_P_DNS_IPv4, ts_PCO_P_PCSCF_IPv4 });
 	GSUP.send(ts_GSUP_EPDGTunnel_REQ(g_pars.imsi, pco));
 	as_GTP2C_CreateSession_success();
 	/* Expect a positive response back to the translator; */
@@ -721,7 +748,7 @@ private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
 			tr_GSUP_IE_PDP_QOS(?),
 			tr_GSUP_IE_Charging_Characteristics(?)
 			};
-	var template (present) PCO_DATA exp_pco := tr_PCO({
+	var template (present) PCO_DATA exp_pco := PCO_Types.tr_PCO({
 			tr_PCO_P_DNS_IPv4(f_inet_addr(mp_s2b_dns_ipv4)),
 			tr_PCO_P_PCSCF_IPv4(f_inet_addr(mp_s2b_pcscf_ipv4))
 			});
@@ -738,7 +765,7 @@ private function f_GSUP_EPDGTunnel_success() runs on EPDG_ConnHdlr {
 /* GSUP TunnelEPDG Tunnel Req + Resp, triggers S2b CreateSession Req + Response (rejected). */
 private function f_GSUP_EPDGTunnel_error() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
-	var template (value) PCO_DATA pco := ts_PCO({ ts_PCO_P_DNS_IPv4, ts_PCO_P_PCSCF_IPv4 });
+	var template (value) PCO_DATA pco := PCO_Types.ts_PCO({ ts_PCO_P_DNS_IPv4, ts_PCO_P_PCSCF_IPv4 });
 	GSUP.send(ts_GSUP_EPDGTunnel_REQ(g_pars.imsi, pco));
 	as_GTP2C_CreateSession_error(APN_access_denied__no_subscription);
 	alt {
@@ -897,6 +924,24 @@ testcase TC_concurrent_ues100() runs on MTC_CT {
 	f_TC_concurrent_ues_MTC(100)
 }
 
+private function f_TC_upf_echo_req(charstring id) runs on EPDG_ConnHdlr {
+	f_initial_attach();
+	/* Dispatch Echo Resp to this component: */
+	f_gtp2_register_teid('00000000'O);
+	f_GTP1U_echo_ping_pong(seq_nr := 0);
+	/* Send one again, to validate it works several times: */
+	f_GTP1U_echo_ping_pong(seq_nr := 1);
+	f_GSUP_PurgeMS_success();
+}
+testcase TC_upf_echo_req() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_upf_echo_req), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute ( TC_authinfo_normal() );
 	execute ( TC_ho_lte_to_wifi() );
@@ -904,6 +949,7 @@ control {
 	execute ( TC_s2b_CreateSession_rejected() );
 	execute ( TC_concurrent_ues2() );
 	execute ( TC_concurrent_ues100() );
+	execute ( TC_upf_echo_req() );
 }
 
 }
