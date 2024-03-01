@@ -63,6 +63,7 @@ FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_C
 FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
 FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn DIAMETER_ts32_299_Templates.ttcn "
+FILES+="ICMP_Templates.ttcn ICMPv6_Templates.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
 gen_links $DIR $FILES
 
