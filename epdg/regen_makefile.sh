@@ -9,6 +9,8 @@ FILES="
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
+	IP_EncDec.cc
+	ICMP_EncDec.cc
 	TCCConversion.cc
 	TCCEncoding.cc
 	TCCInterface.cc
