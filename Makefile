@@ -30,6 +30,7 @@ SUBDIRS= \
 	hnbgw \
 	hnodeb \
 	hss \
+	ipad \
 	mgw \
 	mme \
 	msc \

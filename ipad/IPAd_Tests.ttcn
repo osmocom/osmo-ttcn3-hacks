@@ -1,0 +1,708 @@
+/* IPAd testsuite in TTCN-3
+ *
+ * Author: Philipp Maier <pmaier@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module IPAd_Tests {
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from SGP32Definitions all;
+import from SGP32Definitions_Types all;
+import from SGP32Definitions_Templates all;
+
+import from RSPDefinitions all;
+import from RSPDefinitions_Types all;
+import from RSPDefinitions_Templates all;
+
+import from PKIX1Explicit88 all;
+import from PKIX1Explicit88_Templates all;
+import from PKIX1Explicit88_Types all;
+
+import from HTTP_Server_Emulation all;
+import from HTTPmsg_Types all;
+
+import from VPCD_Types all;
+import from VPCD_CodecPort all;
+import from VPCD_Adapter all;
+
+modulepar {
+	/* emulated eIM HTTPs server */
+	charstring mp_esipa_ip := "127.0.0.1";
+	integer mp_esipa_port := 4430;
+	boolean mp_esipa_disable_ssl := false;
+	boolean mp_use_vpcd := true;
+	float mp_restart_guardtime := 2.0
+}
+
+/* Altstep to handle card power up/down and ATR transmission */
+private altstep as_vpcd_atr() runs on VPCD_Adapter_CT {
+	[] VPCD.receive(tr_VPCD_Recv(g_vpcd_conn_id, tr_VPCD_CTRL_ATR)) {
+		f_vpcd_send(ts_VPCD_DATA('3B9F96801FC78031A073BE21136743200718000001A5'O));
+		repeat;
+		}
+	[] VPCD.receive(tr_VPCD_Recv(g_vpcd_conn_id, tr_VPCD_CTRL_OFF)) {
+		repeat;
+		}
+	[] VPCD.receive(tr_VPCD_Recv(g_vpcd_conn_id, tr_VPCD_CTRL_ON)) {
+		repeat;
+		}
+}
+
+/* Helper template to format HTTP responses */
+private template (value) HTTPMessage ts_http_resp(template (value) octetstring resp := ''O) := {
+	response_binary := {
+		client_id := omit,
+		version_major := 1,
+		version_minor := 1,
+		statuscode := 200,
+		statustext := "OK",
+		/* See also SGP.32, section 6.1.1 */
+		header := {
+				{
+					header_name := "X-Admin-Protocol",
+					header_value := "gsma/rsp/v1.0.0"
+				},
+				{
+					header_name := "Content-Type",
+					header_value := "application/x-gsma-rsp-asn1"
+				},
+				{
+					header_name := "Content-Length",
+					header_value := int2str(lengthof(resp))
+				}
+		},
+		body := resp
+	}
+}
+
+type component MTC_CT {
+	timer g_Tguard;
+
+	/* HTTP server */
+	var HTTP_Server_Emulation_CT vc_HTTP;
+};
+
+type component IPAd_ConnHdlr extends HTTP_ConnHdlr, VPCD_Adapter_CT {
+	var IPAd_ConnHdlrPars g_pars;
+};
+
+type record IPAd_ConnHdlrPars {
+     /* TODO: add some useful parameters */
+};
+
+private function f_init_pars()
+runs on MTC_CT return IPAd_ConnHdlrPars {
+	var IPAd_ConnHdlrPars pars := {
+	    /* TODO: fill parameters with meaninful values */
+	};
+	return pars;
+}
+
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+private type function void_fn(charstring id) runs on IPAd_ConnHdlr;
+
+private function f_init_handler(void_fn fn, charstring id, IPAd_ConnHdlrPars pars) runs on IPAd_ConnHdlr {
+	g_pars := pars;
+
+	/* Initialize VPDC (virtual smartcard) */
+	if (mp_use_vpcd) {
+		VPCD_Adapter.f_connect();
+		activate(as_vpcd_atr());
+	}
+
+	fn.apply(id);
+}
+
+private function f_start_handler(void_fn fn, IPAd_ConnHdlrPars pars)
+runs on MTC_CT return IPAd_ConnHdlr {
+	var IPAd_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := IPAd_ConnHdlr.create(id);
+
+	if (isbound(vc_HTTP)) {
+		connect(vc_conn:HTTP_SRV, vc_HTTP:CLIENT);
+		connect(vc_conn:HTTP_SRV_PROC, vc_HTTP:CLIENT_PROC);
+	}
+
+	vc_conn.start(f_init_handler(fn, id, pars));
+	return vc_conn;
+}
+
+function f_init_esipa(charstring id) runs on MTC_CT {
+	var HttpServerEmulationCfg http_cfg := {
+		http_bind_ip := mp_esipa_ip,
+		http_bind_port := mp_esipa_port,
+		use_ssl := not mp_esipa_disable_ssl
+	};
+
+	vc_HTTP := HTTP_Server_Emulation_CT.create(id);
+	vc_HTTP.start(HTTP_Server_Emulation.main(http_cfg));
+}
+
+private function f_init(charstring id, float t_guard := 40.0) runs on MTC_CT {
+	/* Ensure a guard time inbetween tests. This is to make sure that the IPAd is able to finish its current poll
+	 * cycle. In practice this means that the IPAd will notice that the connectivity towards the eIM is lost and
+	 * since this is one of the conditions for ending the current poll cycle it will exit. A freshly restarted
+	 * IPAd is a mandatory start condition for the tests since all tests expect the initialization procedure
+	 * (selection of ISD-P etc.) that the IPAd executes on startup. */
+	f_sleep(mp_restart_guardtime);
+
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+	f_init_esipa(id);
+}
+
+/* Expect a GetResponse request from IUT and transfer as many response bytes the IUT requests */
+private function f_vpcd_get_response(octetstring response) runs on IPAd_ConnHdlr return integer {
+	var octetstring sw;
+	var VPCD_PDU req;
+	var integer len;
+
+	req := f_vpcd_exp(tr_VPCD_DATA(?));
+	len := oct2int(req.u.data[4]);
+	if (len == 0) {
+		len := 256;
+	}
+
+	/* Make sure that the request APDU is actually a GetResponse request (on logical channel 2) */
+	if (substr(req.u.data, 0, 4) != '01c00000'O) {
+		setverdict(fail, "unexpected APDU, expecting GetResponse");
+		return 0;
+	}
+
+	/* Compute status word, in case the requested data is shorter then the response data we intend to send, we must
+	 * tell the IUT that there is still data available, so that a consecutive GetResponse request can be issued.
+	 * (caller must check return code to determine if a consecutive GetResponse is needed/expected) */
+	if (lengthof(response) > len) {
+		if (lengthof(response) - len > 255) {
+			sw := '6100'O;
+		} else {
+			sw := '61'O & int2oct(lengthof(response) - len, 1);
+		}
+	} else {
+		sw := '9000'O;
+	}
+
+	/* Send response to IUT */
+	f_vpcd_send(ts_VPCD_DATA(substr(response, 0, len) & sw));
+
+	/* Return how many bytes have sent */
+	return len;
+}
+
+/* Expect one or more GetResponse requests from IUT until the full response is transferred */
+private function f_vpcd_get_response_multi(octetstring response) runs on IPAd_ConnHdlr {
+	var integer bytes_sent := 0;
+	var octetstring response_remainder := response;
+
+	while (true) {
+		response_remainder := substr(response_remainder, bytes_sent, lengthof(response_remainder) - bytes_sent);
+		bytes_sent := f_vpcd_get_response(response_remainder);
+
+		/* Check if we reached the last chunk */
+		if (lengthof(response_remainder) <= bytes_sent) {
+			return;
+		}
+	}
+}
+
+/* Expect one or more STORE DATA requests until the IUT has completed the transmision cycle */
+private function f_vpcd_store_data(octetstring exp := ''O) runs on IPAd_ConnHdlr return octetstring {
+
+	var VPCD_PDU req;
+	var octetstring block;
+	var integer len;
+	var octetstring data := ''O;
+
+	while (true) {
+		req := f_vpcd_exp(tr_VPCD_DATA(?));
+
+		/* Make sure that the request APDU is actually a STORE DATA request (on logical channel 1) */
+		if (substr(req.u.data, 0, 3) != '81E291'O and
+		    substr(req.u.data, 0, 3) != '81E211'O) {
+			setverdict(fail, "unexpected APDU, expecting GetResponse");
+			return ''O;
+		}
+
+		if (lengthof(req.u.data) - 5 > 255) {
+			len := 255;
+		} else {
+			len := lengthof(req.u.data) - 5;
+		}
+		block := substr(req.u.data, 5, len);
+		data := data & block;
+
+		/* The final status word contains the length of the response. We can not send it right now
+		 * since the caller must first process the received data block and compute a response. When
+		 * the exact length of the response data is known. The final status word can be sent using
+		 * f_vpcd_store_data_final_ack() */
+		if (substr(req.u.data, 2, 1) == '91'O) {
+			if (exp != ''O and block != exp) {
+				setverdict(fail, "received block contains unexpected data (", block, " != ", exp, ")");
+			}
+			return block;
+		}
+
+		f_vpcd_send(ts_VPCD_DATA('9000'O));
+	}
+
+	setverdict(fail, "no data? (we should not reach this code path)");
+	return ''O;
+}
+
+/* Send a final status word to acknowledge the last block of a STORE DATA transmission. The status word will tell
+ * the IUT how many response bytes are available. (The IUT will immediately begin to fetch the response using
+ * one or more GetResponse requests */
+private function f_vpcd_store_data_final_ack(integer response_len) runs on IPAd_ConnHdlr {
+	var octetstring second_sw_byte;
+	var octetstring first_sw_byte;
+
+	if (response_len > 255) {
+		second_sw_byte := '00'O;
+	} else {
+		second_sw_byte := int2oct(response_len, 1);
+	}
+
+	if (response_len > 0) {
+		first_sw_byte := '61'O; /* 61xx */
+	} else {
+		first_sw_byte := '90'O; /* 9000 */
+	}
+
+	f_vpcd_send(ts_VPCD_DATA(first_sw_byte & second_sw_byte));
+}
+
+/* Expect a pre-defined request (optional), and send a pre-defined response. This is a shortcut that only works in case
+ * the response does not depend on the request. */
+private function f_vpcd_transceive(octetstring response, octetstring expected_request := ''O) runs on IPAd_ConnHdlr {
+
+	/* In case we do not use the VPCD (because we have some other kind of eUICC emulation or even a real card
+	 * present), we just skip. */
+	if (mp_use_vpcd == false) {
+		return;
+	}
+
+	f_vpcd_store_data(expected_request);
+	f_vpcd_store_data_final_ack(lengthof(response));
+	if (response != ''O) {
+		f_vpcd_get_response_multi(response);
+	}
+}
+
+/* Handle the opening of logical channel 1 and the selection of the ISD-R */
+private function f_es10x_init() runs on IPAd_ConnHdlr {
+	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
+
+	/* If we decide not to use vpcd, then we must not initialize anything here */
+	if (mp_use_vpcd == false) {
+		return;
+	}
+
+	/* Expect a MANAGE CHANNEL request that opens logical channel 1 */
+	f_vpcd_exp(tr_VPCD_DATA('0070000100'O));
+	f_vpcd_send(ts_VPCD_DATA('9000'O));
+
+	/* Expect selection of ISD-R request */
+	f_vpcd_exp(tr_VPCD_DATA('01a4040410a0000005591010ffffffff8900000100'O));
+	f_vpcd_send(ts_VPCD_DATA('6121'O)); /* 21 bytes of response, which are not requested by the ipad. */
+
+	/* Expect the IPAd to query the eID from the eUICC */
+	f_vpcd_transceive(enc_GetEuiccDataResponse(valueof(ts_getEuiccDataResponse)), 'BF3E035C015A'O);
+
+	/* Expect the IPAd to query the eIM configuration data from the eUICC */
+	f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(ts_getEimConfigurationDataResponse(eim_fqdn))), 'BF5500'O);
+}
+
+/* Handle the closing of logical channel 1 */
+private function f_es10x_close() runs on IPAd_ConnHdlr {
+
+	/* Expect a MANAGE CHANNEL request that closes logical channel 1 */
+	f_vpcd_exp(tr_VPCD_DATA('0070800100'O));
+	f_vpcd_send(ts_VPCD_DATA('9000'O));
+}
+
+/* Receive ESipa HTTP request */
+private function f_esipa_receive() runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var HTTPMessage esipa_req;
+	timer T := 10.0;
+	var EsipaMessageFromIpaToEim request;
+
+	T.start;
+	alt {
+	[] HTTP_SRV.receive({ request_binary := ? }) -> value esipa_req {
+		request := dec_EsipaMessageFromIpaToEim(esipa_req.request_binary.body);
+		}
+	[] T.timeout {
+		setverdict(fail, "no HTTP request received?");
+		}
+	}
+
+	return request;
+}
+
+/* Send ESipa HTTP response */
+private function f_esipa_send(EsipaMessageFromEimToIpa response) runs on IPAd_ConnHdlr  {
+	var octetstring esipa_res;
+	esipa_res := enc_EsipaMessageFromEimToIpa(response);
+	HTTP_SRV.send(ts_http_resp(esipa_res));
+}
+
+/* Perform one ESipa HTTP request/response cycle */
+private function f_esipa_transceive(EsipaMessageFromEimToIpa response) runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var EsipaMessageFromIpaToEim request;
+
+	request := f_esipa_receive();
+	f_esipa_send(response);
+
+	return request;
+}
+
+/* Perform one ESipa HTTP request/response cycle but with an empty response */
+private function f_esipa_transceive_empty_response() runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var EsipaMessageFromIpaToEim request;
+
+	request := f_esipa_receive();
+	HTTP_SRV.send(ts_http_resp(''O));
+	return request;
+}
+
+/* Common Mutual Authentication Procedure, see also: GSMA SGP.22, section 3.0.1 */
+private function f_proc_cmn_mtl_auth() runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+
+	/* Step #1 */
+	f_vpcd_transceive(enc_EUICCInfo1(valueof(ts_EUICCInfo1)), 'bf2000'O);
+
+	/* Step #2-#4 */
+	f_vpcd_transceive(enc_GetEuiccChallengeResponse(valueof(ts_GetEuiccChallengeResponse)), 'bf2e00'O);
+
+	/* Step #5-#10 */
+	esipa_req := f_esipa_receive();
+	if (not match(esipa_req, tr_initiateAuthenticationRequestEsipa)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+	esipa_res := valueof(ts_initiateAuthenticationResponseEsipa(euiccChallenge := esipa_req.initiateAuthenticationRequestEsipa.euiccChallenge));
+	f_esipa_send(esipa_res);
+
+	/* Step #11-#14 */
+	f_vpcd_transceive(enc_AuthenticateServerResponse(valueof(ts_authenticateServerResponse)));
+
+	/* Step #15-#17 */
+	esipa_req := f_esipa_transceive(valueof(ts_authenticateClientResponseEsipa_dpe));
+	if (not match(esipa_req, tr_authenticateClientRequestEsipa)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+}
+
+/* ********************************************* */
+/* ********** BELOW ONLY TESTCASES! ************ */
+/* ********************************************* */
+
+
+/* A testcase to try out an the Common Mutual Authentication Procedure */
+private function f_TC_proc_direct_prfle_dwnld(charstring id) runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+	var integer i;
+	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
+	var BoundProfilePackage boundProfilePackage;
+
+	f_es10x_init();
+	f_http_register();
+
+	/* Prepare direct profile download by responding with a download trigger request */
+	esipa_res := valueof(ts_getEimPackageResponse_dnlTrigReq);
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_getEimPackageRequest)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Expect the IPAd to query the eIM configuration data from the eUICC */
+	f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(ts_getEimConfigurationDataResponse(eim_fqdn))), 'BF5500'O);
+
+	f_proc_cmn_mtl_auth();
+
+	f_vpcd_transceive(enc_PrepareDownloadResponse(valueof(ts_prepareDownloadResponse)));
+
+	esipa_res := valueof(ts_getBoundProfilePackageResponseEsipa);
+	esipa_req := f_esipa_transceive(esipa_res);
+	boundProfilePackage := esipa_res.getBoundProfilePackageResponseEsipa.getBoundProfilePackageOkEsipa.boundProfilePackage;
+	/* TODO: match response (we do not have a template yet) */
+
+	/* initialiseSecureChannelRequest */
+	f_vpcd_transceive(''O);
+
+	/* Step #3 (ES8+.ConfigureISDP) */
+	for (i := 0; i < sizeof(boundProfilePackage.firstSequenceOf87); i := i + 1) {
+		f_vpcd_transceive(''O);
+	}
+
+	/* Step #4 (ES8+.StoreMetadata) */
+	for (i := 0; i < sizeof(boundProfilePackage.sequenceOf88); i := i + 1) {
+		f_vpcd_transceive(''O);
+	}
+
+	/* Step #5 (ES8+.ReplaceSessionKeys", optional, left out) */
+	if (ispresent(boundProfilePackage.secondSequenceOf87)) {
+		for (i := 0; i < sizeof(boundProfilePackage.secondSequenceOf87); i := i + 1) {
+			f_vpcd_transceive(''O);
+		}
+	}
+
+	/* Step #6 (ES8+.LoadProfileElements) */
+	for (i := 0; i < sizeof(boundProfilePackage.sequenceOf86); i := i + 1) {
+		if (i < sizeof(boundProfilePackage.sequenceOf86) - 1) {
+			f_vpcd_transceive(''O);
+		} else {
+			/* In the last message we send the ProfileInstallationResult */
+			f_vpcd_transceive(enc_ProfileInstallationResult(valueof(ts_profileInstallationResult)));
+		}
+	}
+
+	/* Receive ProfileInstallationResult from iPAD->eIM */
+	esipa_req := f_esipa_transceive_empty_response();
+	/* TODO: match response (we do not have a template yet) */
+
+	/* Receive RemoveNotificationFromList from iPAD->eUICC */
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+
+	/* Wait some time until the the last HTTP response is actually delivered */
+	f_sleep(2.0);
+
+	f_es10x_close();
+
+	setverdict(pass);
+}
+testcase TC_proc_direct_prfle_dwnld() runs on MTC_CT {
+	var charstring id := testcasename();
+	var IPAd_ConnHdlrPars pars := f_init_pars();
+	var IPAd_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_direct_prfle_dwnld), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+
+/* A testcase to try out an the Generic eUICC Package Download and Execution Procedure */
+private function f_TC_proc_euicc_pkg_dwnld_exec(charstring id) runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+
+	f_es10x_init();
+	f_http_register();
+
+	/* Step #1-#2 */
+	esipa_res := valueof(ts_getEimPackageResponse_euiccPkgReq);
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_getEimPackageRequest)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Step #3-#8 */
+	f_vpcd_transceive(enc_EuiccPackageResult(valueof(ts_euiccPackageResult)));
+
+	/* Step #9 */
+	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
+
+	/* Step #10-14 */
+	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_provideEimPackageResult_ePRAndNotif)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Step #15-17 */
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+
+	/* Wait some time until the the last HTTP response is actually delivered */
+	f_sleep(2.0);
+
+	f_es10x_close();
+
+	setverdict(pass);
+}
+
+testcase TC_proc_euicc_pkg_dwnld_exec() runs on MTC_CT {
+	var charstring id := testcasename();
+	var IPAd_ConnHdlrPars pars := f_init_pars();
+	var IPAd_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+
+/* A testcase to try out an the Generic eUICC Package Download and Execution Procedure, but this time we force a rollback meneuver */
+private function f_TC_proc_euicc_pkg_dwnld_exec_rollback(charstring id) runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+
+	f_es10x_init();
+	f_http_register();
+
+	/* Step #1-#2 */
+	esipa_res := valueof(ts_getEimPackageResponse_euiccPkgReq);
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_getEimPackageRequest)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Step #3-#8 */
+	f_vpcd_transceive(enc_EuiccPackageResult(valueof(ts_euiccPackageResult)));
+
+	/* Step #9 */
+	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
+
+	/* We now ignore the response from the IPAd. The IPAd will interpret this as a disturbed IP connection. */
+	f_esipa_receive();
+
+	/* To fix the problem, the IPAd will now try a profile rollback meneuver. */
+	f_vpcd_transceive(enc_ProfileRollbackResponse(valueof(ts_profileRollbackResponse)),
+			  enc_ProfileRollbackRequest(valueof(ts_profileRollbackRequest)));
+
+	/* At this point the old profile is active again. The IPAd is now expected to start at Step #9 again
+	 * to continue the procedure normally. */
+
+	/* Step #9 */
+	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
+
+	/* Step #10-14 */
+	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_provideEimPackageResult_ePRAndNotif)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Step #15-17 */
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
+
+	/* Wait some time until the the last HTTP response is actually delivered */
+	f_sleep(2.0);
+
+	f_es10x_close();
+
+	setverdict(pass);
+}
+
+testcase TC_proc_euicc_pkg_dwnld_exec_rollback() runs on MTC_CT {
+	var charstring id := testcasename();
+	var IPAd_ConnHdlrPars pars := f_init_pars();
+	var IPAd_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_rollback), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+
+/* A testcase to try out an IpaEuiccDataRequest */
+private function f_TC_proc_euicc_data_req(charstring id) runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
+
+	f_es10x_init();
+	f_http_register();
+
+	/* IPAd requests a package, we tell it to execute an ipaEuiccDataRequest */
+	esipa_res := valueof(ts_getEimPackageResponse_euiccDataReq);
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_getEimPackageRequest)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* IPAd will obtain the data from the eUICC */
+	f_vpcd_transceive(enc_EuiccConfiguredAddressesResponse(valueof(ts_euiccConfiguredAddressesResponse)));
+	f_vpcd_transceive(enc_EUICCInfo1(valueof(ts_EUICCInfo1)));
+	f_vpcd_transceive(enc_EUICCInfo2(valueof(ts_EUICCInfo2)));
+	f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(ts_getEimConfigurationDataResponse(eim_fqdn))));
+	f_vpcd_transceive(enc_GetCertsResponse(valueof(ts_getCertsResponse)));
+	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
+
+	/* IPAd will return the data to us */
+	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
+	esipa_req := f_esipa_transceive(esipa_res);
+
+	/* Wait some time until the the last HTTP response is actually delivered */
+	f_sleep(2.0);
+
+	f_es10x_close();
+
+	setverdict(pass);
+}
+testcase TC_proc_euicc_data_req() runs on MTC_CT {
+	var charstring id := testcasename();
+	var IPAd_ConnHdlrPars pars := f_init_pars();
+	var IPAd_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_data_req), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* A testcase to try out what happens when the eIM package request is rejected */
+private function f_TC_get_eim_pkg_req_rej(charstring id) runs on IPAd_ConnHdlr {
+	var EsipaMessageFromIpaToEim esipa_req;
+	var EsipaMessageFromEimToIpa esipa_res;
+
+	f_es10x_init();
+	f_http_register();
+
+	/* IPAd requests a package, we respond with an eimPackageError code 127 (undefined error) */
+	esipa_res := valueof(ts_getEimPackageResponse_eimPkgErrUndef);
+	esipa_req := f_esipa_transceive(esipa_res);
+	if (not match(esipa_req, tr_getEimPackageRequest)) {
+		setverdict(fail, "unexpected message from IPAd");
+	}
+
+	/* Wait some time until the the last HTTP response is actually delivered */
+	f_sleep(2.0);
+
+	f_es10x_close();
+
+	setverdict(pass);
+}
+testcase TC_get_eim_pkg_req_rej() runs on MTC_CT {
+	var charstring id := testcasename();
+	var IPAd_ConnHdlrPars pars := f_init_pars();
+	var IPAd_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_get_eim_pkg_req_rej), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+control {
+	execute ( TC_proc_direct_prfle_dwnld() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_rollback() );
+	execute ( TC_proc_euicc_data_req() );
+	execute ( TC_get_eim_pkg_req_rej() );
+}
+
+}
