@@ -1,0 +1,147 @@
+/* HTTP Emulation in TTCN-3
+ *
+ * Author: Philipp Maier <pmaier@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This module implements a HTTP/HTTPs server based on TestPorts/HTTPmsg,
+ * (see also deps/titan.TestPorts.HTTPmsg)
+ */
+
+module HTTP_Server_Emulation {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from HTTPmsg_Types all;
+import from HTTPmsg_PortType all;
+
+/***********************************************************************
+ * Main Emulation Component
+ ***********************************************************************/
+
+type record HttpServerEmulationCfg {
+	charstring http_bind_ip,
+	integer http_bind_port,
+	boolean use_ssl
+};
+
+type component HTTP_Server_Emulation_CT {
+	/* Communication with underlying HTTP CodecPort */
+	port HTTPmsg_PT HTTP_server_port;
+
+	/* Communication with Clients */
+	port HTTP_SRV_PT CLIENT;
+	port HTTP_SRV_PROC_PT CLIENT_PROC;
+	port HTTP_SRV_PT CLIENT_DEFAULT;
+
+	/* Configuration by the user */
+	var HttpServerEmulationCfg g_http_cfg;
+
+	/* State */
+	var HTTP_ConnHdlr vc_conn_table[16];
+};
+
+private function f_init(HttpServerEmulationCfg cfg) runs on HTTP_Server_Emulation_CT {
+
+	g_http_cfg := cfg;
+
+	map(self:HTTP_server_port, system:HTTP_server_port);
+	var Listen listen := { local_hostname := g_http_cfg.http_bind_ip,
+			       portnumber := g_http_cfg.http_bind_port,
+			       use_ssl := g_http_cfg.use_ssl };
+
+	/* Start HTTP server */
+	HTTP_server_port.send(listen);
+}
+
+private function f_vc_conn_table_add(HTTP_ConnHdlr vc_conn) runs on HTTP_Server_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(vc_conn_table); i := i + 1) {
+		if (not isbound(vc_conn_table[i])) {
+			vc_conn_table[i] := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in vc_conn_table[i] for ", vc_conn);
+}
+
+/* Forward request to all registered clients */
+private function forward_req(HTTPMessage recv_req_value) runs on HTTP_Server_Emulation_CT {
+
+	var integer i;
+	for (i := 0; i < sizeof(vc_conn_table); i := i + 1) {
+		if (isbound(vc_conn_table[i])) {
+			CLIENT.send(recv_req_value) to vc_conn_table[i];
+		}
+	}
+}
+
+function main(HttpServerEmulationCfg cfg) runs on HTTP_Server_Emulation_CT {
+
+	var HTTP_ConnHdlr vc_conn;
+	var template (value) Close close := { client_id := omit };
+	var template (present) Half_close half_close := { client_id := ? };
+	var template (present) HTTPMessage recv_req := { request := ? };
+	var template (present) HTTPMessage recv_req_bin := { request_binary := ? };
+	var HTTPMessage recv_req_value;
+	var HTTPMessage send_resp_value;
+
+	f_init(cfg);
+
+	while(true) {
+	alt {
+	[] HTTP_server_port.receive(recv_req) -> value recv_req_value {
+		forward_req(recv_req_value);
+        	}
+	[] HTTP_server_port.receive(recv_req_bin) -> value recv_req_value {
+		forward_req(recv_req_value);
+        	}
+	[] CLIENT.receive(HTTPMessage:?) -> value send_resp_value sender vc_conn {
+		HTTP_server_port.send(send_resp_value);
+		}
+	[] HTTP_server_port.receive(half_close) {
+		HTTP_server_port.send(close);
+		}
+	[] CLIENT_PROC.getcall(HTTPEM_register:{}) -> sender vc_conn {
+		f_vc_conn_table_add(vc_conn);
+		CLIENT_PROC.reply(HTTPEM_register:{}) to vc_conn;
+		}
+	}
+	}
+
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+type port HTTP_SRV_PT message {
+	inout HTTPMessage;
+} with { extension "internal" };
+
+signature HTTPEM_register();
+
+type port HTTP_SRV_PROC_PT procedure {
+	inout HTTPEM_register;
+} with { extension "internal" };
+
+
+/***********************************************************************
+ * Client Component
+ ***********************************************************************/
+
+type component HTTP_ConnHdlr {
+	port HTTP_SRV_PT HTTP_SRV;
+	port HTTP_SRV_PROC_PT HTTP_SRV_PROC;
+};
+
+function f_http_register() runs on HTTP_ConnHdlr {
+	HTTP_SRV_PROC.call(HTTPEM_register:{}) {
+		[] HTTP_SRV_PROC.getreply(HTTPEM_register:{});
+	}
+}
+
+}
