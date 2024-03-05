@@ -19,6 +19,7 @@ import from GSUP_Emulation all;
 import from DIAMETER_Types all;
 import from DIAMETER_Templates all;
 import from DIAMETER_rfc4004_Templates all;
+import from DIAMETER_ts29_272_Templates all;
 import from DIAMETER_ts29_273_Templates all;
 import from DIAMETER_Emulation all;
 
@@ -381,26 +382,50 @@ private function f_nai() runs on EPDG_ConnHdlr return charstring {
 	return hex2str(g_pars.imsi) & "@" & mp_s6b_nai_realm;
 }
 
-/* Diameter SWx MAR + MAA. */
-private altstep as_DIA_SWx_MA_success() runs on EPDG_ConnHdlr {
-	var PDU_DIAMETER rx_dia;
+private function f_DIA_SWx_tx_MAA_success(PDU_DIAMETER rx_mar) runs on EPDG_ConnHdlr {
 	var template (omit) AVP avp;
 	var octetstring sess_id;
 	var template (value) GenericAVP sip_auth_data_item;
+
+	avp := f_DIAMETER_get_avp(rx_mar, c_AVP_Code_BASE_NONE_Session_Id);
+	sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+	sip_auth_data_item := ts_AVP_3GPP_SIPAuthDataItem(0,
+							  g_pars.vec.rand,
+							  g_pars.vec.ik,
+							  g_pars.vec.ck,
+							  g_pars.vec.autn,
+							  g_pars.vec.auts);
+	/* Send MAA to translator; expect it to show up on GSUP side */
+	SWx.send(ts_DIA_SWx_MAA(g_pars.imsi, sip_auth_data_item,
+				sess_id := sess_id,
+				hbh_id := rx_mar.hop_by_hop_id,
+				ete_id := rx_mar.end_to_end_id));
+}
+
+private function f_DIA_SWx_tx_MAA_error(PDU_DIAMETER rx_mar, template (value) GenericAVP result) runs on EPDG_ConnHdlr {
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	var template (value) GenericAVP sip_auth_data_item;
+
+	avp := f_DIAMETER_get_avp(rx_mar, c_AVP_Code_BASE_NONE_Session_Id);
+	sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+	sip_auth_data_item := ts_AVP_3GPP_SIPAuthDataItem(0,
+							  g_pars.vec.rand,
+							  g_pars.vec.ik,
+							  g_pars.vec.ck,
+							  g_pars.vec.autn,
+							  g_pars.vec.auts);
+	SWx.send(ts_DIA_SWx_MAA_result(g_pars.imsi, result,
+				       sess_id := sess_id,
+				       hbh_id := rx_mar.hop_by_hop_id,
+				       ete_id := rx_mar.end_to_end_id));
+}
+
+/* Diameter SWx MAR + MAA. */
+private altstep as_DIA_SWx_MA_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
 	[] SWx.receive(tr_DIA_SWx_MAR(g_pars.imsi)) -> value rx_dia {
-		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
-		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
-		sip_auth_data_item := ts_AVP_3GPP_SIPAuthDataItem(0,
-								  g_pars.vec.rand,
-								  g_pars.vec.ik,
-								  g_pars.vec.ck,
-								  g_pars.vec.autn,
-								  g_pars.vec.auts);
-		/* Send MAA to translator; expect it to show up on GSUP side */
-		SWx.send(ts_DIA_SWx_MAA(g_pars.imsi, sip_auth_data_item,
-					sess_id := sess_id,
-					hbh_id := rx_dia.hop_by_hop_id,
-					ete_id := rx_dia.end_to_end_id));
+		f_DIA_SWx_tx_MAA_success(rx_dia);
 		setverdict(pass);
 	}
 	[] SWx.receive(PDU_DIAMETER:?) -> value rx_dia {
@@ -729,28 +754,47 @@ private altstep as_GTPU_rx_icmp4(template (present) PDU_ICMP expected := ?) runs
 	}
 }
 
-/* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
-private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
+private function f_GSUP_tx_SAI_REQ() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
-	var template (present) GSUP_IE auth_tuple_ie;
 	var template (value) GSUP_IEs pdp_info;
-	auth_tuple_ie := tr_GSUP_IE_AuthTuple3G(g_pars.vec.rand,
-						g_pars.vec.ik,
-						g_pars.vec.ck,
-						g_pars.vec.autn,
-						g_pars.vec.rand & g_pars.vec.auts);
 	pdp_info := { ts_GSUP_IE_PDP_CONTEXT_ID('00'O),
 		      ts_GSUP_IE_PDP_ADDRESS(ts_EuaIPv4Dyn),
 		      ts_GSUP_IE_APN(f_enc_dns_hostname(g_pars.apn)) };
 	GSUP.send(ts_GSUP_SAI_REQ_PDP_INFO(g_pars.imsi, pdp_info));
-	as_DIA_SWx_MA_success();
-	/* Expect a positive response back to the translator; expect AIA */
-	alt {
-	[] GSUP.receive(tr_GSUP_SAI_RES(g_pars.imsi, auth_tuple_ie));
+}
+
+
+private altstep as_GSUP_rx_SAI_RES() runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+	var template (present) GSUP_IE auth_tuple_ie := tr_GSUP_IE_AuthTuple3G(
+						g_pars.vec.rand,
+						g_pars.vec.ik,
+						g_pars.vec.ck,
+						g_pars.vec.autn,
+						g_pars.vec.rand & g_pars.vec.auts);
+
+	[] GSUP.receive(tr_GSUP_SAI_RES(g_pars.imsi, auth_tuple_ie)) -> value rx_gsup {
+	}
 	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
-		}
 	}
+}
+
+private altstep as_GSUP_rx_SAI_ERR(template (present) integer cause := ?) runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+
+	[] GSUP.receive(tr_GSUP_SAI_ERR(g_pars.imsi, cause)) -> value rx_gsup {
+	}
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+	}
+}
+
+/* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
+private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
+	f_GSUP_tx_SAI_REQ();
+	as_DIA_SWx_MA_success();
+	as_GSUP_rx_SAI_RES();
 	setverdict(pass);
 }
 
@@ -859,6 +903,27 @@ testcase TC_authinfo_normal() runs on MTC_CT {
 	var EPDG_ConnHdlr vc_conn;
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_authinfo_normal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+private function f_TC_authinfo_MAA_unknown_user(charstring id) runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var DIAMETER_ExperimentalResultcode exp_result_code := DIAMETER_ERROR_USER_UNKNOWN;
+	f_GSUP_tx_SAI_REQ();
+
+	SWx.receive(tr_DIA_SWx_MAR(g_pars.imsi)) -> value rx_dia;
+	f_DIA_SWx_tx_MAA_error(rx_dia,
+			       ts_AVP_ExperimentalResult(vendor_id_3GPP,
+							 int2oct(enum2int(exp_result_code), 4)));
+	/* cause 2 = IMSI_UNKNOWN */
+	as_GSUP_rx_SAI_ERR(2);
+}
+testcase TC_authinfo_MAA_unknown_user() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_authinfo_MAA_unknown_user), pars);
 	vc_conn.done;
 	setverdict(pass);
 }
@@ -998,6 +1063,7 @@ testcase TC_mt_ipv4_echo_req() runs on MTC_CT {
 
 control {
 	execute ( TC_authinfo_normal() );
+	execute ( TC_authinfo_MAA_unknown_user() );
 	execute ( TC_ho_lte_to_wifi() );
 	execute ( TC_ho_wifi_to_lte() );
 	execute ( TC_s2b_CreateSession_rejected() );
