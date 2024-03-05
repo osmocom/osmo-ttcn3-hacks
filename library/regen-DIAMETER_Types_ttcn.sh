@@ -18,5 +18,6 @@ $AVP_SH_PATH \
         CxDxInterface_3GPP_TS29229_c30.ddf \
         GiSGiInterface_3GPP_TS29061_d70.ddf \
         ChargingApplications_3GPP_TS32299_d90.ddf \
+        AAAInterface_3GPP_TS29273_f00.ddf
 
 mv -v $AVP_SH_DIR/DIAMETER_Types.ttcn $SELF_DIR/
