@@ -7,6 +7,7 @@ cd $AVP_SH_DIR
 $AVP_SH_PATH \
         Base_IETF_RFC3588.ddf \
         BaseTypes_IETF_RFC3588.ddf \
+        MobileIPv4_Application_IETF_RFC4004.ddf \
         NetworkAccessServer_IETF_RFC4005.ddf \
         CreditControl_IETF_RFC4006.ddf \
         MobileIPv6_NAS_IETF_RFC5447.ddf \
