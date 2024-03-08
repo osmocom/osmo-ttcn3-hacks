@@ -422,9 +422,24 @@ private function f_DIA_SWx_tx_MAA_error(PDU_DIAMETER rx_mar, template (value) Ge
 }
 
 /* Diameter SWx MAR + MAA. */
-private altstep as_DIA_SWx_MA_success() runs on EPDG_ConnHdlr {
+private altstep as_DIA_SWx_MA_success(boolean exp_req_resync := false) runs on EPDG_ConnHdlr {
 	var PDU_DIAMETER rx_dia;
 	[] SWx.receive(tr_DIA_SWx_MAR(g_pars.imsi)) -> value rx_dia {
+		if (exp_req_resync) {
+			var octetstring rand_autn_concatenated := g_pars.vec.rand & g_pars.vec.auts;
+			var AVP avp_grp;
+			var GenericAVP sip_auth_avp;
+
+			avp_grp := f_DIAMETER_get_avp_or_fail(rx_dia, c_AVP_Code_CxDx_3GPP_SIP_Auth_Data_Item);
+			sip_auth_avp.avp := f_AVP_Grouped_get_avp_or_fail(avp_grp.avp_data.avp_CxDx_3GPP_SIP_Auth_Data_Item,
+									  c_AVP_Code_CxDx_3GPP_SIP_Authorization);
+
+			if (not match(sip_auth_avp, tr_AVP_3GPP_SIPAuthorization(rand_autn_concatenated))) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Unexpected Diameter AVP SIP-Authorization: ", sip_auth_avp,
+								" vs exp ", tr_AVP_3GPP_SIPAuthorization(rand_autn_concatenated)));
+			}
+		}
 		f_DIA_SWx_tx_MAA_success(rx_dia);
 		setverdict(pass);
 	}
@@ -754,13 +769,19 @@ private altstep as_GTPU_rx_icmp4(template (present) PDU_ICMP expected := ?) runs
 	}
 }
 
-private function f_GSUP_tx_SAI_REQ() runs on EPDG_ConnHdlr {
+private function f_GSUP_tx_SAI_REQ(boolean req_resync := false) runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
 	var template (value) GSUP_IEs pdp_info;
 	pdp_info := { ts_GSUP_IE_PDP_CONTEXT_ID('00'O),
 		      ts_GSUP_IE_PDP_ADDRESS(ts_EuaIPv4Dyn),
 		      ts_GSUP_IE_APN(f_enc_dns_hostname(g_pars.apn)) };
-	GSUP.send(ts_GSUP_SAI_REQ_PDP_INFO(g_pars.imsi, pdp_info));
+	if (req_resync) {
+		GSUP.send(ts_GSUP_SAI_REQ_PDP_INFO_UMTS_AKA_RESYNC(
+				g_pars.imsi, pdp_info,
+				g_pars.vec.auts, g_pars.vec.rand));
+	} else {
+		GSUP.send(ts_GSUP_SAI_REQ_PDP_INFO(g_pars.imsi, pdp_info));
+	}
 }
 
 
@@ -791,9 +812,9 @@ private altstep as_GSUP_rx_SAI_ERR(template (present) integer cause := ?) runs o
 }
 
 /* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
-private function f_GSUP_AI_success() runs on EPDG_ConnHdlr {
-	f_GSUP_tx_SAI_REQ();
-	as_DIA_SWx_MA_success();
+private function f_GSUP_AI_success(boolean req_resync := false) runs on EPDG_ConnHdlr {
+	f_GSUP_tx_SAI_REQ(req_resync);
+	as_DIA_SWx_MA_success(req_resync);
 	as_GSUP_rx_SAI_RES();
 	setverdict(pass);
 }
@@ -942,6 +963,23 @@ testcase TC_authinfo_twice() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* Emulate UE doing MAR+MAA, then UE requesting again due to resync needed */
+private function f_TC_authinfo_fail_resync(charstring id) runs on EPDG_ConnHdlr {
+	f_GSUP_AI_success(false);
+	f_GSUP_AI_success(true);
+	f_GSUP_LU_success();
+	f_GSUP_EPDGTunnel_success();
+	f_GSUP_PurgeMS_success();
+}
+testcase TC_authinfo_fail_resync() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_authinfo_fail_resync), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 private function f_TC_ho_lte_to_wifi(charstring id) runs on EPDG_ConnHdlr {
 	f_initial_attach();
 	/* Whenever UE comes from 3GPP, PGW may activate a dedicated S2b bearer
@@ -1079,6 +1117,7 @@ control {
 	execute ( TC_authinfo_normal() );
 	execute ( TC_authinfo_MAA_unknown_user() );
 	execute ( TC_authinfo_twice() );
+	execute ( TC_authinfo_fail_resync() );
 	execute ( TC_ho_lte_to_wifi() );
 	execute ( TC_ho_wifi_to_lte() );
 	execute ( TC_s2b_CreateSession_rejected() );
