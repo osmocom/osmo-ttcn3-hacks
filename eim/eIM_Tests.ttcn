@@ -1,0 +1,325 @@
+/* eIM testsuite in TTCN-3
+ *
+ * Author: Philipp Maier <pmaier@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module eIM_Tests {
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from SGP32Definitions all;
+import from SGP32Definitions_Types all;
+import from SGP32Definitions_Templates all;
+
+import from RSPDefinitions all;
+import from RSPDefinitions_Types all;
+import from RSPDefinitions_Templates all;
+
+import from PKIX1Explicit88 all;
+import from PKIX1Explicit88_Templates all;
+import from PKIX1Explicit88_Types all;
+
+import from PKIX1Implicit88 all;
+import from PKIX1Implicit88_Templates all;
+import from PKIX1Implicit88_Types all;
+
+import from HTTP_Server_Emulation all;
+import from HTTPmsg_Types all;
+
+import from HTTPmsg_PortType all;
+import from HTTP_Adapter all;
+
+
+import from es9p_Types_JSON all;
+
+/* Helper function to send HTTP responses */
+private function f_make_http_resp(charstring resp) return HTTPMessage {
+	var HTTPMessage resp_msg;
+	var HTTPResponse resp_body := {
+		client_id := omit,
+		version_major := 1,
+		version_minor := 1,
+		statuscode := 200,
+		statustext := "OK",
+		/* See also SGP.32, section 6.1.1 */
+		header := {
+			{
+				header_name := "X-Admin-Protocol",
+				header_value := "gsma/rsp/v1.0.0"
+			},
+			{
+				header_name := "Content-Type",
+				header_value := "application/x-gsma-rsp-asn1"
+			},
+			{
+				header_name := "Content-Length",
+				header_value := int2str(lengthof(resp))
+			}
+			},
+			body := resp
+		};
+
+	resp_msg := { response := resp_body };
+	return resp_msg;
+}
+
+type component MTC_CT {
+	timer g_Tguard;
+
+	/* HTTP server */
+	var HTTP_Server_Emulation_CT vc_HTTP;
+};
+
+type component eIM_ConnHdlr extends HTTP_ConnHdlr, http_CT {
+	var eIM_ConnHdlrPars g_pars;
+};
+
+type record eIM_ConnHdlrPars {
+     /* TODO: add some useful parameters */
+};
+
+private function f_init_pars()
+runs on MTC_CT return eIM_ConnHdlrPars {
+	var eIM_ConnHdlrPars pars := {
+	    /* TODO: fill parameters with meaninful values */
+	};
+	return pars;
+}
+
+modulepar {
+	/* emulated eIM HTTPs server */
+	charstring mp_es9p_ip := "127.0.0.1";
+	integer mp_es9p_port := 4430;
+	boolean mp_es9p_disable_ssl := false;
+
+	charstring mp_esipa_ip := "127.0.0.1";
+	integer mp_esipa_port := 8000;
+	boolean mp_esipa_disable_ssl := true;
+
+}
+
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+private type function void_fn(charstring id) runs on eIM_ConnHdlr;
+
+private function f_init_handler(void_fn fn, charstring id, eIM_ConnHdlrPars pars) runs on eIM_ConnHdlr {
+	g_pars := pars;
+
+	fn.apply(id);
+}
+
+private function f_start_handler(void_fn fn, eIM_ConnHdlrPars pars)
+runs on MTC_CT return eIM_ConnHdlr {
+	var eIM_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := eIM_ConnHdlr.create(id);
+
+	if (isbound(vc_HTTP)) {
+		connect(vc_conn:HTTP_SRV, vc_HTTP:CLIENT);
+		connect(vc_conn:HTTP_SRV_PROC, vc_HTTP:CLIENT_PROC);
+	}
+
+	vc_conn.start(f_init_handler(fn, id, pars));
+	return vc_conn;
+}
+
+function f_init_es9p(charstring id) runs on MTC_CT {
+	var HttpServerEmulationCfg http_cfg := {
+		http_bind_ip := mp_es9p_ip,
+		http_bind_port := mp_es9p_port,
+		use_ssl := not mp_es9p_disable_ssl
+	};
+
+	vc_HTTP := HTTP_Server_Emulation_CT.create(id);
+	vc_HTTP.start(HTTP_Server_Emulation.main(http_cfg));
+}
+
+private function f_init(charstring id, float t_guard := 40.0) runs on MTC_CT {
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+//	f_init_es9p(id);
+}
+
+/* Receive one Es9p HTTP request */
+private function f_es9p_receive() runs on eIM_ConnHdlr return charstring {
+	var HTTPMessage es9p_req;
+	timer T := 10.0;
+	var charstring request;
+
+	T.start;
+	alt {
+	[] HTTP_SRV.receive({ request := ? }) -> value es9p_req {
+		request := es9p_req.request.body; /* TODO: decode to template */
+		}
+	[] T.timeout {
+		setverdict(fail, "no HTTP request received?");
+		}
+	}
+
+	return request;
+}
+
+/* Send one Es9p HTTP response */
+private function f_es9p_send(charstring response) runs on eIM_ConnHdlr  {
+	var charstring es9p_res;
+	es9p_res := response; /* TODO, encode from template */
+	HTTP.send(f_make_http_resp(es9p_res));
+}
+
+/* Perform one Es9p HTTP request/response cycle */
+private function f_es9p_transceive(charstring response) runs on eIM_ConnHdlr return charstring {
+	var charstring request;
+
+	request := f_es9p_receive();
+	f_es9p_send(response);
+
+	return request;
+}
+
+/* Perform one Es9p HTTP request/response cycle but with an empty response */
+private function f_es9p_transceive_empty_response() runs on eIM_ConnHdlr return charstring {
+	var charstring request;
+
+	request := f_es9p_receive();
+	HTTP.send(f_make_http_resp(""));
+	return request;
+}
+
+/* ********************************************* */
+/* ********** BELOW ONLY TESTCASES! ************ */
+/* ********************************************* */
+
+
+
+
+private function f_enc_http_req(in RemoteProfileProvisioningResponse es9p_res, out HTTPMessage http_res) {
+	var charstring json_body;
+	var HTTPResponse resp_body;
+
+	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, json_body);
+	resp_body := {
+		client_id := omit,
+		version_major := 1,
+		version_minor := 1,
+		statuscode := 200,
+		statustext := "OK",
+		/* See also SGP.32, section 6.1.1 */
+		header := {
+			{
+				header_name := "X-Admin-Protocol",
+				header_value := "gsma/rsp/v1.0.0"
+			},
+			{
+				header_name := "Content-Type",
+				header_value := "application/x-gsma-rsp-asn1"
+			},
+			{
+				header_name := "Content-Length",
+				header_value := int2str(lengthof(json_body))
+			}
+			},
+			body := json_body
+		};
+
+	http_res := { response := resp_body };
+} with { extension "prototype(fast)" }
+
+private function f_dec_http_req(in HTTPMessage http_req, out RemoteProfileProvisioningRequest es9p_req) {
+	dec_RemoteProfileProvisioningRequest_from_JSON(http_req.request.body, es9p_req);
+} with { extension "prototype(fast)" }
+
+// type port ES9P_JSON message map to HTTP_SRV_PT
+// {
+//	in RemoteProfileProvisioningRequest from HTTPMessage with f_dec_http_req();
+//	out RemoteProfileProvisioningResponse to HTTPMessage with f_enc_http_req();
+// }
+
+
+
+
+private function f_TC_testme(charstring id) runs on eIM_ConnHdlr {
+	var charstring es9p_req;
+	var RemoteProfileProvisioningResponse es9p_res;
+	var charstring es9p_res_json;
+	var RemoteProfileProvisioningRequest asn1_pdu_dec;
+
+	f_http_register();
+
+	es9p_req := f_es9p_transceive_empty_response();
+
+	log("===============================================");
+	dec_RemoteProfileProvisioningRequest_from_JSON(es9p_req, asn1_pdu_dec);
+	log(asn1_pdu_dec);
+	log("===============================================");
+
+
+	es9p_res := valueof(ts_getBoundProfilePackageResponse('AAAAAAAA'O, ts_boundProfilePackage));
+	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, es9p_res_json);
+
+	log("================== ENCODER RESULT ==================");
+	log(es9p_res_json);
+	log("================== ENCODER RESULT ==================");
+
+
+	/* Wait some time until the the HTTP response is actually delivered */
+	f_sleep(2.0);
+
+
+	setverdict(pass);
+}
+testcase TC_testme() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_testme), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+template (value) HeaderLines ts_esipa_HTTP_Header := {
+	 { header_name := "User-Agent", header_value := "TTCN3 eIM testsuite" },
+	 { header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
+	 { header_name := "Content-Type", header_value := "application/x-gsma-rsp-asn1" }
+};
+
+private function f_TC_testme2(charstring id) runs on eIM_ConnHdlr {
+	var HTTPMessage http_resp;
+	f_http_init(mp_esipa_ip, mp_esipa_port, not mp_esipa_disable_ssl);
+
+	log("======================== HTTP REQUEST ========================");
+	http_resp := f_http_transact(url := "/", method := "GET", exp := tr_HTTP_Resp(200), custom_hdr := valueof(ts_esipa_HTTP_Header));
+	log("======================== HTTP RESPONSE =======================");
+	log(http_resp);
+	log("======================== HTTP DONE ========================");
+
+	setverdict(pass);
+}
+testcase TC_testme2() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_testme2), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+control {
+//	execute ( TC_testme() );
+	execute ( TC_testme2() );
+}
+
+}
