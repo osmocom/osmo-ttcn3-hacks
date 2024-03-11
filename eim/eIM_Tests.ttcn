@@ -1,0 +1,809 @@
+/* eIM testsuite in TTCN-3
+ *
+ * Author: Philipp Maier <pmaier@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module eIM_Tests {
+
+import from Misc_Helpers all;
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from SGP32Definitions all;
+import from SGP32Definitions_Types all;
+import from SGP32Definitions_Templates all;
+
+import from RSPDefinitions all;
+import from RSPDefinitions_Types all;
+import from RSPDefinitions_Templates all;
+
+import from PKIX1Explicit88 all;
+import from PKIX1Explicit88_Templates all;
+import from PKIX1Explicit88_Types all;
+
+import from PKIX1Implicit88 all;
+import from PKIX1Implicit88_Templates all;
+import from PKIX1Implicit88_Types all;
+
+import from HTTP_Server_Emulation all;
+import from HTTPmsg_Types all;
+
+import from HTTPmsg_PortType all;
+import from HTTP_Adapter all;
+
+import from es9p_Types_JSON all;
+import from REST_Types_JSON all;
+
+/* the PIPEasp port allows us to interact with restop.py via stdin/stdout */
+import from PIPEasp_PortType all;
+import from PIPEasp_Types all;
+
+const octetstring eID := '89882119900000000000000000000005'O;
+const octetstring iccid := '123456789ABCDEFFAAAA'O;
+
+type component MTC_CT {
+	timer g_Tguard;
+
+	/* HTTP server */
+	var HTTP_Server_Emulation_CT vc_HTTP;
+};
+
+type component eIM_ConnHdlr extends HTTP_ConnHdlr, http_CT {
+	port PIPEasp_PT PIPE;
+	var eIM_ConnHdlrPars g_pars_EIM;
+	var template integer g_http_client_id := omit; /* ESipa client */
+};
+
+type record eIM_ConnHdlrPars {
+	/* add parameters here when necessary */
+};
+
+private function f_init_pars()
+runs on MTC_CT return eIM_ConnHdlrPars {
+	var eIM_ConnHdlrPars pars := {
+		/* add parameters here when necessary */
+	};
+	return pars;
+}
+
+modulepar {
+	/* emulated ES9+ SMDP+ server */
+	charstring mp_es9p_ip := "127.0.0.1";
+	integer mp_es9p_port := 8090;
+	boolean mp_es9p_disable_ssl := false;
+
+	/* emulated ESipa IPAd HTTPs client */
+	charstring mp_esipa_ip := "127.0.0.1";
+	integer mp_esipa_port := 8000;
+	boolean mp_esipa_disable_ssl := false;
+
+	/* REST API tool */
+	charstring mp_restop_path;
+}
+
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+private type function void_fn(charstring id) runs on eIM_ConnHdlr;
+
+private function f_init_handler(void_fn fn, charstring id, eIM_ConnHdlrPars pars) runs on eIM_ConnHdlr {
+	g_pars_EIM := pars;
+	fn.apply(id);
+}
+
+private function f_start_handler(void_fn fn, eIM_ConnHdlrPars pars)
+runs on MTC_CT return eIM_ConnHdlr {
+	var eIM_ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := eIM_ConnHdlr.create(id);
+
+	/* connect ES9+/HTTP-server ports */
+	if (isbound(vc_HTTP)) {
+		connect(vc_conn:HTTP_SRV, vc_HTTP:CLIENT);
+		connect(vc_conn:HTTP_SRV_PROC, vc_HTTP:CLIENT_PROC);
+	}
+
+	vc_conn.start(f_init_handler(fn, id, pars));
+	return vc_conn;
+}
+
+private function f_init(charstring id, float t_guard := 40.0) runs on MTC_CT {
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+
+	/* start ES9+/HTTP-server */
+	var HttpServerEmulationCfg http_cfg := {
+		http_bind_ip := mp_es9p_ip,
+		http_bind_port := mp_es9p_port,
+		use_ssl := not mp_es9p_disable_ssl
+	};
+	vc_HTTP := HTTP_Server_Emulation_CT.create(id);
+	vc_HTTP.start(HTTP_Server_Emulation.main(http_cfg));
+}
+
+
+
+/* ********************************************* */
+/* ************* ES9+/HTTP-server ************** */
+/* ********************************************* */
+
+/* Helper function to send HTTP responses (ES9+) */
+template (value) HTTPMessage ts_http_resp(charstring resp) := {
+	response := {
+		client_id := omit,
+		version_major := 1,
+		version_minor := 1,
+		statuscode := 200,
+		statustext := "OK",
+		/* See also SGP.32, section 6.1.1 */
+		header := {
+			{
+				header_name := "X-Admin-Protocol",
+				header_value := "gsma/rsp/v1.0.0"
+			},
+			{
+				header_name := "Content-Type",
+				header_value := "application/json"
+			},
+			{
+				header_name := "Content-Length",
+				header_value := int2str(lengthof(resp))
+			}
+			},
+		body := resp
+	}
+}
+
+
+/* Receive one Es9p HTTP request */
+private function f_es9p_receive() runs on eIM_ConnHdlr return RemoteProfileProvisioningRequest {
+	var HTTPMessage es9p_req;
+	timer T := 10.0;
+	var RemoteProfileProvisioningRequest request;
+
+	T.start;
+	alt {
+	[] HTTP_SRV.receive({ request := ? }) -> value es9p_req {
+		dec_RemoteProfileProvisioningRequest_from_JSON(es9p_req.request.body, request);
+		}
+	[] T.timeout {
+		setverdict(fail, "no HTTP request received?");
+		}
+	}
+
+	return request;
+}
+
+/* Send Es9p HTTP response */
+private function f_es9p_send(RemoteProfileProvisioningResponse es9p_res) runs on eIM_ConnHdlr  {
+	var charstring es9p_res_json;
+	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, es9p_res_json);
+	HTTP_SRV.send(ts_http_resp(es9p_res_json));
+}
+
+/* Perform Es9p HTTP request/response cycle */
+private function f_es9p_transceive(RemoteProfileProvisioningResponse es9p_res,
+				   template RemoteProfileProvisioningRequest expected_es9p_req := omit)
+runs on eIM_ConnHdlr return RemoteProfileProvisioningRequest {
+	var RemoteProfileProvisioningRequest es9p_req;
+	es9p_req := f_es9p_receive();
+	f_es9p_send(es9p_res);
+	if (not istemplatekind(expected_es9p_req, "omit")) {
+		if (not match(valueof(es9p_req), expected_es9p_req)) {
+			setverdict(fail, "unexpected request from eIM on ES9p");
+		}
+	}
+	return es9p_req;
+}
+
+/* Perform Es9p HTTP request/response cycle but with an empty response */
+private function f_es9p_transceive_empty_response(template RemoteProfileProvisioningRequest expected_es9p_req := omit)
+runs on eIM_ConnHdlr return RemoteProfileProvisioningRequest {
+	var RemoteProfileProvisioningResponse es9p_res; /* Intentionally left unbound */
+	return f_es9p_transceive(es9p_res, expected_es9p_req);
+}
+
+
+
+/* ********************************************* */
+/* ************ PIPEasp (REST API) ************* */
+/* ********************************************* */
+
+template (value) ASP_PExecute ts_Exec(charstring cmd) := {
+	command := cmd,
+	stdin := ""
+}
+
+template (present) ASP_PResult tr_Result(template (present) charstring stdout,
+					 template (present) charstring stderr,
+					 template (present) integer code) := {
+	stdout := stdout,
+	stderr := stderr,
+	code := code
+}
+
+private function f_init_pipe() runs on eIM_ConnHdlr {
+	map(self:PIPE, system:PIPE);
+}
+
+/* Create a new rest resource (generic) */
+private function f_rest_create(charstring cmdline)
+runs on eIM_ConnHdlr return charstring {
+	var ASP_PResult result;
+
+	PIPE.send(ts_Exec(cmdline));
+	timer T := 4.0;
+	T.start;
+	alt {
+	[] PIPE.receive(tr_Result(?,?,0)) -> value result {
+		/* On success, stdout should contain an URL to a resource */
+		 if (substr(result.stdout, 0, 7) != "http://") {
+			setverdict(fail, "got malformed resource URL from REST API while creating resource");
+		 }
+		return regexp(result.stdout, "(?+)(lookup/)(?+)", 2);
+		}
+	[] PIPE.receive	{
+		setverdict(fail, "unexpected response from REST API while creating resource");
+	}
+	[] T.timeout {
+		setverdict(fail, "no response from REST API while creating resource");
+		}
+	}
+
+	setverdict(fail, "got no resource URL from REST API while creating resource");
+	return "no resource";
+}
+
+/* Create a new rest resource (facility/order) */
+private function f_rest_create_order(charstring facility, template JSON_REST_Resource order)
+runs on eIM_ConnHdlr return charstring {
+	var charstring cmdline;
+	cmdline := mp_restop_path & " -c -f " & facility & " -j " &
+		   oct2char(enc_JSON_REST_Resource(valueof(order)));
+	return f_rest_create(cmdline);
+}
+
+/* Lookup an existing REST resource */
+private function f_rest_lookup_resource(charstring resource_id, charstring facility,
+					template JSON_REST_Response expected_rest_res := omit)
+runs on eIM_ConnHdlr return JSON_REST_Response {
+	var charstring cmdline;
+	var ASP_PResult result;
+	var JSON_REST_Response rest_res;
+
+	cmdline := mp_restop_path & " -l -f " & facility & " -r " & resource_id;
+
+	PIPE.send(ts_Exec(cmdline));
+	timer T := 4.0;
+	T.start;
+	alt {
+	[] PIPE.receive(tr_Result(?,?,0)) -> value result {
+		rest_res := dec_JSON_REST_Response(char2oct(result.stdout));
+		}
+	[] PIPE.receive	{
+		setverdict(fail, "unexpected response from REST API while looking up resource");
+	}
+	[] T.timeout {
+		setverdict(fail, "no response from REST API while looking up resource");
+		}
+	}
+
+	if (not istemplatekind(expected_rest_res, "omit") and not match(rest_res, tr_JSON_REST_success)) {
+		setverdict(fail, "unexpected REST lookup result from eIM");
+	}
+
+	return rest_res;
+}
+
+/* Delete REST resource */
+private function f_rest_delete_resource(charstring resource_id, charstring facility)
+runs on eIM_ConnHdlr {
+	var charstring cmdline;
+	var ASP_PResult result;
+	var JSON_REST_Response rest_res;
+	cmdline := mp_restop_path & " -d -f " & facility & " -r " & resource_id;
+
+	PIPE.send(ts_Exec(cmdline));
+	timer T := 4.0;
+	T.start;
+	alt {
+	[] PIPE.receive(tr_Result(?,?,0)) -> value result {
+	   	/* Verify that the resource has been deleted */
+		rest_res := dec_JSON_REST_Response(char2oct(result.stdout));
+		if (not match(rest_res, tr_JSON_REST_deleted)) {
+			setverdict(fail, "unexpected REST delete result from eIM");
+		}
+
+		/* Make sure that the resource has really been deleted */
+		if (not match(f_rest_lookup_resource(resource_id, facility), tr_JSON_REST_absent)) {
+			setverdict(fail, "unexpected REST result from eIM while checking resource deletion");
+		}
+
+		}
+	[] PIPE.receive	{
+		setverdict(fail, "unexpected response from REST API while deleting resource");
+	}
+	[] T.timeout {
+		setverdict(fail, "no response from REST API while deleting resource");
+		}
+	}
+}
+
+
+
+/* ********************************************* */
+/* ************* ESipa/HTTP-client ************* */
+/* ********************************************* */
+
+private function f_enc_http_req(in RemoteProfileProvisioningResponse es9p_res, out HTTPMessage http_res) {
+	var charstring json_body;
+	var HTTPResponse resp_body;
+
+	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, json_body);
+	resp_body := {
+		client_id := omit,
+		version_major := 1,
+		version_minor := 1,
+		statuscode := 200,
+		statustext := "OK",
+		/* See also SGP.32, section 6.1.1 */
+		header := {
+			{
+				header_name := "X-Admin-Protocol",
+				header_value := "gsma/rsp/v1.0.0"
+			},
+			{
+				header_name := "Content-Type",
+				header_value := "application/x-gsma-rsp-asn1"
+			},
+			{
+				header_name := "Content-Length",
+				header_value := int2str(lengthof(json_body))
+			}
+			},
+			body := json_body
+		};
+
+	http_res := { response := resp_body };
+} with { extension "prototype(fast)" }
+
+template (value) HeaderLines ts_esipa_HTTP_Header := {
+	 { header_name := "User-Agent", header_value := "TTCN3 eIM testsuite" },
+	 { header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
+	 { header_name := "Content-Type", header_value := "application/x-gsma-rsp-asn1" }
+};
+
+/* Send ESipa HTTP request */
+private function f_esipa_send(EsipaMessageFromIpaToEim esipa_req) runs on eIM_ConnHdlr {
+	var octetstring esipa_req_enc;
+	esipa_req_enc := enc_EsipaMessageFromIpaToEim(esipa_req);
+	f_http_tx_request(url := "/gsma/rsp2/asn1",
+			  method := "POST",
+			  binary_body:= esipa_req_enc,
+			  custom_hdr := valueof(ts_esipa_HTTP_Header),
+			  client_id := g_http_client_id);
+}
+
+/* Receive ESipa HTTP response */
+private function f_esipa_receive(template EsipaMessageFromEimToIpa expected_esipa_res := omit)
+runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var HTTPMessage response_http;
+	response_http := f_http_rx_response(exp := ?,
+					    client_id := g_http_client_id,
+					    keep_connection := true);
+
+	if (istemplatekind(g_http_client_id, "omit")) {
+		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
+		 * in all consecutive requests. */
+		g_http_client_id := f_http_client_id_from_http_response(response_http);
+	} else if (valueof(g_http_client_id) != valueof(f_http_client_id_from_http_response(response_http))) {
+		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
+		 * HTTP connection. This must not happen unexpectetly. */
+		setverdict(fail, "unexpected ESipa HTTP connection");
+	}
+
+	if (ispresent(response_http.response_binary)) {
+		esipa_res := dec_EsipaMessageFromEimToIpa(response_http.response_binary.body);
+		if (not istemplatekind(expected_esipa_res, "omit")) {
+			if (not match(valueof(esipa_res), expected_esipa_res)) {
+				setverdict(fail, "unexpected response from eIM on ESipa");
+			}
+		}
+		return esipa_res;
+	} else {
+		setverdict(fail,
+			   "unexpected ESipa response, the HTTP body did either contain no or a non binary response");
+		return omit;
+	}
+}
+
+/* Perform one ESipa HTTP request/response cycle */
+private function f_esipa_transceive(EsipaMessageFromIpaToEim esipa_req,
+				    template EsipaMessageFromEimToIpa expected_esipa_res := omit)
+runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
+	var template EsipaMessageFromEimToIpa esipa_res
+	f_esipa_send(esipa_req);
+	esipa_res := f_esipa_receive();
+	if (not istemplatekind(expected_esipa_res, "omit")) {
+		if (not match(valueof(esipa_res), expected_esipa_res)) {
+			setverdict(fail, "unexpected response from eIM on ESipa");
+		}
+	}
+	return esipa_res;
+}
+
+
+
+/* ********************************************* */
+/* ********** BELOW ONLY TESTCASES! ************ */
+/* ********************************************* */
+
+/* Common Mutual Authentication Procedure, see also: GSMA SGP.22, section 3.0.1 */
+private function f_proc_cmn_mtl_auth() runs on eIM_ConnHdlr {
+	var charstring smdpAddress := mp_es9p_ip & ":" & int2str(mp_es9p_port);
+
+	/* InitiateAuthentication cycle */
+	f_esipa_send(valueof(ts_initiateAuthenticationRequestEsipa(smdpAddress := smdpAddress)));
+	f_es9p_transceive(valueof(ts_initiateAuthenticationResponse), tr_initiateAuthenticationRequest);
+	f_esipa_receive(tr_initiateAuthenticationResponseEsipa);
+
+	/* AuthenticateClient cycle */
+	f_esipa_send(valueof(ts_authenticateClientRequestEsipa));
+	f_es9p_transceive(valueof(ts_authenticateClientResponseEs9), tr_authenticateClientRequest);
+	f_esipa_receive(tr_authenticateClientResponseEsipa_dpe);
+}
+
+/* A testcase to try out an indirect profile download,
+ * See also: GSMA SGP.32, section 3.2.3.2: Indirect Profile Download */
+private function f_TC_proc_indirect_prfle_dwnld(charstring id) runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var HTTP_Adapter_Params http_adapter_pars;
+	var charstring activationCode := "1$" & mp_es9p_ip & ":" & int2str(mp_es9p_port) & "$MyMatchingId"
+
+	f_http_register();
+
+	f_init_pipe();
+	http_adapter_pars := {
+		http_host := mp_esipa_ip,
+		http_port := mp_esipa_port,
+		use_ssl := not mp_esipa_disable_ssl
+	};
+	f_http_init(http_adapter_pars);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("download", ts_JSON_REST_download_order(eID, activationCode));
+
+	/* Check the eIM for new eIM packages, we expect to get a profileDownloadTriggerRequest that contains the
+	 * activationCode that we have created the download with (see above) */
+	f_esipa_transceive(valueof(ts_getEimPackageRequest(eID)), tr_getEimPackageResponse_dnlTrigReq(activationCode));
+
+	/* Perform common mutial authentication procedure */
+	f_proc_cmn_mtl_auth();
+
+	/* Request/download bound profile package */
+	f_esipa_send(valueof(ts_getBoundProfilePackageRequestEsipa));
+	f_es9p_transceive(valueof(ts_getBoundProfilePackageResponse), tr_getBoundProfilePackageRequest);
+	f_esipa_receive(tr_getBoundProfilePackageResponseEsipa);
+
+	/* Handle notification */
+	f_esipa_send(valueof(ts_handleNotificationEsipa_prfleInstRslt));
+	f_es9p_transceive_empty_response(tr_handleNotification);
+
+	f_rest_lookup_resource(resource_id, "download", tr_JSON_REST_success);
+	f_rest_delete_resource(resource_id, "download");
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_proc_indirect_prfle_dwnld() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_indirect_prfle_dwnld), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* A testcase to try out an the Generic eUICC Package Download and Execution Procedure (PSMO),
+ * See also: GSMA SGP.32, section 3.3.1: Generic eUICC Package Download and Execution */
+private function f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco(charstring facility, charstring id,
+							    JSON_REST_Resource order,
+							    template (present) EuiccPackage euiccPackage,
+							    template (present) EuiccPackageResult euiccPackageResult)
+runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var HTTP_Adapter_Params http_adapter_pars;
+	var template EsipaMessageFromEimToIpa esipa_res;
+
+	f_http_register();
+
+	f_init_pipe();
+	http_adapter_pars := {
+		http_host := mp_esipa_ip,
+		http_port := mp_esipa_port,
+		use_ssl := not mp_esipa_disable_ssl
+	};
+	f_http_init(http_adapter_pars);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order(facility, order);
+
+	/* Check the eIM for new eIM packages, we expect to get an euiccPackageRequest that contains the PSMO
+	 * that we have created (see above) */
+	esipa_res := f_esipa_transceive(valueof(ts_getEimPackageRequest(str2oct(order.eidValue))),
+					tr_getEimPackageResponse_euiccPkgReq(euiccPackage));
+
+	/* The eIM will generate a counterValue and a transactionId, both must be echoed in the
+	 * response. */
+	euiccPackageResult.euiccPackageResultSigned.euiccPackageResultDataSigned.counterValue :=
+		esipa_res.getEimPackageResponse.euiccPackageRequest.euiccPackageSigned.counterValue;
+	euiccPackageResult.euiccPackageResultSigned.euiccPackageResultDataSigned.transactionId :=
+		esipa_res.getEimPackageResponse.euiccPackageRequest.euiccPackageSigned.transactionId;
+
+	/* Respond with a plausible EimPackage result */
+	f_esipa_transceive(valueof(ts_provideEimPackageResult_ePRAndNotif(euiccPackageResult)),
+			   tr_provideEimPackageResultResponse_eimAck);
+
+	f_rest_lookup_resource(resource_id, facility, tr_JSON_REST_success);
+	f_rest_delete_resource(resource_id, facility);
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+
+/* (see also above) Test enable PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_enable_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_enable(eID, iccid, false));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_enablePsmo;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_enablePsmo);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_enable_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_enable_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test disable PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_disable_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_disable(eID, iccid));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_disablePsmo;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_disablePsmo);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_disable_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_disable_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test delete PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_delete_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_delete(eID, iccid));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_deletePsmo;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_deletePsmo);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_delete_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_delete_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test disable and delete PSMO at the same time to make sure that eUICC packages with multiple PSMOs
+ * are also accepted and processed correctly. */
+private function f_TC_proc_euicc_pkg_dwnld_exec_disable_and_delete_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_disable_and_delete(eID, iccid));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_disableAndDeletePsmo;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_disableAndDeletePsmo);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_disable_and_delete_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_disable_and_delete_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test listProfileInfo PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_listProfileInfo_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_listProfileInfo(eID, iccid));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_listProfileInfo;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_listProfileInfo);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_listProfileInfo_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_listProfileInfo_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test getRAT PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_getRAT_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_getRAT(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_getRAT;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_getRAT);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_getRAT_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_getRAT_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test configureAutoEnable PSMO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_configureAutoEnable_psmo(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource psmo_order := valueof(ts_JSON_REST_psmo_order_configureAutoEnable(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_configureAutoEnable;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("psmo", id, psmo_order, euiccPackage,
+						   ts_euiccPackageResultSigned_configureAutoEnable);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_configureAutoEnable_psmo() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_configureAutoEnable_psmo), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test addEim eCO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_addEim_eco(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource eco_order := valueof(ts_JSON_REST_eco_order_addEim(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_addEim;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("eco", id, eco_order, euiccPackage,
+						   ts_euiccPackageResultSigned_addEim);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_addEim_eco() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_addEim_eco), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test deleteEim eCO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_deleteEim_eco(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource eco_order := valueof(ts_JSON_REST_eco_order_deleteEim(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_deleteEim;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("eco", id, eco_order, euiccPackage,
+						   ts_euiccPackageResultSigned_deleteEim);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_deleteEim_eco() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_deleteEim_eco), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test updateEim eCO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_updateEim_eco(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource eco_order := valueof(ts_JSON_REST_eco_order_updateEim(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_updateEim;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("eco", id, eco_order, euiccPackage,
+						   ts_euiccPackageResultSigned_updateEim);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_updateEim_eco() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_updateEim_eco), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* (see also above) Test listEim eCO */
+private function f_TC_proc_euicc_pkg_dwnld_exec_listEim_eco(charstring id) runs on eIM_ConnHdlr {
+	var JSON_REST_Resource eco_order := valueof(ts_JSON_REST_eco_order_listEim(eID));
+	var template EuiccPackage euiccPackage := tr_euiccPackage_listEim;
+	f_TC_proc_euicc_pkg_dwnld_exec_psmo_or_eco("eco", id, eco_order, euiccPackage,
+						   ts_euiccPackageResultSigned_listEim);
+}
+testcase TC_proc_euicc_pkg_dwnld_exec_listEim_eco() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_pkg_dwnld_exec_updateEim_eco), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* A testcase to try out an eUICC data request,
+ * See also: GSMA SGP.32, section 2.11.1.2: IpaEuiccDataRequest */
+private function f_TC_proc_euicc_data_req(charstring id) runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var HTTP_Adapter_Params http_adapter_pars;
+
+	f_http_register();
+
+	f_init_pipe();
+	http_adapter_pars := {
+		http_host := mp_esipa_ip,
+		http_port := mp_esipa_port,
+		use_ssl := not mp_esipa_disable_ssl
+	};
+	f_http_init(http_adapter_pars);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("edr", ts_JSON_REST_edr_order(eID, '80BF20BF228384A5A688A9BF2B'O));
+
+	/* Check the eIM for new eIM packages, we expect to get a getEimPackageResponse that contains an
+	 * ipaEuiccDataRequest */
+	f_esipa_transceive(valueof(ts_getEimPackageRequest(eID)), tr_getEimPackageResponse_euiccDataReq);
+
+	/* Provide a plausible ipaEuiccDataResponse to the eIM */
+	f_esipa_transceive(valueof(ts_provideEimPackageResult_euiccDataResp),
+			   tr_provideEimPackageResultResponse_eimAck);
+
+	f_rest_lookup_resource(resource_id, "edr", tr_JSON_REST_success);
+	f_rest_delete_resource(resource_id, "edr");
+}
+testcase TC_proc_euicc_data_req() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_proc_euicc_data_req), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+control {
+	execute ( TC_proc_indirect_prfle_dwnld() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_enable_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_disable_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_delete_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_disable_and_delete_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_listProfileInfo_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_getRAT_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_configureAutoEnable_psmo() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_addEim_eco() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_deleteEim_eco() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_updateEim_eco() );
+	execute ( TC_proc_euicc_pkg_dwnld_exec_listEim_eco() );
+	execute ( TC_proc_euicc_data_req() );
+}
+
+}

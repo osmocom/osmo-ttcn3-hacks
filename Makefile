@@ -21,6 +21,7 @@ SUBDIRS= \
 	cbc \
 	ccid \
 	dia2gsup \
+	eim \
 	fr \
 	fr-net \
 	epdg \
