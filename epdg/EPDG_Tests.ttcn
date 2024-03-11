@@ -478,6 +478,7 @@ private function f_DIA_SWx_RT(template (value) CxDx_3GPP_Reason_Code reason_code
 	var UINT32 hbh_id := f_rnd_octstring(4);
 	var UINT32 ete_id := f_rnd_octstring(4);
 	var octetstring reason_info := char2oct("test");
+	var CxDx_3GPP_Reason_Code reason_code_permanent_termination := PERMANENT_TERMINATION;
 
 	/* Unlike STR, STA contains no IMSI. Register ete_id in DIAMETER_Emulation,
 	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
@@ -487,6 +488,14 @@ private function f_DIA_SWx_RT(template (value) CxDx_3GPP_Reason_Code reason_code
 	SWx.send(ts_DIA_SWx_RTR(g_pars.imsi, reason_code, reason_info,
 				hbh_id := hbh_id,
 				ete_id := ete_id));
+
+	if (match(reason_code_permanent_termination, reason_code)) {
+		/* Expect Abort-Session procedure (ASR + ASA) in the S6b interface: */
+		as_DIA_S6b_AS_success();
+		/* Here AAA-Server starts an ASR + ASA procedure towards ePDG, which forwards it to strongswan: */
+		as_GSUP_rx_CL_REQ(OSMO_GSUP_CANCEL_TYPE_WITHDRAW);
+		f_GSUP_tx_CL_RES();
+	}
 
 	alt {
 	[] SWx.receive(tr_DIA_SWx_RTA(exp_result_tmpl, hbh_id := hbh_id, ete_id := ete_id)) -> value rx_dia {}
@@ -546,6 +555,25 @@ private function f_S6b_ST_success() runs on EPDG_ConnHdlr {
 	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
 		}
+	}
+}
+
+/* Diameter S6b ASR + ASA, TS 29.273 9.1.2.3.4. */
+private altstep as_DIA_S6b_AS_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	[] S6b.receive(tr_DIA_S6b_ASR(f_nai())) -> value rx_dia {
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		SWx.send(ts_DIA_S6b_ASA(DIAMETER_SUCCESS,
+					sess_id := sess_id,
+					hbh_id := rx_dia.hop_by_hop_id,
+					ete_id := rx_dia.end_to_end_id));
+		setverdict(pass);
+	}
+	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter msg rx: ", rx_dia));
 	}
 }
 
@@ -796,6 +824,10 @@ private altstep as_GTPU_rx_icmp4(template (present) PDU_ICMP expected := ?) runs
 	}
 }
 
+/************
+ * GSUP CEAI
+ ************/
+
 private function f_GSUP_tx_SAI_REQ(boolean req_resync := false) runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
 	var template (value) GSUP_IEs pdp_info;
@@ -810,7 +842,6 @@ private function f_GSUP_tx_SAI_REQ(boolean req_resync := false) runs on EPDG_Con
 		GSUP.send(ts_GSUP_SAI_REQ_PDP_INFO(g_pars.imsi, pdp_info));
 	}
 }
-
 
 private altstep as_GSUP_rx_SAI_RES() runs on EPDG_ConnHdlr {
 	var GSUP_PDU rx_gsup;
@@ -836,6 +867,20 @@ private altstep as_GSUP_rx_SAI_ERR(template (present) integer cause := ?) runs o
 	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
 	}
+}
+
+private altstep as_GSUP_rx_CL_REQ(template GSUP_CancelType ctype := omit) runs on EPDG_ConnHdlr {
+	var GSUP_PDU rx_gsup;
+
+	[] GSUP.receive(tr_GSUP_CL_REQ(g_pars.imsi, dom := *, ctype := ctype)) -> value rx_gsup {
+	}
+	[] GSUP.receive(GSUP_PDU:?) -> value rx_gsup {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GSUP msg rx: ", rx_gsup));
+	}
+}
+
+private function f_GSUP_tx_CL_RES() runs on EPDG_ConnHdlr {
+	GSUP.send(ts_GSUP_CL_RES(g_pars.imsi));
 }
 
 /* GSUP AuthInfo Req + Resp, triggers SWx MAR + MAA. */
@@ -1070,6 +1115,23 @@ testcase TC_hss_initiated_deregister_new_server_assigned() runs on MTC_CT {
 	setverdict(pass);
 }
 
+private function f_TC_hss_initiated_deregister_permanent_termination(charstring id) runs on EPDG_ConnHdlr {
+	f_initial_attach();
+	/* Procedure should be performed properly: */
+	f_DIA_SWx_RT(PERMANENT_TERMINATION, tr_AVP_ResultCode(DIAMETER_SUCCESS));
+	/* Subscriber was already removed, it should fail if requested again: */
+	var DIAMETER_ts29_229_ExperimentalResultcode erc := DIAMETER_ERROR_USER_UNKNOWN;
+	f_DIA_SWx_RT(PERMANENT_TERMINATION, tr_AVP_ExperimentalResult(vendor_id_3GPP, int2oct(enum2int(erc), 4)));
+}
+testcase TC_hss_initiated_deregister_permanent_termination() runs on MTC_CT {
+	var EPDG_ConnHdlrPars pars := f_init_pars();
+	var EPDG_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_hss_initiated_deregister_permanent_termination), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 private function f_TC_concurrent_ues(charstring id) runs on EPDG_ConnHdlr {
 	COORD.send(COORD_CMD_READY);
 	COORD.receive(COORD_CMD_START);
@@ -1167,6 +1229,7 @@ control {
 	execute ( TC_ho_wifi_to_lte() );
 	execute ( TC_s2b_CreateSession_rejected() );
 	execute ( TC_hss_initiated_deregister_new_server_assigned() );
+	execute ( TC_hss_initiated_deregister_permanent_termination() );
 	execute ( TC_concurrent_ues2() );
 	execute ( TC_concurrent_ues100() );
 	execute ( TC_upf_echo_req() );
