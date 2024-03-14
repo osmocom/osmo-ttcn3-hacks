@@ -473,7 +473,8 @@ private altstep as_DIA_SWx_SA_success(template (present) CxDx_3GPP_Server_Assign
 
 /* Send RTR as HSS to AAA server, expect back RTA */
 private function f_DIA_SWx_RT(template (value) CxDx_3GPP_Reason_Code reason_code,
-			      template (present) GenericAVP exp_result_tmpl := tr_AVP_ResultCode(DIAMETER_SUCCESS)) runs on EPDG_ConnHdlr {
+			      template (present) GenericAVP exp_result_tmpl := tr_AVP_ResultCode(DIAMETER_SUCCESS),
+			      boolean exp_aaa_proc := true) runs on EPDG_ConnHdlr {
 	var PDU_DIAMETER rx_dia;
 	var UINT32 hbh_id := f_rnd_octstring(4);
 	var UINT32 ete_id := f_rnd_octstring(4);
@@ -489,12 +490,14 @@ private function f_DIA_SWx_RT(template (value) CxDx_3GPP_Reason_Code reason_code
 				hbh_id := hbh_id,
 				ete_id := ete_id));
 
-	if (match(reason_code_permanent_termination, reason_code)) {
+	if (match(reason_code_permanent_termination, reason_code) and exp_aaa_proc) {
 		/* Expect Abort-Session procedure (ASR + ASA) in the S6b interface: */
 		as_DIA_S6b_AS_success();
 		/* Here AAA-Server starts an ASR + ASA procedure towards ePDG, which forwards it to strongswan: */
 		as_GSUP_rx_CL_REQ(OSMO_GSUP_CANCEL_TYPE_WITHDRAW);
 		f_GSUP_tx_CL_RES();
+		/* No need to so STR+STA, since the session was already aborted above during ASR+ASA: */
+		as_GTP2C_DeleteSession_success(do_s6b_st_proc := false);
 	}
 
 	alt {
@@ -566,7 +569,7 @@ private altstep as_DIA_S6b_AS_success() runs on EPDG_ConnHdlr {
 	[] S6b.receive(tr_DIA_S6b_ASR(f_nai())) -> value rx_dia {
 		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
 		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
-		SWx.send(ts_DIA_S6b_ASA(DIAMETER_SUCCESS,
+		S6b.send(ts_DIA_S6b_ASA(DIAMETER_SUCCESS,
 					sess_id := sess_id,
 					hbh_id := rx_dia.hop_by_hop_id,
 					ete_id := rx_dia.end_to_end_id));
@@ -702,7 +705,7 @@ private altstep as_GTP2C_CreateSession_error(GTP2C_Cause resp_cause, boolean do_
 }
 
 /* ePDG Deletes session at the PGW. PGW sends Diameter s6b AAR + AAA. */
-private altstep as_GTP2C_DeleteSession_success() runs on EPDG_ConnHdlr {
+private altstep as_GTP2C_DeleteSession_success(boolean do_s6b_st_proc := true) runs on EPDG_ConnHdlr {
 	var PDU_GTPCv2 rx_msg;
 	var BearerContextIEs rx_bctx_ies;
 	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
@@ -710,8 +713,10 @@ private altstep as_GTP2C_DeleteSession_success() runs on EPDG_ConnHdlr {
 	var template (value) BearerContextIEs bctx_ies;
 
 	[] GTP2.receive(tr_GTP2C_DeleteSessionReq(g_pars.teic_local)) -> value rx_msg {
-		/* Upon rx of DeleteSession, emulate PGW requesting the AAA server for Sesssion Termination. */
-		f_S6b_ST_success();
+		if (do_s6b_st_proc) {
+			/* Upon rx of DeleteSession, emulate PGW requesting the AAA server for Sesssion Termination. */
+			f_S6b_ST_success();
+		}
 
 		GTP2.send(ts_GTP2C_DeleteSessionResp(g_pars.teic_remote,
 						     rx_msg.sequenceNumber,
@@ -1121,7 +1126,8 @@ private function f_TC_hss_initiated_deregister_permanent_termination(charstring 
 	f_DIA_SWx_RT(PERMANENT_TERMINATION, tr_AVP_ResultCode(DIAMETER_SUCCESS));
 	/* Subscriber was already removed, it should fail if requested again: */
 	var DIAMETER_ts29_229_ExperimentalResultcode erc := DIAMETER_ERROR_USER_UNKNOWN;
-	f_DIA_SWx_RT(PERMANENT_TERMINATION, tr_AVP_ExperimentalResult(vendor_id_3GPP, int2oct(enum2int(erc), 4)));
+	f_DIA_SWx_RT(PERMANENT_TERMINATION, tr_AVP_ExperimentalResult(vendor_id_3GPP, int2oct(enum2int(erc), 4)),
+		     exp_aaa_proc := false);
 }
 testcase TC_hss_initiated_deregister_permanent_termination() runs on MTC_CT {
 	var EPDG_ConnHdlrPars pars := f_init_pars();
