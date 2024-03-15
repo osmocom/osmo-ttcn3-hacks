@@ -472,7 +472,8 @@ private altstep as_DIA_SWx_SA_success(template (present) CxDx_3GPP_Server_Assign
 }
 
 /* Send PPR as HSS to AAA server, expect back PPA */
-private function f_DIA_SWx_PP(template (present) GenericAVP exp_result_tmpl := tr_AVP_ResultCode(DIAMETER_SUCCESS)) runs on EPDG_ConnHdlr {
+private function f_DIA_SWx_PP(template (present) GenericAVP exp_result_tmpl := tr_AVP_ResultCode(DIAMETER_SUCCESS),
+			      boolean exp_aaa_proc := true) runs on EPDG_ConnHdlr {
 	var PDU_DIAMETER rx_dia;
 	var UINT32 hbh_id := f_rnd_octstring(4);
 	var UINT32 ete_id := f_rnd_octstring(4);
@@ -488,6 +489,24 @@ private function f_DIA_SWx_PP(template (present) GenericAVP exp_result_tmpl := t
 				g_pars.apn,
 				hbh_id := hbh_id,
 				ete_id := ete_id));
+
+	if (exp_aaa_proc) {
+		/* TODO: in successful case, we want to validate how this procedure extends to other interfaces:
+		* """ 3GPP TS 29.273 8.1.2.3.3:
+		* After a successful user profile download, the 3GPP AAA Server shall
+		* initiate re-authentication procedure as described
+		* in clause 7.2.2.4 if the subscriber has previously been authenticated
+		* and authorized to untrusted non-3GPP access.
+		* """
+		*/
+		/* TS 29.273 9.1.2.5.1:
+		 * "The Service Authorization Information Update procedure is performed in two steps":
+		 * step 1: */
+		as_DIA_S6b_RA_success();
+		/* step 2 */
+		/* Since PGW Address didn't change, expect no SAR+SAA triggered as a consequence to AAR+AAA. */
+		f_S6b_AA_success(exp_swx_sa_proc := false);
+	}
 
 	alt {
 	[] SWx.receive(tr_DIA_SWx_PPA(exp_result_tmpl, hbh_id := hbh_id, ete_id := ete_id)) -> value rx_dia {}
@@ -536,7 +555,7 @@ private function f_DIA_SWx_RT(template (value) CxDx_3GPP_Reason_Code reason_code
 
 
 /* Send AAR as PGW to AAA server, expect back AAA */
-private function f_S6b_AA_success() runs on EPDG_ConnHdlr {
+private function f_S6b_AA_success(boolean exp_swx_sa_proc := true) runs on EPDG_ConnHdlr {
 	var PDU_DIAMETER rx_dia;
 	var UINT32 hbh_id := f_rnd_octstring(4);
 	var UINT32 ete_id := f_rnd_octstring(4);
@@ -555,8 +574,10 @@ private function f_S6b_AA_success() runs on EPDG_ConnHdlr {
 				pgw_addr,
 				hbh_id := hbh_id, ete_id := ete_id));
 
-	/* AAR in S6b in AAA-Server triggers Service-Assignment Request/Answer towards HSS: */
-	as_DIA_SWx_SA_success();
+	if (exp_swx_sa_proc) {
+		/* AAR in S6b in AAA-Server triggers Service-Assignment Request/Answer towards HSS: */
+		as_DIA_SWx_SA_success();
+	}
 
 	alt {
 	[] S6b.receive(tr_DIA_S6b_AAA) -> value rx_dia {}
@@ -587,6 +608,25 @@ private function f_S6b_ST_success() runs on EPDG_ConnHdlr {
 	}
 }
 
+/* Diameter S6b RAR + RAA, TS 29.273 9.1.2.5. */
+private altstep as_DIA_S6b_RA_success() runs on EPDG_ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	[] S6b.receive(tr_DIA_S6b_RAR(f_nai())) -> value rx_dia {
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		S6b.send(ts_DIA_S6b_RAA(DIAMETER_SUCCESS,
+					sess_id := sess_id,
+					hbh_id := rx_dia.hop_by_hop_id,
+					ete_id := rx_dia.end_to_end_id));
+		setverdict(pass);
+	}
+	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
+	}
+}
+
 /* Diameter S6b ASR + ASA, TS 29.273 9.1.2.3.4. */
 private altstep as_DIA_S6b_AS_success() runs on EPDG_ConnHdlr {
 	var PDU_DIAMETER rx_dia;
@@ -602,7 +642,7 @@ private altstep as_DIA_S6b_AS_success() runs on EPDG_ConnHdlr {
 		setverdict(pass);
 	}
 	[] S6b.receive(PDU_DIAMETER:?) -> value rx_dia {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter msg rx: ", rx_dia));
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
 	}
 }
 
@@ -1188,7 +1228,8 @@ testcase TC_hss_initiated_update_user_profile() runs on MTC_CT {
  */
 private function f_TC_hss_initiated_update_user_profile_unknown(charstring id) runs on EPDG_ConnHdlr {
 	var DIAMETER_ts29_229_ExperimentalResultcode erc := DIAMETER_ERROR_USER_UNKNOWN;
-	f_DIA_SWx_PP(tr_AVP_ExperimentalResult(vendor_id_3GPP, int2oct(enum2int(erc), 4)));
+	f_DIA_SWx_PP(tr_AVP_ExperimentalResult(vendor_id_3GPP, int2oct(enum2int(erc), 4)),
+		     exp_aaa_proc := false);
 }
 testcase TC_hss_initiated_update_user_profile_unknown() runs on MTC_CT {
 	var EPDG_ConnHdlrPars pars := f_init_pars();
