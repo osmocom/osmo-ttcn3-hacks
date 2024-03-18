@@ -132,6 +132,14 @@ type record BearerConfig {
 	OCT4 		teid_remote optional
 };
 
+type record SessionParsGy {
+	/* In seconds. 0 => disabled, !0 => grant over CC-Time period */
+	integer validity_time,
+
+	/* Result-Code to use when sending Gy CCA, usually DIAMETER_SUCCESS */
+	DIAMETER_Resultcode cca_res_code
+};
+
 /* configuration data for a given Session */
 type record SessionPars {
 	hexstring	imsi,
@@ -159,8 +167,7 @@ type record SessionPars {
 	charstring	tun_dev_name,
 	charstring	tun_netns_name optional,
 
-	/* In seconds. 0 => disabled, !0 => grant over CC-Time period */
-	integer gy_validity_time
+	SessionParsGy gy
 }
 
 template (value) SessionPars
@@ -188,7 +195,10 @@ t_SessionPars(hexstring imsi,
 	},
 	tun_dev_name := tundev,
 	tun_netns_name := tundev,
-	gy_validity_time := 0
+	gy := {
+		validity_time := 0,
+		cca_res_code := DIAMETER_SUCCESS
+	}
 }
 
 
@@ -575,26 +585,43 @@ runs on PGW_Session_CT return template (present) PDU_DIAMETER
 	return tpl;
 }
 
+function f_ts_DIA_Gy_CCA(PDU_DIAMETER rx_gy)
+runs on PGW_Session_CT return template (value) PDU_DIAMETER
+{
+	var template (value) PDU_DIAMETER tx_dia;
+	var template (omit) AVP avp;
+	var octetstring sess_id;
+	var AVP_Unsigned32 req_num;
+	var DCC_NONE_CC_Request_Type req_type;
+	var DIAMETER_Resultcode cca_res_code_success := DIAMETER_SUCCESS;
+
+	avp := f_DIAMETER_get_avp(rx_gy, c_AVP_Code_BASE_NONE_Session_Id);
+	sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+
+	avp := f_DIAMETER_get_avp(rx_gy, c_AVP_Code_DCC_NONE_CC_Request_Type);
+	req_type := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Type);
+
+	avp := f_DIAMETER_get_avp(rx_gy, c_AVP_Code_DCC_NONE_CC_Request_Number);
+	req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
+
+	if (g_pars.gy.cca_res_code != cca_res_code_success) {
+		tx_dia := ts_DIA_Gy_CCA(rx_gy.hop_by_hop_id, rx_gy.end_to_end_id, sess_id,
+					g_pars.gy.cca_res_code, req_type, req_num);
+	} else if (g_pars.gy.validity_time > 0) {
+		tx_dia := ts_DIA_Gy_CCA_ValidityTime(rx_gy.hop_by_hop_id, rx_gy.end_to_end_id, sess_id,
+						req_type, req_num, g_pars.gy.validity_time);
+	} else {
+		tx_dia := ts_DIA_Gy_CCA(rx_gy.hop_by_hop_id, rx_gy.end_to_end_id, sess_id,
+					g_pars.gy.cca_res_code, req_type, req_num);
+	}
+	return tx_dia;
+}
+
 private altstep as_DIA_Gy_CCR(DCC_NONE_CC_Request_Type req_type)
 runs on PGW_Session_CT {
 	[] Gy.receive(f_tr_DIA_Gy_CCR(req_type := req_type)) -> value g_rx_gy {
 		var template (value) PDU_DIAMETER tx_dia;
-		var template (omit) AVP avp;
-		var octetstring sess_id;
-		var AVP_Unsigned32 req_num;
-
-		avp := f_DIAMETER_get_avp(g_rx_gy, c_AVP_Code_BASE_NONE_Session_Id);
-		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
-
-		avp := f_DIAMETER_get_avp(g_rx_gy, c_AVP_Code_DCC_NONE_CC_Request_Number);
-		req_num := valueof(avp.avp_data.avp_DCC_NONE_CC_Request_Number);
-		if (g_pars.gy_validity_time > 0) {
-			tx_dia := ts_DIA_Gy_CCA_ValidityTime(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
-						 req_type, req_num, g_pars.gy_validity_time);
-		} else {
-			tx_dia := ts_DIA_Gy_CCA(g_rx_gy.hop_by_hop_id, g_rx_gy.end_to_end_id, sess_id,
-						 req_type, req_num);
-		}
+		tx_dia := f_ts_DIA_Gy_CCA(g_rx_gy);
 		Gy.send(tx_dia);
 	}
 	[] Gy.receive(PDU_DIAMETER:?) -> value g_rx_gy {
@@ -1046,7 +1073,7 @@ private function f_TC_gy_charging_cc_time() runs on PGW_Session_CT {
 testcase TC_gy_charging_cc_time() runs on PGW_Test_CT {
 	var PGW_Session_CT vc_conn;
 	var SessionPars pars := valueof(t_SessionPars('001010123456789'H, "tun23"));
-	pars.gy_validity_time := 3; /* Grant access for 3 seconds, needs to be re-validated afterwards */
+	pars.gy.validity_time := 3; /* Grant access for 3 seconds, needs to be re-validated afterwards */
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_gy_charging_cc_time), pars);
 	vc_conn.done;
