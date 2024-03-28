@@ -14,6 +14,7 @@
 # limitations under the License.
 
 SUBDIRS= \
+	asterisk \
 	bsc \
 	bsc-nat \
 	bts \
