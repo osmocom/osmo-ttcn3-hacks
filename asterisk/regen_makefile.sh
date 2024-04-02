@@ -14,6 +14,7 @@ FILES="
 	SIPmsg_PT.cc
 	TCCConversion.cc
 	TCCInterface.cc
+	TCCOpenSecurity.cc
 "
 
 ../regen-makefile.sh -e $NAME $FILES

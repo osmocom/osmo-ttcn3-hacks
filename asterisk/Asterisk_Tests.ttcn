@@ -11,6 +11,7 @@ module Asterisk_Tests {
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+import from TCCOpenSecurity_Functions all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from Native_Functions all;
@@ -44,6 +45,7 @@ type component ConnHdlr extends SIP_ConnHdlr {
 type record ConnHdlrPars {
 	float t_guard,
 	charstring user,
+	charstring password,
 	SipUrl registrar_sip_url,
 	SipAddr registrar_sip_record,
 	CallidString registrar_sip_call_id,
@@ -55,9 +57,11 @@ type record ConnHdlrPars {
 }
 
 template (value) ConnHdlrPars t_Pars(charstring user,
-				     charstring displayname := "\"Anonymous\"") := {
+				     charstring displayname := "\"Anonymous\"",
+				     charstring password := "secret") := {
 	t_guard := 30.0,
 	user := user,
+	password := password,
 	registrar_sip_url := valueof(ts_SipUrlHost(mp_remote_sip_host)),
 	registrar_sip_record := ts_SipAddr(ts_HostPort(mp_remote_sip_host),
 					   ts_UserInfo(user),
@@ -188,38 +192,87 @@ private function f_tr_Via_response(Via via_req) return template (present) Via {
 			    via_resp_params);
 }
 
+private function f_tr_To_response(SipAddr to_req) return template (present) SipAddr {
+	return tr_SipAddr_from_val(to_req);
+}
+
 function f_SIP_register() runs on ConnHdlr return PDU_SIP_Response
 {
 	var template (present) PDU_SIP_Response exp;
+	var Authorization authorization;
+	var Via via := g_pars.registrar_via;
+	var SipAddr from_sipaddr := g_pars.registrar_sip_record;
+	var charstring branch_value;
 
+	branch_value := f_sip_gen_branch(f_sip_SipAddr_to_str(g_pars.registrar_sip_record),
+					 f_sip_SipAddr_to_str(g_pars.registrar_sip_record),
+					 g_pars.registrar_sip_call_id,
+					 g_pars.registrar_sip_seq_nr);
+
+	via.viaBody[0].viaParams := f_sip_param_set(via.viaBody[0].viaParams, "branch", branch_value);
+	from_sipaddr.params := f_sip_param_set(from_sipaddr.params, "tag", f_sip_rand_tag());
 	SIP.send(ts_SIP_REGISTER(g_pars.registrar_sip_url,
 				 g_pars.registrar_sip_call_id,
+				 from_sipaddr,
 				 g_pars.registrar_sip_record,
-				 g_pars.registrar_sip_record,
-				 g_pars.registrar_via,
+				 via,
 				 g_pars.registrar_sip_seq_nr,
 				 g_pars.local_contact,
 				 ts_Expires("7200")));
 
 	exp := tr_SIP_Response_REGISTER_Unauthorized(
 			g_pars.registrar_sip_call_id,
-			g_pars.registrar_sip_record,
-			g_pars.registrar_sip_record,
-			f_tr_Via_response(g_pars.registrar_via),
+			from_sipaddr,
+			f_tr_To_response(g_pars.registrar_sip_record),
+			f_tr_Via_response(via),
 			*,
+			tr_WwwAuthenticate({tr_Challenge_digestCln(?)}),
 			g_pars.registrar_sip_seq_nr);
 	as_SIP_expect_resp(exp);
 
-	/* Do the registering after calculating the md5 hash, etc. */
+	/* Digest Auth: RFC 2617 */
+	authorization := f_sip_digest_gen_Authorization(g_rx_sip_resp.msgHeader.wwwAuthenticate,
+							g_pars.user, g_pars.password,
+							"REGISTER", "sip:" & mp_remote_sip_host)
+
+	/* New transaction: */
+	g_pars.registrar_sip_seq_nr := g_pars.registrar_sip_seq_nr + 1;
+	branch_value := f_sip_gen_branch(f_sip_SipAddr_to_str(g_pars.registrar_sip_record),
+					 f_sip_SipAddr_to_str(g_pars.registrar_sip_record),
+					 g_pars.registrar_sip_call_id,
+					 g_pars.registrar_sip_seq_nr);
+	via.viaBody[0].viaParams := f_sip_param_set(via.viaBody[0].viaParams, "branch", branch_value);
+
+	SIP.send(ts_SIP_REGISTER(g_pars.registrar_sip_url,
+				g_pars.registrar_sip_call_id,
+				from_sipaddr,
+				g_pars.registrar_sip_record,
+				via,
+				g_pars.registrar_sip_seq_nr,
+				g_pars.local_contact,
+				ts_Expires("7200"),
+				authorization := authorization));
+
+	/* Wait for OK answer */
+	exp := tr_SIP_Response(
+			g_pars.registrar_sip_call_id,
+			from_sipaddr,
+			f_tr_To_response(g_pars.registrar_sip_record),
+			f_tr_Via_response(via),
+			*,
+			"REGISTER", 200,
+			g_pars.registrar_sip_seq_nr, "OK");
+	as_SIP_expect_resp(exp);
+
+	/* Prepare for next use: */
+	g_pars.registrar_sip_seq_nr := g_pars.registrar_sip_seq_nr + 1;
 	return g_rx_sip_resp;
 }
 
-/* Successful MO Call, which is subsequently released by SIP side */
+/* Test SIP registration of local clients */
 private function f_TC_internal_registration(charstring id) runs on ConnHdlr {
 
 	f_SIP_register();
-	/* now call is fully established */
-	f_sleep(2.0);
 	// f_SIP_deregister();
 	setverdict(pass);
 }
@@ -231,6 +284,11 @@ testcase TC_internal_registration() runs on test_CT {
 	pars := f_init_ConnHdlrPars();
 	vc_conn := f_start_handler(refers(f_TC_internal_registration), pars);
 	vc_conn.done;
+}
+
+testcase TC_selftest() runs on test_CT {
+	f_sip_digest_selftest();
+	setverdict(pass);
 }
 
 control {

@@ -17,6 +17,7 @@ FILES="
 	SIPmsg_PT.cc
 	TCCConversion.cc
 	TCCInterface.cc
+	TCCOpenSecurity.cc
 	TELNETasp_PT.cc
 	UD_PT.cc
 "
