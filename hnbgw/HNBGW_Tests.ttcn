@@ -88,6 +88,7 @@ modulepar {
 	charstring mp_hnbgw_ip := "127.0.0.1";
 	integer mp_hnbgw_iuh_port := 29169;
 	integer mp_hnbgw_ctrl_port := 4262;
+	integer mp_hnbgw_statsd_port := 8125;
 
 	charstring mp_mgw_ip := "127.0.0.1";
 	integer mp_mgw_port := 2427;
@@ -299,8 +300,9 @@ type record TestHdlrParams {
    * RUA_ConnHdlr (for the Iuh side, emulating the HNB)
    * RAN_ConnHdlr (for the Iu side, emulating the MSC)
    * MGCP_ConnHdlr (for the MGCP side, emulating the MGW)
+   * StatsD_ConnHdlr (for the statsd interface, verifying counters)
  */
-type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr {
+type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr  {
 	var integer g_sccp_conn_id;
 	var TestHdlrParams g_pars;
 	timer g_Tguard;
@@ -328,7 +330,7 @@ type record HnbConfig {
 	integer sac
 }
 
-type component test_CT extends CTRL_Adapter_CT {
+type component test_CT extends CTRL_Adapter_CT, StatsD_Checker_CT {
 	var boolean g_initialized := false;
 
 	/********************* Iu side */
@@ -344,6 +346,7 @@ type component test_CT extends CTRL_Adapter_CT {
 
 	var MGCP_Emulation_CT vc_MGCP;
 	port TELNETasp_PT HNBGWVTY;
+	var StatsD_Checker_CT vc_STATSD;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard := 30.0;
 
@@ -488,6 +491,8 @@ function f_init(charstring id := "HNBGW", float guard_timeout := 30.0, integer n
 	T_guard.start(guard_timeout);
 	activate(as_Tguard());
 
+	f_init_statsd("VirtHNBGW", vc_STATSD, mp_hnbgw_ip, mp_hnbgw_statsd_port);
+
 	/* RUA/RANAP emulation on top of lower-layer Iuh */
 	var RuaOps rua_ops := {
 		create_cb := refers(IuhRanapCreateCallback),
@@ -601,6 +606,8 @@ private function f_start_handler_create(TestHdlrParams pars) runs on test_CT ret
 	/* MGCP part */
 	connect(vc_conn:MGCP, vc_MGCP:MGCP_CLIENT);
 	connect(vc_conn:MGCP_PROC, vc_MGCP:MGCP_PROC);
+
+	connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
 
 	return vc_conn;
 }
@@ -1407,6 +1414,7 @@ private altstep as_mgcp_dlcx(inout TestHdlrParams pars) runs on ConnHdlr {
 }
 
 friend function f_tc_rab_assignment(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	const charstring hnb0_ctr_prefix := "TTCN3.hnb.001-01-L2342-R0-S55-C1.";
 	var MgcpCommand mgcp_cmd;
 	var RANAP_PDU tx;
 	timer T := 5.0;
@@ -1414,10 +1422,27 @@ friend function f_tc_rab_assignment(charstring id, TestHdlrParams pars) runs on 
 	f_init_handler(pars);
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
 
+	f_statsd_reset();
+
 	tx := f_build_initial_ue(g_pars);
 	f_iuh2iu_connect(tx);
 
+	/* Expect stats to be 0 */
+	var StatsDExpects expect := {
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.req", mtype := "c", min := 0, max := 0},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.cnf", mtype := "c", min := 0, max := 0},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.fail", mtype := "c", min := 0, max := 0}
+	};
+	f_statsd_expect(expect);
+
 	f_create_rab(pars.mgcp_pars);
+
+	expect := {
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.req", mtype := "c", min := 1, max := 1},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.cnf", mtype := "c", min := 1, max := 1},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.fail", mtype := "c", min := 0, max := 0}
+	};
+	f_statsd_expect(expect);
 
 	/* Send Iu Release */
 	tx := valueof(ts_RANAP_IuReleaseCommand(pars.rab_rel_cause));
@@ -1447,6 +1472,7 @@ testcase TC_rab_assignment() runs on test_CT {
 }
 
 friend function f_tc_rab_assign_fail(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	const charstring hnb0_ctr_prefix := "TTCN3.hnb.001-01-L2342-R0-S55-C1.";
 	var MgcpCommand mgcp_cmd;
 	var RANAP_PDU tx;
 	timer T := 5.0;
@@ -1454,14 +1480,32 @@ friend function f_tc_rab_assign_fail(charstring id, TestHdlrParams pars) runs on
 	f_init_handler(pars);
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
 
+	f_statsd_reset();
+
 	tx := f_build_initial_ue(g_pars);
 	f_iuh2iu_connect(tx);
+
+	/* Expect stats to be 0 */
+	var StatsDExpects expect := {
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.req", mtype := "c", min := 0, max := 0},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.cnf", mtype := "c", min := 0, max := 0},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.fail", mtype := "c", min := 0, max := 0}
+	};
+	f_statsd_expect(expect);
 
 	f_rab_ass_req(pars.mgcp_pars);
 
 	/* Send RAB failed list in response */
 	tx := valueof(ts_RANAP_RabAssResp(rab_fl := ts_RAB_FL(t_RAB_id(23), pars.rab_rel_cause)));
 	f_iuh2iu(tx);
+
+	expect := {
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.req", mtype := "c", min := 1, max := 1},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.cnf", mtype := "c", min := 0, max := 0},
+		{name := hnb0_ctr_prefix & "ranap.cs.rab_act.fail", mtype := "c", min := 1, max := 1}
+	};
+	f_statsd_expect(expect);
+
 
 	T.start;
 	alt {
@@ -1484,6 +1528,7 @@ testcase TC_rab_assign_fail() runs on test_CT {
 }
 
 friend function f_tc_rab_release(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	const charstring hnb0_ctr_prefix := "TTCN3.hnb.001-01-L2342-R0-S55-C1.";
 	var MgcpCommand mgcp_cmd;
 	var RANAP_PDU tx;
 	timer T := 15.0;
@@ -1491,14 +1536,34 @@ friend function f_tc_rab_release(charstring id, TestHdlrParams pars) runs on Con
 	f_init_handler(pars);
 	f_create_mgcp_expect(ExpectCriteria:{omit,omit,omit});
 
+	f_statsd_reset();
+
 	tx := f_build_initial_ue(g_pars);
 	f_iuh2iu_connect(tx);
 
 	f_create_rab(pars.mgcp_pars);
 
+	var charstring ctr_name;
+	if (pars.rab_rel_cause == valueof(ts_RanapCause_nas_normal)) {
+		ctr_name := "ranap.cs.rab_rel.req.normal";
+	} else {
+		ctr_name := "ranap.cs.rab_rel.req.abnormal";
+	}
+
+	/* Expect stats to be 0 */
+	var StatsDExpects expect := {
+		{name := hnb0_ctr_prefix & ctr_name, mtype := "c", min := 0, max := 0}
+	};
+	f_statsd_expect(expect);
+
 	/* Send RAB Release */
 	tx := valueof(ts_RANAP_RabAssReq(rab_rl := ts_RAB_RL(t_RAB_id(23), pars.rab_rel_cause)));
 	BSSAP.send(tx);
+
+	expect := {
+		{name := hnb0_ctr_prefix & ctr_name, mtype := "c", min := 1, max := 1}
+	};
+	f_statsd_expect(expect);
 
 	T.start;
 
