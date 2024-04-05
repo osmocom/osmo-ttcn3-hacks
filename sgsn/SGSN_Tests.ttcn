@@ -3727,6 +3727,167 @@ testcase TC_cell_change_different_ci_data() runs on test_CT {
 	f_cleanup();
 }
 
+/* SGSN terminated SGSN Context Request procedure (we request, SGSN responds)
+ * 3GPP TS 23.401, Figure D.3.6-1: "Gn/Gp SGSN to MME Tracking Area Update procedure" */
+private function f_TC_sgsn_context_req_in(charstring id) runs on BSSGP_ConnHdlr {
+	var integer seq_nr := f_rnd_int(65535);
+	var Gtp1cUnitdata gtpc_ud;
+	timer T;
+
+	var Gtp1cPeer peer := {
+		connId := 1,
+		remName := mp_sgsn_gtp_ip,
+		remPort := GTP1C_PORT
+	}
+
+	/* The MS attaches to GERAN/UTRAN and enjoys the service */
+	f_gmm_attach(false, false);
+
+	/* The MS switches to an LTE cell and performs Tracking Area Update Request there.
+	 * The MME requests information about the MS by sending SGSN Context Request. */
+	var template (value) GTPC_PDUs ctx_req;
+	ctx_req := ts_SGSNContextReqPDU(rai := ts_RoutingAreaIdentity('250'H, 'F99'H, '4242'O, 'DE'O),
+					teic := '12345678'O,
+					sgsn_addr_control := f_inet_addr(mp_ggsn_ip),
+					ptmsi := ts_PTMSI(g_pars.p_tmsi),
+					ptmsi_sig := ts_PTMSI_sig('010203'O));
+	GTP.send(ts_GTPC_SGSNContextReq(peer, seq_nr, ctx_req));
+
+	/* The SGSN responds with subscriber's IMSI */
+	var template (present) GTPC_PDUs ctx_rsp;
+	ctx_rsp := tr_SGSNContextRespPDU(cause := GTP_CAUSE_REQUEST_ACCEPTED,
+					 imsi := g_pars.imsi);
+	/* TODO: match MM/PDP Context, GSN Address */
+
+	T.start(2.0);
+	alt {
+	[] GTP.receive(tr_GTPC_SGSNContextResp(?, ?, ctx_rsp)) -> value gtpc_ud {
+		log("Rx SGSN Context Resp from SGSN, sending Ack");
+		GTP.send(ts_GTPC_SGSNContextAck(gtpc_ud.peer, '12345678'O, seq_nr));
+		setverdict(pass);
+		}
+	[] GTP.receive(tr_GTPC_SGSNContextResp) -> value gtpc_ud {
+		GTP.send(ts_GTPC_SGSNContextAck(gtpc_ud.peer, '12345678'O, seq_nr,
+						ts_SGSNContextAckPDU(GTP_CAUSE_INVALID_MSG_FORMAT)));
+		setverdict(fail, "Rx unexpected SGSN Context Resp");
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SGSN Context Resp");
+		}
+	}
+
+	/* HLR/HSS tells SGSN to forget this MS/UE */
+	GSUP.send(ts_GSUP_CL_REQ(g_pars.imsi, OSMO_GSUP_CANCEL_TYPE_UPDATE));
+	GSUP.receive(tr_GSUP_CL_RES(g_pars.imsi));
+}
+testcase TC_sgsn_context_req_in() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_sgsn_context_req_in), testcasename(), g_gb, 72);
+	vc_conn.done;
+	f_cleanup();
+}
+
+/* SGSN originated SGSN Context Request procedure (SGSN requests, we respond)
+ * 3GPP TS 23.401, Figure D.3.5-1 "Routing Area Update procedure" */
+private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr {
+	var integer seq_nr := f_rnd_int(65535);
+	var Gtp1cUnitdata gtpc_ud;
+	timer T;
+
+	/* The MS goes to GERAN/UTRAN from an LTE cell */
+	f_send_l3(ts_GMM_RAU_REQ(mi_lv := valueof(ts_MI_TMSI_LV('DE42DE42'O)),
+				 upd_type := GPRS_UPD_T_RA,
+				 old_ra := f_random_RAI()), 0);
+
+
+	/* The SGSN has no idea about the MS and inquires the MME about it */
+	T.start(2.0);
+	alt {
+	[] GTP.receive(tr_GTPC_SGSNContextReq(?, ?)) -> value gtpc_ud {
+		log("Rx SGSN Context Req from SGSN");
+		setverdict(pass);
+		T.stop;
+		}
+	[] GTP.receive(tr_GTPC_SGSNContextResp) {
+		setverdict(fail, "Rx unexpected SGSN Context Req");
+		mtc.stop;
+		}
+	[] BSSGP[0].receive(tr_LLC_XID_MT_CMD(?, ?)) {
+		/* Ignore XID Reset */
+		repeat;
+		}
+	[] BSSGP[0].receive(tr_GMM_RAU_REJECT) {
+		/* osmo-sgsn -latest would send RAU Reject (Implicitly detached) */
+		setverdict(fail, "Rx unexpected RAU Reject");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SGSN Context Req");
+		mtc.stop;
+		}
+	}
+
+	/* The MME responds */
+	var OCT8 kc := f_rnd_octstring(8);
+
+	var template (value) PDP_Context_GTPC pdp_ctx;
+	pdp_ctx := ts_PDP_Context_GTPC(pdp_addr := f_inet_addr("10.10.10.10"),
+				       ggsn_gsn_addr := f_inet_addr(mp_ggsn_ip),
+				       apn := '08696E7465726E6574'O);
+
+	var template (value) GTPC_PDUs ctx_rsp;
+	ctx_rsp := ts_SGSNContextRespPDU(cause := GTP_CAUSE_REQUEST_ACCEPTED,
+					 imsi := g_pars.imsi,
+					 teic := '12345678'O,
+					 mm_context := ts_MM_ContextGSM(kc),
+					 pdp_ctx_list := { pdp_ctx });
+	GTP.send(ts_GTPC_SGSNContextResp(gtpc_ud.peer, '12345678'O, seq_nr, ctx_rsp));
+
+	/* TODO: Security Functions (auth/ciphering?) */
+
+	/* The SGSN ACKs */
+	T.start(2.0);
+	alt {
+	[] GTP.receive(tr_GTPC_SGSNContextAck) -> value gtpc_ud {
+		log("Rx SGSN Context ACK from SGSN");
+		setverdict(pass);
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SGSN Contect ACK");
+		mtc.stop;
+		}
+	}
+
+	/* TODO: Update PDP Context Req/Resp */
+	/* TODO: 7..10 Update Location, ISD */
+
+	/* RAU procedure completion */
+	T.start(2.0);
+	alt {
+	[] as_routing_area_update_gb(0) {
+		log("RAU procedure completed");
+		setverdict(pass);
+		T.stop;
+		}
+	[] BSSGP[0].receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout completing the RAU procedure");
+		mtc.stop;
+		}
+	}
+}
+testcase TC_sgsn_context_req_out() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_sgsn_context_req_out), testcasename(), g_gb, 73);
+	vc_conn.done;
+	f_cleanup();
+}
+
 control {
 	execute( TC_attach() );
 	execute( TC_attach_mnc3() );
@@ -3802,6 +3963,9 @@ control {
 	execute( TC_cell_change_different_rai_ci_data() );
 	execute( TC_cell_change_different_ci_attach() );
 	execute( TC_cell_change_different_ci_data() );
+
+	execute( TC_sgsn_context_req_in() );
+	execute( TC_sgsn_context_req_out() );
 
 	/* At the end, may crash osmo-sgsn, see OS#3957, OS#4245 */
 	execute( TC_attach_req_id_req_ra_update() );
