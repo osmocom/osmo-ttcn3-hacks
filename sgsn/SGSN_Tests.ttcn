@@ -2630,46 +2630,67 @@ testcase TC_attach_check_complete_resend() runs on test_CT {
 	f_cleanup();
 }
 
-friend function f_routing_area_update(RoutingAreaIdentificationV old_ra, integer ran_index := 0) runs on BSSGP_ConnHdlr {
+friend altstep as_routing_area_update_gb(integer ran_index := 0) runs on BSSGP_ConnHdlr {
 	var PDU_L3_SGSN_MS l3_mt;
-	var PDU_DTAP_PS_MT mt;
-	var template (omit) OCT4 p_tmsi := omit;
 
-	if (is_iu(ran_index)) {
-		p_tmsi := g_pars.p_tmsi;
-	}
-	/* then send RAU */
-	f_send_l3(ts_GMM_RAU_REQ(f_mi_get_lv(), GPRS_UPD_T_RA, old_ra, false, omit, omit, p_tmsi), ran_index);
-	alt {
-	[is_gb(ran_index)] BSSGP[ran_index].receive(tr_GMM_RAU_ACCEPT) -> value l3_mt {
+	[] BSSGP[ran_index].receive(tr_GMM_RAU_ACCEPT) -> value l3_mt {
 		f_process_rau_accept(l3_mt.msgs.gprs_mm.routingAreaUpdateAccept, ran_index);
 		f_send_l3(ts_GMM_RAU_COMPL, ran_index);
 		setverdict(pass);
 		}
-	[is_iu(ran_index)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_RAU_ACCEPT)) -> value mt {
+	[] BSSGP[ran_index].receive(tr_GMM_RAU_REJECT) {
+		setverdict(fail, "Unexpected RAU Reject");
+		mtc.stop;
+	}
+}
+friend altstep as_routing_area_update_iu(integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	var PDU_DTAP_PS_MT mt;
+
+	[] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_RAU_ACCEPT)) -> value mt {
 		f_process_rau_accept(mt.dtap.msgs.gprs_mm.routingAreaUpdateAccept, ran_index);
 		f_send_l3(ts_GMM_RAU_COMPL, ran_index);
 		setverdict(pass);
 		}
-
-	[is_gb(ran_index)] BSSGP[ran_index].receive(tr_GMM_RAU_REJECT) {
+	[] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_RAU_REJECT)) {
 		setverdict(fail, "Unexpected RAU Reject");
 		mtc.stop;
 		}
-	[is_iu(ran_index)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_RAU_REJECT)) {
-		setverdict(fail, "Unexpected RAU Reject");
-		mtc.stop;
-		}
+	[] BSSAP.receive(tr_RANAP_SecurityModeCmd(uia_algs := ?,
+						  uia_key := oct2bit(g_pars.vec.ik),
+						  key_sts := ?)) {
+		var IntegrityProtectionAlgorithm uia_chosen := 0; /* 0 = standard_UMTS_integrity_algorithm_UIA1 */
+		BSSAP.send(ts_RANAP_SecurityModeComplete(uia_chosen));
+		BSSAP.receive(tr_RANAP_CommonId(imsi_hex2oct(g_pars.imsi)))
+		repeat;
+	}
+}
+friend altstep as_routing_area_update(integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	[is_gb(ran_index)] as_routing_area_update_gb(ran_index);
+	[is_iu(ran_index)] as_routing_area_update_iu(ran_index);
+}
 
-	[is_iu(ran_index)] BSSAP.receive(tr_RANAP_SecurityModeCmd(uia_algs := ?, uia_key := oct2bit(g_pars.vec.ik),
-								key_sts := ?)) {
-			var IntegrityProtectionAlgorithm uia_chosen := 0; /* 0 = standard_UMTS_integrity_algorithm_UIA1 */
-			BSSAP.send(ts_RANAP_SecurityModeComplete(uia_chosen));
-			BSSAP.receive(tr_RANAP_CommonId(imsi_hex2oct(g_pars.imsi)))
-			repeat;
-		}
+friend function f_routing_area_update(RoutingAreaIdentificationV old_ra,
+				      GprsUpdateType upd_type := GPRS_UPD_T_RA,
+				      integer ran_index := 0,
+				      float Tval := 2.0) runs on BSSGP_ConnHdlr {
+	var template (omit) OCT4 p_tmsi := omit;
+	timer T := Tval;
+
+	if (is_iu(ran_index)) {
+		p_tmsi := g_pars.p_tmsi;
+	}
+
+	f_send_l3(ts_GMM_RAU_REQ(f_mi_get_lv(), upd_type, old_ra, p_tmsi := p_tmsi), ran_index);
+
+	T.start;
+	alt {
+	[] as_routing_area_update(ran_index) { setverdict(pass); }
 	[is_gb(ran_index)] BSSGP[ran_index].receive { repeat; }
 	[is_iu(ran_index)] BSSAP.receive { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout completing the RAU procedure");
+		mtc.stop;
+		}
 	}
 }
 
@@ -2706,14 +2727,14 @@ private function f_TC_attach_rau_a_b(charstring id) runs on BSSGP_ConnHdlr {
 	f_TC_attach(id);
 
 	log("attach complete sending rau");
-	f_routing_area_update(g_pars.ra, 0);
+	f_routing_area_update(g_pars.ra);
 
 	log("rau complete unregistering");
 	f_bssgp_client_unregister(g_pars.imsi);
 	f_bssgp_client_register(g_pars.imsi, g_pars.tlli, BSSGP_PROC[1]);
 
 	log("sending second RAU via different RA");
-	f_routing_area_update(f_cellid_to_RAI(g_pars.bssgp_cell_id[1]), 1);
+	f_routing_area_update(f_cellid_to_RAI(g_pars.bssgp_cell_id[1]), ran_index := 1);
 
 	f_detach_mo(c_GMM_DTT_MO_GPRS, true, true, 1);
 }
