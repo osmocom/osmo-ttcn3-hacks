@@ -52,8 +52,18 @@ template (present) SipUrl tr_SipUrl(template (present) HostPort host_port := ?,
 	headers := *
 }
 
-template (value) SipUrl ts_SipUrlHost(template (value) charstring host)
-	:= ts_SipUrl(ts_HostPort(host));
+template (value) SipUrl ts_SipUrlHost(template (value) charstring host,
+				      template (omit) integer portField := omit)
+	:= ts_SipUrl(ts_HostPort(host, portField));
+
+function ts_SipUrl_from_Addr_Union(template (value) Addr_Union au)
+return template (value) SipUrl {
+	if (ischosen(au.nameAddr)) {
+		return au.nameAddr.addrSpec;
+	} else { /* au.addrSpecUnion */
+		return au.addrSpecUnion;
+	}
+}
 
 template (value) Credentials ts_Credentials_DigestResponse(template (value) CommaParam_List digestResponse) := {
 	digestResponse := digestResponse
@@ -212,18 +222,54 @@ template (present) SipAddr tr_SipAddr(template (present) HostPort host_port := ?
 }
 
 /* build a receive template from a value: substitute '*' for omit */
-function tr_SipAddr_from_val(SipAddr tin) return template (present) SipAddr {
+function tr_SipUrl_from_val(template (value) SipUrl tin) return template (present) SipUrl {
+	var template (present) SipUrl ret := tin;
+
+	/* if the port number is 5060, it may be omitted */
+	if (ispresent(tin.hostPort.portField) and
+	    valueof(tin.hostPort.portField) == 5060) {
+		ret.hostPort.portField := 5060 ifpresent;
+	}
+	if (not ispresent(tin.userInfo.password)) {
+		ret.userInfo.password := *;
+	}
+
+	return ret;
+}
+function tr_SipAddr_from_val(template (value) SipAddr tin) return template (present) SipAddr {
 	var template (present) SipAddr ret := tin;
-	if (tin.addr.nameAddr.displayName == omit) {
+
+	if (not ispresent(tin.addr.nameAddr.displayName)) {
 		ret.addr.nameAddr.displayName := *;
+	} else if (f_str_tolower(f_sip_str_unquote(tin.addr.nameAddr.displayName)) == "anonymous") {
+		/* if the user is Anonymous, it may be omitted */
+		ret.addr.nameAddr.displayName := tin.addr.nameAddr.displayName ifpresent;
 	}
-	if (tin.addr.nameAddr.addrSpec.userInfo.password == omit) {
-		ret.addr.nameAddr.addrSpec.userInfo.password := *;
-	}
-	if (tin.params == omit) {
+
+	ret.addr.nameAddr.addrSpec := tr_SipUrl_from_val(tin.addr.nameAddr.addrSpec);
+
+	if (not ispresent(tin.params)) {
 		ret.params := *;
 	}
 	return ret;
+}
+
+function ts_SipAddr_from_Addr_Union(template (value) Addr_Union au,
+				    template (omit) SemicolonParam_List	params := omit)
+return template (value) SipAddr {
+	var template (value) SipUrl addrSpec := ts_SipUrl_from_Addr_Union(au);
+	var template (omit) charstring displayName;
+
+	if (ischosen(au.nameAddr)) {
+		displayName := au.nameAddr.displayName;
+	} else { /* au.addrSpecUnion */
+		displayName := omit
+	}
+
+	return ts_SipAddr(addrSpec.hostPort,
+			  addrSpec.userInfo,
+			  displayName,
+			  params);
 }
 
 template (value) HostPort ts_HostPort(template (omit) charstring host := omit,
@@ -231,8 +277,19 @@ template (value) HostPort ts_HostPort(template (omit) charstring host := omit,
 	host := host,
 	portField := portField
 }
-function tr_HostPort(template HostPort hp) return template HostPort {
-	var template HostPort hpout := hp;
+
+template (present) HostPort tr_HostPort(template charstring host := *,
+					template integer portField := *) := {
+	host := host,
+	portField := portField
+}
+function f_tr_HostPort(template charstring host := *,
+		       template integer portField := *)
+return template (present) HostPort {
+	return f_tr_HostPort_opt_defport(tr_HostPort(host, portField));
+}
+function f_tr_HostPort_opt_defport(template (present) HostPort hp) return template (present) HostPort {
+	var template (present) HostPort hpout := hp;
 	/* if the port number is 5060, it may be omitted */
 	if (isvalue(hp.portField) and valueof(hp.portField) == 5060) {
 		hpout.portField := 5060 ifpresent;
@@ -240,6 +297,11 @@ function tr_HostPort(template HostPort hp) return template HostPort {
 	return hpout;
 }
 
+function f_tr_SipUrl_opt_defport(template (present) SipUrl url) return template (present) SipUrl {
+	var template (present) SipUrl urlout := url;
+	urlout.hostPort := f_tr_HostPort_opt_defport(url.hostPort);
+	return urlout;
+}
 
 template (value) UserInfo ts_UserInfo(template (value) charstring userOrTelephoneSubscriber,
 				      template (omit) charstring password := omit) := {
@@ -515,7 +577,7 @@ tr_SIP_REGISTER(template (present) SipUrl sip_url_host_port := ?,
 		template charstring body := *) := {
 	requestLine := tr_SIP_ReqLine(REGISTER_E, sip_url_host_port),
 	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, contact,
-				     tr_Via_from(tr_HostPort(from_addr.addr.nameAddr.addrSpec.hostPort)),
+				     tr_Via_from(f_tr_HostPort_opt_defport(from_addr.addr.nameAddr.addrSpec.hostPort)),
 				     "REGISTER", *, seq_nr,
 				     expires := expires),
 	messageBody := body,
@@ -523,96 +585,102 @@ tr_SIP_REGISTER(template (present) SipUrl sip_url_host_port := ?,
 }
 
 template (value) PDU_SIP_Request
-ts_SIP_INVITE(CallidString call_id,
-	      SipAddr from_addr,
-	      SipAddr to_addr,
+ts_SIP_INVITE(template (value) CallidString call_id,
+	      template (value) SipAddr from_addr,
+	      template (value) SipAddr to_addr,
+	      template (value) Via via,
+	      template (value) Contact contact,
 	      integer seq_nr,
 	      template (omit) charstring body := omit) := {
 	requestLine := ts_SIP_ReqLine(INVITE_E, to_addr.addr.nameAddr.addrSpec),
-	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr,
-				     ts_Contact_SipAddr(from_addr),
+	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr, contact,
 				     "INVITE", seq_nr,
-				     ts_Via_from(from_addr.addr.nameAddr.addrSpec.hostPort),
+				     via,
 				     f_ContentTypeOrOmit(ts_CT_SDP, body)),
 	messageBody := body,
 	payload := omit
 }
 template (present) PDU_SIP_Request
-tr_SIP_INVITE(template CallidString call_id,
+tr_SIP_INVITE(template (present) SipUrl uri,
+	      template CallidString call_id,
 	      template SipAddr from_addr,
 	      template SipAddr to_addr,
+	      template Via via := tr_Via_from(f_tr_HostPort_opt_defport(?)),
 	      template integer seq_nr,
 	      template charstring body) := {
-	requestLine := tr_SIP_ReqLine(INVITE_E, to_addr.addr.nameAddr.addrSpec),
+	requestLine := tr_SIP_ReqLine(INVITE_E, uri),
 	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, ?,
-				     tr_Via_from(tr_HostPort(from_addr.addr.nameAddr.addrSpec.hostPort)),
-				     "INVITE", *, seq_nr),
+				     via, "INVITE", *, seq_nr),
 	messageBody := body,
 	payload := omit
 }
 
 template (value) PDU_SIP_Request
 ts_SIP_BYE(CallidString call_id,
-	   SipAddr from_addr,
-	   SipAddr to_addr,
+	   template (value) SipAddr from_addr,
+	   template (value) SipAddr to_addr,
+	   template (value) Via via,
 	   integer seq_nr,
 	   template (omit) charstring body) := {
 	requestLine := ts_SIP_ReqLine(BYE_E, to_addr.addr.nameAddr.addrSpec),
 	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr, omit, "BYE", seq_nr,
-				     ts_Via_from(from_addr.addr.nameAddr.addrSpec.hostPort),
-				     f_ContentTypeOrOmit(ts_CT_SDP, body)),
+				     via, f_ContentTypeOrOmit(ts_CT_SDP, body)),
 	messageBody := body,
 	payload := omit
 }
 
 template (present) PDU_SIP_Request
-tr_SIP_BYE(template CallidString call_id,
+tr_SIP_BYE(template (present) SipUrl uri,
+	   template CallidString call_id,
 	   template SipAddr from_addr,
 	   template SipAddr to_addr,
+	   template Via via,
 	   template integer seq_nr,
-	   template charstring body) := {
-	requestLine := tr_SIP_ReqLine(BYE_E, to_addr.addr.nameAddr.addrSpec),
+	   template charstring body := *) := {
+	requestLine := tr_SIP_ReqLine(BYE_E, uri),
 	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, omit,
-				     tr_Via_from(tr_HostPort(from_addr.addr.nameAddr.addrSpec.hostPort)),
-				     "BYE", *, seq_nr),
+				     via, "BYE", *, seq_nr),
 	messageBody := body,
 	payload := omit
 }
 
 
 template (value) PDU_SIP_Request
-ts_SIP_ACK(CallidString call_id,
-	   SipAddr from_addr,
-	   SipAddr to_addr,
+ts_SIP_ACK(template (value) CallidString call_id,
+	   template (value) SipAddr from_addr,
+	   template (value) SipAddr to_addr,
+	   template (value) Via via,
 	   integer seq_nr,
 	   template (omit) charstring body) := {
 	requestLine := ts_SIP_ReqLine(ACK_E, to_addr.addr.nameAddr.addrSpec),
 	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr,
 				     ts_Contact_SipAddr(from_addr),
 				     "ACK", seq_nr,
-				     ts_Via_from(from_addr.addr.nameAddr.addrSpec.hostPort),
+				     via,
 				     f_ContentTypeOrOmit(ts_CT_SDP, body)),
 	messageBody := body,
 	payload := omit
 }
 template (present) PDU_SIP_Request
-tr_SIP_ACK(template CallidString call_id,
+tr_SIP_ACK(template (present) SipUrl uri,
+	   template CallidString call_id,
 	   template SipAddr from_addr,
 	   template SipAddr to_addr,
+	   template Via via,
 	   template integer seq_nr,
 	   template charstring body) := {
-	requestLine := tr_SIP_ReqLine(ACK_E, to_addr.addr.nameAddr.addrSpec),
+	requestLine := tr_SIP_ReqLine(ACK_E, uri),
 	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, *,
-				     tr_Via_from(tr_HostPort(from_addr.addr.nameAddr.addrSpec.hostPort)),
+				     via,
 				     "ACK", *, seq_nr),
 	messageBody := body,
 	payload := omit
 }
 
 template (value) PDU_SIP_Response
-ts_SIP_Response(CallidString call_id,
-		SipAddr from_addr,
-		SipAddr to_addr,
+ts_SIP_Response(template (value) CallidString call_id,
+		template (value) SipAddr from_addr,
+		template (value) SipAddr to_addr,
 		charstring method,
 		integer status_code,
 		integer seq_nr,
@@ -620,6 +688,23 @@ ts_SIP_Response(CallidString call_id,
 		Via via,
 		template (omit) charstring body := omit) := {
 	statusLine := ts_SIP_StatusLine(status_code, reason),
+	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr, omit, method, seq_nr,
+				     via, f_ContentTypeOrOmit(ts_CT_SDP, body)),
+	messageBody := body,
+	payload := omit
+}
+
+/* 180 Ringing */
+template (value) PDU_SIP_Response
+ts_SIP_Response_Ringing(
+	template (value) CallidString call_id,
+	template (value) SipAddr from_addr,
+	template (value) SipAddr to_addr,
+	Via via,
+	integer seq_nr,
+	charstring method := "INVITE",
+	template (omit) charstring body := omit) := {
+	statusLine := ts_SIP_StatusLine(180, "Ringing"),
 	msgHeader := ts_SIP_msgh_std(call_id, from_addr, to_addr, omit, method, seq_nr,
 				     via, f_ContentTypeOrOmit(ts_CT_SDP, body)),
 	messageBody := body,
@@ -645,9 +730,9 @@ tr_SIP_Response(template CallidString call_id,
 	payload := omit
 }
 
-/* Expect during first REGISTER when authorization is required: */
+/* Expect during first REGISTER/INVITE/... when authorization is required: */
 template (present) PDU_SIP_Response
-tr_SIP_Response_REGISTER_Unauthorized(
+tr_SIP_Response_Unauthorized(
 	template CallidString call_id,
 	template SipAddr from_addr,
 	template SipAddr to_addr,
@@ -667,6 +752,50 @@ tr_SIP_Response_REGISTER_Unauthorized(
 	messageBody := body,
 	payload := omit
 }
+
+/* 100 Trying */
+template (present) PDU_SIP_Response
+tr_SIP_Response_Trying(
+	template CallidString call_id,
+	template SipAddr from_addr,
+	template SipAddr to_addr,
+	template (present) Via via := tr_Via_from(?),
+	template integer seq_nr := ?,
+	template charstring method := "INVITE",
+	template integer status_code := 100,
+	template charstring reason := "Trying",
+	template charstring body := *) := {
+	statusLine := tr_SIP_StatusLine(status_code, reason),
+	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, omit,
+				     via,
+				     method, *, seq_nr),
+	messageBody := body,
+	payload := omit
+}
+
+/* 180 Ringing */
+template (present) PDU_SIP_Response
+tr_SIP_Response_Ringing(
+	template CallidString call_id,
+	template SipAddr from_addr,
+	template SipAddr to_addr,
+	template (present) Via via := tr_Via_from(?),
+	template integer seq_nr := ?,
+	template charstring method := "INVITE",
+	template integer status_code := 180,
+	template charstring reason := "Ringing",
+	template charstring body := *) := {
+	statusLine := tr_SIP_StatusLine(status_code, reason),
+	msgHeader := tr_SIP_msgh_std(call_id, from_addr, to_addr, *,
+				     via,
+				     method, *, seq_nr),
+	messageBody := body,
+	payload := omit
+}
+
+/****************
+ * FUNCTIONS:
+ ****************/
 
 function f_sip_param_find(GenericParam_List li,
 			  template (present) charstring id := ?)
@@ -996,6 +1125,14 @@ Authorization: Digest username="Mufasa",
 function f_sip_rand_seq_nr() return integer {
 	 /* 2**31 = 2147483648 */
 	return f_rnd_int(2147483648)
+}
+
+function f_sip_next_seq_nr(integer seq_nr) return integer {
+	return (seq_nr + 1) mod 2147483648;
+}
+
+function f_sip_Request_inc_seq_nr(inout template (value) PDU_SIP_Request req) {
+	req.msgHeader.cSeq.seqNumber := f_sip_next_seq_nr(valueof(req.msgHeader.cSeq.seqNumber));
 }
 
 /* Tags shall have at least 32 bit of randomness */
