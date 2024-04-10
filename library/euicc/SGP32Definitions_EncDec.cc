@@ -109,5 +109,39 @@ AddInitialEimResponse dec__AddInitialEimResponse(const OCTETSTRING &stream) {
 	return msg;
 }
 
+OCTETSTRING enc__ProfileRollbackRequest(const ProfileRollbackRequest &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(ProfileRollbackRequest_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+ProfileRollbackRequest dec__ProfileRollbackRequest(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	ProfileRollbackRequest msg;
+	buf.put_os(stream);
+
+	msg.decode(ProfileRollbackRequest_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__ProfileRollbackResponse(const ProfileRollbackResponse &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(ProfileRollbackResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+ProfileRollbackResponse dec__ProfileRollbackResponse(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	ProfileRollbackResponse msg;
+	buf.put_os(stream);
+
+	msg.decode(ProfileRollbackResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 
 }
