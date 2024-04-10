@@ -37,7 +37,9 @@ type port Coord_PT message
 } with { extension "internal" };
 private const charstring COORD_CMD_REGISTERED := "COORD_CMD_REGISTERED";
 private const charstring COORD_CMD_START := "COORD_CMD_START";
+private const charstring COORD_CMD_PICKUP := "COORD_CMD_PICKUP";
 private const charstring COORD_CMD_CALL_ESTABLISHED := "COORD_CMD_CALL_ESTABLISHED";
+private const charstring COORD_CMD_CALL_CANCELLED := "COORD_CMD_CALL_CANCELLED";
 private const charstring COORD_CMD_HANGUP := "COORD_CMD_HANGUP";
 
 type component test_CT {
@@ -54,6 +56,9 @@ type component ConnHdlr extends SIP_ConnHdlr {
 
 	port Coord_PT COORD;
 }
+type record of ConnHdlr ConnHdlrList;
+
+const charstring broadcast_sip_extension := "0500";
 
 type record ConnHdlrPars {
 	float t_guard,
@@ -70,6 +75,7 @@ type record ConnHdlrPars {
 	Contact local_contact,
 	CallPars cp optional
 }
+type record of ConnHdlrPars ConnHdlrParsList;
 
 template (value) ConnHdlrPars t_Pars(charstring user,
 				     charstring display_name := "Anonymous",
@@ -103,9 +109,20 @@ template (value) ConnHdlrPars t_Pars(charstring user,
 
 function f_init_ConnHdlrPars(integer idx := 1) runs on test_CT return ConnHdlrPars {
 	var  template (value) CallPars cp := t_CallPars(idx := idx);
-	var template (value) ConnHdlrPars pars := t_Pars("0" & int2str(500 + idx),
+	var template (value) ConnHdlrPars pars := t_Pars("0" & int2str(str2int(broadcast_sip_extension) + idx),
 							 cp := cp);
 	return valueof(pars);
+}
+
+type record CallParsMT {
+	/* Whether to wait for COORD.receive(COORD_CMD_PICKUP) before accepting the call. */
+	boolean wait_coord_cmd_pickup,
+	/* Whether to expect CANCEL instead of ACK as answer to our OK */
+	boolean exp_cancel
+}
+private template (value) CallParsMT t_CallParsMT := {
+	wait_coord_cmd_pickup := false,
+	exp_cancel := false
 }
 
 type record CallPars {
@@ -122,7 +139,8 @@ type record CallPars {
 	charstring local_rtp_addr,
 	uint16_t local_rtp_port,
 
-	SDP_Message peer_sdp optional
+	SDP_Message peer_sdp optional,
+	CallParsMT mt
 }
 
 private template (value) CallPars t_CallPars(integer idx := 1,
@@ -137,7 +155,8 @@ private template (value) CallPars t_CallPars(integer idx := 1,
 	sip_body := omit,
 	local_rtp_addr := mp_local_sip_host,
 	local_rtp_port := 1234 + 2*idx,
-	peer_sdp := omit
+	peer_sdp := omit,
+	mt := t_CallParsMT
 }
 
 function f_init() runs on test_CT {
@@ -444,8 +463,24 @@ private function f_SIP_mo_call_setup() runs on ConnHdlr
 	g_pars.cp.sip_seq_nr := g_pars.cp.sip_seq_nr + 1;
 }
 
+private function f_ConnHdlr_parse_initial_SIP_INVITE(PDU_SIP_Request rx_sip_req) runs on ConnHdlr
+{
+	f_SDP_decodeMessage(rx_sip_req.messageBody, g_pars.cp.peer_sdp);
+	log("Rx Initial MT INVITE decoded SDP: ", g_pars.cp.peer_sdp);
+
+	/* Obtain params: */
+	g_pars.cp.sip_call_id := rx_sip_req.msgHeader.callId.callid;
+	g_pars.cp.from_addr := valueof(ts_SipAddr_from_Addr_Union(rx_sip_req.msgHeader.fromField.addressField,
+								rx_sip_req.msgHeader.fromField.fromParams));
+	g_pars.cp.to_addr := valueof(ts_SipAddr_from_Addr_Union(rx_sip_req.msgHeader.toField.addressField,
+								rx_sip_req.msgHeader.toField.toParams));
+	g_pars.cp.to_addr.params := f_sip_param_set(g_pars.cp.to_addr.params, "tag", f_sip_rand_tag());
+	g_pars.cp.sip_seq_nr := rx_sip_req.msgHeader.cSeq.seqNumber;
+}
+
 /* Peer is calling us, accept it: */
-private altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true, boolean fail_others := true) runs on ConnHdlr
+private altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true,
+				      boolean fail_others := true) runs on ConnHdlr
 {
 	var template (present) PDU_SIP_Request exp_req :=
 		tr_SIP_INVITE(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
@@ -461,17 +496,8 @@ private altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true, 
 		var Via via;
 		var charstring tx_sdp;
 
-		f_SDP_decodeMessage(g_rx_sip_req.messageBody, g_pars.cp.peer_sdp);
-		log("Rx Initial MT INVITE decoded SDP: ", g_pars.cp.peer_sdp);
-
 		/* Obtain params: */
-		g_pars.cp.sip_call_id := g_rx_sip_req.msgHeader.callId.callid;
-		g_pars.cp.from_addr := valueof(ts_SipAddr_from_Addr_Union(g_rx_sip_req.msgHeader.fromField.addressField,
-									g_rx_sip_req.msgHeader.fromField.fromParams));
-		g_pars.cp.to_addr := valueof(ts_SipAddr_from_Addr_Union(g_rx_sip_req.msgHeader.toField.addressField,
-									g_rx_sip_req.msgHeader.toField.toParams));
-		g_pars.cp.to_addr.params := f_sip_param_set(g_pars.cp.to_addr.params, "tag", f_sip_rand_tag());
-		g_pars.cp.sip_seq_nr := g_rx_sip_req.msgHeader.cSeq.seqNumber;
+		f_ConnHdlr_parse_initial_SIP_INVITE(g_rx_sip_req);
 		via := g_rx_sip_req.msgHeader.via;
 
 
@@ -482,6 +508,10 @@ private altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true, 
 						via,
 						g_pars.cp.sip_seq_nr);
 		SIP.send(tx_resp);
+
+		if (g_pars.cp.mt.wait_coord_cmd_pickup) {
+			COORD.receive(COORD_CMD_PICKUP);
+		}
 
 		/* Tx 200 OK */
 		tx_sdp := f_gen_sdp();
@@ -509,6 +539,71 @@ private altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true, 
 			/* Via is not kept since anyway "branch" will change upon following INVITE. */
 			as_SIP_exp_call_update(g_pars.cp.sip_seq_nr + 1);
 		}
+	}
+	[fail_others] as_SIP_fail_resp(sip_expect_str);
+	[fail_others] as_SIP_fail_req(sip_expect_str);
+
+}
+
+/* Peer is calling us, but cancells it during ringing: */
+private altstep as_SIP_mt_call_cancelled(boolean fail_others := true) runs on ConnHdlr
+{
+	var template (present) PDU_SIP_Request exp_req :=
+		tr_SIP_INVITE(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
+			      ?,
+			      f_tr_From(g_pars.cp.calling),
+			      g_pars.cp.called,
+			      tr_Via_from(f_tr_HostPort(mp_remote_sip_host, mp_remote_sip_port)),
+			      ?, ?);
+	var charstring sip_expect_str := log2str(exp_req);
+
+	[] SIP.receive(exp_req) -> value g_rx_sip_req {
+		var template (value) PDU_SIP_Response tx_resp;
+		var Via via;
+		var template (present) SipAddr exp_to_addr;
+		var charstring tx_sdp;
+
+		/* Obtain params: */
+		f_ConnHdlr_parse_initial_SIP_INVITE(g_rx_sip_req);
+		via := g_rx_sip_req.msgHeader.via;
+
+
+		/* Tx 180 Ringing */
+		tx_resp := ts_SIP_Response_Ringing(g_pars.cp.sip_call_id,
+						g_pars.cp.from_addr,
+						g_pars.cp.to_addr,
+						via,
+						g_pars.cp.sip_seq_nr);
+		SIP.send(tx_resp);
+
+		if (g_pars.cp.mt.wait_coord_cmd_pickup) {
+			COORD.receive(COORD_CMD_PICKUP);
+		}
+
+		/* Wait for CANCEL */
+		/* Cancel may come even before we send Ringing, hence To's "tag"
+		 * may not be known by peer, so g_pars.to_addr can't be used here: */
+		exp_to_addr := ts_SipAddr_from_Addr_Union(g_rx_sip_req.msgHeader.toField.addressField,
+							  g_rx_sip_req.msgHeader.toField.toParams);
+		exp_req := tr_SIP_CANCEL(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
+					 g_pars.cp.sip_call_id,
+					 g_pars.cp.from_addr,
+					 exp_to_addr,
+					 f_tr_Via_response(via),
+					 g_pars.cp.sip_seq_nr, *);
+		as_SIP_expect_req(exp_req);
+
+		/* Tx 200 OK */
+		tx_sdp := f_gen_sdp();
+		tx_resp := ts_SIP_Response(g_pars.cp.sip_call_id,
+					   g_pars.cp.from_addr,
+					   g_pars.cp.to_addr,
+					   "CANCEL", 200,
+					   g_pars.cp.sip_seq_nr,
+					   "OK",
+					   via,
+					   body := omit);
+		SIP.send(tx_resp);
 	}
 	[fail_others] as_SIP_fail_resp(sip_expect_str);
 	[fail_others] as_SIP_fail_req(sip_expect_str);
@@ -681,6 +776,13 @@ private function f_TC_internal_call_mt(charstring id) runs on ConnHdlr {
 	f_SIP_register();
 	COORD.send(COORD_CMD_REGISTERED);
 
+	if (g_pars.cp.mt.exp_cancel) {
+		as_SIP_mt_call_cancelled();
+		COORD.send(COORD_CMD_CALL_CANCELLED);
+		setverdict(pass);
+		return;
+	}
+
 	as_SIP_mt_call_accept();
 	COORD.send(COORD_CMD_CALL_ESTABLISHED);
 
@@ -720,11 +822,94 @@ testcase TC_internal_call_momt() runs on test_CT {
 	[] COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn[1];
 	}
 
+	/* Call on-going */
+	f_sleep(1.0);
+
 	COORD.send(COORD_CMD_HANGUP) to vc_conn[0];
 
 
 	vc_conn[0].done;
 	vc_conn[1].done;
+}
+
+/* One of the users calls (INVITE) shared extension, which makes all other user
+ * equipments ring (INVITE). The first one to pick up the call (OK 200) gets the
+ * call established (ACK), others get a CANCEL event. */
+private function TC_internal_call_all_Nregistered(integer num_conns := 2) runs on test_CT {
+	var ConnHdlrList vc_conn_list := {};
+	const integer vc_conn_mo_idx := 0; /* Index of MO leg in vc_conn_list */
+	const integer vc_conn_mt_idx := 1; /* Index of MT leg in vc_conn_list, peer picking up first the call */
+	var SipAddr broadcast_sip_record;
+	var ConnHdlrPars pars_mo;
+
+	f_init();
+
+	broadcast_sip_record := valueof(ts_SipAddr(ts_HostPort(mp_local_sip_host),
+					ts_UserInfo(broadcast_sip_extension)));
+
+	for (var integer i := 0; i < num_conns; i := i + 1) {
+		var ConnHdlrPars pars;
+		var ConnHdlr vc_conn;
+		pars := f_init_ConnHdlrPars(idx := i + 1);
+		if (i == vc_conn_mo_idx) { /* MO */
+			pars.cp.calling := pars.registrar_sip_record;
+			pars.cp.called := broadcast_sip_record;
+			vc_conn := f_start_handler(refers(f_TC_internal_call_mo), pars);
+			pars_mo := pars;
+		} else { /* MT */
+			pars.cp.calling := pars_mo.registrar_sip_record;
+			pars.cp.called := pars.local_sip_record;
+			pars.cp.mt.wait_coord_cmd_pickup := true;
+			if (i != vc_conn_mt_idx) {
+				/* Only first MT picking up (OK 200 INVITE) will be ACKed, others CANCELed: */
+				pars.cp.mt.exp_cancel := true;
+			}
+			vc_conn := f_start_handler(refers(f_TC_internal_call_mt), pars);
+		}
+		vc_conn_list := vc_conn_list & { vc_conn };
+	}
+
+	/* Wait all users are registered: */
+	for (var integer i := 0; i < num_conns; i := i + 1) {
+		/* Note: "from vc_conn_list[i]" can't be used since they may arrive from components in any order: */
+		COORD.receive(COORD_CMD_REGISTERED);
+	}
+
+	/* Ask MO user to start the call: */
+	COORD.send(COORD_CMD_START) to vc_conn_list[vc_conn_mo_idx];
+
+	/* Make sure the desired MT is the one picking up first the call: */
+	COORD.send(COORD_CMD_PICKUP) to vc_conn_list[vc_conn_mt_idx];
+	interleave {
+	[] COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_list[vc_conn_mo_idx];
+	[] COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_list[vc_conn_mt_idx];
+	}
+
+	/* Pick up from other phone calls and expect CANCEL: */
+	for (var integer i := 0; i < num_conns; i := i + 1) {
+		if (i != vc_conn_mo_idx and i != vc_conn_mt_idx) {
+			COORD.send(COORD_CMD_PICKUP) to vc_conn_list[i];
+			COORD.receive(COORD_CMD_CALL_CANCELLED) from vc_conn_list[i];
+		}
+	}
+
+	/* Call on-going */
+	f_sleep(1.0);
+
+	COORD.send(COORD_CMD_HANGUP) to vc_conn_list[vc_conn_mo_idx];
+
+	for (var integer i := 0; i < num_conns; i := i + 1) {
+		vc_conn_list[i].done;
+	}
+}
+testcase TC_internal_call_all_2registered() runs on test_CT {
+	TC_internal_call_all_Nregistered(2);
+}
+testcase TC_internal_call_all_3registered() runs on test_CT {
+	TC_internal_call_all_Nregistered(3);
+}
+testcase TC_internal_call_all_4registered() runs on test_CT {
+	TC_internal_call_all_Nregistered(4);
 }
 
 testcase TC_selftest() runs on test_CT {
@@ -735,6 +920,9 @@ testcase TC_selftest() runs on test_CT {
 control {
 	execute( TC_internal_registration() );
 	execute( TC_internal_call_momt() );
+	execute( TC_internal_call_all_2registered() );
+	execute( TC_internal_call_all_3registered() );
+	execute( TC_internal_call_all_4registered() );
 }
 
 }
