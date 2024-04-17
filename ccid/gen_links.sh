@@ -4,9 +4,9 @@ BASEDIR=../deps
 
 . ../gen_links.sh.inc
 
-#DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
-#FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
-#gen_links $DIR $FILES
+DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
+FILES="TCCConversion_Functions.ttcn TCCConversion.cc"
+gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.USB/src
 FILES="USB_PT.cc USB_PT.hh USB_PortType.ttcn USB_PortTypes.ttcn USB_Templates.ttcn USB_Types.ttcn USB_Component.ttcn "

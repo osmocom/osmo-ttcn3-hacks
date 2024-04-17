@@ -5,6 +5,7 @@ NAME=SIMTRACE_Tests
 FILES="
 	*.ttcn
 	Native_FunctionDefs.cc
+	TCCConversion.cc
 	USB_PT.cc
 "
 
