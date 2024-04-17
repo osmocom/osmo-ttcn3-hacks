@@ -18,6 +18,10 @@ DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
+FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.SDP/src
 FILES="SDP_EncDec.cc SDP_Types.ttcn SDP_parse_.tab.c SDP_parse_.tab.h SDP_parse_parser.h SDP_parser.l
 SDP_parser.y lex.SDP_parse_.c"

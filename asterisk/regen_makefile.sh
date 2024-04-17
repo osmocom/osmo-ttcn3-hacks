@@ -15,6 +15,7 @@ FILES="
 	TCCConversion.cc
 	TCCInterface.cc
 	TCCOpenSecurity.cc
+	TELNETasp_PT.cc
 "
 
 ../regen-makefile.sh -e $NAME $FILES
