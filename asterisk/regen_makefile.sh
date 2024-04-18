@@ -15,6 +15,7 @@ FILES="
 	TCCConversion.cc
 	TCCInterface.cc
 	TCCOpenSecurity.cc
+	TCCDateTime.cc
 	TELNETasp_PT.cc
 "
 
