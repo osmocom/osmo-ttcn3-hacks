@@ -71,10 +71,16 @@ template (value) HeaderLine ts_HeaderLine(charstring header_name, charstring hea
 }
 
 function f_ts_HTTP_Header(template (omit) charstring body := omit,
+			  template (omit) octetstring binary_body := omit,
 			  template (omit) charstring host := omit,
 			  HeaderLines custom_hdr := { })
 return template (value) HeaderLines {
 	var HeaderLines hdr := { };
+
+	/* Make sure we never use body or binary_body at the same time */
+	if (not istemplatekind(body, "omit") and not istemplatekind(binary_body, "omit")) {
+		setverdict(fail, "use wither (ascii) body or binary_body");
+	}
 
 	/* Build default header */
 	if (not istemplatekind(host, "omit")) {
@@ -83,6 +89,9 @@ return template (value) HeaderLines {
 	hdr := hdr & {{ header_name := "Content-Type", header_value := "application/json" }};
 	if (not istemplatekind(body, "omit")) {
 		hdr := hdr & {valueof(ts_HeaderLine("Content-Length", int2str(lengthof(body))))};
+	}
+	else if (not istemplatekind(binary_body, "omit")) {
+		hdr := hdr & {valueof(ts_HeaderLine("Content-Length", int2str(lengthof(binary_body))))};
 	}
 
 	return f_overlay_HTTP_Header(hdr, custom_hdr);
@@ -107,10 +116,35 @@ template (value) HTTPMessage ts_HTTP_Req(charstring url,
 		uri := url,
 		version_major := v_maj,
 		version_minor := v_min,
-		header := f_ts_HTTP_Header(body, host, custom_hdr),
+		header := f_ts_HTTP_Header(body, omit, host, custom_hdr),
 		body := f_ts_body_or_empty(body)
 	}
 }
+
+function f_ts_body_or_empty_bin(template (omit) octetstring body) return template (value) octetstring {
+	if (istemplatekind(body, "omit")) {
+		return ''O;
+	}
+	return body;
+}
+
+template (value) HTTPMessage ts_HTTP_Req_Bin(charstring url,
+					     charstring method := "GET",
+					     template (omit) octetstring body := omit,
+					     integer v_maj := 1, integer v_min := 1,
+					     charstring host,
+					     HeaderLines custom_hdr := { }) := {
+	request_binary := {
+		client_id := omit,
+		method := method,
+		uri := url,
+		version_major := v_maj,
+		version_minor := v_min,
+		header := f_ts_HTTP_Header(omit, body, host, custom_hdr),
+		body := f_ts_body_or_empty_bin(body)
+	}
+}
+
 
 template HTTPMessage tr_HTTP_Resp(template integer sts := ?) := {
 	response := {
@@ -124,14 +158,33 @@ template HTTPMessage tr_HTTP_Resp(template integer sts := ?) := {
 	}
 };
 
+template HTTPMessage tr_HTTP_Resp_Bin(template integer sts := ?) := {
+	response_binary := {
+		client_id := ?,
+		version_major := ?,
+		version_minor := ?,
+		statuscode := sts,
+		statustext := ?,
+		header := ?,
+		body := ?
+	}
+};
+
 template HTTPMessage tr_HTTP_Resp2xx := tr_HTTP_Resp((200..299));
 
-function f_http_tx_request(charstring url, charstring method := "GET", template charstring body := omit,
+function f_http_tx_request(charstring url, charstring method := "GET",
+			   template charstring body := omit,
+			   template octetstring binary_body := omit,
 			   HeaderLines custom_hdr := { })
 runs on http_CT {
 	HTTP.send(ts_HTTP_Connect(g_pars.http_host, g_pars.http_port, g_pars.use_ssl));
 	HTTP.receive(Connect_result:?);
-	HTTP.send(ts_HTTP_Req(url, method, body, host := g_pars.http_host & ":" & int2str(g_pars.http_port), custom_hdr := custom_hdr));
+
+	if (not istemplatekind(body, "omit")) {
+		HTTP.send(ts_HTTP_Req(url, method, body, host := g_pars.http_host & ":" & int2str(g_pars.http_port), custom_hdr := custom_hdr));
+	} else if (not istemplatekind(binary_body, "omit")) {
+		HTTP.send(ts_HTTP_Req_Bin(url, method, binary_body, host := g_pars.http_host & ":" & int2str(g_pars.http_port), custom_hdr := custom_hdr));
+	}
 }
 
 function f_http_rx_response(template HTTPMessage exp := tr_HTTP_Resp2xx, float tout := 2.0)
@@ -146,6 +199,9 @@ runs on http_CT return HTTPMessage {
 	[] HTTP.receive(tr_HTTP_Resp) -> value resp {
 		setverdict(fail, "Unexpected HTTP response ", resp);
 		}
+	[] HTTP.receive(tr_HTTP_Resp_Bin) -> value resp {
+		setverdict(fail, "Unexpected (binary) HTTP response ", resp);
+		}
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for HTTP response");
 		self.stop;
@@ -157,10 +213,12 @@ runs on http_CT return HTTPMessage {
 
 /* run a HTTP request and return the response */
 function f_http_transact(charstring url, charstring method := "GET",
-			 template (omit) charstring body := omit, template HTTPMessage exp := tr_HTTP_Resp2xx,
+			 template (omit) charstring body := omit,
+			 template (omit) octetstring binary_body := omit,
+			 template HTTPMessage exp := tr_HTTP_Resp2xx,
 			 float tout := 2.0, HeaderLines custom_hdr := { })
 runs on http_CT return HTTPMessage {
-	f_http_tx_request(url, method, body, custom_hdr);
+	f_http_tx_request(url, method, body, binary_body, custom_hdr);
 	return f_http_rx_response(exp, tout);
 }
 
