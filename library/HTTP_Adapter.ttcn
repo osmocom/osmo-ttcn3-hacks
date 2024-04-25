@@ -40,7 +40,7 @@ template (value) Connect ts_HTTP_Connect(template (value) charstring hostname,
 	portnumber := http_port,
 	use_ssl := use_ssl
 }
-template (value) Close ts_HTTP_Close := { client_id := omit };
+template (value) Close ts_HTTP_Close(template (omit) integer client_id := omit) := { client_id := client_id };
 
 /* function to add HeaderLines to a an existing set of HeaderLines. HeaderLines that are already present, are updated. */
 function f_overlay_HTTP_Header(HeaderLines hdr, HeaderLines additional_hdr) return template (value) HeaderLines
@@ -109,9 +109,10 @@ template (value) HTTPMessage ts_HTTP_Req(charstring url,
 					 template (omit) charstring body := omit,
 					 integer v_maj := 1, integer v_min := 1,
 					 charstring host,
-					 HeaderLines custom_hdr := { }) := {
+					 HeaderLines custom_hdr := { },
+					 template (omit) integer client_id := omit) := {
 	request := {
-		client_id := omit,
+		client_id := client_id,
 		method := method,
 		uri := url,
 		version_major := v_maj,
@@ -133,9 +134,10 @@ template (value) HTTPMessage ts_HTTP_Req_Bin(charstring url,
 					     template (omit) octetstring body := omit,
 					     integer v_maj := 1, integer v_min := 1,
 					     charstring host,
-					     HeaderLines custom_hdr := { }) := {
+					     HeaderLines custom_hdr := { },
+					     template (omit) integer client_id := omit) := {
 	request_binary := {
-		client_id := omit,
+		client_id := client_id,
 		method := method,
 		uri := url,
 		version_major := v_maj,
@@ -175,19 +177,48 @@ template HTTPMessage tr_HTTP_Resp2xx := tr_HTTP_Resp((200..299));
 function f_http_tx_request(charstring url, charstring method := "GET",
 			   template charstring body := omit,
 			   template octetstring binary_body := omit,
-			   HeaderLines custom_hdr := { })
+			   HeaderLines custom_hdr := { },
+			   float tout := 2.0,
+			   template integer client_id := omit)
 runs on http_CT {
-	HTTP.send(ts_HTTP_Connect(g_pars.http_host, g_pars.http_port, g_pars.use_ssl));
-	HTTP.receive(Connect_result:?);
+	var Connect_result rc;
+	timer T := tout;
+	var template integer use_client_id := omit;
+
+	/* In case the caller didn't specify a client_id, we will create a new connection. */
+	if (istemplatekind(client_id, "omit")) {
+		HTTP.send(ts_HTTP_Connect(g_pars.http_host, g_pars.http_port, g_pars.use_ssl));
+		T.start;
+		alt {
+		[] HTTP.receive(Connect_result:?) -> value rc;
+		[] HTTP.receive {
+			setverdict(fail, "HTTP connection to client failed");
+			self.stop;
+			}
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for completion of HTTP connection");
+			self.stop;
+			}
+		}
+		use_client_id := rc.client_id;
+	} else {
+		use_client_id := client_id;
+	}
 
 	if (not istemplatekind(body, "omit")) {
-		HTTP.send(ts_HTTP_Req(url, method, body, host := g_pars.http_host & ":" & int2str(g_pars.http_port), custom_hdr := custom_hdr));
+		HTTP.send(ts_HTTP_Req(url, method, body, host := g_pars.http_host & ":" & int2str(g_pars.http_port),
+				      custom_hdr := custom_hdr, client_id := use_client_id));
 	} else if (not istemplatekind(binary_body, "omit")) {
-		HTTP.send(ts_HTTP_Req_Bin(url, method, binary_body, host := g_pars.http_host & ":" & int2str(g_pars.http_port), custom_hdr := custom_hdr));
+		HTTP.send(ts_HTTP_Req_Bin(url, method, binary_body,
+					  host := g_pars.http_host & ":" & int2str(g_pars.http_port),
+					  custom_hdr := custom_hdr, client_id := use_client_id));
 	}
 }
 
-function f_http_rx_response(template HTTPMessage exp := tr_HTTP_Resp2xx, float tout := 2.0)
+function f_http_rx_response(template HTTPMessage exp := tr_HTTP_Resp2xx,
+	 		    float tout := 2.0,
+			    template integer client_id := omit,
+			    boolean keep_connection := false)
 runs on http_CT return HTTPMessage {
 	var HTTPMessage resp;
 	timer T := tout;
@@ -207,7 +238,11 @@ runs on http_CT return HTTPMessage {
 		self.stop;
 		}
 	}
-	HTTP.send(ts_HTTP_Close);
+
+	if (not keep_connection) {
+		HTTP.send(ts_HTTP_Close(client_id));
+	}
+
 	return resp;
 }
 
@@ -216,10 +251,22 @@ function f_http_transact(charstring url, charstring method := "GET",
 			 template (omit) charstring body := omit,
 			 template (omit) octetstring binary_body := omit,
 			 template HTTPMessage exp := tr_HTTP_Resp2xx,
-			 float tout := 2.0, HeaderLines custom_hdr := { })
+			 float tout := 2.0, HeaderLines custom_hdr := { },
+			 template integer client_id := omit,
+			 boolean keep_connection := false)
 runs on http_CT return HTTPMessage {
-	f_http_tx_request(url, method, body, binary_body, custom_hdr);
-	return f_http_rx_response(exp, tout);
+	f_http_tx_request(url, method, body, binary_body, custom_hdr, tout, client_id);
+	return f_http_rx_response(exp, tout, client_id, keep_connection);
+}
+
+function f_http_client_id_from_http_response(template HTTPMessage response_http) return template integer {
+	if (ispresent(response_http.response_binary)) {
+		return response_http.response_binary.client_id;
+	} else if (ispresent(response_http.response)) {
+		return response_http.response.client_id;
+	}
+
+	return omit;
 }
 
 }
