@@ -167,6 +167,58 @@ tr_AMI_Response_Success_ActionId(template (present) charstring action_id := ?) :
 	tr_AMI_Field_ActionId(action_id)
 );
 
+
+/***********************
+ * Adapter:
+ ***********************/
+
+type port AMI_Msg_PT message {
+	inout AMI_Msg;
+} with { extension "internal" };
+
+type component AMI_Adapter_CT {
+	port TELNETasp_PT AMI;
+	port AMI_Msg_PT CLIENT;
+}
+
+function f_AMI_Adapter_main() runs on AMI_Adapter_CT {
+	var AMI_Msg msg;
+
+	var charstring rx, buf := "";
+	var integer fd;
+
+	map(self:AMI, system:AMI);
+
+	while (true) {
+
+		alt {
+		[] AMI.receive(pattern "\n") {
+			buf := buf & "\n";
+			msg := dec_AMI_Msg(buf);
+			buf := "";
+			CLIENT.send(msg);
+			};
+		[] AMI.receive(charstring:?) -> value rx {
+			buf := buf & rx;
+			};
+		[] AMI.receive(integer:?) -> value fd {
+			if (fd == -1) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"AMI Telnet Connection Failure: " & int2str(fd));
+			} else {
+				/* telnet connection succeeded */
+			}
+			}
+		[] CLIENT.receive(AMI_Msg:?) -> value msg {
+			/* TODO: in the future, queue Action if there's already one Action in transit, to fullfill AMI requirements. */
+			var charstring tx_txt := enc_AMI_Msg(msg);
+			AMI.send(tx_txt);
+			}
+		}
+	}
+}
+
+
 /*
  * Functions:
  */
@@ -223,62 +275,66 @@ return template charstring {
 	return field.val;
 }
 
-private function f_ami_wait_for_prompt_str(TELNETasp_PT pt, charstring log_label := "(?)")
-return charstring {
-	var charstring rx, buf := "";
-	var integer fd;
+function f_ami_transceive_ret(AMI_Msg_PT pt, template (value) AMI_Msg tx_msg, float rx_timeout := 10.0) return AMI_Msg {
+	var AMI_Msg rx_msg;
 	timer T;
 
-	T.start(mp_ami_prompt_timeout);
+	T.start(rx_timeout);
+	pt.send(tx_msg);
 	alt {
-	[] pt.receive(pattern "\n") { buf := buf & "\n" };
-	[] pt.receive(charstring:?) -> value rx { buf := buf & rx; repeat };
-	[] pt.receive(integer:?) -> value fd {
-		if (fd == -1) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						"AMI Telnet Connection Failure: " & log_label);
-		} else {
-			repeat; /* telnet connection succeeded */
-		}
-	}
+	[] pt.receive(AMI_Msg:?) -> value rx_msg;
 	[] T.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					"AMI Timeout for prompt: " & log_label);
-		};
+					log2str("AMI Response timeout: ", tx_msg));
+		}
 	}
 	T.stop;
-	return buf;
+	return rx_msg;
+
 }
 
-function f_ami_wait_for_prompt(TELNETasp_PT pt, charstring log_label := "(?)") return AMI_Msg {
-	var charstring buf := f_ami_wait_for_prompt_str(pt, log_label);
-	var AMI_Msg msg := dec_AMI_Msg(buf);
-	return msg;
-}
-
-/* send a AMI command and obtain response until prompt is received */
-private function f_ami_transceive_ret_str(TELNETasp_PT pt, charstring tx) return charstring {
-	pt.send(tx);
-	return f_ami_wait_for_prompt_str(pt, tx);
-}
-
-function f_ami_transceive_ret(TELNETasp_PT pt, template (value) AMI_Msg tx_msg) return AMI_Msg {
-	var charstring tx_txt := enc_AMI_Msg(valueof(tx_msg));
-	var charstring resp_txt := f_ami_transceive_ret_str(pt, tx_txt);
-	return dec_AMI_Msg(resp_txt);
-}
-
-function f_ami_transceive_match(TELNETasp_PT pt,
-				template (value) AMI_Msg tx_msg,
-				template (present) AMI_Msg exp_ret := ?) {
-	var AMI_Msg ret := f_ami_transceive_ret(pt, tx_msg);
-	if (not match(ret, exp_ret)) {
+private altstep as_ami_rx_fail(AMI_Msg_PT pt, template AMI_Msg exp_msg := *)
+{
+	var AMI_Msg msg;
+	[] pt.receive(AMI_Msg:?) -> value msg {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-			log2str("Non-matching AMI response: ", ret, " vs exp: ", exp_ret));
+					log2str("Received unexpected AMI message := ", msg, "\nvs exp := ", exp_msg));
 	}
 }
 
-function f_ami_transceive_match_response_success(TELNETasp_PT pt,
+altstep as_ami_expect_msg(AMI_Msg_PT pt, template (present) AMI_Msg msg_expect, boolean fail_others := true)
+{
+	[] pt.receive(msg_expect);
+	[fail_others] as_ami_rx_fail(pt, msg_expect);
+}
+
+function f_ami_transceive_match(AMI_Msg_PT pt,
+				template (value) AMI_Msg tx_msg,
+				template (present) AMI_Msg exp_ret := ?,
+				boolean fail_others := true,
+				float rx_timeout := 10.0) return AMI_Msg {
+	var AMI_Msg rx_msg;
+	timer T;
+
+	T.start(rx_timeout);
+	pt.send(tx_msg);
+	alt {
+	[] pt.receive(exp_ret) -> value rx_msg;
+	[not fail_others] pt.receive(AMI_Msg:?) -> value rx_msg {
+		log("AMI: Ignoring Rx msg ", rx_msg);
+		repeat;
+	}
+	[fail_others] as_ami_rx_fail(pt, exp_ret);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("AMI Response timeout: ", tx_msg));
+		}
+	}
+	T.stop;
+	return rx_msg;
+}
+
+function f_ami_transceive_match_response_success(AMI_Msg_PT pt,
 						 template (value) AMI_Msg tx_msg) {
 	var template (present) AMI_Msg exp_resp;
 	var template (omit) charstring action_id := f_ami_msg_get_value(valueof(tx_msg), AMI_FIELD_ACTION_ID);
@@ -290,11 +346,11 @@ function f_ami_transceive_match_response_success(TELNETasp_PT pt,
 	f_ami_transceive_match(pt, tx_msg, exp_resp);
 }
 
-function f_ami_action_login(TELNETasp_PT pt, charstring username, charstring secret) {
+function f_ami_action_login(AMI_Msg_PT pt, charstring username, charstring secret) {
 	f_ami_transceive_match_response_success(pt, ts_AMI_Action_Login(username, secret));
 }
 
-function f_ami_action_PJSIPRegister(TELNETasp_PT pt, charstring register) {
+function f_ami_action_PJSIPRegister(AMI_Msg_PT pt, charstring register) {
 	var charstring reg_action_id := f_gen_action_id();
 	f_ami_transceive_match_response_success(pt, ts_AMI_Action_PJSIPRegister(register, reg_action_id));
 }
