@@ -278,4 +278,38 @@ SmdpSigned2 dec__SmdpSigned2(const OCTETSTRING &stream) {
 	return msg;
 }
 
+OCTETSTRING enc__RemoteProfileProvisioningResponse(const RemoteProfileProvisioningResponse &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(RemoteProfileProvisioningResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+RemoteProfileProvisioningResponse dec__RemoteProfileProvisioningResponse(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	RemoteProfileProvisioningResponse msg;
+	buf.put_os(stream);
+
+	msg.decode(RemoteProfileProvisioningResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__RemoteProfileProvisioningRequest(const RemoteProfileProvisioningRequest &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(RemoteProfileProvisioningRequest_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+RemoteProfileProvisioningRequest dec__RemoteProfileProvisioningRequest(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	RemoteProfileProvisioningRequest msg;
+	buf.put_os(stream);
+
+	msg.decode(RemoteProfileProvisioningRequest_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 }
