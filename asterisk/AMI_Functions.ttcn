@@ -15,10 +15,11 @@
 module AMI_Functions {
 
 import from Misc_Helpers all;
-import from TELNETasp_PortType all;
 import from Osmocom_Types all;
-import from TCCConversion_Functions all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
 import from Socket_API_Definitions all;
+import from TCCConversion_Functions all;
 
 modulepar {
 	float mp_ami_prompt_timeout := 10.0;
@@ -172,47 +173,167 @@ tr_AMI_Response_Success_ActionId(template (present) charstring action_id := ?) :
  * Adapter:
  ***********************/
 
+type record AMI_Adapter_Parameters {
+	charstring			remote_host,
+	IPL4asp_Types.PortNumber	remote_port,
+	charstring			local_host,
+	IPL4asp_Types.PortNumber	local_port,
+	charstring			welcome_str
+}
+
+const AMI_Adapter_Parameters c_default_AMI_Adapter_pars := {
+	remote_host := "127.0.0.1",
+	remote_port := 5038,
+	local_host := "0.0.0.0",
+	local_port := 0,
+	welcome_str := "Asterisk Call Manager/9.0.0\r\n"
+};
+
 type port AMI_Msg_PT message {
 	inout AMI_Msg;
 } with { extension "internal" };
 
 type component AMI_Adapter_CT {
-	port TELNETasp_PT AMI;
+	port IPL4asp_PT IPL4;
 	port AMI_Msg_PT CLIENT;
+	var AMI_Adapter_Parameters g_pars;
+
+	/* Connection identifier of the client itself */
+	var IPL4asp_Types.ConnectionId g_self_conn_id := -1;
 }
 
-function f_AMI_Adapter_main() runs on AMI_Adapter_CT {
-	var AMI_Msg msg;
+/* Function to use to connect as client to a remote IPA Server */
+private function f_AMI_Adapter_connect() runs on AMI_Adapter_CT {
+	var IPL4asp_Types.Result res;
+	map(self:IPL4, system:IPL4);
+	res := IPL4asp_PortType.f_IPL4_connect(IPL4, g_pars.remote_host, g_pars.remote_port,
+					       g_pars.local_host, g_pars.local_port, 0, { tcp:={} });
+	if (not ispresent(res.connId)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Could not connect AMI socket from ", g_pars.local_host, " port ",
+				g_pars.local_port, " to ", g_pars.remote_host, " port ", g_pars.remote_port,
+				"; check your configuration"));
+	}
+	g_self_conn_id := res.connId;
+	log("AMI connected, ConnId=", g_self_conn_id)
+}
 
+private function f_ASP_RecvFrom_msg_to_charstring(ASP_RecvFrom rx_rf) return charstring {
+	return oct2char(rx_rf.msg);
+}
+
+/* Function to use to connect as client to a remote IPA Server */
+private function f_AMI_Adapter_wait_rx_welcome_str() runs on AMI_Adapter_CT {
+	var ASP_RecvFrom rx_rf;
+	var charstring rx_str;
+	timer Twelcome := 3.0;
+
+	Twelcome.start;
+	alt {
+	[] IPL4.receive(ASP_RecvFrom:?) -> value rx_rf {
+		rx_str := f_ASP_RecvFrom_msg_to_charstring(rx_rf);
+		if (g_pars.welcome_str != rx_str) {
+					Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("AMI Welcome message mismatch: '", rx_str,
+						"' vs exp '", g_pars.welcome_str, "'"));
+		}
+	}
+	[] Twelcome.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("AMI Welcome timeout"));
+	}
+	}
+	Twelcome.stop;
+	log("AMI Welcome message received: '", rx_str, "'");
+}
+
+private function dec_AMI_Msg_ext(charstring txt) return AMI_Msg {
+	log("AMI dec: '", txt, "'");
+	/* TEXT Enc/dec is not happy with empty values, workaround it: */
+	var charstring patched_txt := f_str_replace(txt, "Challenge: \r\n", "");
+	patched_txt := f_str_replace(patched_txt, "AccountCode: \r\n", "");
+	patched_txt := f_str_replace(patched_txt, "Value: \r\n", "");
+	patched_txt := f_str_replace(patched_txt, "DestExten: \r\n", "");
+	patched_txt := f_str_replace(patched_txt, "Exten: \r\n", "");
+	patched_txt := f_str_replace(patched_txt, "Extension: \r\n", "");
+
+	/* "AppData" field sometimes has a value containing separator ": ", which makes
+	 * TEXT dec not happy. Workaround it for now by removing the whole field line:
+	 * "AppData: 5,0502: Call pjsip endpoint from 0501\r\n"
+	 */
+	var integer pos := f_strstr(patched_txt, "AppData: ", 0);
+	if (pos >= 0) {
+		var integer pos_end := f_strstr(patched_txt, "\r\n", pos) + lengthof("\r\n");
+		var charstring to_remove := substr(patched_txt, pos, pos_end - pos);
+		patched_txt := f_str_replace(patched_txt, to_remove, "");
+	}
+
+	log("AMI patched dec: '", patched_txt, "'");
+	return dec_AMI_Msg(patched_txt);
+}
+
+function f_AMI_Adapter_main(AMI_Adapter_Parameters pars := c_default_AMI_Adapter_pars)
+		runs on AMI_Adapter_CT {
+	var AMI_Msg msg;
 	var charstring rx, buf := "";
 	var integer fd;
+	var ASP_RecvFrom rx_rf;
+	var ASP_Event rx_ev;
 
-	map(self:AMI, system:AMI);
+	g_pars := pars;
+
+	f_AMI_Adapter_connect();
+
+	f_AMI_Adapter_wait_rx_welcome_str();
 
 	while (true) {
 
 		alt {
-		[] AMI.receive(pattern "\n") {
-			buf := buf & "\n";
-			msg := dec_AMI_Msg(buf);
-			buf := "";
-			CLIENT.send(msg);
-			};
-		[] AMI.receive(charstring:?) -> value rx {
-			buf := buf & rx;
-			};
-		[] AMI.receive(integer:?) -> value fd {
-			if (fd == -1) {
-				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-							"AMI Telnet Connection Failure: " & int2str(fd));
-			} else {
-				/* telnet connection succeeded */
+		[] IPL4.receive(ASP_RecvFrom:?) -> value rx_rf {
+			var charstring rx_str := f_ASP_RecvFrom_msg_to_charstring(rx_rf);
+			log("AMI rx: '", rx_str, "'");
+			buf := buf & rx_str;
+			log("AMI buf: '", buf, "'");
+
+			/* If several messages come together */
+			var boolean last_is_complete := f_str_endswith(buf, "\r\n\r\n");
+			var Misc_Helpers.ro_charstring msgs := f_str_split(buf, "\r\n\r\n");
+			log("AMI split: ", msgs);
+			if (lengthof(msgs) > 0) {
+				for (var integer i := 0; i < lengthof(msgs) - 1; i := i + 1) {
+					var charstring txt := msgs[i] & "\r\n";
+					msg := dec_AMI_Msg_ext(txt);
+					CLIENT.send(msg);
+				}
+				if (last_is_complete) {
+					var charstring txt := msgs[lengthof(msgs) - 1] & "\r\n";
+					msg := dec_AMI_Msg_ext(txt);
+					CLIENT.send(msg);
+					buf := "";
+				} else {
+					buf := msgs[lengthof(msgs) - 1];
+				}
 			}
+			log("AMI remain buf: '", buf, "'");
+			}
+		[] IPL4.receive(ASP_ConnId_ReadyToRelease:?) {
+			}
+
+		[] IPL4.receive(ASP_Event:?) -> value rx_ev {
+			log("Rx AMI ASP_Event: ", rx_ev);
 			}
 		[] CLIENT.receive(AMI_Msg:?) -> value msg {
 			/* TODO: in the future, queue Action if there's already one Action in transit, to fullfill AMI requirements. */
-			var charstring tx_txt := enc_AMI_Msg(msg);
-			AMI.send(tx_txt);
+			var charstring tx_txt := enc_AMI_Msg(msg) & "\r\n";
+
+			var ASP_SendTo tx := {
+				connId := g_self_conn_id,
+				remName := g_pars.remote_host,
+				remPort := g_pars.remote_port,
+				proto := { tcp := {} },
+				msg := char2oct(tx_txt)
+			};
+			IPL4.send(tx);
 			}
 		}
 	}
@@ -353,6 +474,16 @@ function f_ami_action_login(AMI_Msg_PT pt, charstring username, charstring secre
 function f_ami_action_PJSIPRegister(AMI_Msg_PT pt, charstring register) {
 	var charstring reg_action_id := f_gen_action_id();
 	f_ami_transceive_match_response_success(pt, ts_AMI_Action_PJSIPRegister(register, reg_action_id));
+}
+
+private function f_ami_selftest_decode(charstring txt) {
+	log("Text to decode: '", txt, "'");
+	var AMI_Msg msg := dec_AMI_Msg(txt);
+	log("AMI_Msg decoded: ", msg);
+}
+
+function f_ami_selftest() {
+	f_ami_selftest_decode("AppData: 5,0502: Call pjsip endpoint from 0501\r\n");
 }
 
 }
