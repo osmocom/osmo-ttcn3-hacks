@@ -14,7 +14,10 @@ DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
 FILES="Socket_API_Definitions.ttcn"
 gen_links $DIR $FILES
 
-# Required by MGCP and IPA
+DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
+FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn PIPEasp_Templates.ttcn "
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
@@ -38,6 +41,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
+FILES+="PIPEasp_Templates.ttcn "
 FILES+="RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunctDef.cc "
 FILES+="SDP_Templates.ttcn "
 FILES+="SIP_Emulation.ttcn SIP_Templates.ttcn "

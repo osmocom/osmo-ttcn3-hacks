@@ -16,12 +16,22 @@ import from Osmocom_Types all;
 import from Native_Functions all;
 import from Misc_Helpers all;
 
+/* the PIPE asp port allows us to interact with ip xfrm via stdin/stdout */
+import from PIPEasp_PortType all;
+import from PIPEasp_Types all;
+import from PIPEasp_Templates all;
+
 import from SDP_Types all;
 import from SDP_Templates all;
 
 import from SIP_Emulation all;
 import from SIPmsg_Types all;
 import from SIP_Templates all;
+
+
+modulepar {
+	charstring mp_ipsec_setup_script_path := "./IMS_ipsec_setup.sh";
+}
 
 const char c_sip_server_name := "osmo-ttcn3-hacks/0.23";
 
@@ -41,6 +51,7 @@ type component IMS_ConnHdlr extends SIP_ConnHdlr {
 	var PDU_SIP_Response g_rx_sip_resp;
 
 	port IMSCoord_PT COORD;
+	port PIPEasp_PT PIPE;
 }
 type record of IMS_ConnHdlr IMS_ConnHdlrList;
 
@@ -54,10 +65,14 @@ type record IMS_ConnHdlrPars {
 	charstring user,
 	charstring display_name,
 	charstring password,
+	charstring nonce,
+	charstring ipsec_auth_key,
 	integer ipsec_local_spi_c,
 	integer ipsec_local_spi_s,
 	integer ipsec_remote_spi_c optional,
 	integer ipsec_remote_spi_s optional,
+	uint16_t ipsec_remote_port_c optional,
+	uint16_t ipsec_remote_port_s optional,
 	SipUrl registrar_sip_req_uri,
 	SipAddr registrar_sip_record,
 	CallidString registrar_sip_call_id,
@@ -131,10 +146,15 @@ template (value) IMS_ConnHdlrPars t_IMS_Pars(charstring local_sip_host,
 	user := user,
 	display_name := f_sip_str_quote(display_name),
 	password := password,
+	/* The Nonce field is the Base64 encoded version of the RAND value and concatenated with the AUTN: */
+	nonce := "FJh2MfZfjjeIoHmLbrzQjvbhmnzLAoAAoGsZyVRFFuU=",
+	ipsec_auth_key := "0x5238297dfcca759bd05d48ff49bc63fa00000000",
 	ipsec_local_spi_c := 4142,
 	ipsec_local_spi_s := 4143,
 	ipsec_remote_spi_c := omit,
 	ipsec_remote_spi_s := omit,
+	ipsec_remote_port_c := omit,
+	ipsec_remote_port_s := omit,
 	registrar_sip_req_uri := valueof(ts_SipUrlHost(local_sip_host)),
 	registrar_sip_record := ts_SipAddr(ts_HostPort(local_sip_host),
 					   ts_UserInfo(user),
@@ -194,6 +214,39 @@ private altstep as_SIP_fail_resp(charstring exp_msg_str := "") runs on IMS_ConnH
 	}
 }
 
+/* HTTP Digest Authentication Using AKA (AKAv1-MD5): RFC 3310 */
+function f_tr_Authorization_AKAv1MD5(WwwAuthenticate www_authenticate,
+				     charstring username,
+				     charstring uri,
+				     integer nc_int := 1)
+return template (present) Authorization {
+	var CommaParam_List digestCln;
+	var template (present) Authorization authorization;
+	var template (present) Credentials cred;
+	var template (omit) GenericParam rx_param;
+
+	digestCln := www_authenticate.challenge[0].digestCln;
+
+	var charstring algorithm := f_sip_param_get_value_present_or_fail(digestCln, "algorithm");
+	var charstring realm := f_sip_param_get_value_present_or_fail(digestCln, "realm");
+	var charstring nonce := f_sip_param_get_value_present_or_fail(digestCln, "nonce");
+
+	var template (present) CommaParam_List digestResponse := superset(
+		tr_Param("username", f_sip_str_quote(username)),
+		tr_Param("realm", f_sip_str_quote(realm)),
+		tr_Param("nonce", f_sip_str_quote(nonce)),
+		tr_Param("uri", f_sip_str_quote(uri)),
+		tr_Param("response", ?),
+		tr_Param("algorithm", algorithm),
+		tr_Param("qop", "auth"),
+		tr_Param("cnonce", ?),
+		tr_Param("nc", ?)
+	);
+	cred := tr_Credentials_DigestResponse(digestResponse);
+	authorization := tr_Authorization(cred);
+	return authorization;
+}
+
 private function f_ims_validate_register_contact(Contact rx_contact)
 {
 /* IMS contact shows up like this:
@@ -229,6 +282,10 @@ private function f_ims_parse_security_client(Security_client security_client) ru
 		g_pars.ipsec_remote_spi_c := str2int(par_val);
 		par_val := f_sip_param_get_value_present_or_fail(sec_pars, "spi-s");
 		g_pars.ipsec_remote_spi_s := str2int(par_val);
+		par_val := f_sip_param_get_value_present_or_fail(sec_pars, "port-c");
+		g_pars.ipsec_remote_port_c := str2int(par_val);
+		par_val := f_sip_param_get_value_present_or_fail(sec_pars, "port-s");
+		g_pars.ipsec_remote_port_s := str2int(par_val);
 		found := true;
 		break;
 	}
@@ -242,10 +299,40 @@ private function f_ims_parse_security_client(Security_client security_client) ru
 	    "local_spi_c=", g_pars.ipsec_local_spi_c, " local_spi_s=", g_pars.ipsec_local_spi_s);
 }
 
-private function f_ims_setup_ipsec(PDU_SIP_Request req_req) runs on IMS_ConnHdlr
+private function f_IMS_exec_sync(charstring cmdline, template (present) integer rc := 0)
+		runs on IMS_ConnHdlr return ASP_PResult {
+	var ASP_PResult res;
+
+	map(self:PIPE, system:PIPE);
+	res := f_PIPEasp_exec_sync_PResult(PIPE, cmdline, tr_PResult(?, ?, rc));
+	unmap(self:PIPE, system:PIPE);
+
+	return res;
+}
+
+private function f_ims_setup_ipsec() runs on IMS_ConnHdlr
 {
-	var Security_client security_client := req_req.msgHeader.security_client;
-	f_ims_parse_security_client(security_client);
+	var ASP_PResult res;
+
+	var charstring cmd := mp_ipsec_setup_script_path & " " &
+		g_pars.local_sip_host & " " &
+		int2str(g_pars.local_sip_port) & " " & int2str(g_pars.ipsec_local_spi_c) & " " &
+		int2str(g_pars.local_sip_port) & " " & int2str(g_pars.ipsec_local_spi_s) & " " &
+		g_pars.remote_sip_host & " " &
+		int2str(g_pars.ipsec_remote_port_c) & " " & int2str(g_pars.ipsec_remote_spi_c) & " " &
+		int2str(g_pars.ipsec_remote_port_s) & " " & int2str(g_pars.ipsec_remote_spi_s) & " " &
+		g_pars.ipsec_auth_key;
+
+	res := f_IMS_exec_sync(cmd);
+
+	/* Debug applied rules: */
+	/*
+	res := f_IMS_exec_sync("ip xfrm state");
+	log("ip-xfrm-state Result-Stdout: " & res.stdout);
+
+	res := f_IMS_exec_sync("ip xfrm policy");
+	log("ip-xfrm-policy Result-Stdout: " & res.stdout);
+	*/
 }
 
 /* Peer is calling us, accept it: */
@@ -275,8 +362,9 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 		var template (value) WwwAuthenticate wwwAuthenticate;
 		var template (value) Security_server security_server;
 		var template (value) Server server_name := ts_Server({c_sip_server_name});
+		var template (value) Require require := ts_Require({"sec-agree"});
 		var template (value) Supported supported := ts_Supported({"sec-agree"});
-		var Authorization authorization;
+		var template (present) Authorization authorization;
 		var integer sip_seq_nr;
 		var charstring tx_sdp;
 
@@ -293,9 +381,6 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 		f_ims_validate_register_contact(contact);
 
 		/* TODO: Validate "Expires" is 600000 */
-		/* TODO: validate presence of:
-		 * Security-Client: ipsec-3gpp; alg=hmac-md5-96; ealg=des-ede3-cbc; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718,ipsec-3gpp; alg=hmac-md5-96; ealg=aes-cbc; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718,ipsec-3gpp; alg=hmac-md5-96; ealg=null; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718,ipsec-3gpp; alg=hmac-sha-1-96; ealg=des-ede3-cbc; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718,ipsec-3gpp; alg=hmac-sha-1-96; ealg=aes-cbc; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718,ipsec-3gpp; alg=hmac-sha-1-96; ealg=null; spi-c=431842084; spi-s=650017092; port-c=41271; port-s=41718
-		 */
 
 		/* Tx 100 Tyring */
 		tx_resp := ts_SIP_Response_Trying(sip_call_id,
@@ -309,7 +394,9 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 					userAgent := omit);
 		SIP.send(tx_resp);
 
-		f_ims_setup_ipsec(g_rx_sip_req);
+		g_pars.remote_sip_host := valueof(contact.contactBody.contactAddresses[0].addressField.nameAddr.addrSpec.hostPort.host);
+		f_ims_parse_security_client(g_rx_sip_req.msgHeader.security_client);
+		f_ims_setup_ipsec();
 
 		to_addr.params := f_sip_param_set(to_addr.params, "tag", f_sip_rand_tag());
 
@@ -317,7 +404,7 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 			ts_Param("realm", f_sip_str_quote(g_pars.realm)),
 			ts_Param("qop", f_sip_str_quote("auth")),
 			ts_Param("algorithm", "AKAv1-MD5"),
-			ts_Param("nonce", f_sip_str_quote("FJh2MfZfjjeIoHmLbrzQjvbhmnzLAoAAoGsZyVRFFuU="))
+			ts_Param("nonce", f_sip_str_quote(g_pars.nonce))
 			/* "opaque not needed in IMS "*/
 		};
 		wwwAuthenticate := ts_WwwAuthenticate( { ts_Challenge_digestCln(digestCln) } )
@@ -337,8 +424,8 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 		security_server := ts_Security_server({
 			ts_Security_mechanism("ipsec-3gpp", sec_params)
 		});
-		/* Tx 401 Unauthorized
-		 * TODO: with IMS params */
+
+		/* Tx 401 Unauthorized */
 		tx_resp := ts_SIP_Response_Unauthorized(sip_call_id,
 					from_addr,
 					to_addr,
@@ -352,19 +439,25 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 					userAgent := omit);
 		SIP.send(tx_resp);
 
+		/* Now we should receive a new REGISTER over ipsec: */
+
 		/* TODO: Generate expected Authoritzation based on AKAv1-MD5: */
 		/*authorization := f_sip_digest_gen_Authorization(valueof(wwwAuthenticate),
 								g_pars.user, g_pars.password,
 								"REGISTER",
 								f_sip_SipUrl_to_str(g_pars.registrar_sip_record.addr.nameAddr.addrSpec))
 		*/
+		authorization := f_tr_Authorization_AKAv1MD5(valueof(wwwAuthenticate),
+							     g_pars.user & "@" & g_pars.realm,
+							     f_sip_SipUrl_to_str(g_pars.registrar_sip_record.addr.nameAddr.addrSpec));
 		/* TODO: match Authorization from above: */
 		exp_req :=
 		tr_SIP_REGISTER(g_pars.registrar_sip_req_uri,
 				?,
 				tr_SipAddr(),
 				tr_SipAddr(),
-				tr_Via_from(?));
+				tr_Via_from(?),
+				authorization := authorization);
 		SIP.receive(exp_req) -> value g_rx_sip_req;
 
 		sip_call_id := g_rx_sip_req.msgHeader.callId.callid;
@@ -373,21 +466,33 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 							g_rx_sip_req.msgHeader.fromField.fromParams);
 		to_addr := ts_SipAddr_from_Addr_Union(g_rx_sip_req.msgHeader.toField.addressField,
 						      g_rx_sip_req.msgHeader.toField.toParams);
-		to_addr.params := f_sip_param_set(to_addr.params, "tag", f_sip_rand_tag());
 		sip_seq_nr := g_rx_sip_req.msgHeader.cSeq.seqNumber;
 
-		/* TODO: Add following fields:
-		 * Supported: sec-agree
-		 * Security-Server: ipsec-3gpp;q=0.1;prot=esp;mod=trans;spi-c=4096;spi-s=4097;port-c=5104;port-s=6104;alg=hmac-sha-1-96;ealg=null
-		 * */
+		/* Tx 100 Trying */
+		tx_resp := ts_SIP_Response_Trying(sip_call_id,
+					from_addr,
+					to_addr,
+					via,
+					sip_seq_nr,
+					"REGISTER",
+					allow := omit,
+					server := server_name,
+					userAgent := omit);
+		SIP.send(tx_resp);
 
+		/* Tx 200 OK */
+		to_addr.params := f_sip_param_set(to_addr.params, "tag", f_sip_rand_tag());
 		tx_resp := ts_SIP_Response(sip_call_id,
 			from_addr,
 			to_addr,
 			"REGISTER", 200,
 			sip_seq_nr,
 			"OK",
-			via);
+			via,
+			require := require,
+			server := server_name,
+			supported := supported,
+			userAgent := omit);
 		SIP.send(tx_resp);
 	}
 	[fail_others] as_SIP_fail_resp(sip_expect_str);

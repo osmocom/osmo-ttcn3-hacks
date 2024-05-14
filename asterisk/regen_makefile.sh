@@ -5,6 +5,7 @@ NAME=Asterisk_Tests
 FILES="
 	*.c
 	*.ttcn
+	PIPEasp_PT.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
@@ -20,3 +21,6 @@ FILES="
 "
 
 ../regen-makefile.sh -e $NAME $FILES
+
+# required for forkpty(3) used by PIPEasp
+sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile
