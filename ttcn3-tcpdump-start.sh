@@ -109,6 +109,7 @@ do
 	sleep 1
 	i=$((i+1))
 	if [ $i -eq 10 ]; then
+		echo "Packet dumper didn't start filling pcap file after $i seconds!!!"
 		break
 	fi
 done
