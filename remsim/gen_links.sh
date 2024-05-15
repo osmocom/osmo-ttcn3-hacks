@@ -39,6 +39,7 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_VTY_Functions.ttcn Osmocom_Types.ttcn "
+FILES+="PIPEasp_Templates.ttcn "
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp IPA_CodecPort.ttcn " #RSL_Types.ttcn RSL_Emulation.ttcn "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn  "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
