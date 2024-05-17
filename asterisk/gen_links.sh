@@ -7,7 +7,8 @@ BASEDIR=../deps
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h "
 FILES+="TCCOpenSecurity_Functions.ttcn TCCOpenSecurity.cc TCCOpenSecurity_Functions.hh "
-FILES+="TCCDateTime.cc TCCDateTime_Functions.ttcn"
+FILES+="TCCDateTime.cc TCCDateTime_Functions.ttcn "
+FILES+="TCCEncoding_Functions.ttcn TCCEncoding.cc " # Base64
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src

@@ -14,6 +14,7 @@ FILES="
 	SDP_EncDec.cc
 	SIPmsg_PT.cc
 	TCCConversion.cc
+	TCCEncoding.cc
 	TCCInterface.cc
 	TCCOpenSecurity.cc
 	TCCDateTime.cc
