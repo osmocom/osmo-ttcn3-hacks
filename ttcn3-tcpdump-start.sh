@@ -85,6 +85,7 @@ fi
 # Log stderr to CMD_OUTFILE and a dedicated error log file
 tee $CMD_OUTFILE < $FIFO > $CMD_OUTFILE_ERR &
 CMD_STR="$CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE 2>$FIFO &"
+echo "$CMD_STR"
 eval $CMD_STR
 # $CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE &
 PID=$!
