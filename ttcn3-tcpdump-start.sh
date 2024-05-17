@@ -62,7 +62,12 @@ if [ -x "$DUMPCAP" ]; then
     fi
 
     if [ -u $DUMPCAP -o "$CAP_ERR" = "0" ]; then
-	CMD="$DUMPCAP -q"
+	# dumpcap, *after dropping permissions*, needs to be able to write to the directory to create the pcap file:
+	if [ "$(stat -L -c "%u" "$TTCN3_PCAP_PATH")" = "$(id -u)" ] && [ "$(stat -L -c "%A" "$TTCN3_PCAP_PATH" | head -c 4)" = "drwx" ]; then
+		CMD="$DUMPCAP -q"
+	else
+		echo "NOTE: unable to use dumpcap due to missing permissions in $TTCN3_PCAP_PATH"
+	fi
     else
  	echo "NOTE: unable to use dumpcap due to missing capabilities or suid bit"
     fi
