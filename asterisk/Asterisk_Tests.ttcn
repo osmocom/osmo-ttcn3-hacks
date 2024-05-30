@@ -65,6 +65,14 @@ type component test_CT {
 
 const charstring broadcast_sip_extension := "0500";
 
+/* TODO: need to find correct RES, CK, IK, values for:
+ * Response: "a19de225d030e6e0ec20f6de5f9dd80d"
+ * CNonce Value: "9a6460bcc3c84a3eac69455a93b67a77"
+ */
+const charstring c_auth_res := "a19de225d030e6e0";
+const charstring c_auth_ck := "9a6460bcc3c84a3eac69455a93b67a77";
+const charstring c_auth_ik := "5238297dfcca759bd05d48ff49bc63fa";
+
 function f_init_ConnHdlrPars(integer idx := 1) runs on test_CT return SIPConnHdlrPars {
 	var template (value) CallPars cp := t_CallPars(mp_local_sip_host, 1234 + 2*idx);
 	var template (value) SIPConnHdlrPars pars := t_Pars(mp_local_sip_host,
@@ -163,7 +171,7 @@ runs on test_CT return SIPConnHdlr {
 function f_start_handler_IMS(ims_void_fn fn, IMS_ConnHdlrPars pars)
 runs on test_CT return IMS_ConnHdlr {
 	var IMS_ConnHdlr vc_conn;
-	var charstring id := testcasename() & "-IMS_ConnHdlr-" & pars.user;
+	var charstring id := testcasename() & "-IMS_ConnHdlr-" & pars.subscr.imsi;
 
 	vc_conn := IMS_ConnHdlr.create(id) alive;
 
@@ -359,9 +367,43 @@ testcase TC_selftest() runs on test_CT {
 	setverdict(pass);
 }
 
+private function f_AMI_IMS_register(IMS_ConnHdlrPars pars) runs on test_CT
+{
+	/* Give some time for IMS_ConnHdlr to register SIP expect. This could be done through IMS_COORD. */
+	f_sleep(1.0);
+	/* Clear events: */
+	AMI_CLIENT.clear;
+
+	/* Announce network information, this should usually happen when UE
+	 * becomes attached to network and before IMS APN is set up: */
+	f_ami_action_PJSIPAccessNetworkInfo(AMI_CLIENT, mp_volte_ims_outbound_registration,
+					    f_ami_gen_PJSIPAccessNetworkInfo_Info_EUTRAN(pars.subscr.uli_str));
+
+	/* Trigger registration: */
+	f_ami_action_PJSIPRegister(AMI_CLIENT, mp_volte_ims_outbound_registration);
+
+	var charstring rand_str := oct2str(pars.subscr.rand);
+	var charstring autn_str := oct2str(pars.subscr.autn);
+	AMI_CLIENT.receive(tr_AMI_Event_AuthRequest(mp_volte_ims_outbound_registration,
+						    rand := pattern @nocase rand_str,
+						    autn := pattern @nocase autn_str));
+
+	f_ami_action_AuthResponse_RES(AMI_CLIENT,
+				      mp_volte_ims_outbound_registration,
+				      c_auth_res, c_auth_ck, c_auth_ik);
+
+	AMI_CLIENT.receive(tr_AMI_Event_Registry(f_sip_SipAddr_to_str(pars.subscr.local_sip_record),
+						 "sip:" & mp_local_ims_host,
+						 "Registered"));
+
+	 /* TODO: test "Action: PJSIPUnregister" */
+
+	 /* TODO: in another test emulating a call, test "Action: DedicatedBearerStatus" */
+}
+
 /* Test SIP registration of local clients */
 private function f_TC_ims_registration(charstring id) runs on IMS_ConnHdlr {
-	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.registrar_sip_record.addr)));
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
 	as_IMS_register();
 	setverdict(pass);
 }
@@ -372,43 +414,64 @@ testcase TC_ims_registration() runs on test_CT {
 	pars := f_init_IMS_ConnHdlrPars();
 	vc_conn := f_start_handler_IMS(refers(f_TC_ims_registration), pars);
 
-	/* Give some time for IMS_ConnHdlr to register SIP expect. This could be done through IMS_COORD. */
-	f_sleep(1.0);
-	/* Clear events: */
-	AMI_CLIENT.clear;
-
-	/* Announce network information, this should usually happen when UE
-	 * becomes attached to network and before IMS APN is set up: */
-	f_ami_action_PJSIPAccessNetworkInfo(AMI_CLIENT, mp_volte_ims_outbound_registration,
-					    f_ami_gen_PJSIPAccessNetworkInfo_Info_EUTRAN(pars.uli_str));
-
-	/* Trigger registration: */
-	f_ami_action_PJSIPRegister(AMI_CLIENT, mp_volte_ims_outbound_registration);
-
-	var charstring rand_str := oct2str(pars.rand);
-	var charstring autn_str := oct2str(pars.autn);
-	AMI_CLIENT.receive(tr_AMI_Event_AuthRequest(mp_volte_ims_outbound_registration,
-						    rand := pattern @nocase rand_str,
-						    autn := pattern @nocase autn_str));
-	/* TODO: need to find correct RES, CK, IK, values for:
-	 * Response: "a19de225d030e6e0ec20f6de5f9dd80d"
-	 * CNonce Value: "9a6460bcc3c84a3eac69455a93b67a77"
-	 */
-	f_ami_action_AuthResponse_RES(AMI_CLIENT,
-				  mp_volte_ims_outbound_registration,
-				  res := "a19de225d030e6e0",
-				  ck := "9a6460bcc3c84a3eac69455a93b67a77",
-				  ik := "5238297dfcca759bd05d48ff49bc63fa");
-
-	AMI_CLIENT.receive(tr_AMI_Event_Registry(f_sip_SipAddr_to_str(pars.local_sip_record),
-						 "sip:" & mp_local_ims_host,
-						 "Registered"));
-
-	 /* TODO: test "Action: PJSIPUnregister" */
-
-	 /* TODO: in another test emulating a call, test "Action: DedicatedBearerStatus" */
+	f_AMI_IMS_register(pars);
 
 	vc_conn.done;
+	f_shutdown();
+}
+
+/* Test SIP registration of local clients */
+private function f_TC_ims_call_mo(charstring id) runs on IMS_ConnHdlr {
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
+	if (ispresent(g_pars.subscr.cp.called)) {
+		f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)));
+	}
+	as_IMS_register();
+	setverdict(pass);
+	as_IMS_mo_call_accept();
+	setverdict(pass);
+	COORD.send(COORD_CMD_CALL_ESTABLISHED);
+	as_IMS_exp_call_hangup(g_pars.subscr.cp.sip_seq_nr + 1);
+	setverdict(pass);
+}
+testcase TC_ims_call_mo() runs on test_CT {
+	var SIPConnHdlrPars sip_pars;
+	var IMS_ConnHdlrPars ims_pars;
+	var SIPConnHdlr vc_conn_sip;
+	var IMS_ConnHdlr vc_conn_ims;
+	const charstring c_ext_msisdn := "90829";
+
+	f_init();
+
+	sip_pars := f_init_ConnHdlrPars(idx := 1);
+	ims_pars := f_init_IMS_ConnHdlrPars();
+
+	sip_pars.cp.calling := sip_pars.registrar_sip_record;
+	sip_pars.cp.called := valueof(ts_SipAddr(ts_HostPort(sip_pars.remote_sip_host),
+						 ts_UserInfo(c_ext_msisdn)));
+	ims_pars.subscr.cp.calling := valueof(ts_SipAddr(ts_HostPort(ims_pars.local_sip_host),
+							 ts_UserInfo(ims_pars.subscr.msisdn)));
+	ims_pars.subscr.cp.called := valueof(ts_SipAddr(ts_HostPort(ims_pars.local_sip_host),
+							ts_UserInfo(c_ext_msisdn)));
+
+	vc_conn_ims := f_start_handler_IMS(refers(f_TC_ims_call_mo), ims_pars);
+	vc_conn_sip := f_start_handler(refers(f_TC_internal_call_mo), sip_pars);
+
+	COORD.receive(COORD_CMD_REGISTERED) from vc_conn_sip;
+
+	f_AMI_IMS_register(ims_pars);
+
+	COORD.send(COORD_CMD_START) to vc_conn_sip;
+	COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_sip;
+	IMS_COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_ims;
+
+	/* Call on-going */
+	f_sleep(1.0);
+
+	COORD.send(COORD_CMD_HANGUP) to vc_conn_sip;
+
+	vc_conn_sip.done;
+	vc_conn_ims.done;
 	f_shutdown();
 }
 
@@ -419,6 +482,7 @@ control {
 	execute( TC_internal_call_all_3registered() );
 	execute( TC_internal_call_all_4registered() );
 	execute( TC_ims_registration() );
+	execute( TC_ims_call_mo() );
 }
 
 }
