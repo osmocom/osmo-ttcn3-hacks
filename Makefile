@@ -39,6 +39,7 @@ SUBDIRS= \
 	pcu \
 	pgw \
 	remsim \
+	s1gw \
 	sccp \
 	selftest \
 	sgsn \
