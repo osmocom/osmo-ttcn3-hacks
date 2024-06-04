@@ -80,6 +80,7 @@ type record IMS_ConnHdlrSubscrPars {
 	SipUrl local_sip_url_ext,
 	SipAddr local_sip_record,
 	Contact local_contact,
+	P_Associated_Uri p_associated_uri,
 	IMS_CallPars cp optional
 }
 type record of IMS_ConnHdlrSubscrPars IMS_ConnHdlrSubscrParsList;
@@ -184,6 +185,7 @@ template (value) IMS_ConnHdlrSubscrPars t_IMS_SubscrPars(charstring local_sip_ho
 								     ts_UserInfo(imsi))),
 						omit)
 				})),
+	p_associated_uri := ts_P_Associated_Uri({}),
 	cp := cp
 }
 
@@ -448,9 +450,8 @@ private function f_gen_sdp() runs on IMS_ConnHdlr return charstring {
 	return sdp;
 }
 
-/* Peer is calling us, accept it: */
-altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
-			boolean fail_others := true) runs on IMS_ConnHdlr
+/* Peer is issuing 1st register, accept it: */
+altstep as_IMS_register(boolean fail_others := true) runs on IMS_ConnHdlr
 {
 	var template (present) PDU_SIP_Request exp_req :=
 		tr_SIP_REGISTER(g_pars.registrar_sip_req_uri,
@@ -473,7 +474,6 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 		var template (value) To to_addr;
 		var template (value) CommaParam_List digestCln ;
 		var template (value) WwwAuthenticate wwwAuthenticate;
-		var template (value) P_Associated_Uri p_associated_uri := ts_P_Associated_Uri({});
 		var template (value) Security_server security_server;
 		var template (value) Server server_name := ts_Server({c_sip_server_name});
 		var template (value) Require require := ts_Require({"sec-agree"});
@@ -561,7 +561,7 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 					wwwAuthenticate,
 					sip_seq_nr,
 					"REGISTER",
-					p_associated_uri := p_associated_uri,
+					p_associated_uri := g_pars.subscr.p_associated_uri,
 					security_server := security_server,
 					server := server_name,
 					supported := supported,
@@ -610,7 +610,7 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 		/* Validate P-Access-Network-Info: */
 		f_ims_validate_register_P_Access_Network_info(g_rx_sip_req, exp_present := true);
 
-		p_associated_uri := ts_P_Associated_Uri({
+		g_pars.subscr.p_associated_uri := valueof(ts_P_Associated_Uri({
 				ts_P_Assoc_uri_spec(ts_NameAddr(ts_SipUrl(ts_HostPort(g_pars.realm),
 									  ts_UserInfo(g_pars.subscr.msisdn),
 									  scheme := "sip"))),
@@ -618,7 +618,7 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 									  omit,
 									  scheme := "tel"))),
 				ts_P_Assoc_uri_spec(g_rx_sip_req.msgHeader.toField.addressField.nameAddr)
-			});
+			}));
 
 		/* Tx 200 OK */
 		to_addr.toParams := f_sip_param_set(to_addr.toParams, "tag", f_sip_rand_tag());
@@ -629,7 +629,7 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 			sip_seq_nr,
 			"OK",
 			via,
-			p_associated_uri := p_associated_uri,
+			p_associated_uri := g_pars.subscr.p_associated_uri,
 			require := require,
 			server := server_name,
 			supported := supported,
@@ -639,6 +639,89 @@ altstep as_IMS_register(boolean exp_update_to_direct_rtp := true,
 	[fail_others] as_SIP_fail_resp(sip_expect_str);
 	[fail_others] as_SIP_fail_req(sip_expect_str);
 
+}
+
+/* Peer wants to unregister, accept it: */
+altstep as_IMS_unregister(boolean fail_others := true) runs on IMS_ConnHdlr
+{
+	var template (present) PDU_SIP_Request exp_req :=
+		tr_SIP_REGISTER(g_pars.registrar_sip_req_uri,
+				?,
+				tr_From(),
+				tr_To(),
+				tr_Via_from(?),
+				expires := tr_Expires(int2str(0)),
+				require := tr_Require(superset("sec-agree")),
+				security_client := tr_Security_client(superset(tr_Security_mechanism("ipsec-3gpp",
+												     superset(tr_Param("alg","hmac-sha-1-96"))))),
+				supported := tr_Supported(superset("path", "sec-agree")));
+	var charstring sip_expect_str := log2str(exp_req);
+
+	[] SIP.receive(exp_req) -> value g_rx_sip_req {
+		var template (value) PDU_SIP_Response tx_resp;
+		var Via via;
+		var CallidString sip_call_id;
+		var Contact contact;
+		var template (value) From from_addr;
+		var template (value) To to_addr;
+		var template (value) CommaParam_List digestCln ;
+		var template (value) WwwAuthenticate wwwAuthenticate;
+		var template (value) Security_server security_server;
+		var template (value) Server server_name := ts_Server({c_sip_server_name});
+		var template (value) Require require := ts_Require({"sec-agree"});
+		var template (value) Supported supported := ts_Supported({"sec-agree"});
+		var template (present) Authorization authorization;
+		var integer sip_seq_nr;
+		var charstring tx_sdp;
+
+		sip_call_id := g_rx_sip_req.msgHeader.callId.callid;
+		via := g_rx_sip_req.msgHeader.via;
+		via.viaBody[0].viaParams := f_sip_param_set(via.viaBody[0].viaParams, "rport", "1234"); /* TODO: set remote src port of the REGISTER */
+		from_addr := g_rx_sip_req.msgHeader.fromField;
+		to_addr := g_rx_sip_req.msgHeader.toField;
+		sip_seq_nr := g_rx_sip_req.msgHeader.cSeq.seqNumber;
+
+		contact := g_rx_sip_req.msgHeader.contact;
+		f_ims_validate_register_contact(contact);
+
+		/* Validate P-Access-Network-Info: */
+		f_ims_validate_register_P_Access_Network_info(g_rx_sip_req, exp_present := true);
+
+		/* Tx 100 Tyring */
+		tx_resp := ts_SIP_Response_Trying(sip_call_id,
+					from_addr,
+					to_addr,
+					via,
+					sip_seq_nr,
+					"REGISTER",
+					allow := omit,
+					server := server_name,
+					userAgent := omit);
+		SIP.send(tx_resp);
+
+		/* Change all Contact parameters to expires=0: */
+		for (var integer i := 0; i < lengthof(contact.contactBody.contactAddresses); i := i + 1) {
+			contact.contactBody.contactAddresses[i].contactParams := valueof({ ts_Param("expires", "0") });
+		}
+		/* Tx 200 OK */
+		to_addr.toParams := f_sip_param_set(to_addr.toParams, "tag", f_sip_rand_tag());
+		tx_resp := ts_SIP_Response(sip_call_id,
+			from_addr,
+			to_addr,
+			"REGISTER", 200,
+			sip_seq_nr,
+			"OK",
+			via,
+			contact := contact,
+			p_associated_uri := g_pars.subscr.p_associated_uri,
+			require := require,
+			server := server_name,
+			supported := supported,
+			userAgent := omit);
+		SIP.send(tx_resp);
+	}
+	[fail_others] as_SIP_fail_resp(sip_expect_str);
+	[fail_others] as_SIP_fail_req(sip_expect_str);
 }
 
 private function f_ConnHdlr_parse_initial_SIP_INVITE(PDU_SIP_Request rx_sip_req) runs on IMS_ConnHdlr
