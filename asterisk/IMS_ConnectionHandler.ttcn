@@ -56,6 +56,14 @@ type component IMS_ConnHdlr extends SIP_ConnHdlr {
 }
 type record of IMS_ConnHdlr IMS_ConnHdlrList;
 
+type record IMS_AuthVector {
+	OCT16 rand,
+	OCT16 autn,
+	OCT8 res,
+	OCT16 ck,
+	OCT16 ik
+}
+
 type record IMS_ConnHdlrSubscrPars {
 	charstring remote_sip_host optional,
 	uint16_t remote_sip_port optional,
@@ -65,8 +73,7 @@ type record IMS_ConnHdlrSubscrPars {
 	charstring msisdn,
 	/* Expected User-Location-Info in P-Access-Network-Info */
 	charstring uli_str,
-	octetstring rand,
-	octetstring autn,
+	IMS_AuthVector auth,
 	charstring ipsec_auth_key,
 	integer ipsec_local_spi_c,
 	integer ipsec_local_spi_s,
@@ -158,10 +165,15 @@ template (value) IMS_ConnHdlrSubscrPars t_IMS_SubscrPars(charstring local_sip_ho
 	password := password,
 	msisdn := msisdn,
 	uli_str := "2380100010000101",
-	/* The Nonce field is the Base64 encoded version of the RAND value and concatenated with the AUTN: */
-	rand := '14987631f65f8e3788a0798b6ebcd08e'O,
-	autn := 'f6e19a7ccb028000a06b19c9544516e5'O,
-	ipsec_auth_key := "0x5238297dfcca759bd05d48ff49bc63fa00000000",
+	auth := {
+		/* The Nonce field is the Base64 encoded version of the RAND value and concatenated with the AUTN: */
+		rand := 'd5d5de2bce418d7865ed7fa6956618a2'O,
+		autn := 'd42e61db5f15800067393a5b7691a227'O,
+		res := '6f2556bbe4366ab1'O,
+		ck := '0b389d08c833991734936bec55cac800'O,
+		ik := '17141862125bd30c81c4224391a0909a'O
+	},
+	ipsec_auth_key := "0x17141862125bd30c81c4224391a0909a00000000",
 	ipsec_local_spi_c := 4142,
 	ipsec_local_spi_s := 4143,
 	ipsec_remote_spi_c := omit,
@@ -250,8 +262,7 @@ private function f_nonce_from_rand_autn(octetstring rand, octetstring autn) retu
 /* HTTP Digest Authentication Using AKA (AKAv1-MD5): RFC 3310 */
 function f_tr_Authorization_AKAv1MD5(WwwAuthenticate www_authenticate,
 				     charstring username,
-				     charstring uri,
-				     integer nc_int := 1)
+				     charstring uri)
 return template (present) Authorization {
 	var CommaParam_List digestCln;
 	var template (present) Authorization authorization;
@@ -279,6 +290,12 @@ return template (present) Authorization {
 	authorization := tr_Authorization(cred);
 	return authorization;
 }
+
+private function f_ims_validate_Authorization_AKAv1MD5_Response(Authorization authorization, charstring method)
+runs on IMS_ConnHdlr {
+	f_sip_digest_validate_Authorization_AKAv1MD5(authorization, method, g_pars.subscr.auth.res);
+}
+
 
 private function f_ims_validate_register_contact(Contact rx_contact)
 {
@@ -532,7 +549,8 @@ altstep as_IMS_register(boolean fail_others := true) runs on IMS_ConnHdlr
 			ts_Param("realm", f_sip_str_quote(g_pars.realm)),
 			ts_Param("qop", f_sip_str_quote("auth")),
 			ts_Param("algorithm", "AKAv1-MD5"),
-			ts_Param("nonce", f_sip_str_quote(f_nonce_from_rand_autn(g_pars.subscr.rand, g_pars.subscr.autn)))
+			ts_Param("nonce", f_sip_str_quote(f_nonce_from_rand_autn(g_pars.subscr.auth.rand,
+										 g_pars.subscr.auth.autn)))
 			/* "opaque not needed in IMS "*/
 		};
 		wwwAuthenticate := ts_WwwAuthenticate( { ts_Challenge_digestCln(digestCln) } )
@@ -569,17 +587,9 @@ altstep as_IMS_register(boolean fail_others := true) runs on IMS_ConnHdlr
 		SIP.send(tx_resp);
 
 		/* Now we should receive a new REGISTER over ipsec: */
-
-		/* TODO: Generate expected Authoritzation based on AKAv1-MD5: */
-		/*authorization := f_sip_digest_gen_Authorization(valueof(wwwAuthenticate),
-								g_pars.user, g_pars.subscr.password,
-								"REGISTER",
-								f_sip_SipUrl_to_str(g_pars.subscr.registrar_sip_record.addr.nameAddr.addrSpec))
-		*/
 		authorization := f_tr_Authorization_AKAv1MD5(valueof(wwwAuthenticate),
 							     g_pars.subscr.imsi & "@" & g_pars.realm,
 							     f_sip_SipUrl_to_str(g_pars.registrar_sip_req_uri));
-		/* TODO: match Authorization from above: */
 		exp_req :=
 		tr_SIP_REGISTER(g_pars.registrar_sip_req_uri,
 				?,
@@ -606,6 +616,9 @@ altstep as_IMS_register(boolean fail_others := true) runs on IMS_ConnHdlr
 					server := server_name,
 					userAgent := omit);
 		SIP.send(tx_resp);
+
+		/* Validate Digest Response: */
+		f_ims_validate_Authorization_AKAv1MD5_Response(g_rx_sip_req.msgHeader.authorization, "REGISTER");
 
 		/* Validate P-Access-Network-Info: */
 		f_ims_validate_register_P_Access_Network_info(g_rx_sip_req, exp_present := true);

@@ -1275,7 +1275,17 @@ function f_sip_digest_A1(charstring user, charstring realm, charstring password)
 			     f_sip_str_unquote(realm) & ":" &
 			     password;
 	var charstring digestA1 := f_str_tolower(f_calculateMD5(A1));
-	log("A1: md5('", A1, "') = ", digestA1);
+	log("A1: md5(", A1, ") = ", digestA1);
+	return digestA1;
+}
+
+/* RFC 3310: Same as f_sip_digest_A1(), but using an octet buffer as password (AKAv1-MD5, pwd=RES) */
+function f_sip_digest_A1_octpwd(charstring user, charstring realm, octetstring password) return charstring {
+	var charstring A1pre := f_sip_str_unquote(user) & ":" &
+				f_sip_str_unquote(realm) & ":";
+	var octetstring A1 := char2oct(A1pre) & password;
+	var charstring digestA1 := f_str_tolower(oct2str(f_calculateMD5_oct(A1)));
+	log("A1-octpwd: md5(", A1, ") = ", digestA1);
 	return digestA1;
 }
 
@@ -1284,7 +1294,7 @@ function f_sip_digest_A2(charstring method, charstring uri) return charstring {
 
 	var charstring A2 := method & ":" & uri
 	var charstring digestA2 := f_str_tolower(f_calculateMD5(A2));
-	log("A2: md5('", A2, "') = ", digestA2);
+	log("A2: md5(", A2, ") = ", digestA2);
 	return digestA2;
 }
 
@@ -1298,7 +1308,7 @@ function f_sip_digest_RequestDigest(charstring digestA1, charstring nonce,
 				      f_sip_str_unquote(qop) & ":" &
 				      digestA2;
 	var charstring req_digest := f_sip_digest_KD(digestA1, digest_data);
-	log("Request-Digest: md5('", digestA1, ":", digest_data ,"') = ", req_digest);
+	log("Request-Digest: md5(\"" & digestA1 & ":" & digest_data & "\") = " & "\"" & req_digest & "\"");
 	return req_digest;
 }
 
@@ -1310,7 +1320,41 @@ function f_sip_digest_KD(charstring secret, charstring data) return charstring {
 }
 
 /* Digest Auth: RFC 2617 */
-function f_sip_digest_gen_Authorization(WwwAuthenticate www_authenticate,
+function f_sip_digest_gen_Authorization_Response_MD5(charstring user, charstring realm, charstring password,
+						     charstring method, charstring uri, charstring qop,
+						     charstring nonce, charstring cnonce, charstring nc)
+return charstring {
+	/* RFC 2617 3.2.2.2 A1 */
+	var charstring digestA1 := f_sip_digest_A1(user, realm, password);
+
+	/* RFC 2617 3.2.2.3 A2 */
+	var charstring digestA2 := f_sip_digest_A2(method, uri);
+
+	/* RFC 2617 3.2.2.1 Request-Digest */
+	var charstring req_digest := f_sip_digest_RequestDigest(digestA1, nonce,
+								nc, cnonce,
+								qop, digestA2);
+	return req_digest;
+}
+
+/* Digest Auth: RFC 2617 */
+function f_sip_digest_gen_Authorization_Response_AKAv1MD5(charstring user, charstring realm, octetstring password,
+							  charstring method, charstring uri, charstring qop,
+							  charstring nonce, charstring cnonce, charstring nc)
+return charstring {
+	/* RFC 2617 3.2.2.2 A1 */
+	var charstring digestA1 := f_sip_digest_A1_octpwd(user, realm, password);
+	/* RFC 2617 3.2.2.3 A2 */
+	var charstring digestA2 := f_sip_digest_A2(method, uri);
+
+	/* RFC 2617 3.2.2.1 Request-Digest */
+	var charstring req_digest := f_sip_digest_RequestDigest(digestA1, nonce,
+								nc, cnonce,
+								qop, digestA2);
+	return req_digest;
+}
+
+function f_sip_digest_gen_Authorization_MD5(WwwAuthenticate www_authenticate,
 				 charstring user, charstring password,
 				 charstring method, charstring uri,
 				 charstring cnonce := "0a4f113b", integer nc_int := 1) return Authorization {
@@ -1343,17 +1387,13 @@ function f_sip_digest_gen_Authorization(WwwAuthenticate www_authenticate,
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected qop: ", qop));
 	}
 	var charstring selected_qop := "auth";
-
-	/* RFC 2617 3.2.2.2 A1 */
-	var charstring digestA1 := f_sip_digest_A1(user, realm, password);
-	/* RFC 2617 3.2.2.3 A2 */
-	var charstring digestA2 := f_sip_digest_A2(method, uri);
-
-	/* RFC 2617 3.2.2.1 Request-Digest */
 	var charstring nc := f_str_tolower(hex2str(int2hex(nc_int, 8)));
-	var charstring req_digest := f_sip_digest_RequestDigest(digestA1, nonce,
-								nc, cnonce,
-								selected_qop, digestA2);
+
+	var charstring req_digest;
+	req_digest :=
+		f_sip_digest_gen_Authorization_Response_MD5(user, realm, password,
+							    method, uri, selected_qop,
+							    nonce, cnonce, nc);
 
 	cred := ts_Credentials_DigestResponseMD5(user, realm, nonce,
 						 uri, req_digest,
@@ -1361,6 +1401,55 @@ function f_sip_digest_gen_Authorization(WwwAuthenticate www_authenticate,
 
 	authorization := ts_Authorization(cred);
 	return valueof(authorization);
+}
+
+/* RFC 3310: Same as f_sip_digest_validate_Authorization_MD5(), but using an octet buffer as password (AKAv1-MD5, pwd=RES) */
+function f_sip_digest_validate_Authorization_AKAv1MD5(Authorization authorization, charstring method, octetstring password) {
+	var CommaParam_List auth_pars := authorization.body.digestResponse;
+	var template (omit) GenericParam rx_param;
+
+	rx_param := f_sip_param_find(auth_pars, "algorithm");
+	if (istemplatekind(rx_param, "omit")) {
+		/* Assume MD5 if not set */
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Algorithm param not present");
+	} else {
+		var charstring algorithm := valueof(rx_param.paramValue);
+		if (f_strstr(algorithm, "AKAv1-MD5") == -1) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Unexpected algorithm: ", algorithm));
+		}
+	}
+
+	var charstring user := f_sip_param_get_value_present_or_fail(auth_pars, "username");
+	var charstring realm := f_sip_param_get_value_present_or_fail(auth_pars, "realm");
+	var charstring uri := f_sip_param_get_value_present_or_fail(auth_pars, "uri");
+	var charstring nonce := f_sip_param_get_value_present_or_fail(auth_pars, "nonce");
+	var charstring qop := f_sip_param_get_value_present_or_fail(auth_pars, "qop");
+	var charstring response := f_sip_param_get_value_present_or_fail(auth_pars, "response");
+	var charstring cnonce := f_sip_param_get_value_present_or_fail(auth_pars, "cnonce");
+	var charstring nc := f_sip_param_get_value_present_or_fail(auth_pars, "nc");
+
+	if (f_strstr(qop, "auth") == -1) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected qop: ", qop));
+	}
+
+	var charstring exp_response :=
+		f_sip_digest_gen_Authorization_Response_AKAv1MD5(f_sip_str_unquote(user),
+								 f_sip_str_unquote(realm),
+								 password,
+								 method,
+								 f_sip_str_unquote(uri),
+								 qop,
+								 f_sip_str_unquote(nonce),
+								 f_sip_str_unquote(cnonce),
+								 nc);
+
+	response := f_sip_str_unquote(response);
+	if (response != exp_response) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Wrong digest response: ", response,
+						" vs exp: ", exp_response, ". Params: ", auth_pars));
+	}
 }
 
 /* RFC 2617 3.5 Example */
@@ -1400,13 +1489,13 @@ Authorization: Digest username="Mufasa",
 		ts_WwwAuthenticate( { ts_Challenge_digestCln(digestCln) } )
 
 	var Authorization authorization :=
-		f_sip_digest_gen_Authorization(valueof(www_authenticate),
-					       "Mufasa",
-					       "Circle Of Life",
-					       "GET",
-					       "/dir/index.html",
-					       cnonce := "0a4f113b",
-					       nc_int := 1);
+		f_sip_digest_gen_Authorization_MD5(valueof(www_authenticate),
+						   "Mufasa",
+						   "Circle Of Life",
+						   "GET",
+						   "/dir/index.html",
+						   cnonce := "0a4f113b",
+						   nc_int := 1);
 
 	var CommaParam_List digestResp := authorization.body.digestResponse;
 	f_sip_param_match_value_or_fail(digestResp, "realm",	f_sip_str_quote("testrealm@host.com"));
