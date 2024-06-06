@@ -357,6 +357,7 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_Checker_CT {
 	var charstring g_ctr_cn_node_name;
 	/* Counter state */
 	var CounterNameValsList g_ctr_cn;
+	var CounterNameValsList g_ctr_hnb;
 }
 
 /* global altstep for global guard timer; */
@@ -431,6 +432,15 @@ function f_init_hnodeb(charstring id, integer hnb_idx, RuaOps rua_ops) runs on t
 	/* Start Iuh side components */
 	vc_Iuh[hnb_idx].start(Iuh_Emulation.main(iuh_pars, id));
 	vc_RUA[hnb_idx].start(RUA_Emulation.main(rua_ops, id & "-RUA"));
+}
+
+function f_drop_hnodeb(integer hnb_idx) runs on test_CT
+{
+
+	vc_Iuh[hnb_idx].stop;
+	vc_RUA[hnb_idx].stop;
+	disconnect(self:HNBAP[hnb_idx], vc_Iuh[hnb_idx]:HNBAP);
+	disconnect(vc_RUA[hnb_idx]:RUA, vc_Iuh[hnb_idx]:RUA);
 }
 
 private type record of boolean BooleanList;
@@ -1013,6 +1023,114 @@ testcase TC_hnb_reregister_reuse_sctp_assoc() runs on test_CT {
 	HNBAP[0].send(ts_HNBAP_HNBDe_Register(ts_HnbapCause(unspecified)));
 	f_hnbap_hnb_register(0);
 	f_verify_talloc_count(HNBGWVTY, {"struct hnb_context"}, expect_count := 1);
+	f_shutdown_helper();
+}
+
+/* Default list of counters for a 'hnb' entity */
+const CounterNameVals counternames_hnb := {
+	{ "iuh:established", 0 }
+};
+
+private function f_ctrs_hnb_init(integer hnb_start := 0, integer hnb_count := 1,
+				 CounterNameVals counternames := counternames_hnb) runs on test_CT {
+	g_ctr_hnb := f_counter_name_vals_get_n(IPA_CTRL, "hnb", hnb_count, counternames, start_idx := hnb_start);
+	log("initial hnb rate counters: ", g_ctr_hnb);
+}
+
+/*  f_ctrs_hnb_init();
+ *  f_do_thing(on_hnb := 0);
+ *  f_do_thing(on_hnb := 0);
+ *  f_do_other(on_hnb := 1);
+ *  f_ctrs_hnb_add(0, "thing", 2);
+ *  f_ctrs_hnb_add(1, "other");
+ *  f_ctrs_hnb_verify();
+ */
+private function f_ctrs_hnb_verify() runs on test_CT {
+	log("verifying hnb rate counters: ", g_ctr_hnb);
+	f_counter_name_vals_expect_n(IPA_CTRL, "hnb", g_ctr_hnb);
+}
+
+/* convenience: f_ctrs_hnb_add() and f_ctrs_hnb_verify() in one call.
+ *  f_ctrs_hnb_init();
+ *  f_do_thing(on_hnb := 0);
+ *  f_do_thing(on_hnb := 0);
+ *  f_do_thing(on_hnb := 0);
+ *  f_ctrs_hnb_expect(0, "thing", 3);
+ */
+private function f_ctrs_hnb_expect(integer hnb_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_ctrs_hnb_add(hnb_nr, countername, val);
+	f_ctrs_hnb_verify();
+}
+
+private function f_ctrs_hnb_add(integer hnb_nr, charstring countername, integer val := 1) runs on test_CT {
+	f_counter_name_vals_list_add(g_ctr_hnb, hnb_nr, countername, val);
+}
+
+/* Set all counters for this hnb instance to a specific value. Useful to expect a disconnected and discarded hnb,
+ * because -1 is returned by f_counter_name_vals_get_n() when the hnb is not present on the CTRL interface. */
+private function f_ctrs_hnb_set_all(integer hnb_nr, integer val) runs on test_CT {
+	for (var integer i := 0; i < lengthof(counternames_hnb); i := i + 1) {
+		f_counter_name_vals_list_set(g_ctr_hnb, hnb_nr, counternames_hnb[i].name, val);
+	}
+}
+
+private function f_vty_run_hnbgw(TELNETasp_PT pt, charstring cmd)
+{
+	f_vty_enter_config(pt);
+	f_vty_transceive(pt, "hnbgw");
+	f_vty_transceive(pt, cmd);
+	f_vty_transceive(pt, "end");
+}
+
+testcase TC_hnb_disconnected_timeout() runs on test_CT {
+	g_num_hnbs := 1;
+	f_init(start_hnb := true);
+
+	f_vty_run_hnbgw(HNBGWVTY, "timer hnbgw X35 5");
+
+	/* Init the counters when the hnb already exists. There should be a nonzero iuh:established count now. */
+	f_ctrs_hnb_init();
+
+	/* Drop the Iuh link */
+	f_drop_hnodeb(0);
+	f_sleep(1.0);
+
+	/* The hNodeB persistent state should still be around, because X35 has not yet elapsed. */
+	f_ctrs_hnb_verify();
+
+	f_sleep(5.0);
+	/* We get -1 counters when the CTRL interface returned an error for the requested counter, meaning that the
+	 * hnb_persistent no longer exists. Verify that it is gone: */
+	f_ctrs_hnb_set_all(0, -1);
+	f_ctrs_hnb_verify();
+
+	f_sleep(1.0);
+
+	/* Connect again. */
+	var RuaOps rua_ops := {
+		create_cb := refers(IuhRanapCreateCallback),
+		unitdata_cb := refers(IuhRanapUnitdataCallback)
+	};
+	f_init_hnodeb(testcasename(), 0, rua_ops);
+
+	/* still disconnected until actually registered on HNBAP */
+	f_ctrs_hnb_verify();
+
+	f_hnbap_hnb_register(0);
+	/* The hNodeB has come back to existence, so expect 0, not -1 anymore: */
+	f_ctrs_hnb_set_all(0, 0);
+	/* Also we've registered once. */
+	f_ctrs_hnb_add(0, "iuh:established", 1);
+	f_ctrs_hnb_verify();
+	f_sleep(1.0);
+
+	/* Again drop the Iuh link, wait for X35 and see that it's gone again. */
+	f_drop_hnodeb(0);
+	f_ctrs_hnb_verify();
+	f_sleep(6.0);
+	f_ctrs_hnb_set_all(0, -1);
+	f_ctrs_hnb_verify();
+
 	f_shutdown_helper();
 }
 
@@ -2882,6 +3000,7 @@ control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
 	execute(TC_hnb_register_duplicate_reuse_sctp_assoc());
+	execute(TC_hnb_disconnected_timeout());
 	execute(TC_ue_register());
 	execute(TC_ue_register_tmsi_lai());
 	execute(TC_ue_register_before_hnb_register());
