@@ -1,0 +1,436 @@
+module S1AP_Server {
+
+/* S1AP Server, runs on top of S1AP_CodecPort, accepting the S1AP
+ * connections and forwarding S1AP PDUs to/from the ConnHdlr components.
+ * A ConnHdlr component may subscribe for one or more S1AP connections
+ * using the Global_ENB_ID value, which is sent in S1AP SetupReq.
+ *
+ * (C) 2024 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
+ *
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+
+import from S1AP_CodecPort all;
+import from S1AP_CodecPort_CtrlFunct all;
+import from S1AP_Types all;
+import from S1AP_Constants all;
+import from S1AP_PDU_Contents all;
+import from S1AP_PDU_Descriptions all;
+import from S1AP_IEs all;
+import from S1AP_Templates all;
+
+type enumerated S1APSRV_Event {
+	S1APSRV_EVENT_CONN_UP,
+	S1APSRV_EVENT_CONN_DOWN
+};
+
+type port S1APSRV_CONN_PT message {
+	inout S1AP_PDU, S1APSRV_Event;
+} with { extension "internal" };
+
+type component S1APSRV_ConnHdlr {
+	port S1APSRV_CONN_PT S1AP_CONN;
+	port S1APSRV_PROC_PT S1AP_PROC;
+};
+
+type record S1APSRV_ConnParams {
+	HostName local_ip,
+	PortNumber local_port
+};
+
+type component S1AP_Server_CT {
+	/* port facing to the SUT */
+	port S1AP_CODEC_PT S1AP;
+	/* all S1APSRV_ConnHdlr S1AP ports connect here */
+	port S1APSRV_CONN_PT S1AP_CLIENT;
+	/* procedure based port to register for incoming connections */
+	port S1APSRV_PROC_PT S1AP_PROC;
+
+	/* active eNB connections */
+	var ConnList g_conn_list;
+	/* registered ConnHdlr */
+	var ConnHdlrList g_conn_hdlr_list;
+
+	var S1APSRV_ConnParams g_cpars;
+	var ConnectionId g_s1ap_conn_id := -1;
+};
+
+
+/* represents a single eNB connection */
+private type record ConnData {
+	ConnectionId conn_id,
+	Global_ENB_ID genb_id /* can be unbound */
+};
+private type record of ConnData ConnList;
+
+/* represents a single ConnHdlr item */
+private type record ConnHdlrData {
+	S1APSRV_ConnHdlr vc_conn,
+	Global_ENB_ID genb_id,
+	ConnectionId conn_id /* can be -1 */
+};
+private type record of ConnHdlrData ConnHdlrList;
+
+private template (present) S1AP_RecvFrom
+tr_S1AP_RecvFrom_R(template (present) S1AP_PDU msg := ?,
+		   template (present) ConnectionId conn_id := ?) := {
+	connId := conn_id,
+	remName := ?,
+	remPort := ?,
+	locName := ?,
+	locPort := ?,
+	msg := msg
+};
+
+template (value) SctpTuple ts_SCTP(template (omit) integer ppid := 18) := {
+	sinfo_stream := omit,
+	sinfo_ppid := ppid,
+	remSocks := omit,
+	assocId := omit
+};
+
+/***********************************************************************************
+ * Connection management API
+ **********************************************************************************/
+
+/* find a connection [index] by a connection ID */
+private function f_conn_find_by_conn_id(ConnectionId conn_id)
+runs on S1AP_Server_CT return integer {
+	for (var integer i := 0; i < lengthof(g_conn_list); i := i + 1) {
+		if (g_conn_list[i].conn_id == conn_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* find a connection [index] by a global eNB ID */
+private function f_conn_find_by_genb_id(Global_ENB_ID genb_id)
+runs on S1AP_Server_CT return integer {
+	for (var integer i := 0; i < lengthof(g_conn_list); i := i + 1) {
+		if (isbound(g_conn_list[i].genb_id) and
+		    g_conn_list[i].genb_id == genb_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* add a new connection, return its index */
+private function f_conn_add(ConnectionId conn_id)
+runs on S1AP_Server_CT return integer {
+	var ConnData conn := { conn_id, - };
+	var integer idx;
+
+	if (f_conn_find_by_conn_id(conn_id) != -1) {
+		setverdict(fail, "Connection (id=", conn_id, ") is already added");
+		mtc.stop;
+	}
+
+	idx := lengthof(g_conn_list);
+	g_conn_list := g_conn_list & { conn };
+	log("Connection (id=", conn_id, ") is registered");
+
+	return idx;
+}
+
+/* del an existing connection */
+private function f_conn_del(ConnectionId conn_id)
+runs on S1AP_Server_CT {
+	var ConnList conn_list := { };
+
+	for (var integer i := 0; i < lengthof(g_conn_list); i := i + 1) {
+		if (g_conn_list[i].conn_id == conn_id) {
+			if (isbound(g_conn_list[i].genb_id)) {
+				f_ConnHdlr_update(g_conn_list[i].genb_id, -1);
+			}
+		} else {
+			conn_list := conn_list & { g_conn_list[i] };
+		}
+	}
+
+	if (lengthof(conn_list) == lengthof(g_conn_list)) {
+		setverdict(fail, "Connection (id=", conn_id, ") is not known");
+		mtc.stop;
+	}
+
+	g_conn_list := conn_list;
+	log("Connection (id=", conn_id, ") is deleted");
+}
+
+/* add a new connection, return its index */
+private function f_conn_set_genb_id(ConnectionId conn_id, Global_ENB_ID genb_id)
+runs on S1AP_Server_CT {
+	var integer idx;
+
+	if (f_conn_find_by_genb_id(genb_id) != -1) {
+		setverdict(fail, "Duplicate Global eNB ID ", genb_id);
+		mtc.stop;
+	}
+
+	idx := f_conn_find_by_conn_id(conn_id);
+	if (idx == -1) {
+		setverdict(fail, "Connection (id=", conn_id, ") is not known");
+		mtc.stop;
+	}
+
+	g_conn_list[idx].genb_id := genb_id;
+
+	f_ConnHdlr_update(genb_id, conn_id);
+}
+
+private function f_conn_close(ConnectionId conn_id)
+runs on S1AP_Server_CT {
+	log("Closing an eNB connection (id=", conn_id, ")");
+	S1AP_CodecPort_CtrlFunct.f_IPL4_close(S1AP, conn_id,
+					      { sctp := valueof(ts_SCTP) });
+	f_conn_del(conn_id);
+}
+
+private function f_conn_close_by_genb_id(Global_ENB_ID genb_id)
+runs on S1AP_Server_CT {
+	var integer idx;
+
+	idx := f_conn_find_by_genb_id(genb_id);
+	if (idx == -1) {
+		setverdict(fail, "There is no connection for Global eNB ID ", genb_id);
+		mtc.stop;
+	}
+
+	f_conn_close(g_conn_list[idx].conn_id);
+}
+
+/***********************************************************************************
+ * ConnHdlr management API
+ **********************************************************************************/
+
+/* find a ConnHdlr [index] by a connection ID */
+private function f_ConnHdlr_find_by_conn_id(ConnectionId conn_id)
+runs on S1AP_Server_CT return integer {
+	for (var integer i := 0; i < lengthof(g_conn_hdlr_list); i := i + 1) {
+		if (g_conn_hdlr_list[i].conn_id == conn_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* find a ConnHdlr [index] by a global eNB ID */
+private function f_ConnHdlr_find_by_genb_id(Global_ENB_ID genb_id)
+runs on S1AP_Server_CT return integer {
+	for (var integer i := 0; i < lengthof(g_conn_hdlr_list); i := i + 1) {
+		if (g_conn_hdlr_list[i].genb_id == genb_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* find a ConnHdlr [index] by a component reference */
+private function f_ConnHdlr_find_by_vc_conn(S1APSRV_ConnHdlr vc_conn)
+runs on S1AP_Server_CT return integer {
+	for (var integer i := 0; i < lengthof(g_conn_hdlr_list); i := i + 1) {
+		if (g_conn_hdlr_list[i].vc_conn == vc_conn) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+private function f_ConnHdlr_add(S1APSRV_ConnHdlr vc_conn, Global_ENB_ID genb_id)
+runs on S1AP_Server_CT {
+	var ConnectionId conn_id := -1;
+	var integer idx;
+
+	if (f_ConnHdlr_find_by_genb_id(genb_id) != -1) {
+		setverdict(fail, "Global eNB ID ", genb_id, " is already registered");
+		mtc.stop;
+	}
+
+	idx := f_conn_find_by_genb_id(genb_id);
+	if (idx != -1) {
+		conn_id := g_conn_list[idx].conn_id;
+	}
+
+	g_conn_hdlr_list := g_conn_hdlr_list & { {vc_conn, genb_id, conn_id} };
+	log("Global eNB ID ", genb_id, " has been registered");
+}
+
+private function f_ConnHdlr_del(integer idx)
+runs on S1AP_Server_CT {
+	var ConnHdlrList conn_hdlr_list := { };
+
+	for (var integer i := 0; i < lengthof(g_conn_hdlr_list); i := i + 1) {
+		if (i != idx) {
+			conn_hdlr_list := conn_hdlr_list & { g_conn_hdlr_list[i] };
+		}
+	}
+
+	g_conn_hdlr_list := conn_hdlr_list;
+}
+
+private function f_ConnHdlr_del_by_genb_id(Global_ENB_ID genb_id)
+runs on S1AP_Server_CT {
+	var integer idx;
+
+	idx := f_ConnHdlr_find_by_genb_id(genb_id);
+	if (idx == -1) {
+		setverdict(fail, "Global eNB ID ", genb_id, " is not registered");
+		mtc.stop;
+	}
+
+	f_ConnHdlr_del(idx);
+	log("Global eNB ID ", genb_id, " has been unregistered");
+}
+
+private function f_ConnHdlr_update(Global_ENB_ID genb_id, ConnectionId conn_id)
+runs on S1AP_Server_CT {
+	for (var integer i := 0; i < lengthof(g_conn_hdlr_list); i := i + 1) {
+		if (g_conn_hdlr_list[i].genb_id == genb_id) {
+			g_conn_hdlr_list[i].conn_id := conn_id;
+			/* notify the ConnHdlr about connection state */
+			var S1APSRV_Event ev;
+			if (conn_id == -1) {
+				ev := S1APSRV_EVENT_CONN_DOWN;
+			} else {
+				ev := S1APSRV_EVENT_CONN_UP;
+			}
+			S1AP_CLIENT.send(ev) to g_conn_hdlr_list[i].vc_conn;
+		}
+	}
+}
+
+signature S1APSRV_register(in S1APSRV_ConnHdlr vc_conn, in Global_ENB_ID genb_id);
+signature S1APSRV_unregister(in S1APSRV_ConnHdlr vc_conn, in Global_ENB_ID genb_id);
+signature S1APSRV_close_conn(in S1APSRV_ConnHdlr vc_conn, in Global_ENB_ID genb_id);
+
+type port S1APSRV_PROC_PT procedure {
+	inout S1APSRV_register;
+	inout S1APSRV_unregister;
+	inout S1APSRV_close_conn;
+} with { extension "internal" };
+
+function f_ConnHdlr_register(Global_ENB_ID genb_id)
+runs on S1APSRV_ConnHdlr {
+	S1AP_PROC.call(S1APSRV_register:{self, genb_id}) {
+		[] S1AP_PROC.getreply(S1APSRV_register:{?, ?}) { };
+	}
+}
+
+function f_ConnHdlr_unregister(Global_ENB_ID genb_id)
+runs on S1APSRV_ConnHdlr {
+	S1AP_PROC.call(S1APSRV_unregister:{self, genb_id}) {
+		[] S1AP_PROC.getreply(S1APSRV_unregister:{?, ?}) { };
+	}
+}
+
+function f_ConnHdlr_close_conn(Global_ENB_ID genb_id)
+runs on S1APSRV_ConnHdlr {
+	S1AP_PROC.call(S1APSRV_close_conn:{self, genb_id}) {
+		[] S1AP_PROC.getreply(S1APSRV_close_conn:{?, ?}) { };
+	}
+}
+
+function main(S1APSRV_ConnParams cpars) runs on S1AP_Server_CT {
+	var Result res;
+
+	g_cpars := cpars;
+	g_conn_list := { };
+	g_conn_hdlr_list := { };
+
+	map(self:S1AP, system:S1AP_CODEC_PT);
+	res := S1AP_CodecPort_CtrlFunct.f_IPL4_listen(S1AP,
+						      cpars.local_ip, cpars.local_port,
+						      { sctp := valueof(ts_SCTP) });
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not create an S1AP socket, check your configuration");
+		mtc.stop;
+	}
+	g_s1ap_conn_id := res.connId;
+
+	log("SCTP server listening on ", cpars.local_ip, ":", cpars.local_port);
+
+	while (true) {
+		var S1APSRV_ConnHdlr vc_conn;
+		var S1AP_RecvFrom mrf;
+		var S1AP_PDU msg;
+
+		var Global_ENB_ID genb_id;
+		var PortEvent pev;
+
+		alt {
+		/* S1AP PDU from a peer (eNB) */
+		[] S1AP.receive(tr_S1AP_RecvFrom_R) -> value mrf {
+			if (match(mrf.msg, tr_S1AP_SetupReq)) {
+				genb_id := mrf.msg.initiatingMessage.value_.S1SetupRequest.protocolIEs[0].value_.Global_ENB_ID;
+				f_conn_set_genb_id(mrf.connId, genb_id);
+			}
+			var integer idx := f_ConnHdlr_find_by_conn_id(mrf.connId);
+			if (idx != -1) {
+				S1AP_CLIENT.send(mrf.msg) to g_conn_hdlr_list[idx].vc_conn;
+			} /* else: no ConnHdlr, drop PDU */
+			}
+		/* S1AP PDU from a ConnHdlr: pass on transparently */
+		[] S1AP_CLIENT.receive(S1AP_PDU:?) -> value msg sender vc_conn {
+			var integer idx := f_ConnHdlr_find_by_vc_conn(vc_conn);
+			if (idx == -1) {
+				setverdict(fail, "Component ", vc_conn, " is not registered");
+				mtc.stop;
+			}
+			if (g_conn_hdlr_list[idx].conn_id == -1) {
+				setverdict(fail, "S1AP connection is not up");
+				mtc.stop;
+			}
+			S1AP.send(t_S1AP_Send(g_conn_hdlr_list[idx].conn_id, msg));
+			}
+
+		/* connection opened/closed events */
+		[] S1AP.receive(PortEvent:{connOpened := ?}) -> value pev {
+			log("eNB connection (id=", pev.connOpened.connId, ", ",
+			    pev.connOpened.remName, ":", pev.connOpened.remPort, ") ",
+			    "established");
+			f_conn_add(pev.connOpened.connId);
+			}
+		[] S1AP.receive(PortEvent:{connClosed := ?}) -> value pev {
+			log("eNB connection (id=", pev.connClosed.connId, ", ",
+			    pev.connClosed.remName, ":", pev.connClosed.remPort, ") ",
+			    "closed");
+			f_conn_del(pev.connClosed.connId);
+			}
+
+		/* SCTP events we don't care about */
+		[] S1AP.receive(PortEvent:{sctpEvent := ?}) { }
+
+		/* ConnHdlr registration/unregistration */
+		[] S1AP_PROC.getcall(S1APSRV_register:{?, ?}) -> param(vc_conn, genb_id) {
+			f_ConnHdlr_add(vc_conn, genb_id);
+			S1AP_PROC.reply(S1APSRV_register:{vc_conn, genb_id}) to vc_conn;
+			}
+		[] S1AP_PROC.getcall(S1APSRV_unregister:{?, ?}) -> param(vc_conn, genb_id) {
+			f_ConnHdlr_del_by_genb_id(genb_id);
+			S1AP_PROC.reply(S1APSRV_unregister:{vc_conn, genb_id}) to vc_conn;
+			}
+		[] S1AP_PROC.getcall(S1APSRV_close_conn:{?, ?}) -> param(vc_conn, genb_id) {
+			f_conn_close_by_genb_id(genb_id);
+			S1AP_PROC.reply(S1APSRV_close_conn:{vc_conn, genb_id}) to vc_conn;
+			}
+		}
+	}
+}
+
+}
