@@ -65,6 +65,7 @@ FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct
 FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn DIAMETER_ts32_299_Templates.ttcn "
 FILES+="ICMP_Templates.ttcn ICMPv6_Templates.ttcn "
 FILES+="Osmocom_VTY_Functions.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

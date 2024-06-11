@@ -52,6 +52,7 @@ FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_Ctr
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 FILES+="SCCP_Templates.ttcn "
 FILES+="M3UA_Templates.ttcn M3UA_CodecPort.ttcn M3UA_CodecPort_CtrlFunct.ttcn M3UA_CodecPort_CtrlFunctDef.cc "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

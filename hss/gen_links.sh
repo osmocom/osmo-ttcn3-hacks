@@ -25,6 +25,7 @@ DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
 FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

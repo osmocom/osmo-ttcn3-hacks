@@ -41,6 +41,7 @@ FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc
 IPA_Emulation.ttcnpp "
 FILES+="PCO_Types.ttcn GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

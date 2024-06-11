@@ -57,6 +57,7 @@ FILES+="HTTP_Adapter.ttcn "
 FILES+="BSSMAP_Templates.ttcn "
 FILES+="CBSP_Types.ttcn CBSP_Templates.ttcn "
 FILES+="CBSP_CodecPort.ttcn CBSP_CodecPort_CtrlFunct.ttcn CBSP_CodecPort_CtrlFunctdef.cc CBSP_Adapter.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
