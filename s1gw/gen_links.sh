@@ -26,6 +26,7 @@ gen_links $DIR $FILES
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results
