@@ -48,6 +48,8 @@ modulepar {
 	charstring mp_ami_user := "test_user";
 	charstring mp_ami_secret := "1234";
 	charstring mp_volte_ims_outbound_registration := "volte_ims";
+	/* Current default by pjproject (timeout_timer_val) to 32s, and not changed by Asterisk */
+	integer mp_volte_ims_outbound_register_timeout := 32;
 }
 
 type component test_CT {
@@ -386,7 +388,9 @@ private function f_AMI_IMS_start_register(IMS_ConnHdlrPars pars) runs on test_CT
 	f_ami_action_PJSIPRegister(AMI_CLIENT, mp_volte_ims_outbound_registration);
 }
 
-private altstep as_AMI_IMS_register_Auth(IMS_ConnHdlrPars pars, boolean resync := false) runs on test_CT
+private altstep as_AMI_IMS_register_Auth(IMS_ConnHdlrPars pars,
+					 boolean resync := false,
+					 boolean exp_ami_ev_registered := true) runs on test_CT
 {
 	var charstring rand_str := oct2str(pars.subscr.auth.rand);
 	var charstring autn_str := oct2str(pars.subscr.auth.autn);
@@ -399,9 +403,11 @@ private altstep as_AMI_IMS_register_Auth(IMS_ConnHdlrPars pars, boolean resync :
 					f_str_tolower(oct2str(pars.subscr.auth.ck)),
 					f_str_tolower(oct2str(pars.subscr.auth.ik)));
 
-		AMI_CLIENT.receive(tr_AMI_Event_Registry(f_sip_SipAddr_to_str(pars.subscr.local_sip_record),
-							"sip:" & mp_ims_domain,
-							"Registered"));
+		if (exp_ami_ev_registered) {
+			AMI_CLIENT.receive(tr_AMI_Event_Registry(f_sip_SipAddr_to_str(pars.subscr.local_sip_record),
+								"sip:" & mp_ims_domain,
+								"Registered"));
+		}
 	}
 	[resync] AMI_CLIENT.receive(tr_AMI_Event_AuthRequest(mp_volte_ims_outbound_registration,
 						    rand := pattern @nocase rand_str,
@@ -478,6 +484,79 @@ testcase TC_ims_registration_resync() runs on test_CT {
 
 	vc_conn.done;
 	f_shutdown();
+}
+
+private function f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_register_early_return early_ret, boolean exp_auth_resync := false) runs on IMS_ConnHdlr {
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
+
+	as_IMS_register(exp_auth_resync := exp_auth_resync, early_ret := early_ret);
+
+	timer Tout;
+	/* 1.0: Give some margin. */
+	Tout.start(int2float(mp_volte_ims_outbound_register_timeout) + 1.0);
+	/* Make sure no new REGISTER is attempted unless directed by AMI: */
+	alt {
+	[] as_SIP_fail_req("nothing");
+	[] as_SIP_fail_resp("nothing");
+	[] Tout.timeout { /* Done */ }
+	}
+	setverdict(pass);
+}
+/* Test initial REGISTER against IMS core timing out. */
+private function f_TC_ims_registration_timeout_initial_100Trying(charstring id) runs on IMS_ConnHdlr {
+	f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_REG_EARLY_RET_BEFORE_Initial_100Trying);
+}
+private function f_TC_ims_registration_timeout_initial_401Unauthorized(charstring id) runs on IMS_ConnHdlr {
+	f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_REG_EARLY_RET_BEFORE_Initial_401Unauthorized);
+}
+private function f_TC_ims_registration_timeout_resync_401Unauthorized(charstring id) runs on IMS_ConnHdlr {
+	f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_REG_EARLY_RET_BEFORE_Resync_401Unauthorized, exp_auth_resync := true);
+}
+private function f_TC_ims_registration_timeout_protected_100Trying(charstring id) runs on IMS_ConnHdlr {
+	f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_REG_EARLY_RET_BEFORE_Protected_100Trying);
+}
+private function f_TC_ims_registration_timeout_protected_200OK(charstring id) runs on IMS_ConnHdlr {
+	f_TC_ims_registration_timeout_IMS_ConnHdlr(IMS_REG_EARLY_RET_BEFORE_Protected_200OK);
+}
+private function f_TC_ims_registration_timeout_initial(ims_void_fn fn,
+						       boolean answer_register := false,
+						       boolean resync := false) runs on test_CT {
+	var IMS_ConnHdlrPars pars;
+	var IMS_ConnHdlr vc_conn;
+	f_init();
+	pars := f_init_IMS_ConnHdlrPars();
+	vc_conn := f_start_handler_IMS(fn, pars);
+
+	f_AMI_IMS_start_register(pars);
+
+	if (answer_register) {
+		as_AMI_IMS_register_Auth(pars, resync := resync, exp_ami_ev_registered := false);
+	}
+
+	AMI_CLIENT.receive(tr_AMI_Event_Registry(f_sip_SipAddr_to_str(pars.subscr.local_sip_record),
+						 "sip:" & mp_ims_domain,
+						 "Rejected"));
+
+	vc_conn.done;
+	f_shutdown();
+}
+testcase TC_ims_registration_timeout_initial_100Trying() runs on test_CT {
+	f_TC_ims_registration_timeout_initial(refers(f_TC_ims_registration_timeout_initial_100Trying));
+}
+testcase TC_ims_registration_timeout_initial_401Unauthorized() runs on test_CT {
+	f_TC_ims_registration_timeout_initial(refers(f_TC_ims_registration_timeout_initial_401Unauthorized));
+}
+testcase TC_ims_registration_timeout_resync_401Unauthorized() runs on test_CT {
+	f_TC_ims_registration_timeout_initial(refers(f_TC_ims_registration_timeout_resync_401Unauthorized),
+					      true, true);
+}
+testcase TC_ims_registration_timeout_protected_100Trying() runs on test_CT {
+	f_TC_ims_registration_timeout_initial(refers(f_TC_ims_registration_timeout_protected_100Trying),
+					      true, false);
+}
+testcase TC_ims_registration_timeout_protected_200OK() runs on test_CT {
+	f_TC_ims_registration_timeout_initial(refers(f_TC_ims_registration_timeout_protected_200OK),
+					      true, false);
 }
 
 /* Test SIP registration of local clients */
@@ -619,6 +698,11 @@ control {
 	execute( TC_internal_call_all_4registered() );
 	execute( TC_ims_registration() );
 	execute( TC_ims_registration_resync() );
+	execute( TC_ims_registration_timeout_initial_100Trying() );
+	execute( TC_ims_registration_timeout_initial_401Unauthorized() );
+	execute( TC_ims_registration_timeout_resync_401Unauthorized() );
+	execute( TC_ims_registration_timeout_protected_100Trying() );
+	execute( TC_ims_registration_timeout_protected_200OK() );
 	execute( TC_ims_call_mo() );
 	execute( TC_ims_call_mt() );
 }
