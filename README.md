@@ -12,6 +12,14 @@ Those test suites mostly are performing *functional testing* of cellular
 network elements, from 2G, 3G, 4G to 5G.  The individual test-suites are
 in sub-directories, while some shared library code is in *library*.
 
+Running Testsuites
+------------------
+
+Use the `testenv.py` script to run the testsuites, e.g.:
+
+```
+$ ./testenv.py run mgw
+```
 
 Continuous Integration
 ----------------------

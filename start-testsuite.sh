@@ -52,6 +52,8 @@ ulimit -n 100000
 # below is for the debian packages
 TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
+
+set -x
 LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SUITE_DIR:$TITAN_LIBRARY_PATH" "$TTCN3_BIN_DIR/ttcn3_start" $SUITE $CFG $TEST
 
 expected="$SUITE_DIR/expected-results.xml"
