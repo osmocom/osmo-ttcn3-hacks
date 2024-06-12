@@ -138,6 +138,8 @@ type record IMS_CallPars {
 	charstring local_rtp_addr,
 	uint16_t local_rtp_port,
 
+	boolean support_precondition_ext,
+	boolean require_precondition_ext,
 	SDP_Message peer_sdp optional,
 	IMS_CallParsMT mt
 }
@@ -155,6 +157,8 @@ template (value) IMS_CallPars t_IMS_CallPars(charstring local_rtp_addr,
 	sip_body := omit,
 	local_rtp_addr := local_rtp_addr,
 	local_rtp_port := local_rtp_port,
+	support_precondition_ext := true,
+	require_precondition_ext := false,
 	peer_sdp := omit,
 	mt := t_IMS_CallParsMT
 }
@@ -1104,24 +1108,106 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 		var template (value) PDU_SIP_Response tx_resp;
 		var Via via;
 		var charstring tx_sdp;
+		var boolean peer_support_precondition := match(g_rx_sip_req.msgHeader.supported.optionsTags,
+							       superset("100rel", "precondition"));
 
 		/* Obtain params: */
 		f_ConnHdlr_parse_initial_SIP_INVITE(g_rx_sip_req);
 		via := g_rx_sip_req.msgHeader.via;
 
 		f_ims_validate_register_P_Access_Network_info(g_rx_sip_req, exp_present := true);
+		if (g_pars.subscr.cp.require_precondition_ext and not peer_support_precondition) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(g_name & ": Missing '100rel,precondition' in INVITE Supported header: ",
+						g_rx_sip_req.msgHeader.supported));
+		}
 
-
-		/* Tx 180 Ringing */
-		tx_resp := ts_SIP_Response_Ringing(g_pars.subscr.cp.sip_call_id,
+		/* Tx 100 Tyring */
+		tx_resp := ts_SIP_Response_Trying(g_pars.subscr.cp.sip_call_id,
 						   g_pars.subscr.cp.from_addr,
 						   g_pars.subscr.cp.to_addr,
 						   via,
-						   g_pars.subscr.cp.sip_seq_nr);
+						   g_pars.subscr.cp.sip_seq_nr,
+						   "INVITE",
+						   allow := omit,
+						   server := g_pars.server_name,
+						   userAgent := omit);
 		SIP.send(tx_resp);
 
-		/* Tx 200 OK */
 		tx_sdp := f_gen_sdp();
+
+		/* Use precondition ? */
+		if (g_pars.subscr.cp.require_precondition_ext or
+		    (g_pars.subscr.cp.support_precondition_ext and peer_support_precondition)) {
+			/* Tx 183 Session Progress */
+			/* TODO: add a=curr:qos, a=des:qos and a=conf:qos fields to SDP */
+			tx_resp := ts_SIP_Response_SessionProgress(g_pars.subscr.cp.sip_call_id,
+							g_pars.subscr.cp.from_addr,
+							g_pars.subscr.cp.to_addr,
+							via,
+							g_pars.subscr.cp.sip_seq_nr,
+							rseq := ts_RSeq(1),
+							body := tx_sdp);
+			SIP.send(tx_resp);
+
+			/* Rx PRACK */
+			exp_req := tr_SIP_PRACK(f_tr_SipUrl_opt_defport(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)),
+					g_pars.subscr.cp.sip_call_id,
+					g_pars.subscr.cp.from_addr,
+					g_pars.subscr.cp.to_addr,
+					f_tr_Via_response(via),
+					g_pars.subscr.cp.sip_seq_nr + 1,
+					rack := tr_RAck(1, g_pars.subscr.cp.sip_seq_nr, "INVITE"),
+					body := omit);
+			as_SIP_expect_req(exp_req);
+
+			/* Tx 200 OK (PRACK) */
+			tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
+						g_pars.subscr.cp.from_addr,
+						g_pars.subscr.cp.to_addr,
+						"PRACK", 200,
+						g_pars.subscr.cp.sip_seq_nr,
+						"OK",
+						via,
+						body := omit);
+			SIP.send(tx_resp);
+
+			/* Rx UPDATE */
+			exp_req := tr_SIP_UPDATE(f_tr_SipUrl_opt_defport(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)),
+					g_pars.subscr.cp.sip_call_id,
+					g_pars.subscr.cp.from_addr,
+					g_pars.subscr.cp.to_addr,
+					f_tr_Via_response(via),
+					g_pars.subscr.cp.sip_seq_nr + 1,
+					require := tr_Require(superset("precondition")),
+					body := ?);
+			as_SIP_expect_req(exp_req);
+
+			/* Tx 200 OK (UPDATE) */
+			/* TODO: add a=curr:qos, a=des:qos and a=conf:qos fields to SDP */
+			tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
+						g_pars.subscr.cp.from_addr,
+						g_pars.subscr.cp.to_addr,
+						"UPDATE", 200,
+						g_pars.subscr.cp.sip_seq_nr,
+						"OK",
+						via,
+						body := tx_sdp);
+			SIP.send(tx_resp);
+
+			g_pars.subscr.cp.sip_seq_nr := g_pars.subscr.cp.sip_seq_nr + 1;
+		}
+
+		/* Tx 180 Ringing */
+		tx_resp := ts_SIP_Response_Ringing(g_pars.subscr.cp.sip_call_id,
+						g_pars.subscr.cp.from_addr,
+						g_pars.subscr.cp.to_addr,
+						via,
+						g_pars.subscr.cp.sip_seq_nr);
+		SIP.send(tx_resp);
+
+
+		/* Tx 200 OK */
 		tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
 					   g_pars.subscr.cp.from_addr,
 					   g_pars.subscr.cp.to_addr,
