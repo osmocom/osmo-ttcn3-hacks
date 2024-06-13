@@ -30,4 +30,26 @@ S1AP__PDU__Descriptions::S1AP__PDU dec__S1AP__PDU(const OCTETSTRING &stream)
 	return pdu;
 }
 
+OCTETSTRING enc__S1AP__Global__ENB__ID(const S1AP__IEs::Global__ENB__ID &ie)
+{
+	TTCN_Buffer buf;
+
+	buf.clear();
+	ie.encode(S1AP__IEs::Global__ENB__ID_descr_, buf,
+		  TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+S1AP__IEs::Global__ENB__ID dec__S1AP__Global__ENB__ID(const OCTETSTRING &stream)
+{
+	S1AP__IEs::Global__ENB__ID ie;
+	TTCN_Buffer buf;
+
+	buf.clear();
+	buf.put_os(stream);
+	ie.decode(S1AP__IEs::Global__ENB__ID_descr_, buf,
+		  TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ie;
+}
+
 }
