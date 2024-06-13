@@ -30,4 +30,4 @@ FILES="
 
 . ../_buildsystem/regen_makefile.inc.sh
 
-sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode -lgnutls/' Makefile
+sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lgnutls/' Makefile

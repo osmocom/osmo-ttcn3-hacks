@@ -48,4 +48,4 @@ CPPFLAGS_TTCN3="
 
 . ../_buildsystem/regen_makefile.inc.sh
 
-sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode -lssl/' Makefile
+sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lssl/' Makefile
