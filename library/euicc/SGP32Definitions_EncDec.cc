@@ -117,6 +117,23 @@ OCTETSTRING enc__ProfileRollbackRequest(const ProfileRollbackRequest &msg) {
 	return OCTETSTRING(buf.get_len(), buf.get_data());
 }
 
+EnableUsingDDResponse dec__EnableUsingDDResponse(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	EnableUsingDDResponse msg;
+	buf.put_os(stream);
+
+	msg.decode(EnableUsingDDResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__EnableUsingDDResponse(const EnableUsingDDResponse &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(EnableUsingDDResponse_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
 ProfileRollbackRequest dec__ProfileRollbackRequest(const OCTETSTRING &stream) {
 	TTCN_Buffer buf;
 	ProfileRollbackRequest msg;
