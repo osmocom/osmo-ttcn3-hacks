@@ -87,7 +87,7 @@ clean: $(foreach dir,$(SUBDIRS),$(dir)/clean)
 all: $(foreach dir,$(SUBDIRS),$(dir)/all)
 
 define DIR_Makefile_template
-$(1)/Makefile:
+$(1)/Makefile: $(1)/gen_links.sh $(1)/regen_makefile.sh
 	(cd $(1) && ./gen_links.sh && ./regen_makefile.sh)
 endef
 
