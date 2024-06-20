@@ -73,9 +73,12 @@ type record IMS_ConnHdlrSubscrPars {
 	charstring remote_sip_host optional,
 	uint16_t remote_sip_port optional,
 	charstring imsi,
+	charstring imei,
 	charstring display_name,
 	charstring password,
 	charstring msisdn,
+	boolean support_video,
+	boolean support_smsip,
 	/* Expected User-Location-Info in P-Access-Network-Info */
 	charstring uli_str,
 	IMS_AuthVector auth,
@@ -160,6 +163,7 @@ template (value) IMS_ConnHdlrSubscrPars t_IMS_SubscrPars(charstring local_sip_ho
 						   uint16_t local_sip_port,
 						   charstring domain,
 						   charstring imsi,
+						   charstring imei,
 						   charstring msisdn := "90828",
 						   charstring display_name := "Anonymous",
 						   charstring password := "secret",
@@ -167,9 +171,12 @@ template (value) IMS_ConnHdlrSubscrPars t_IMS_SubscrPars(charstring local_sip_ho
 	remote_sip_host := omit,
 	remote_sip_port := omit,
 	imsi := imsi,
+	imei := imei,
 	display_name := f_sip_str_quote(display_name),
 	password := password,
 	msisdn := msisdn,
+	support_video := false,
+	support_smsip := false,
 	uli_str := "2380100010000101",
 	auth := {
 		/* The Nonce field is the Base64 encoded version of the RAND value and concatenated with the AUTN: */
@@ -207,6 +214,7 @@ template (value) IMS_ConnHdlrPars t_IMS_Pars(charstring local_sip_host,
 					uint16_t local_sip_port,
 					charstring domain,
 					charstring imsi,
+					charstring imei,
 					template (omit) IMS_CallPars cp := omit) := {
 	t_guard := 60.0,
 	realm := domain,
@@ -215,7 +223,9 @@ template (value) IMS_ConnHdlrPars t_IMS_Pars(charstring local_sip_host,
 	registrar_sip_req_uri := valueof(ts_SipUrlHost(domain)),
 	local_via := ts_Via_from(ts_HostPort(local_sip_host, local_sip_port)),
 	server_name := valueof(ts_Server({c_sip_server_name})),
-	subscr := t_IMS_SubscrPars(local_sip_host, local_sip_port, domain := domain, imsi := imsi, cp := cp)
+	subscr := t_IMS_SubscrPars(local_sip_host, local_sip_port,
+				   domain := domain, imsi := imsi,
+				   imei := imei, cp := cp)
 }
 
 private altstep as_Tguard() runs on IMS_ConnHdlr {
@@ -316,19 +326,69 @@ runs on IMS_ConnHdlr {
 }
 
 
-private function f_ims_validate_register_contact(Contact rx_contact)
+private function f_ims_validate_register_contact(Contact rx_contact) runs on IMS_ConnHdlr
 {
-/* IMS contact shows up like this:
- * Contact: <sip:8adf9f3d-9342-4060-aa4f-a909f37fd6f6@192.168.101.2:5060>;+g.3gpp.accesstype="cellular2";video;audio;+g.3gpp.smsip;+g.3gpp.nw-init-ussi;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+sip.instance="<urn:gsma:imei:35589811-338445-0>"
- */
- /* TODO: "that the UE must include the IMS Communication Service Identifier (ICSI)
-in the contact: header to indicate IMS Multimedia Telephony." */
- /* TODO: "The UE must include an IMEI URN in the +sip.instance header field
-parameter of the contact: header." */
- /* TODO: "If the UE supports SMS over IP, it must include the feature tag
-“+g.3gpp.smsip” in the contact: header." */
- /* TODO: "If the UE supports conversational audio and video service, then this must
-be indicated by adding a “video” media feature tag to the contact: header." */
+	/* IMS contact shows up like this:
+	* Contact: <sip:8adf9f3d-9342-4060-aa4f-a909f37fd6f6@192.168.101.2:5060>;+g.3gpp.accesstype="cellular2";video;audio;+g.3gpp.smsip;+g.3gpp.nw-init-ussi;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+sip.instance="<urn:gsma:imei:35589811-338445-0>"
+	*/
+	if (ischosen(rx_contact.contactBody.wildcard)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str(g_name & ": Received unexpected Contact wildcard := ", rx_contact));
+	}
+	var ContactAddress_List caddrs := rx_contact.contactBody.contactAddresses;
+	if (lengthof(caddrs) == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str(g_name & ": Received unexpected empty Contact Address list"));
+	}
+	for (var integer i := 0; i < lengthof(caddrs); i := i + 1) {
+		var ContactAddress caddr := caddrs[i];
+		var template (omit) GenericParam param_tpl;
+		var boolean rx_supported;
+		if (not ispresent(caddr.contactParams)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str(g_name & ": Received unexpected empty Contact attributes (omit)"));
+		}
+		f_sip_param_match_value_or_fail(caddr.contactParams, "+g.3gpp.icsi-ref", "\"urn\\%3Aurn-7\\%3A3gpp-service.ims.icsi.mmtel\"");
+		f_sip_param_match_value_or_fail(caddr.contactParams, "+sip.instance", "\"<urn:gsma:imei:" & g_pars.subscr.imei & ">\"");
+		f_sip_param_match_value_or_fail(caddr.contactParams, "audio", omit);
+
+		/* Check video support */
+		param_tpl := f_sip_param_find(caddr.contactParams, "video");
+		rx_supported := not istemplatekind(param_tpl, "omit");
+		if (rx_supported) {
+			/* This attribute never has a value: */
+			if (not istemplatekind(param_tpl.paramValue, "omit")) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Received Contact with 'video' attribute containing a value := ", rx_contact));
+			}
+			if (not g_pars.subscr.support_video) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Received Contact with unexpected 'video' attribute := ", rx_contact));
+			}
+		} else if (g_pars.subscr.support_video) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str(g_name & ": Received Contact with missing 'video' attribute := ", rx_contact));
+		}
+
+		/* Check smsip support */
+		param_tpl := f_sip_param_find(caddr.contactParams, "+g.3gpp.smsip");
+		rx_supported := not istemplatekind(param_tpl, "omit");
+		if (rx_supported) {
+			/* This attribute never has a value: */
+			if (not istemplatekind(param_tpl.paramValue, "omit")) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Received Contact with '+g.3gpp.smsip' attribute containing a value := ", rx_contact));
+			}
+			if (not g_pars.subscr.support_smsip) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Received Contact with unexpected '+g.3gpp.smsip' attribute := ", rx_contact));
+			}
+		} else if (g_pars.subscr.support_smsip) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str(g_name & ": Received Contact with missing '+g.3gpp.smsip' attribute := ", rx_contact));
+		}
+	}
+
 }
 
 /* Validate P-Access-Network-Info: RFC7315 6.4 */
