@@ -546,6 +546,8 @@ private altstep as_SIP_expect_req(template (present) PDU_SIP_Request sip_expect,
 
 type enumerated IMS_gen_sdp_state {
 	IMS_GEN_SDP_None,
+	IMS_GEN_SDP_MO_INVITE,
+	IMS_GEN_SDP_MO_UPDATE,
 	IMS_GEN_SDP_MT_Session_Progress,
 	IMS_GEN_SDP_MT_UPDATE_200OK
 }
@@ -576,6 +578,20 @@ private function f_gen_sdp(IMS_gen_sdp_state st := IMS_GEN_SDP_None) runs on IMS
 		"a=rtcp-fb:* ccm tmmbr\r\n";
 	select (st) {
 	case (IMS_GEN_SDP_None) {
+	}
+	case (IMS_GEN_SDP_MO_INVITE) {
+		sdp := sdp &
+			"a=curr:qos local none\r\n" &
+			"a=curr:qos remote none\r\n" &
+			"a=des:qos mandatory local sendrecv\r\n" &
+			"a=des:qos optional remote sendrecv\r\n";
+	}
+	case (IMS_GEN_SDP_MO_UPDATE) {
+		sdp := sdp &
+			"a=curr:qos local sendrecv\r\n" &
+			"a=curr:qos remote none\r\n" &
+			"a=des:qos mandatory local sendrecv\r\n" &
+			"a=des:qos mandatory remote sendrecv\r\n";
 	}
 	case (IMS_GEN_SDP_MT_Session_Progress) {
 		sdp := sdp &
@@ -998,7 +1014,7 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 	var Via via;
 	var template (omit) Require require := omit;
 	var template (omit) Supported supported := omit;
-	var charstring tx_sdp := f_gen_sdp();
+	var charstring tx_sdp;
 	var default d_trying, d_ringing;
 	var charstring branch_value;
 	var Contact calling_contact;
@@ -1024,6 +1040,10 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 		/* indicate the support for "reliable provisional response"
 		 * and "preconditions mechanism" */
 		supported := ts_Supported({ "100rel", "precondition" });
+		tx_sdp := f_gen_sdp(IMS_GEN_SDP_MO_INVITE);
+	} else {
+		/* Don't add any preconditions to SDP: */
+		tx_sdp := f_gen_sdp(IMS_GEN_SDP_None);
 	}
 
 	req := ts_SIP_INVITE(g_pars.subscr.cp.sip_call_id,
@@ -1046,6 +1066,7 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 	d_trying := activate(as_SIP_ignore_resp(exp));
 
 	if (g_pars.subscr.cp.require_precondition_ext) {
+		var template (present) SDP_attribute_list preconds;
 		/* Rx 183 Session Progress */
 		exp := tr_SIP_Response_SessionProgress(
 				g_pars.subscr.cp.sip_call_id,
@@ -1062,6 +1083,26 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 						log2str(g_name & ": Expected 183 Session Progress instead of 180 Ringing: ",
 							g_rx_sip_resp));
 			}
+		}
+
+		/* Validate SDP in Session Progress contains the preconditions:
+		 * a=curr:qos local none
+		 * a=curr:qos remote none
+		 * a=des:qos mandatory local sendrecv
+		 * a=des:qos mandatory remote sendrecv
+		 * a=conf:qos remote sendrecv
+		*/
+		preconds := superset(
+			tr_SDP_curr(c_SDP_PRECON_STATUS_TYPE_local,  c_SDP_PRECON_DIR_TAG_none),
+			tr_SDP_curr(c_SDP_PRECON_STATUS_TYPE_remote, c_SDP_PRECON_DIR_TAG_none),
+			tr_SDP_des(c_SDP_PRECON_STRENGTH_TAG_mandatory, c_SDP_PRECON_STATUS_TYPE_local, c_SDP_PRECON_DIR_TAG_sendrecv),
+			tr_SDP_des(c_SDP_PRECON_STRENGTH_TAG_mandatory,  c_SDP_PRECON_STATUS_TYPE_remote, c_SDP_PRECON_DIR_TAG_sendrecv),
+			tr_SDP_conf(c_SDP_PRECON_STATUS_TYPE_remote,  c_SDP_PRECON_DIR_TAG_sendrecv));
+		if (not ispresent(g_pars.subscr.cp.peer_sdp.attributes) or
+			not match(g_pars.subscr.cp.peer_sdp.attributes, preconds)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(g_name & ": Unexpected precondition attrs in Session Progress : ",
+							g_pars.subscr.cp.peer_sdp.attributes));
 		}
 
 		/* Tx PRACK */
@@ -1094,6 +1135,7 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 		as_SIP_expect_resp(exp, fail_others := false);
 
 		/* Tx UPDATE */
+		tx_sdp := f_gen_sdp(IMS_GEN_SDP_MO_UPDATE);
 		req := ts_SIP_UPDATE(g_pars.subscr.cp.to_addr.addressField.nameAddr.addrSpec,
 				     g_pars.subscr.cp.sip_call_id,
 				     g_pars.subscr.cp.from_addr,
@@ -1116,6 +1158,24 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 				       body := ?);
 		as_SIP_expect_resp(exp, fail_others := false);
 
+		/* Validate SDP in 200 OK (UPDATE) contains the preconditions:
+		 * a=curr:qos local sendrecv
+		 * a=curr:qos remote sendrecv
+		 * a=des:qos mandatory local sendrecv
+		 * a=des:qos mandatory remote sendrecv
+		*/
+		preconds := superset(
+			tr_SDP_curr(c_SDP_PRECON_STATUS_TYPE_local,  c_SDP_PRECON_DIR_TAG_sendrecv),
+			tr_SDP_curr(c_SDP_PRECON_STATUS_TYPE_remote, c_SDP_PRECON_DIR_TAG_sendrecv),
+			tr_SDP_des(c_SDP_PRECON_STRENGTH_TAG_mandatory, c_SDP_PRECON_STATUS_TYPE_local, c_SDP_PRECON_DIR_TAG_sendrecv),
+			tr_SDP_des(c_SDP_PRECON_STRENGTH_TAG_mandatory,  c_SDP_PRECON_STATUS_TYPE_remote, c_SDP_PRECON_DIR_TAG_sendrecv));
+		if (not ispresent(g_pars.subscr.cp.peer_sdp.attributes) or
+			not match(g_pars.subscr.cp.peer_sdp.attributes, preconds)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(g_name & ": Unexpected precondition attrs in 200 OK (UPDATE): ",
+							g_pars.subscr.cp.peer_sdp.attributes));
+		}
+
 		g_pars.subscr.cp.sip_seq_nr := g_rx_sip_resp.msgHeader.cSeq.seqNumber + 1;
 	}
 
@@ -1136,7 +1196,7 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 			*,
 			"INVITE", 200,
 			g_pars.subscr.cp.sip_seq_nr, "OK",
-			body := ?);
+			body := *);
 	as_SIP_expect_resp(exp, fail_others := false);
 
 	deactivate(d_trying);
