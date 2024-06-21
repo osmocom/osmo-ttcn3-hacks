@@ -151,6 +151,8 @@ re_dynerr = re.compile('(Dynamic test case error: .*)')
 # setverdict(error): none -> error
 re_verdict = re.compile('setverdict\(([^)]+)\): ([^ ]+) .*')
 
+linenr = 0
+
 for line in open(sys.argv[1]):
 	time = None
 	srcfile = None
@@ -158,6 +160,8 @@ for line in open(sys.argv[1]):
 	component = None
 	component = None
 	msg = None
+
+	linenr += 1
 
 	m = re_prefix.match(line)
 	if m:
@@ -210,9 +214,9 @@ for line in open(sys.argv[1]):
 		if m:
 			port, from_component_name, msgtype, msgdata, msgid = m.groups()
 			Message.rx(port, from_component_name, msgid, msgtype, msgdata)
-		elif msg.find('Receive operation') >= 0:
-			print("XXX ", msg)
-			sys.exit(0)
+#elif msg.find('Receive operation') >= 0:
+#			print("XXX ", msg)
+#			sys.exit(0)
 
 	m = re_tx.match(msg)
 	if m:
@@ -225,9 +229,9 @@ for line in open(sys.argv[1]):
 		if m:
 			port, to_component, msgtype, msgdata = m.groups()
 			show.append(f'{to_component} < {port} {msgtype}')
-		elif 'Sent on' in msg:
-			print('XXX ', msg)
-			sys.exit(0)
+#		elif 'Sent on' in msg:
+#			print('XXX ', msg)
+#			sys.exit(0)
 
 	m = re_dynerr.match(msg)
 	if m:
@@ -246,7 +250,7 @@ for line in open(sys.argv[1]):
 		ctx.append(f'{srcfile}:{srcline}')
 
 	for s in show:
-		print(f'{s}  ' + ' '.join(ctx))
+		print(f'{linenr}: {s}  ' + ' '.join(ctx))
 
 
 
