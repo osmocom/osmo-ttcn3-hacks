@@ -119,18 +119,32 @@ type record of IMS_ConnHdlrPars IMS_ConnHdlrParsList;
 
 type record IMS_CallParsMO {
 	/* Whether to COORD.send(IMS_COORD_CMD_CALL_TRYING) when receiving an INVITE from UE. */
-	boolean tx_coord_cmd_invite_trying
+	boolean tx_coord_cmd_invite_trying,
+	/* Whether to announce "Support: timer" and Session-Expires header */
+	boolean support_timer_enable,
+	integer support_timer_session_expires,
+	integer support_timer_exp_min_se
 }
 template (value) IMS_CallParsMO t_IMS_CallParsMO := {
-	tx_coord_cmd_invite_trying := false
+	tx_coord_cmd_invite_trying := false,
+	support_timer_enable := false,
+	support_timer_session_expires := 0,
+	support_timer_exp_min_se := 0
 }
 
 type record IMS_CallParsMT {
 	/* Whether to COORD.send(IMS_COORD_CMD_CALL_SESSION_PROGRESS) when receiving an 183 Session Progress from UE. */
-	boolean tx_coord_cmd_session_progress
+	boolean tx_coord_cmd_session_progress,
+	/* Whether to announce "Support: timer" and Session-Expires header */
+	boolean support_timer_enable,
+	integer support_timer_session_expires,
+	integer support_timer_min_se
 }
 template (value) IMS_CallParsMT t_IMS_CallParsMT := {
-	tx_coord_cmd_session_progress := false
+	tx_coord_cmd_session_progress := false,
+	support_timer_enable := false,
+	support_timer_session_expires := 0,
+	support_timer_min_se := 90
 }
 
 type record IMS_CallPars {
@@ -1104,7 +1118,10 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 	var template (present) To to_addr_exp;
 	var Via via;
 	var template (omit) Require require := omit;
+	var template (omit) Min_SE min_SE := omit;
+	var template (omit) Session_expires session_expires := omit;
 	var template (omit) Supported supported := omit;
+	var OptionTag_List supported_list := {};
 	var charstring tx_sdp;
 	var default d_trying, d_ringing;
 	var charstring branch_value;
@@ -1130,11 +1147,23 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 	if (g_pars.subscr.cp.support_precondition_ext) {
 		/* indicate the support for "reliable provisional response"
 		 * and "preconditions mechanism" */
-		supported := ts_Supported({ "100rel", "precondition" });
+		supported_list := supported_list & { "100rel", "precondition" };
 		tx_sdp := f_gen_sdp(IMS_GEN_SDP_MO_INVITE);
 	} else {
 		/* Don't add any preconditions to SDP: */
 		tx_sdp := f_gen_sdp(IMS_GEN_SDP_None);
+	}
+
+	if (g_pars.subscr.cp.mt.support_timer_enable) {
+		supported_list := supported_list & { "timer" };
+		if (g_pars.subscr.cp.mt.support_timer_session_expires > 0) {
+			session_expires := ts_Session_expires(int2str(g_pars.subscr.cp.mt.support_timer_session_expires));
+			min_SE := ts_Min_SE(int2str(g_pars.subscr.cp.mt.support_timer_min_se));
+		}
+	}
+
+	if (lengthof(supported_list) > 0) {
+		supported := ts_Supported(supported_list);
 	}
 
 	req := ts_SIP_INVITE(g_pars.subscr.cp.sip_call_id,
@@ -1143,6 +1172,8 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 			     via,
 			     calling_contact,
 			     g_pars.subscr.cp.sip_seq_nr,
+			     min_SE := min_SE,
+			     session_expires := session_expires,
 			     supported := supported,
 			     body := tx_sdp);
 
@@ -1373,12 +1404,19 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 			      tr_From(tr_Addr_Union_from_val(g_pars.subscr.cp.calling.addr), *),
 			      tr_To(tr_Addr_Union_from_val(g_pars.subscr.cp.called.addr), *),
 			      tr_Via_from(f_tr_HostPort(g_pars.subscr.remote_sip_host, g_pars.subscr.ipsec_remote_port_s)),
-			      ?, ?);
+			      ?,
+			      supported := tr_Supported(superset("timer")),
+			      body := ?);
 	var charstring sip_expect_str := log2str(exp_req);
 
 	[] SIP.receive(exp_req) -> value g_rx_sip_req {
 		var template (value) PDU_SIP_Response tx_resp;
 		var Via invite_via;
+		var template (omit) Require require := omit;
+		var template (omit) Session_expires session_expires := omit;
+		var template (omit) Supported supported := omit;
+		var OptionTag_List supported_list := {};
+		var OptionTag_List require_list := {};
 		var template (omit) charstring tx_sdp;
 		var integer invite_seq_nr;
 		var boolean peer_support_precondition := match(g_rx_sip_req.msgHeader.supported.optionsTags,
@@ -1393,6 +1431,29 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 		f_ims_validate_invite_P_Preferred_Service(g_rx_sip_req, exp_present := true);
 		f_ims_validate_INVITE_Contact(g_rx_sip_req.msgHeader.contact);
 		f_ims_validate_INVITE_SDP(g_pars.subscr.cp.peer_sdp);
+
+		if (g_pars.subscr.cp.mo.support_timer_enable) {
+			supported_list := supported_list & { "timer" };
+			if (g_pars.subscr.cp.mo.support_timer_session_expires > 0) {
+				session_expires := ts_Session_expires(int2str(g_pars.subscr.cp.mo.support_timer_session_expires),
+									      {ts_Param("refresher", "uac")});
+			}
+		}
+		if (lengthof(supported_list) > 0) {
+			supported := ts_Supported(supported_list);
+		}
+		if (g_pars.subscr.cp.mo.support_timer_exp_min_se > 0) {
+			if (not ispresent(g_rx_sip_req.msgHeader.min_SE)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Missing 'Min_SE' header in INVITE: ", g_rx_sip_req));
+			}
+			if (str2int(g_rx_sip_req.msgHeader.min_SE.deltaSec) != g_pars.subscr.cp.mo.support_timer_exp_min_se) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Received unexpected Min_SE := ",
+						g_rx_sip_req.msgHeader.min_SE.deltaSec,
+						"\nvs exp := ", g_pars.subscr.cp.mo.support_timer_exp_min_se));
+			}
+		}
 
 		if (g_pars.subscr.cp.require_precondition_ext and not peer_support_precondition) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
@@ -1479,7 +1540,8 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 					g_pars.subscr.cp.to_addr,
 					f_tr_Via_response(invite_via),
 					g_pars.subscr.cp.sip_seq_nr + 2,
-					require := tr_Require(superset("precondition")),
+					require := tr_Require(superset("sec-agree", "precondition")),
+					supported := tr_Supported(superset("100rel", "timer")),
 					body := ?);
 			as_SIP_expect_req(exp_req);
 
@@ -1510,6 +1572,8 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 						g_pars.subscr.cp.sip_seq_nr + 2,
 						"OK",
 						g_rx_sip_req.msgHeader.via /* UPDATE's new branch */,
+						session_expires := session_expires,
+						supported := supported,
 						body := tx_sdp);
 			SIP.send(tx_resp);
 
@@ -1541,6 +1605,13 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 
 
 		/* Tx 200 OK */
+		if (g_pars.subscr.cp.mo.support_timer_enable) {
+			require_list := require_list & { "timer" };
+		}
+		if (lengthof(require_list) > 0) {
+			require := ts_Require(require_list);
+		}
+
 		tx_sdp := f_gen_sdp();
 		tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
 					   g_pars.subscr.cp.from_addr,
@@ -1549,6 +1620,9 @@ altstep as_IMS_mo_call_accept(boolean exp_update_to_direct_rtp := false,
 					   invite_seq_nr,
 					   "OK",
 					   invite_via,
+					   require := require,
+					   session_expires := session_expires,
+					   supported := supported,
 					   body := tx_sdp);
 		SIP.send(tx_resp);
 
