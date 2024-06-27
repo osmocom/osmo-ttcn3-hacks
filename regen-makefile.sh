@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 # Copyright 2017-2019 Harald Welte
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
