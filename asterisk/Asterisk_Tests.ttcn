@@ -215,6 +215,7 @@ private function f_TC_internal_call_mo(charstring id) runs on SIPConnHdlr {
 	COORD.receive(COORD_CMD_HANGUP);
 	f_SIP_do_call_hangup();
 
+	COORD.receive(COORD_CMD_UNREGISTER);
 	f_SIP_unregister();
 
 	setverdict(pass);
@@ -242,6 +243,8 @@ private function f_TC_internal_call_mt(charstring id) runs on SIPConnHdlr {
 	}
 	as_SIP_exp_call_hangup(g_pars.cp.sip_seq_nr + 1);
 
+	COORD.send(COORD_CMD_CALL_FINISHED);
+	COORD.receive(COORD_CMD_UNREGISTER);
 	f_SIP_unregister();
 
 	setverdict(pass);
@@ -280,7 +283,10 @@ testcase TC_internal_call_momt() runs on test_CT {
 	f_sleep(1.0);
 
 	COORD.send(COORD_CMD_HANGUP) to vc_conn[0];
+	COORD.receive(COORD_CMD_CALL_FINISHED) from vc_conn[1];
 
+	COORD.send(COORD_CMD_UNREGISTER) to vc_conn[0];
+	COORD.send(COORD_CMD_UNREGISTER) to vc_conn[1];
 
 	vc_conn[0].done;
 	vc_conn[1].done;
@@ -352,6 +358,12 @@ private function TC_internal_call_all_Nregistered(integer num_conns := 2) runs o
 	f_sleep(1.0);
 
 	COORD.send(COORD_CMD_HANGUP) to vc_conn_list[vc_conn_mo_idx];
+
+	COORD.receive(COORD_CMD_CALL_FINISHED) from vc_conn_list[vc_conn_mt_idx];
+
+	for (var integer i := 0; i < num_conns; i := i + 1) {
+		COORD.send(COORD_CMD_UNREGISTER) to vc_conn_list[i];
+	}
 
 	for (var integer i := 0; i < num_conns; i := i + 1) {
 		vc_conn_list[i].done;
@@ -656,34 +668,8 @@ testcase TC_ims_reregistration() runs on test_CT {
 	f_shutdown();
 }
 
-/* Test IMS MO call emulating an MT which doesn't support precondition */
-private function f_TC_ims_call_mo_IMS_ConnHdlr(charstring id) runs on IMS_ConnHdlr {
-	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
-	if (ispresent(g_pars.subscr.cp.called)) {
-		f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)));
-	}
-	as_IMS_register();
-	setverdict(pass);
-	as_IMS_mo_call_accept();
-	setverdict(pass);
-	COORD.send(COORD_CMD_CALL_ESTABLISHED);
-	as_IMS_exp_call_hangup(g_pars.subscr.cp.sip_seq_nr + 1);
-	setverdict(pass);
-	as_IMS_unregister();
-}
-private function f_TC_ims_call_mo(boolean use_precondition_ext) runs on test_CT {
-	var SIPConnHdlrPars sip_pars;
-	var IMS_ConnHdlrPars ims_pars;
-	var SIPConnHdlr vc_conn_sip;
-	var IMS_ConnHdlr vc_conn_ims;
-	var AMI_Msg ami_msg;
+private function f_ims_call_mo_configure(inout SIPConnHdlrPars sip_pars, inout IMS_ConnHdlrPars ims_pars) runs on test_CT  {
 	const charstring c_ext_msisdn := "90829";
-
-	f_init();
-
-	sip_pars := f_init_ConnHdlrPars(idx := 1);
-	ims_pars := f_init_IMS_ConnHdlrPars();
-
 	sip_pars.cp.calling := sip_pars.registrar_sip_record;
 	sip_pars.cp.called := valueof(ts_SipAddr(ts_HostPort(sip_pars.remote_sip_host),
 						 ts_UserInfo(c_ext_msisdn)));
@@ -691,16 +677,10 @@ private function f_TC_ims_call_mo(boolean use_precondition_ext) runs on test_CT 
 							 ts_UserInfo(ims_pars.subscr.msisdn)));
 	ims_pars.subscr.cp.called := valueof(ts_SipAddr(ts_HostPort(ims_pars.realm),
 							ts_UserInfo(c_ext_msisdn)));
-	ims_pars.subscr.cp.support_precondition_ext := use_precondition_ext;
-	ims_pars.subscr.cp.require_precondition_ext := use_precondition_ext;
-	ims_pars.subscr.cp.mo.tx_coord_cmd_invite_trying := true;
+}
 
-	vc_conn_ims := f_start_handler_IMS(refers(f_TC_ims_call_mo_IMS_ConnHdlr), ims_pars);
-	vc_conn_sip := f_start_handler(refers(f_TC_internal_call_mo), sip_pars);
-
-	COORD.receive(COORD_CMD_REGISTERED) from vc_conn_sip;
-
-	f_AMI_IMS_register(ims_pars);
+private function f_ims_call_mo_establish(inout SIPConnHdlr vc_conn_sip, inout IMS_ConnHdlr vc_conn_ims) runs on test_CT  {
+	var AMI_Msg ami_msg;
 
 	COORD.send(COORD_CMD_START) to vc_conn_sip;
 
@@ -714,14 +694,84 @@ private function f_TC_ims_call_mo(boolean use_precondition_ext) runs on test_CT 
 
 	COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_sip;
 	IMS_COORD.receive(COORD_CMD_CALL_ESTABLISHED) from vc_conn_ims;
+}
+
+/* Test IMS MO call emulating an MT which doesn't support precondition */
+private function f_TC_ims_call_mo_IMS_ConnHdlr(charstring id) runs on IMS_ConnHdlr {
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
+	if (ispresent(g_pars.subscr.cp.called)) {
+		f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)));
+	}
+	as_IMS_register();
+	setverdict(pass);
+	as_IMS_mo_call_accept();
+	setverdict(pass);
+	COORD.send(COORD_CMD_CALL_ESTABLISHED);
+	if (g_pars.subscr.cp.mo.support_timer_session_expires > 0) {
+		timer Trefresh;
+		Trefresh.start(int2float(g_pars.subscr.cp.mo.support_timer_session_expires));
+		alt {
+		[] as_IMS_exp_call_refresh();
+		[] Trefresh.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str(g_name & ": Timeout waiting for Session Refresh"));
+			}
+		}
+		Trefresh.stop;
+		/* Sleep to make sure response arrives to the peer */
+		f_sleep(1.0);
+		COORD.send(IMS_COORD_CMD_CALL_SESSION_REFRESH);
+	}
+	as_IMS_exp_call_hangup(g_pars.subscr.cp.sip_seq_nr + 1);
+	COORD.send(IMS_COORD_CMD_CALL_FINISHED);
+	setverdict(pass);
+	as_IMS_unregister();
+}
+
+private function f_TC_ims_call_mo(boolean use_precondition_ext, boolean use_session_timer) runs on test_CT {
+	var SIPConnHdlrPars sip_pars;
+	var IMS_ConnHdlrPars ims_pars;
+	var SIPConnHdlr vc_conn_sip;
+	var IMS_ConnHdlr vc_conn_ims;
+
+	f_init();
+
+	sip_pars := f_init_ConnHdlrPars(idx := 1);
+	ims_pars := f_init_IMS_ConnHdlrPars();
+
+	f_ims_call_mo_configure(sip_pars, ims_pars);
+	ims_pars.subscr.cp.support_precondition_ext := use_precondition_ext;
+	ims_pars.subscr.cp.require_precondition_ext := use_precondition_ext;
+	ims_pars.subscr.cp.mo.tx_coord_cmd_invite_trying := true;
+	ims_pars.subscr.cp.mo.support_timer_enable := use_session_timer;
+	if (use_session_timer) {
+		sip_pars.t_guard := 120.0;
+		ims_pars.t_guard := 120.0;
+		ims_pars.subscr.cp.mo.support_timer_exp_min_se := 90;
+		ims_pars.subscr.cp.mo.support_timer_session_expires := 90;
+
+	}
+
+	vc_conn_ims := f_start_handler_IMS(refers(f_TC_ims_call_mo_IMS_ConnHdlr), ims_pars);
+	vc_conn_sip := f_start_handler(refers(f_TC_internal_call_mo), sip_pars);
+
+	COORD.receive(COORD_CMD_REGISTERED) from vc_conn_sip;
+
+	f_AMI_IMS_register(ims_pars);
+
+	f_ims_call_mo_establish(vc_conn_sip, vc_conn_ims);
 
 	/* Call on-going */
+	if (use_session_timer) {
+		IMS_COORD.receive(IMS_COORD_CMD_CALL_SESSION_REFRESH);
+	}
 	f_sleep(1.0);
 
 	COORD.send(COORD_CMD_HANGUP) to vc_conn_sip;
+	IMS_COORD.receive(IMS_COORD_CMD_CALL_FINISHED) from vc_conn_ims;
 
 	/* Trigger unregistration: */
 	f_sleep(1.0);
+	COORD.send(COORD_CMD_UNREGISTER) to vc_conn_sip;
 	AMI_CLIENT.clear;
 	f_AMI_IMS_unregister(ims_pars);
 
@@ -730,10 +780,13 @@ private function f_TC_ims_call_mo(boolean use_precondition_ext) runs on test_CT 
 	f_shutdown();
 }
 testcase TC_ims_call_mo() runs on test_CT {
-	f_TC_ims_call_mo(true);
+	f_TC_ims_call_mo(true, false);
+}
+testcase TC_ims_call_mo_session_timer() runs on test_CT {
+	f_TC_ims_call_mo(true, true);
 }
 testcase TC_ims_call_mo_noprecondition() runs on test_CT {
-	f_TC_ims_call_mo(false);
+	f_TC_ims_call_mo(false, false);
 }
 
 /* Test SIP registration of local clients */
@@ -839,6 +892,7 @@ control {
 	execute( TC_ims_registration_423_interval_too_brief() );
 	execute( TC_ims_reregistration() );
 	execute( TC_ims_call_mo() );
+	execute( TC_ims_call_mo_session_timer() );
 	execute( TC_ims_call_mo_noprecondition() );
 	execute( TC_ims_call_mt() );
 	execute( TC_ims_call_mt_noprecondition() );
