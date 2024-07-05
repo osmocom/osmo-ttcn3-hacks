@@ -56,7 +56,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
-			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TELNETasp \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.UDPasp \
@@ -71,8 +70,9 @@ OSMOGERRIT_REPOS=	osmo-uecups
 
 OSMOGITEA_REPOS=	titan.ProtocolModules.BSSMAP \
 			titan.ProtocolModules.MAP \
-			titan.TestPorts.USB \
-			titan.TestPorts.AF_PACKET
+			titan.TestPorts.AF_PACKET \
+			titan.TestPorts.SIPmsg \
+			titan.TestPorts.USB
 
 ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 			$(OSMOGITHUB_REPOS) \
@@ -129,7 +129,7 @@ titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11
 titan.TestPorts.PCAPasp_commit=			R.8.A-3-g9ad320f
 titan.TestPorts.PIPEasp_commit=			R.7.D-3-g8b01154
 titan.TestPorts.SCTPasp_commit=			R.11.A-8-g2e911c3
-titan.TestPorts.SIPmsg_commit=			R.15.A-1-ge4f9dd0
+titan.TestPorts.SIPmsg_commit=			b37ea251eff2d6cd4e8d317aff71d463863b59f9
 titan.TestPorts.TCPasp_commit=			R.9.A-5-g2c91bc6
 titan.TestPorts.TELNETasp_commit=		873fe539642542cd9a901c208f1ec11c6d2f5387
 titan.TestPorts.UDPasp_commit=			54176e95850654e5e8b0ffa2f1b5f35c412b949c
