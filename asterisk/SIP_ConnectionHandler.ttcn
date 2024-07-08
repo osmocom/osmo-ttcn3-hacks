@@ -239,7 +239,7 @@ altstep as_SIP_ignore_resp(template PDU_SIP_Response sip_expect := ?) runs on SI
 	}
 }
 
-private function f_gen_sdp() runs on SIPConnHdlr return charstring {
+private function f_gen_sdp(charstring dir := "sendrecv") runs on SIPConnHdlr return charstring {
 	var charstring sdp :=
 		"v=0\r\n" &
 		"o=0502 2390 1824 IN IP4 " & g_pars.cp.local_rtp_addr & "\r\n" &
@@ -248,18 +248,9 @@ private function f_gen_sdp() runs on SIPConnHdlr return charstring {
 		"t=0 0\r\n" &
 		"a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n" &
 		"a=record:off\r\n" &
-		"m=audio " & int2str(g_pars.cp.local_rtp_port) & " RTP/AVP 8 96 97 98 0 18 99 100 101\r\n" &
+		"m=audio " & int2str(g_pars.cp.local_rtp_port) & " RTP/AVP 8\r\n" &
+		"a=" & dir & "\r\n" &
 		"a=rtpmap:8 PCMA/8000\r\n" &
-		"a=rtpmap:96 opus/48000/2\r\n" &
-		"a=fmtp:96 useinbandfec=1\r\n" &
-		"a=rtpmap:97 speex/16000\r\n" &
-		"a=fmtp:97 vbr=on\r\n" &
-		"a=rtpmap:98 speex/8000\r\n" &
-		"a=fmtp:98 vbr=on\r\n" &
-		"a=fmtp:18 annexb=yes\r\n" &
-		"a=rtpmap:99 telephone-event/48000\r\n" &
-		"a=rtpmap:100 telephone-event/16000\r\n" &
-		"a=rtpmap:101 telephone-event/8000\r\n" &
 		"a=rtcp:" & int2str(g_pars.cp.local_rtp_port + 1) & "\r\n" &
 		"a=rtcp-fb:* trr-int 1000\r\n" &
 		"a=rtcp-fb:* ccm tmmbr\r\n";
@@ -813,6 +804,83 @@ altstep as_SIP_exp_call_hangup(template (present) integer exp_seq_nr := ?, boole
 	}
 	[fail_others] as_SIP_fail_resp(sip_expect_str);
 	[fail_others] as_SIP_fail_req(sip_expect_str);
+}
+
+/* initiate HOLD Tx RE-INVITE (3GPP TS 24.610 A.1.1): */
+private function f_SIP_do_call_holdresume(charstring dir := "sendonly",
+					  template (present) SDP_attribute exp_resp_dir := tr_SDP_recvonly) runs on SIPConnHdlr
+{
+	var template (value) PDU_SIP_Request req;
+	var template (present) PDU_SIP_Response exp_resp;
+	var template (present) From from_addr_exp;
+	var template (present) To to_addr_exp;
+	var Via via;
+	var charstring branch_value;
+	var charstring tx_sdp := f_gen_sdp(dir := dir);
+
+	/* Reuse g_pars.cp.from_addr and g_pars.cp.to_addr from established called */
+	from_addr_exp := tr_From(tr_Addr_Union_from_val(g_pars.cp.from_addr.addressField), *);
+	to_addr_exp := tr_To(tr_Addr_Union_from_val(g_pars.cp.to_addr.addressField), *);
+	branch_value := f_sip_gen_branch(f_sip_Addr_Union_to_str(g_pars.cp.from_addr.addressField),
+					 f_sip_Addr_Union_to_str(valueof(g_pars.cp.to_addr.addressField)),
+					 g_pars.cp.sip_call_id,
+					 g_pars.cp.sip_seq_nr);
+
+	via := g_pars.local_via;
+	via.viaBody[0].viaParams := f_sip_param_set(via.viaBody[0].viaParams, "branch", branch_value);
+
+	/* Transmit re-INVITE (HOLD) */
+	req := ts_SIP_INVITE(g_pars.cp.sip_call_id,
+			     g_pars.cp.from_addr,
+			     g_pars.cp.to_addr,
+			     via,
+			     g_pars.local_contact,
+			     g_pars.cp.sip_seq_nr,
+			     body := tx_sdp);
+	SIP.send(req);
+
+	/* Wait for OK answer */
+	exp_resp := tr_SIP_Response(
+			g_pars.cp.sip_call_id,
+			from_addr_exp,
+			to_addr_exp,
+			f_tr_Via_response(via),
+			*,
+			"INVITE", 200,
+			g_pars.cp.sip_seq_nr, "OK",
+			body := ?);
+	as_SIP_expect_resp(exp_resp);
+	f_SDP_decodeMessage(g_rx_sip_resp.messageBody, g_pars.cp.peer_sdp);
+
+	/* Check a=$exp_resp_dir in SDP */
+	if (not ispresent(g_pars.cp.peer_sdp.media_list[0].attributes) or
+		not match (g_pars.cp.peer_sdp.media_list[0].attributes, superset(exp_resp_dir))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(g_name & ": Expected 200 OK (re-INVITE) SDP attribute a=", exp_resp_dir, " in: ",
+						g_pars.cp.peer_sdp.media_list[0].attributes));
+	}
+
+	/* Update To with the tags received from peer: */
+	g_pars.cp.to_addr := g_rx_sip_resp.msgHeader.toField;
+
+	/* Transmit ACK */
+	req := ts_SIP_ACK(g_pars.cp.to_addr.addressField.nameAddr.addrSpec,
+			  g_pars.cp.sip_call_id,
+			  g_pars.cp.from_addr,
+			  g_pars.cp.to_addr,
+			  via,
+			  g_pars.cp.sip_seq_nr,
+			  omit);
+	SIP.send(req);
+	g_pars.cp.sip_seq_nr := g_pars.cp.sip_seq_nr + 1;
+}
+function f_SIP_do_call_hold() runs on SIPConnHdlr
+{
+	f_SIP_do_call_holdresume(dir := "sendonly", exp_resp_dir := tr_SDP_recvonly);
+}
+function f_SIP_do_call_resume() runs on SIPConnHdlr
+{
+	f_SIP_do_call_holdresume(dir := "sendrecv", exp_resp_dir := tr_SDP_sendrecv);
 }
 
 }

@@ -650,7 +650,7 @@ type enumerated IMS_gen_sdp_state {
 	IMS_GEN_SDP_MT_UPDATE_200OK
 }
 
-private function f_gen_sdp(IMS_gen_sdp_state st := IMS_GEN_SDP_None) runs on IMS_ConnHdlr return charstring {
+private function f_gen_sdp(IMS_gen_sdp_state st := IMS_GEN_SDP_None, charstring dir := "sendrecv") runs on IMS_ConnHdlr return charstring {
 	var charstring sdp :=
 		"v=0\r\n" &
 		"o=0502 2390 1824 IN IP4 " & g_pars.subscr.cp.local_rtp_addr & "\r\n" &
@@ -659,15 +659,8 @@ private function f_gen_sdp(IMS_gen_sdp_state st := IMS_GEN_SDP_None) runs on IMS
 		"t=0 0\r\n" &
 		"a=rtcp-xr:rcvr-rtt=all:10000 stat-summary=loss,dup,jitt,TTL voip-metrics\r\n" &
 		"a=record:off\r\n" &
-		"m=audio " & int2str(g_pars.subscr.cp.local_rtp_port) & " RTP/AVP 8 96 97 98 0 18 99 100 101\r\n" &
+		"m=audio " & int2str(g_pars.subscr.cp.local_rtp_port) & " RTP/AVP 8 99 100 101\r\n" &
 		"a=rtpmap:8 PCMA/8000\r\n" &
-		"a=rtpmap:96 opus/48000/2\r\n" &
-		"a=fmtp:96 useinbandfec=1\r\n" &
-		"a=rtpmap:97 speex/16000\r\n" &
-		"a=fmtp:97 vbr=on\r\n" &
-		"a=rtpmap:98 speex/8000\r\n" &
-		"a=fmtp:98 vbr=on\r\n" &
-		"a=fmtp:18 annexb=yes\r\n" &
 		"a=rtpmap:99 telephone-event/48000\r\n" &
 		"a=rtpmap:100 telephone-event/16000\r\n" &
 		"a=rtpmap:101 telephone-event/8000\r\n" &
@@ -707,6 +700,8 @@ private function f_gen_sdp(IMS_gen_sdp_state st := IMS_GEN_SDP_None) runs on IMS
 			"a=des:qos mandatory remote sendrecv\r\n";
 	}
 	}
+
+	sdp := sdp & "a=" & dir & "\r\n";
 	return sdp;
 }
 
@@ -1708,10 +1703,10 @@ private function f_IMS_answer_call_refresh(PDU_SIP_Request req) runs on IMS_Conn
 	tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
 				g_pars.subscr.cp.from_addr,
 				g_pars.subscr.cp.to_addr,
-				g_rx_sip_req.msgHeader.cSeq.method, 200,
-				g_rx_sip_req.msgHeader.cSeq.seqNumber,
+				req.msgHeader.cSeq.method, 200,
+				req.msgHeader.cSeq.seqNumber,
 				"OK",
-				g_rx_sip_req.msgHeader.via,
+				req.msgHeader.via,
 				session_expires := ts_Session_expires(int2str(g_pars.subscr.cp.mo.support_timer_session_expires),
 									{ts_Param("refresher", "uac")}),
 				supported := ts_Supported({"timer"}),
@@ -1750,4 +1745,66 @@ altstep as_IMS_exp_call_refresh() runs on IMS_ConnHdlr
 		g_pars.subscr.cp.sip_seq_nr := g_rx_sip_req.msgHeader.cSeq.seqNumber;
 	}
 }
+
+private altstep as_IMS_exp_call_holdresume(template (present) SDP_attribute exp_dir := tr_SDP_sendonly,
+					   charstring tx_dir := "recvonly") runs on IMS_ConnHdlr
+{
+	/* RFC4028 section 7.4. It can be either INVITE or UPDATE: */
+	var template (present) PDU_SIP_Request exp_req_invite :=
+		tr_SIP_INVITE(f_tr_SipUrl_opt_defport(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)),
+			      ?,
+			      tr_From(tr_Addr_Union_from_val(g_pars.subscr.cp.calling.addr), *),
+			      tr_To(tr_Addr_Union_from_val(g_pars.subscr.cp.called.addr), *),
+			      tr_Via_from(f_tr_HostPort(g_pars.subscr.remote_sip_host, g_pars.subscr.ipsec_remote_port_s)),
+			      ?,
+			      body := ?);
+
+	[] SIP.receive(exp_req_invite) -> value g_rx_sip_req {
+		var template (present) PDU_SIP_Request exp_req;
+		var template (value) PDU_SIP_Response tx_resp;
+		var charstring tx_sdp;
+
+		f_SDP_decodeMessage(g_rx_sip_req.messageBody, g_pars.subscr.cp.peer_sdp);
+		g_pars.subscr.cp.sip_seq_nr := g_rx_sip_req.msgHeader.cSeq.seqNumber;
+
+		/* Check a=$exp_dir in SDP */
+		if (not ispresent(g_pars.subscr.cp.peer_sdp.media_list[0].attributes) or
+		    not match (g_pars.subscr.cp.peer_sdp.media_list[0].attributes, superset(exp_dir))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(g_name & ": Expected re-INVITE SDP attribute a=", exp_dir, " in: ",
+							g_pars.subscr.cp.peer_sdp.media_list[0].attributes));
+		}
+
+		tx_sdp := f_gen_sdp(dir := tx_dir);
+		/* Tx 200 OK response*/
+		tx_resp := ts_SIP_Response(g_pars.subscr.cp.sip_call_id,
+					   g_pars.subscr.cp.from_addr,
+					   g_pars.subscr.cp.to_addr,
+					   g_rx_sip_req.msgHeader.cSeq.method, 200,
+					   g_rx_sip_req.msgHeader.cSeq.seqNumber,
+					   "OK",
+					   g_rx_sip_req.msgHeader.via,
+					   body := tx_sdp);
+		SIP.send(tx_resp);
+
+		/* Wait for ACK */
+		exp_req := tr_SIP_ACK(f_tr_SipUrl_opt_defport(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr)),
+				      g_pars.subscr.cp.sip_call_id,
+				      g_pars.subscr.cp.from_addr,
+				      g_pars.subscr.cp.to_addr,
+				      f_tr_Via_response(g_rx_sip_req.msgHeader.via),
+				      g_rx_sip_req.msgHeader.cSeq.seqNumber,
+				      body := omit);
+		as_SIP_expect_req(exp_req);
+	}
+}
+altstep as_IMS_exp_call_hold() runs on IMS_ConnHdlr
+{
+	[] as_IMS_exp_call_holdresume(tr_SDP_sendonly, "recvonly");
+}
+altstep as_IMS_exp_call_resume() runs on IMS_ConnHdlr
+{
+	[] as_IMS_exp_call_holdresume(tr_SDP_sendrecv, "sendrecv");
+}
+
 }
