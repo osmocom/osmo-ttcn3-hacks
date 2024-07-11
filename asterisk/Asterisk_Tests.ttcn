@@ -237,6 +237,18 @@ private function f_TC_internal_call_mo_with_holdresume(charstring id) runs on SI
 	f_TC_internal_hangup_call_mo_unregister();
 	setverdict(pass);
 }
+private function f_TC_internal_call_mo_rejected(charstring id) runs on SIPConnHdlr {
+	f_SIP_register();
+	COORD.send(COORD_CMD_REGISTERED);
+
+	COORD.receive(COORD_CMD_START);
+	f_SIP_mo_call_setup(503, "Service Unavailable");
+	COORD.send(COORD_CMD_CALL_FINISHED);
+
+	COORD.receive(COORD_CMD_UNREGISTER);
+	f_SIP_unregister();
+	setverdict(pass);
+}
 
 private function f_TC_internal_call_mt(charstring id) runs on SIPConnHdlr {
 
@@ -702,15 +714,15 @@ testcase TC_ims_reregistration() runs on test_CT {
 	f_shutdown();
 }
 
-private function f_ims_call_mo_configure(inout SIPConnHdlrPars sip_pars, inout IMS_ConnHdlrPars ims_pars) runs on test_CT  {
-	const charstring c_ext_msisdn := "90829";
+private function f_ims_call_mo_configure(inout SIPConnHdlrPars sip_pars, inout IMS_ConnHdlrPars ims_pars,
+					 charstring tgt_ext_msisdn := "90829") runs on test_CT  {
 	sip_pars.cp.calling := sip_pars.registrar_sip_record;
 	sip_pars.cp.called := valueof(ts_SipAddr(ts_HostPort(sip_pars.remote_sip_host),
-						 ts_UserInfo(c_ext_msisdn)));
+						 ts_UserInfo(tgt_ext_msisdn)));
 	ims_pars.subscr.cp.calling := valueof(ts_SipAddr(ts_HostPort(ims_pars.realm),
 							 ts_UserInfo(ims_pars.subscr.msisdn)));
 	ims_pars.subscr.cp.called := valueof(ts_SipAddr(ts_HostPort(ims_pars.realm),
-							ts_UserInfo(c_ext_msisdn)));
+							ts_UserInfo(tgt_ext_msisdn)));
 }
 
 private function f_ims_call_mo_establish(inout SIPConnHdlr vc_conn_sip, inout IMS_ConnHdlr vc_conn_ims) runs on test_CT  {
@@ -776,7 +788,13 @@ private function f_TC_ims_call_mo_IMS_ConnHdlr_with_holdresume(charstring id) ru
 	f_TC_ims_call_mo_IMS_ConnHdlr_hangup_call_unregister();
 }
 
+type function call_established_fn(SIPConnHdlrPars sip_pars, IMS_ConnHdlrPars ims_pars) runs on test_CT;
+private function call_established_fn_sleep(SIPConnHdlrPars sip_pars, IMS_ConnHdlrPars ims_pars) runs on test_CT {
+	f_sleep(1.0);
+}
+
 private function f_TC_ims_call_mo(boolean use_precondition_ext := true, boolean use_session_timer := false,
+				  call_established_fn call_established_cb := refers(call_established_fn_sleep),
 				  void_fn sip_fn := refers(f_TC_internal_call_mo),
 				  ims_void_fn ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr)) runs on test_CT {
 	var SIPConnHdlrPars sip_pars;
@@ -815,7 +833,7 @@ private function f_TC_ims_call_mo(boolean use_precondition_ext := true, boolean 
 	if (use_session_timer) {
 		IMS_COORD.receive(IMS_COORD_CMD_CALL_SESSION_REFRESH);
 	}
-	f_sleep(1.0);
+	call_established_cb.apply(sip_pars, ims_pars);
 
 	COORD.send(COORD_CMD_HANGUP) to vc_conn_sip;
 	IMS_COORD.receive(IMS_COORD_CMD_CALL_FINISHED) from vc_conn_ims;
@@ -848,6 +866,25 @@ testcase TC_ims_call_mo_noprecondition() runs on test_CT {
 testcase TC_ims_call_mo_holdresume_mo() runs on test_CT {
 	f_TC_ims_call_mo(sip_fn := refers(f_TC_internal_call_mo_with_holdresume),
 			 ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr_with_holdresume));
+}
+
+/* Test a 2nd call initiated from a local SIP UA towards IMS is rejected with
+ * 503 Service Unavailable if IMS endpoint is already busy in a call. */
+private function call_established_fn_2ndrejected(SIPConnHdlrPars sip_pars, IMS_ConnHdlrPars ims_pars) runs on test_CT {
+	var SIPConnHdlrPars sip_pars2;
+	var SIPConnHdlr vc_conn_sip2;
+	sip_pars2 := f_init_ConnHdlrPars(idx := 2);
+	f_ims_call_mo_configure(sip_pars2, ims_pars, tgt_ext_msisdn := "88888888");
+	vc_conn_sip2 := f_start_handler(refers(f_TC_internal_call_mo_rejected), sip_pars2);
+
+	COORD.receive(COORD_CMD_REGISTERED) from vc_conn_sip2;
+	COORD.send(COORD_CMD_START) to vc_conn_sip2;
+	COORD.receive(COORD_CMD_CALL_FINISHED) from vc_conn_sip2;
+	COORD.send(COORD_CMD_UNREGISTER) to vc_conn_sip2;
+	vc_conn_sip2.done;
+}
+testcase TC_ims_call_mo_2nd_mo_rejected() runs on test_CT {
+	f_TC_ims_call_mo(call_established_cb := refers(call_established_fn_2ndrejected));
 }
 
 /* Test SIP registration of local clients */
@@ -967,6 +1004,7 @@ control {
 	execute( TC_ims_call_mo_session_timer() );
 	execute( TC_ims_call_mo_noprecondition() );
 	execute( TC_ims_call_mo_holdresume_mo() );
+	execute( TC_ims_call_mo_2nd_mo_rejected() );
 	execute( TC_ims_call_mt() );
 	execute( TC_ims_call_mt_noprecondition() );
 }
