@@ -341,48 +341,56 @@ private function f_es10x_close() runs on IPAd_ConnHdlr {
 }
 
 /* Receive ESipa HTTP request */
-private function f_esipa_receive() runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
-	var HTTPMessage esipa_req;
+private function f_esipa_receive(template EsipaMessageFromIpaToEim expected_esipa_req := omit)
+runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var HTTPMessage esipa_req_encoded;
 	timer T := 10.0;
-	var EsipaMessageFromIpaToEim request;
+	var EsipaMessageFromIpaToEim esipa_req;
 
 	T.start;
 	alt {
-	[] HTTP_SRV.receive({ request_binary := ? }) -> value esipa_req {
-		request := dec_EsipaMessageFromIpaToEim(esipa_req.request_binary.body);
+	[] HTTP_SRV.receive({ request_binary := ? }) -> value esipa_req_encoded {
+		esipa_req := dec_EsipaMessageFromIpaToEim(esipa_req_encoded.request_binary.body);
+		if (not istemplatekind(expected_esipa_req, "omit")) {
+			if (not match(valueof(esipa_req), expected_esipa_req)) {
+				setverdict(fail, "unexpected message from IPAd");
+			}
+		}
 		}
 	[] T.timeout {
 		setverdict(fail, "no HTTP request received?");
 		}
 	}
 
-	return request;
+	return esipa_req;
 }
 
 /* Send ESipa HTTP response */
-private function f_esipa_send(EsipaMessageFromEimToIpa response) runs on IPAd_ConnHdlr  {
-	var octetstring esipa_res;
-	esipa_res := enc_EsipaMessageFromEimToIpa(response);
-	HTTP_SRV.send(ts_http_resp(esipa_res));
+private function f_esipa_send(EsipaMessageFromEimToIpa esipa_res) runs on IPAd_ConnHdlr  {
+	var octetstring esipa_res_encoded;
+	esipa_res_encoded := enc_EsipaMessageFromEimToIpa(esipa_res);
+	HTTP_SRV.send(ts_http_resp(esipa_res_encoded));
 }
 
 /* Perform one ESipa HTTP request/response cycle */
-private function f_esipa_transceive(EsipaMessageFromEimToIpa response) runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
-	var EsipaMessageFromIpaToEim request;
+private function f_esipa_transceive(EsipaMessageFromEimToIpa esipa_res,
+				    template EsipaMessageFromIpaToEim expected_esipa_req := omit)
+runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var EsipaMessageFromIpaToEim esipa_req;
 
-	request := f_esipa_receive();
-	f_esipa_send(response);
-
-	return request;
+	esipa_req := f_esipa_receive(expected_esipa_req);
+	f_esipa_send(esipa_res);
+	return esipa_req;
 }
 
 /* Perform one ESipa HTTP request/response cycle but with an empty response */
-private function f_esipa_transceive_empty_response() runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
-	var EsipaMessageFromIpaToEim request;
+private function f_esipa_transceive_empty_response(template EsipaMessageFromIpaToEim expected_esipa_req := omit)
+runs on IPAd_ConnHdlr return EsipaMessageFromIpaToEim {
+	var EsipaMessageFromIpaToEim esipa_req;
 
-	request := f_esipa_receive();
+	esipa_req := f_esipa_receive(expected_esipa_req);
 	HTTP_SRV.send(ts_http_resp(''O));
-	return request;
+	return esipa_req;
 }
 
 /* Common Mutual Authentication Procedure, see also: GSMA SGP.22, section 3.0.1 */
@@ -397,10 +405,7 @@ private function f_proc_cmn_mtl_auth() runs on IPAd_ConnHdlr {
 	f_vpcd_transceive(enc_GetEuiccChallengeResponse(valueof(ts_GetEuiccChallengeResponse)), 'bf2e00'O);
 
 	/* Step #5-#10 */
-	esipa_req := f_esipa_receive();
-	if (not match(esipa_req, tr_initiateAuthenticationRequestEsipa)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	esipa_req := f_esipa_receive(tr_initiateAuthenticationRequestEsipa);
 	esipa_res := valueof(ts_initiateAuthenticationResponseEsipa(euiccChallenge := esipa_req.initiateAuthenticationRequestEsipa.euiccChallenge));
 	f_esipa_send(esipa_res);
 
@@ -408,10 +413,7 @@ private function f_proc_cmn_mtl_auth() runs on IPAd_ConnHdlr {
 	f_vpcd_transceive(enc_AuthenticateServerResponse(valueof(ts_authenticateServerResponse)));
 
 	/* Step #15-#17 */
-	esipa_req := f_esipa_transceive(valueof(ts_authenticateClientResponseEsipa_dpe));
-	if (not match(esipa_req, tr_authenticateClientRequestEsipa)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_authenticateClientResponseEsipa_dpe), tr_authenticateClientRequestEsipa);
 }
 
 /* ********************************************* */
@@ -422,8 +424,6 @@ private function f_proc_cmn_mtl_auth() runs on IPAd_ConnHdlr {
 /* A testcase to try out an indirect profile download,
  * See also: GSMA SGP.32, section 3.2.3.2: Indirect Profile Download */
 private function f_TC_proc_indirect_prfle_dwnld(charstring id) runs on IPAd_ConnHdlr {
-	var EsipaMessageFromIpaToEim esipa_req;
-	var EsipaMessageFromEimToIpa esipa_res;
 	var integer i;
 	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
 	var BoundProfilePackage boundProfilePackage;
@@ -432,11 +432,7 @@ private function f_TC_proc_indirect_prfle_dwnld(charstring id) runs on IPAd_Conn
 	f_http_register();
 
 	/* Prepare indirect profile download by responding with a download trigger request */
-	esipa_res := valueof(ts_getEimPackageResponse_dnlTrigReq);
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_getEimPackageRequest)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_getEimPackageResponse_dnlTrigReq), tr_getEimPackageRequest);
 
 	/* Expect the IPAd to query the eIM configuration data from the eUICC */
 	f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(ts_getEimConfigurationDataResponse(eim_fqdn))), 'BF5500'O);
@@ -444,11 +440,10 @@ private function f_TC_proc_indirect_prfle_dwnld(charstring id) runs on IPAd_Conn
 	f_proc_cmn_mtl_auth();
 
 	f_vpcd_transceive(enc_PrepareDownloadResponse(valueof(ts_prepareDownloadResponse)));
+	f_esipa_transceive(valueof(ts_getBoundProfilePackageResponseEsipa),
+			   tr_getBoundProfilePackageRequestEsipa);
 
-	esipa_res := valueof(ts_getBoundProfilePackageResponseEsipa);
-	esipa_req := f_esipa_transceive(esipa_res);
-	boundProfilePackage := esipa_res.getBoundProfilePackageResponseEsipa.getBoundProfilePackageOkEsipa.boundProfilePackage;
-	/* TODO: match response (we do not have a template yet) */
+	boundProfilePackage := valueof(ts_boundProfilePackage);
 
 	/* initialiseSecureChannelRequest */
 	f_vpcd_transceive(''O);
@@ -484,8 +479,7 @@ private function f_TC_proc_indirect_prfle_dwnld(charstring id) runs on IPAd_Conn
 	f_vpcd_transceive(enc_EnableUsingDDResponse(valueof(ts_enableUsingDDResponse)));
 
 	/* Receive ProfileInstallationResult from iPAD->eIM */
-	esipa_req := f_esipa_transceive_empty_response();
-	/* TODO: match response (we do not have a template yet) */
+	f_esipa_transceive_empty_response(tr_handleNotificationEsipa_prfleInstRslt);
 
 	/* Receive RemoveNotificationFromList from iPAD->eUICC */
 	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
@@ -511,18 +505,11 @@ testcase TC_proc_indirect_prfle_dwnld() runs on MTC_CT {
 /* A testcase to try out an the Generic eUICC Package Download and Execution Procedure,
  * See also: GSMA SGP.32, section 3.3.1: Generic eUICC Package Download and Execution */
 private function f_TC_proc_euicc_pkg_dwnld_exec(charstring id) runs on IPAd_ConnHdlr {
-	var EsipaMessageFromIpaToEim esipa_req;
-	var EsipaMessageFromEimToIpa esipa_res;
-
 	f_es10x_init();
 	f_http_register();
 
 	/* Step #1-#2 */
-	esipa_res := valueof(ts_getEimPackageResponse_euiccPkgReq);
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_getEimPackageRequest)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_getEimPackageResponse_euiccPkgReq), tr_getEimPackageRequest);
 
 	/* Step #3-#8 */
 	f_vpcd_transceive(enc_EuiccPackageResult(valueof(ts_euiccPackageResult)));
@@ -531,11 +518,8 @@ private function f_TC_proc_euicc_pkg_dwnld_exec(charstring id) runs on IPAd_Conn
 	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
 
 	/* Step #10-14 */
-	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_provideEimPackageResult_ePRAndNotif)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4})),
+			   tr_provideEimPackageResult_ePRAndNotif);
 
 	/* Step #15-17 */
 	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
@@ -566,18 +550,11 @@ testcase TC_proc_euicc_pkg_dwnld_exec() runs on MTC_CT {
 /* A testcase to try out an the Generic eUICC Package Download and Execution Procedure,
  * but this time we force a rollback meneuver */
 private function f_TC_proc_euicc_pkg_dwnld_exec_rollback(charstring id) runs on IPAd_ConnHdlr {
-	var EsipaMessageFromIpaToEim esipa_req;
-	var EsipaMessageFromEimToIpa esipa_res;
-
 	f_es10x_init();
 	f_http_register();
 
 	/* Step #1-#2 */
-	esipa_res := valueof(ts_getEimPackageResponse_euiccPkgReq);
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_getEimPackageRequest)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_getEimPackageResponse_euiccPkgReq), tr_getEimPackageRequest);
 
 	/* Step #3-#8 */
 	f_vpcd_transceive(enc_EuiccPackageResult(valueof(ts_euiccPackageResult)));
@@ -599,11 +576,8 @@ private function f_TC_proc_euicc_pkg_dwnld_exec_rollback(charstring id) runs on 
 	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
 
 	/* Step #10-14 */
-	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_provideEimPackageResult_ePRAndNotif(euiccPackageResult := ?))) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4})),
+			   tr_provideEimPackageResult_ePRAndNotif(euiccPackageResult := ?));
 
 	/* Step #15-17 */
 	f_vpcd_transceive(enc_NotificationSentResponse(valueof(ts_notificationSentResponse)));
@@ -633,19 +607,13 @@ testcase TC_proc_euicc_pkg_dwnld_exec_rollback() runs on MTC_CT {
 
 /* A testcase to try out an IpaEuiccDataRequest */
 private function f_TC_proc_euicc_data_req(charstring id) runs on IPAd_ConnHdlr {
-	var EsipaMessageFromIpaToEim esipa_req;
-	var EsipaMessageFromEimToIpa esipa_res;
 	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
 
 	f_es10x_init();
 	f_http_register();
 
 	/* IPAd requests a package, we tell it to execute an ipaEuiccDataRequest */
-	esipa_res := valueof(ts_getEimPackageResponse_euiccDataReq);
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_getEimPackageRequest)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_getEimPackageResponse_euiccDataReq), tr_getEimPackageRequest);
 
 	/* IPAd will obtain the data from the eUICC */
 	f_vpcd_transceive(enc_EuiccConfiguredAddressesResponse(valueof(ts_euiccConfiguredAddressesResponse)));
@@ -656,8 +624,8 @@ private function f_TC_proc_euicc_data_req(charstring id) runs on IPAd_ConnHdlr {
 	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse)));
 
 	/* IPAd will return the data to us */
-	esipa_res := valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4}));
-	esipa_req := f_esipa_transceive(esipa_res);
+	f_esipa_transceive(valueof(ts_provideEimPackageResultResponse_eimAck(eimAcknowledgements := {1,2,3,4})),
+			   tr_provideEimPackageResult_euiccDataResp);
 
 	/* Wait some time until the the last HTTP response is actually delivered */
 	f_sleep(2.0);
@@ -685,11 +653,7 @@ private function f_TC_get_eim_pkg_req_rej(charstring id) runs on IPAd_ConnHdlr {
 	f_http_register();
 
 	/* IPAd requests a package, we respond with an eimPackageError code 127 (undefined error) */
-	esipa_res := valueof(ts_getEimPackageResponse_eimPkgErrUndef);
-	esipa_req := f_esipa_transceive(esipa_res);
-	if (not match(esipa_req, tr_getEimPackageRequest)) {
-		setverdict(fail, "unexpected message from IPAd");
-	}
+	f_esipa_transceive(valueof(ts_getEimPackageResponse_eimPkgErrUndef), tr_getEimPackageRequest);
 
 	/* Wait some time until the the last HTTP response is actually delivered */
 	f_sleep(2.0);
