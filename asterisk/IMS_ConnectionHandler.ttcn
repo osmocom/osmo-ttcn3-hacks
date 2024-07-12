@@ -48,6 +48,7 @@ const charstring IMS_COORD_CMD_START := "IMS_COORD_CMD_START";
 const charstring IMS_COORD_CMD_CALL_ESTABLISHED := "IMS_COORD_CMD_CALL_ESTABLISHED";
 const charstring IMS_COORD_CMD_HANGUP := "IMS_COORD_CMD_HANGUP";
 const charstring IMS_COORD_CMD_CALL_FINISHED := "IMS_COORD_CMD_CALL_FINISHED";
+const charstring IMS_COORD_CMD_CALL_REJECTED := "IMS_COORD_CMD_CALL_REJECTED";
 const charstring IMS_COORD_CMD_CALL_TRYING := "IMS_COORD_CMD_CALL_TRYING";
 const charstring IMS_COORD_CMD_CALL_SESSION_PROGRESS := "IMS_COORD_CMD_CALL_SESSION_PROGRESS";
 const charstring IMS_COORD_CMD_CALL_SESSION_REFRESH := "IMS_COORD_CMD_CALL_SESSION_REFRESH";
@@ -1369,6 +1370,62 @@ function f_IMS_mt_call_setup() runs on IMS_ConnHdlr
 
 	/* Transmit ACK */
 	req := ts_SIP_ACK(called_contact.contactBody.contactAddresses[0].addressField.nameAddr.addrSpec,
+			  g_pars.subscr.cp.sip_call_id,
+			  g_pars.subscr.cp.from_addr,
+			  g_pars.subscr.cp.to_addr,
+			  via,
+			  g_pars.subscr.cp.sip_seq_nr,
+			  omit);
+	SIP.send(req);
+	g_pars.subscr.cp.sip_seq_nr := g_pars.subscr.cp.sip_seq_nr + 1;
+}
+
+/* IMS Core starts a call towards the peer and gets rejected. */
+function f_IMS_mt_call_rejected(template (present) integer exp_status_code := 486,
+				template (present) charstring exp_reason := "Busy Here") runs on IMS_ConnHdlr
+{
+	var template (value) PDU_SIP_Request req;
+	var template (present) PDU_SIP_Response exp;
+	var default d_trying, d_ringing, d_sessprog;
+	var Via via;
+
+	g_pars.subscr.cp.from_addr := valueof(ts_From(g_pars.subscr.cp.calling.addr, g_pars.subscr.cp.calling.params));
+	g_pars.subscr.cp.from_addr.fromParams := f_sip_param_set(g_pars.subscr.cp.from_addr.fromParams, "tag", f_sip_rand_tag());
+	g_pars.subscr.cp.to_addr := valueof(ts_To(g_pars.subscr.cp.called.addr, g_pars.subscr.cp.called.params));
+	via := f_IMS_gen_new_Via();
+	f_IMS_mt_call_tx_invite(via);
+
+	/* Conditionally match and accept 100 Trying. */
+	exp := tr_SIP_Response_Trying(g_pars.subscr.cp.sip_call_id,
+				      ?, ?,
+				      f_tr_Via_response(via),
+				      g_pars.subscr.cp.sip_seq_nr, "INVITE");
+	d_trying := activate(as_SIP_ignore_resp(exp));
+	/* Conditionally match and accept 183 Session Progress. */
+	exp := tr_SIP_Response_SessionProgress(g_pars.subscr.cp.sip_call_id,
+					       ?, ?,
+					       f_tr_Via_response(via),
+					       g_pars.subscr.cp.sip_seq_nr, "INVITE");
+	d_sessprog := activate(as_SIP_ignore_resp(exp));
+
+	/* Wait for 486 Busy Here (INVITE) answer */
+	exp := tr_SIP_Response(g_pars.subscr.cp.sip_call_id,
+			       ?, ?,
+			       f_tr_Via_response(via),
+			       *,
+			       "INVITE", exp_status_code,
+			       g_pars.subscr.cp.sip_seq_nr, exp_reason,
+			       body := omit);
+	as_SIP_expect_resp(exp, fail_others := false);
+
+	deactivate(d_sessprog);
+	deactivate(d_trying);
+
+	/* Update To with the tags received from peer: */
+	g_pars.subscr.cp.to_addr := g_rx_sip_resp.msgHeader.toField;
+
+	/* Transmit ACK */
+	req := ts_SIP_ACK(ts_SipUrl_from_Addr_Union(g_pars.subscr.cp.called.addr),
 			  g_pars.subscr.cp.sip_call_id,
 			  g_pars.subscr.cp.from_addr,
 			  g_pars.subscr.cp.to_addr,
