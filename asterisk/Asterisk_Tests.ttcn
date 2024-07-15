@@ -237,6 +237,29 @@ private function f_TC_internal_call_mo_with_holdresume(charstring id) runs on SI
 	f_TC_internal_hangup_call_mo_unregister();
 	setverdict(pass);
 }
+private function f_TC_internal_call_mo_with_holdswitchresume(charstring id) runs on SIPConnHdlr {
+	var CallPars cp0;
+	f_TC_internal_register_establish_call_mo();
+	f_sleep(1.0);
+	f_SIP_do_call_hold();
+
+	/* Backup state of 1st call params: */
+	cp0 := g_pars.cp;
+	g_pars.cp.called := valueof(ts_SipAddr(ts_HostPort(g_pars.remote_sip_host),
+					       ts_UserInfo("123456")));
+	COORD.receive(COORD_CMD_START);
+	f_SIP_mo_call_setup(exp_update_to_direct_rtp := false);
+	log ("SIP: 2nd call ongoing");
+	COORD.send(COORD_CMD_CALL_ESTABLISHED);
+	COORD.receive(COORD_CMD_HANGUP);
+	f_SIP_do_call_hangup();
+
+	/* Restore 1s call metadata before hanging it up here: */
+	g_pars.cp := cp0;
+	f_SIP_do_call_resume();
+	f_TC_internal_hangup_call_mo_unregister();
+	setverdict(pass);
+}
 private function f_TC_internal_call_mo_rejected(charstring id) runs on SIPConnHdlr {
 	f_SIP_register();
 	COORD.send(COORD_CMD_REGISTERED);
@@ -791,6 +814,33 @@ private function f_TC_ims_call_mo_IMS_ConnHdlr_with_holdresume(charstring id) ru
 	as_IMS_exp_call_resume();
 	f_TC_ims_call_mo_IMS_ConnHdlr_hangup_call_unregister();
 }
+private function f_TC_ims_call_mo_IMS_ConnHdlr_with_holdswitchresume(charstring id) runs on IMS_ConnHdlr {
+	var IMS_ConnHdlrSubscrPars subscr0;
+	var Addr_Union called_addr;
+
+	f_TC_ims_call_mo_IMS_ConnHdlr_register_establish_call();
+
+	called_addr := g_pars.subscr.cp.called.addr;
+	called_addr.nameAddr.addrSpec.userInfo := valueof(ts_UserInfo("123456"));
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(called_addr)));
+
+	as_IMS_exp_call_hold();
+
+	/* Backup state of 1st call subscriber: */
+	subscr0 := g_pars.subscr;
+	g_pars.subscr.cp.called.addr := called_addr;
+	as_IMS_mo_call_accept();
+	COORD.send(COORD_CMD_CALL_ESTABLISHED);
+	log ("IMS: 2nd call ongoing");
+
+	as_IMS_exp_call_hangup(g_pars.subscr.cp.sip_seq_nr + 1);
+	COORD.send(IMS_COORD_CMD_CALL_FINISHED);
+	/* Restore 1s call metadata before hanging it up here: */
+	g_pars.subscr := subscr0;
+
+	as_IMS_exp_call_resume();
+	f_TC_ims_call_mo_IMS_ConnHdlr_hangup_call_unregister();
+}
 private function f_TC_ims_call_mo_IMS_ConnHdlr_2nd_mt_rejected(charstring id) runs on IMS_ConnHdlr {
 	var IMS_ConnHdlrSubscrPars subscr0;
 	var default d_trying, d_ringing, d_sessprog;
@@ -893,6 +943,44 @@ testcase TC_ims_call_mo_noprecondition() runs on test_CT {
 testcase TC_ims_call_mo_holdresume_mo() runs on test_CT {
 	f_TC_ims_call_mo(sip_fn := refers(f_TC_internal_call_mo_with_holdresume),
 			 ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr_with_holdresume));
+}
+
+/* Test a 2nd call initiated from a local SIP UA towards IMS after having HOLD the 1st one. */
+private function call_established_fn_holdswitchresume(SIPConnHdlrPars sip_pars, IMS_ConnHdlrPars ims_pars) runs on test_CT {
+	var AMI_Msg ami_msg;
+	var charstring old_asterisk_chan_name := g_asterisk_chan_name; /* backup */
+	COORD.send(COORD_CMD_START);
+
+	IMS_COORD.receive(IMS_COORD_CMD_CALL_TRYING);
+	ami_msg := f_ami_wait_rx_msg(AMI_CLIENT,
+				     tr_AMI_Event_Newchannel(mp_volte_ims_outbound_registration),
+				     fail_others := false);
+	g_asterisk_chan_name := valueof(f_ami_msg_get_value(ami_msg, AMI_FIELD_CHANNEL));
+	f_ami_action_DedicatedBearerStatus(AMI_CLIENT,
+					   g_asterisk_chan_name,
+					   "Up", fail_others := false);
+
+	COORD.receive(COORD_CMD_CALL_ESTABLISHED);
+	IMS_COORD.receive(COORD_CMD_CALL_ESTABLISHED);
+	/* 2nd call ongoing */
+	log ("test_CT: 2nd call ongoing");
+	f_sleep(1.0);
+	/* Tear down 2nd call: */
+	COORD.send(COORD_CMD_HANGUP);
+	IMS_COORD.receive(IMS_COORD_CMD_CALL_FINISHED);
+
+	/* Notify network released 2nd dedicated bearer: */
+	AMI_CLIENT.clear;
+	f_ami_action_DedicatedBearerStatus(AMI_CLIENT,
+					   g_asterisk_chan_name,
+					   "Down", fail_others := false);
+
+	g_asterisk_chan_name := old_asterisk_chan_name; /* restore */
+}
+testcase TC_ims_call_mo_holdswitchresume_mo() runs on test_CT {
+	f_TC_ims_call_mo(call_established_cb := refers(call_established_fn_holdswitchresume),
+			 sip_fn := refers(f_TC_internal_call_mo_with_holdswitchresume),
+			 ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr_with_holdswitchresume));
 }
 
 /* Test a 2nd call initiated from a local SIP UA towards IMS is rejected with
@@ -1175,6 +1263,7 @@ control {
 	execute( TC_ims_call_mo_session_timer() );
 	execute( TC_ims_call_mo_noprecondition() );
 	execute( TC_ims_call_mo_holdresume_mo() );
+	execute( TC_ims_call_mo_holdswitchresume_mo() );
 	execute( TC_ims_call_mo_2nd_mo_rejected() );
 	execute( TC_ims_call_mo_2nd_mt_rejected() );
 	execute( TC_ims_call_mt() );
