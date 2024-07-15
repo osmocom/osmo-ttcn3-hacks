@@ -467,7 +467,8 @@ private function f_SIP_mo_call_tx_invite(Via via) runs on SIPConnHdlr
 }
 
 function f_SIP_mo_call_setup(template (present) integer exp_status_code := 200,
-			     template (present) charstring exp_reason := "OK") runs on SIPConnHdlr
+			     template (present) charstring exp_reason := "OK",
+			     boolean exp_update_to_direct_rtp := false) runs on SIPConnHdlr
 {
 	var template (value) PDU_SIP_Request req;
 	var template (present) PDU_SIP_Response exp;
@@ -545,7 +546,60 @@ function f_SIP_mo_call_setup(template (present) integer exp_status_code := 200,
 			  g_pars.cp.sip_seq_nr,
 			  omit);
 	SIP.send(req);
+
+	if (exp_update_to_direct_rtp) {
+		/* Asterisk will now update the session to connect us to MT directly: */
+		/* Via is not kept since anyway "branch" will change upon following INVITE. */
+		as_SIP_exp_mo_call_update(?);
+	}
+
 	g_pars.cp.sip_seq_nr := g_pars.cp.sip_seq_nr + 1;
+}
+
+/* New (re-)INVITE arrives after MO call is established. Accept it: */
+altstep as_SIP_exp_mo_call_update(template (present) integer exp_seq_nr := ?, boolean fail_others := true) runs on SIPConnHdlr
+{
+	var template (present) PDU_SIP_Request exp_req :=
+		tr_SIP_INVITE(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
+						      ?,
+						      tr_From(tr_Addr_Union_from_val(g_pars.cp.called.addr), *),
+						      tr_To(tr_Addr_Union_from_val(g_pars.cp.calling.addr), *),
+						      tr_Via_from(f_tr_HostPort(g_pars.remote_sip_host, g_pars.remote_sip_port)),
+						      exp_seq_nr,
+						      body := ?);
+	var charstring sip_expect_str := log2str(exp_req);
+
+	[] SIP.receive(exp_req) -> value g_rx_sip_req {
+		var template (value) PDU_SIP_Response tx_resp;
+		var charstring tx_sdp;
+
+		f_SDP_decodeMessage(g_rx_sip_req.messageBody, g_pars.cp.peer_sdp);
+		log("Rx Update MO INVITE decoded SDP: ", g_pars.cp.peer_sdp);
+
+		/* Tx 200 OK */
+		tx_sdp := f_gen_sdp();
+		tx_resp := ts_SIP_Response(g_rx_sip_req.msgHeader.callId.callid,
+					   g_rx_sip_req.msgHeader.fromField,
+					   g_rx_sip_req.msgHeader.toField,
+					   "INVITE", 200,
+					   g_rx_sip_req.msgHeader.cSeq.seqNumber,
+					   "OK",
+					   g_rx_sip_req.msgHeader.via,
+					   body := tx_sdp);
+		SIP.send(tx_resp);
+
+		/* Wait for ACK */
+		exp_req := tr_SIP_ACK(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
+				      g_rx_sip_req.msgHeader.callId.callid,
+				      g_rx_sip_req.msgHeader.fromField,
+				      g_rx_sip_req.msgHeader.toField,
+				      f_tr_Via_response(g_rx_sip_req.msgHeader.via),
+				      g_rx_sip_req.msgHeader.cSeq.seqNumber,
+				      *);
+		as_SIP_expect_req(exp_req);
+	}
+	[fail_others] as_SIP_fail_resp(sip_expect_str);
+	[fail_others] as_SIP_fail_req(sip_expect_str);
 }
 
 private function f_ConnHdlr_parse_initial_SIP_INVITE(PDU_SIP_Request rx_sip_req) runs on SIPConnHdlr
@@ -621,7 +675,7 @@ altstep as_SIP_mt_call_accept(boolean exp_update_to_direct_rtp := true,
 		if (exp_update_to_direct_rtp) {
 			/* Asterisk will now update the session to connect us to MO directly: */
 			/* Via is not kept since anyway "branch" will change upon following INVITE. */
-			as_SIP_exp_call_update(g_pars.cp.sip_seq_nr + 1);
+			as_SIP_exp_mt_call_update(g_pars.cp.sip_seq_nr + 1);
 		}
 	}
 	[fail_others] as_SIP_fail_resp(sip_expect_str);
@@ -694,7 +748,7 @@ altstep as_SIP_mt_call_cancelled(boolean fail_others := true) runs on SIPConnHdl
 }
 
 /* New INVITE arrives after MT call is established. Accept it: */
-altstep as_SIP_exp_call_update(template (present) integer exp_seq_nr := ?, boolean fail_others := true) runs on SIPConnHdlr
+altstep as_SIP_exp_mt_call_update(template (present) integer exp_seq_nr := ?, boolean fail_others := true) runs on SIPConnHdlr
 {
 	var template (present) PDU_SIP_Request exp_req :=
 		tr_SIP_INVITE(f_tr_SipUrl_opt_defport(g_pars.local_sip_url_ext),
@@ -760,7 +814,7 @@ function f_SIP_do_call_hangup() runs on SIPConnHdlr
 	via := g_pars.local_via;
 	via.viaBody[0].viaParams := f_sip_param_set(via.viaBody[0].viaParams, "branch", branch_value);
 
-	/* Transmit ACK */
+	/* Transmit BYE */
 	req := ts_SIP_BYE(g_pars.cp.sip_call_id,
 			  g_pars.cp.from_addr,
 			  g_pars.cp.to_addr,
