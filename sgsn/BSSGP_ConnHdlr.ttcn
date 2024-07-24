@@ -4,6 +4,7 @@ import from General_Types all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 import from Native_Functions all;
+import from Misc_Helpers all;
 import from NS_Types all;
 import from NS_Emulation all;
 import from BSSGP_Types all;
@@ -23,10 +24,12 @@ import from GSUP_Emulation all;
 import from IPA_Emulation all;
 
 import from RAN_Adapter all;
+import from RANAP_Constants all;
+import from RANAP_PDU_Descriptions all;
+import from RANAP_PDU_Contents all;
+import from RANAP_IEs all;
 import from RAN_Emulation all;
 import from RANAP_Templates all;
-import from RANAP_PDU_Descriptions all;
-import from RANAP_IEs all;
 
 import from GTPv1C_CodecPort all;
 import from GTPv1U_CodecPort all;
@@ -51,6 +54,9 @@ type record length(NUM_GB) of BssgpCellId BssgpCellIds;
 
 /* Emulated GGSN is at GTP_ConnHdlr.GTP[0] */
 const integer GTP_GGSN_IDX := 0;
+private function ran2gtp_idx(integer ran_index) return integer {
+	return ran_index + 1 - NUM_GB;
+}
 
 type component BSSGP_ConnHdlr extends BSSGP_Client_CT, GSUP_ConnHdlr, GTP_ConnHdlr, RAN_ConnHdlr {
 	var BSSGP_ConnHdlrPars g_pars;
@@ -145,7 +151,7 @@ runs on BSSGP_ConnHdlr {
 	/* tell GSUP dispatcher to send this IMSI to us */
 	f_create_gsup_expect(hex2str(g_pars.imsi));
 	/* tell GTP dispatcher to send this IMSI to us */
-	f_gtp_register_imsi(g_pars.imsi);
+	f_gtp_register_imsi(g_pars.imsi, GTP_GGSN_IDX);
 
 	g_Tguard.start(pars.t_guard);
 	activate(as_Tguard());
@@ -489,6 +495,8 @@ function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres, intege
 	/* IuPS case: Expect Iu Release */
 	if (is_iu(ran_index)) {
 		as_iu_release_compl_disc();
+		/* Next message will be an InitialUE since conn was torn down */
+		g_pars.rnc_send_initial_ue := true;
 	}
 
 	/* Race condition
@@ -603,6 +611,51 @@ function f_routing_area_update(RoutingAreaIdentificationV old_ra,
 	}
 }
 
+/* Iu only */
+altstep as_service_request(integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	var PDU_DTAP_PS_MT mt;
+
+	[] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_SERVICE_ACC)) -> value mt {
+		setverdict(pass);
+		}
+	[] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_GMM_SERVICE_REJ)) {
+		setverdict(fail, "Unexpected Service Reject");
+		mtc.stop;
+		}
+	[] BSSAP.receive(tr_RANAP_SecurityModeCmd(uia_algs := ?,
+						  uia_key := oct2bit(g_pars.vec.ik),
+						  key_sts := ?)) {
+		var IntegrityProtectionAlgorithm uia_chosen := 0; /* 0 = standard_UMTS_integrity_algorithm_UIA1 */
+		BSSAP.send(ts_RANAP_SecurityModeComplete(uia_chosen));
+		BSSAP.receive(tr_RANAP_CommonId(imsi_hex2oct(g_pars.imsi)))
+		repeat;
+	}
+}
+
+function f_service_request(ServiceType service_type := SERVICE_TYPE_Signalling,
+			   integer ran_index := 0,
+			   float Tval := 2.0) runs on BSSGP_ConnHdlr {
+	timer T := Tval;
+
+	if (not is_iu(ran_index)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"GMM Service Request called on non-Iu RAN index");
+	}
+
+
+	f_send_l3(ts_GMM_SERVICE_REQ(service_type, p_tmsi := g_pars.p_tmsi), ran_index);
+
+	T.start;
+	alt {
+	[] as_service_request(ran_index) { setverdict(pass); }
+	[] BSSAP.receive { repeat; }
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout completing the RAU procedure");
+		}
+	}
+}
+
 type record PdpActPars {
 	BIT3			tid,				/* L3 Transaction ID */
 	BIT4			nsapi,				/* SNDCP NSAPI */
@@ -621,6 +674,9 @@ type record PdpActPars {
 	octetstring		ggsn_ip_u,			/* GGSN IP User */
 	OCT1			ggsn_restart_ctr,		/* GGSN Restart Counter */
 
+	OCT4			rnc_tei_u,			/* SGSN TEI User */
+	octetstring		rnc_ip_u,			/* SGSN IP USer */
+
 	OCT4			sgsn_tei_c optional,		/* SGSN TEI Control */
 	OCT4			sgsn_tei_u optional,		/* SGSN TEI User */
 	octetstring		sgsn_ip_c optional,		/* SGSN IP Control */
@@ -634,33 +690,26 @@ function f_process_gtp_ctx_act_req(inout PdpActPars apars, PDU_GTPC gtpc) runs o
 	apars.sgsn_tei_u := gtpc_rx.createPDPContextRequest.teidDataI.teidDataI;
 	apars.sgsn_ip_c := gtpc_rx.createPDPContextRequest.sgsn_addr_signalling.addressf;
 	apars.sgsn_ip_u := gtpc_rx.createPDPContextRequest.sgsn_addr_traffic.addressf;
-	f_gtp_register_teid(apars.ggsn_tei_c);
-	f_gtp_register_teid(apars.ggsn_tei_u);
+	f_gtp_register_teid(apars.ggsn_tei_c, GTP_GGSN_IDX);
+	f_gtp_register_teid(apars.ggsn_tei_u, GTP_GGSN_IDX);
 }
 
-function f_pdp_ctx_act(inout PdpActPars apars, boolean send_recovery := false, integer ran_index := 0)
-runs on BSSGP_ConnHdlr {
+function f_process_gtp_ctx_upd_req(inout PdpActPars apars, PDU_GTPC gtpc, integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	var UpdatePDPContextRequestSGSN upd := gtpc.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestSGSN;
+	if (ispresent(upd.teidControlPlane.teidControlPlane)) {
+		apars.sgsn_tei_c := upd.teidControlPlane.teidControlPlane;
+	}
+	apars.sgsn_tei_u := upd.teidDataI.teidDataI;
+	apars.sgsn_ip_c := upd.sgsn_addr_controlPlane.addressf;
+	apars.sgsn_ip_u := upd.sgsn_addr_traffic.addressf;
+	f_gtp_register_teid(apars.rnc_tei_u, ran2gtp_idx(ran_index));
+	/* TODO: If "Direct Tunnel" flag, update apars.rnc_{tei,ip}_u instead,
+	 * and store "direct_tunnel" in ggsn state */
+}
+
+altstep as_pdp_ctx_act_gb(inout PdpActPars apars, integer ran_index := 0) runs on BSSGP_ConnHdlr {
 	var boolean exp_rej := ispresent(apars.exp_rej_cause);
-	var Gtp1cUnitdata g_ud;
-	var template Recovery_gtpc recovery := omit;
 
-	if (send_recovery) {
-		recovery := ts_Recovery(apars.ggsn_restart_ctr);
-	}
-
-	f_send_l3(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
-				     apars.apn, apars.pco), ran_index);
-	GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
-		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
-		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
-		GTP[GTP_GGSN_IDX].send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
-						apars.sgsn_tei_c, apars.gtp_resp_cause,
-						apars.ggsn_tei_c, apars.ggsn_tei_u,
-						apars.nsapi,
-						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
-						omit, recovery));
-	}
-	alt {
 	[exp_rej] BSSGP[ran_index].receive(tr_SM_ACT_PDP_REJ(apars.tid, apars.exp_rej_cause)) {
 		setverdict(pass);
 		}
@@ -680,6 +729,92 @@ runs on BSSGP_ConnHdlr {
 		setverdict(pass);
 		}
 	[] as_xid(apars, ran_index);
+}
+altstep as_pdp_ctx_act_iu(inout PdpActPars apars, integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	var boolean exp_rej := ispresent(apars.exp_rej_cause);
+
+	[exp_rej] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_ACT_PDP_REJ(apars.tid, apars.exp_rej_cause))) {
+		setverdict(pass);
+		}
+	[exp_rej] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_ACT_PDP_ACCEPT)) {
+		setverdict(fail, "Unexpected PDP CTX ACT ACC");
+		mtc.stop;
+		}
+	[not exp_rej] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_ACT_PDP_REJ(apars.tid, ?))) {
+		setverdict(fail, "Unexpected PDP CTX ACT FAIL");
+		mtc.stop;
+		}
+	[not exp_rej] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_ACT_PDP_REJ(apars.tid, ?))) {
+		setverdict(fail, "Unexpected PDP CTX ACT FAIL");
+		mtc.stop;
+		}
+	[not exp_rej] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_ACT_PDP_ACCEPT(apars.tid, apars.sapi))) {
+		setverdict(pass);
+		}
+}
+altstep as_pdp_ctx_act(inout PdpActPars apars, integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	[is_gb(ran_index)] as_pdp_ctx_act_gb(apars, ran_index);
+	[is_iu(ran_index)] as_pdp_ctx_act_iu(apars, ran_index);
+}
+
+function f_pdp_ctx_act(inout PdpActPars apars, boolean send_recovery := false, integer ran_index := 0, float Tval := 5.0)
+runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+	var template Recovery_gtpc recovery := omit;
+	timer T := Tval;
+
+	f_send_l3(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
+				     apars.apn, apars.pco), ran_index);
+
+	if (send_recovery) {
+		recovery := ts_Recovery(apars.ggsn_restart_ctr);
+	}
+	GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
+		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP[GTP_GGSN_IDX].send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
+						apars.sgsn_tei_c, apars.gtp_resp_cause,
+						apars.ggsn_tei_c, apars.ggsn_tei_u,
+						apars.nsapi,
+						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
+						omit, recovery));
+	}
+
+	T.start;
+	if (is_iu(ran_index)) {
+		var RANAP_PDU ranap;
+		alt {
+		[] BSSAP.receive(tr_RANAP_RabAssReq(?)) -> value ranap {
+			var RAB_ID rab_id := f_ranap_rab_ass_req_extract_rab_id(ranap);
+			var template (value) RAB_SetupOrModifiedList l;
+			l := ts_RAB_SMdL_ps(rab_id, oct2bit(apars.rnc_ip_u), apars.rnc_tei_u);
+			BSSAP.send(ts_RANAP_RabAssResp(l));
+
+			GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, updatePDPContextRequest, ?)) -> value g_ud {
+				f_process_gtp_ctx_upd_req(apars, g_ud.gtpc, ran_index);
+				var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+				GTP[GTP_GGSN_IDX].send(ts_GTPC_UpdatePdpRespGGSN(g_ud.peer, seq_nr,
+								apars.sgsn_tei_c, apars.gtp_resp_cause,
+								apars.ggsn_tei_c, apars.ggsn_tei_u,
+								apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
+								omit, recovery));
+			}
+			}
+		[] T.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				"Timeout waiting for RANAP RAB AssReq");
+			}
+		}
+	}
+
+	alt {
+	[] as_pdp_ctx_act(apars, ran_index) { setverdict(pass); }
+	[is_gb(ran_index)] BSSGP[ran_index].receive { repeat; }
+	[is_iu(ran_index)] BSSAP.receive { repeat; }
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout completing the PDP ACT");
+		}
 	}
 }
 
@@ -691,15 +826,17 @@ runs on BSSGP_ConnHdlr {
 	f_send_l3(ts_SM_DEACT_PDP_REQ_MO(apars.tid, cause, false, omit), ran_index);
 	GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, deletePDPContextRequest, apars.ggsn_tei_c)) -> value g_ud {
 		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
-		BSSGP[ran_index].clear;
+		if (is_gb(ran_index)) {
+			BSSGP[ran_index].clear;
+		}
 		GTP[GTP_GGSN_IDX].send(ts_GTPC_DeletePdpResp(g_ud.peer, seq_nr, apars.sgsn_tei_c, '7F'O));
 	}
 	alt {
-	[] BSSGP[ran_index].receive(tr_SM_DEACT_PDP_ACCEPT_MT(apars.tid)) {
-		setverdict(pass);
-		}
-	[] as_xid(apars, ran_index);
+	[is_gb(ran_index)] BSSGP[ran_index].receive(tr_SM_DEACT_PDP_ACCEPT_MT(apars.tid));
+	[is_gb(ran_index)] as_xid(apars, ran_index);
+	[is_iu(ran_index)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_DEACT_PDP_ACCEPT_MT(apars.tid)));
 	}
+	setverdict(pass);
 }
 
 function f_pdp_ctx_deact_mt(inout PdpActPars apars, boolean error_ind := false, integer ran_index := 0)
@@ -720,7 +857,10 @@ runs on BSSGP_ConnHdlr {
 	T.start;
 
 	alt {
-	[] BSSGP[ran_index].receive(tr_SM_DEACT_PDP_REQ_MT(apars.tid, ?, true)) {
+	[is_gb(ran_index)] BSSGP[ran_index].receive(tr_SM_DEACT_PDP_REQ_MT(apars.tid, ?, true)) {
+		f_send_l3(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid), ran_index);
+		}
+	[is_iu(ran_index)] BSSAP.receive(tr_PDU_DTAP_PS_MT(tr_SM_DEACT_PDP_REQ_MT(apars.tid, ?, true))) {
 		f_send_l3(ts_SM_DEACT_PDP_ACCEPT_MO(apars.tid), ran_index);
 		}
 	[not error_ind] GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, deletePDPContextResponse, apars.ggsn_tei_c)) {
@@ -782,7 +922,8 @@ template (value) PDPAddressV t_AddrIPv6dyn := {
 	addressInfo := omit
 }
 
-template (value) PdpActPars t_PdpActPars(charstring ggsn_ip) := {
+template (value) PdpActPars t_PdpActPars(charstring ggsn_ip,
+					 charstring rnc_ip := "127.0.0.1") := {
 	tid := '000'B,
 	nsapi := '0101'B, /* < 5 are reserved */
 	sapi := '0011'B, /* 3/5/9/11 */
@@ -800,6 +941,9 @@ template (value) PdpActPars t_PdpActPars(charstring ggsn_ip) := {
 	ggsn_ip_c := f_inet_addr(ggsn_ip),
 	ggsn_ip_u := f_inet_addr(ggsn_ip),
 	ggsn_restart_ctr := int2oct(2, 1),
+
+	rnc_tei_u := f_rnd_octstring(4),
+	rnc_ip_u := f_inet_addr(rnc_ip),
 
 	sgsn_tei_c := omit,
 	sgsn_tei_u := omit,
@@ -863,40 +1007,52 @@ template (value) PDU_SN ts_SN_UD(BIT4 nsapi, octetstring payload) := {
 	}
 }
 
-/* Transceive given 'payload' as MT message from GTP -> OsmoSGSN -> Gb */
+/* Transceive given 'payload' as MT message from GTP -> OsmoSGSN -> {Gb,Iu} */
 function f_gtpu_xceive_mt(inout PdpActPars apars, octetstring payload, integer ran_index := 0, boolean expect_fwd := true)
 runs on BSSGP_ConnHdlr {
 	timer T := 5.0;
 	/* Send PDU via GTP from our simulated GGSN to the SGSN */
 	f_gtpu_send(apars, payload);
 	T.start;
-	/* Expect PDU via BSSGP/LLC on simulated PCU from SGSN */
+
 	alt {
-	[] as_xid(apars, ran_index);
+	/* Expect PDU via BSSGP/LLC on simulated PCU from SGSN: */
+	[is_gb(ran_index)] as_xid(apars, ran_index);
 	//[] BSSGP[ran_index].receive(tr_BD_SNDCP(apars.sapi, tr_SN_UD(apars.nsapi, payload)));
-	[expect_fwd] BSSGP[ran_index].receive(tr_SN_UD(apars.nsapi, payload));
-	[expect_fwd] T.timeout {
-		setverdict(fail, "Timeout waiting for GTP-U to appear on BSSGP");
-		mtc.stop;
+	[is_gb(ran_index) and expect_fwd] BSSGP[ran_index].receive(tr_SN_UD(apars.nsapi, payload));
+	[is_gb(ran_index) and not expect_fwd] BSSGP[ran_index].receive(tr_SN_UD(apars.nsapi, payload)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "GTP-U forwarded to BSSGP but not expected");
 		}
-	[not expect_fwd] BSSGP[ran_index].receive(tr_SN_UD(apars.nsapi, payload)) {
-		setverdict(fail, "GTP-U forwarded to BSSGP but not expected")
-		mtc.stop;
+	/* Expect PDU directly from RNC (Direct Tunnel): */
+	[is_iu(ran_index) and expect_fwd] GTP[ran2gtp_idx(ran_index)].receive(tr_GTPU_GPDU(valueof(ts_GtpPeerU(apars.ggsn_ip_u)), apars.rnc_tei_u, payload));
+	[is_iu(ran_index) and not expect_fwd] GTP[ran2gtp_idx(ran_index)].receive(tr_GTPU_GPDU(valueof(ts_GtpPeerU(apars.ggsn_ip_u)), apars.rnc_tei_u, payload)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "GTP-U forwarded to BSSGP but not expected")
+		}
+	[expect_fwd] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for GTP-U to appear on Gb/Iu");
 		}
 	[not expect_fwd] T.timeout {}
 	}
 }
 
-/* Transceive given 'payload' as MO message from Gb -> OsmoSGSN -> GTP */
+/* Transceive given 'payload' as MO message from {Gb,Iu} -> OsmoSGSN -> GTP */
 function f_gtpu_xceive_mo(inout PdpActPars apars, octetstring payload, integer ran_index := 0, uint9_t n_u := 0)
 runs on BSSGP_ConnHdlr {
-	/* Send PDU via SNDCP/LLC/BSSGP/NS via simulated MS/PCU to the SGSN */
-	var Gtp1uPeer peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
-	var PDU_SN sndcp := valueof(ts_SN_UD(apars.nsapi, payload));
-	BSSGP[ran_index].send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, n_u));
-	/* Expect PDU via GTP from SGSN on simulated GGSN */
+	var Gtp1uPeer rx_peer;
+
+	if (is_gb(ran_index)) {
+		/* Send PDU via SNDCP/LLC/BSSGP/NS via simulated MS/PCU to the SGSN: */
+		rx_peer := valueof(ts_GtpPeerU(apars.sgsn_ip_u));
+		var PDU_SN sndcp := valueof(ts_SN_UD(apars.nsapi, payload));
+		BSSGP[ran_index].send(ts_LLC_UI(enc_PDU_SN(sndcp), apars.sapi, '0'B, n_u));
+	} else if (is_iu(ran_index)) {
+		/* Send PDU via GTPv1U from simulated MS/RNC directly to the simulated GGSN: */
+		rx_peer := valueof(ts_GtpPeerU(apars.rnc_ip_u));
+		GTP[ran2gtp_idx(ran_index)].send(ts_GTP1U_GPDU(valueof(ts_GtpPeerU(apars.ggsn_ip_u)), 0 /*seq*/, apars.ggsn_tei_u, payload));
+	}
+	/* Expect PDU via GTP from RNC/SGSN on simulated GGSN */
 	alt {
-	[] GTP[GTP_GGSN_IDX].receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload));
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPU_GPDU(rx_peer, apars.ggsn_tei_u, payload));
 	}
 }
 
