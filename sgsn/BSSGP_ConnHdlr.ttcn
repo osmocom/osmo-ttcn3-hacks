@@ -494,9 +494,7 @@ function f_gmm_attach(boolean umts_aka_challenge, boolean force_gsm_sres, intege
 
 	/* IuPS case: Expect Iu Release */
 	if (is_iu(ran_index)) {
-		as_iu_release_compl_disc();
-		/* Next message will be an InitialUE since conn was torn down */
-		g_pars.rnc_send_initial_ue := true;
+		as_iu_release_compl_disc_ext();
 	}
 
 	/* Race condition
@@ -633,6 +631,7 @@ altstep as_service_request(integer ran_index := 0) runs on BSSGP_ConnHdlr {
 }
 
 function f_service_request(ServiceType service_type := SERVICE_TYPE_Signalling,
+			   template (value) OCT2 pdp_status := '0000'O,
 			   integer ran_index := 0,
 			   float Tval := 2.0) runs on BSSGP_ConnHdlr {
 	timer T := Tval;
@@ -643,7 +642,10 @@ function f_service_request(ServiceType service_type := SERVICE_TYPE_Signalling,
 	}
 
 
-	f_send_l3(ts_GMM_SERVICE_REQ(service_type, p_tmsi := g_pars.p_tmsi), ran_index);
+	f_send_l3(ts_GMM_SERVICE_REQ(service_type,
+				     p_tmsi := g_pars.p_tmsi,
+				     pdp_status := pdp_status),
+		  ran_index);
 
 	T.start;
 	alt {
@@ -653,6 +655,38 @@ function f_service_request(ServiceType service_type := SERVICE_TYPE_Signalling,
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 			"Timeout completing the RAU procedure");
 		}
+	}
+}
+
+/* expect a IuReleaseCommand; Confirm that; expect SCCP-level N-DISCONNET.ind */
+altstep as_iu_release_compl_disc_ext() runs on BSSGP_ConnHdlr {
+	[] as_iu_release_compl_disc() {
+		/* Next message will be an InitialUE since conn was torn down */
+		g_pars.rnc_send_initial_ue := true;
+	}
+}
+
+function f_iu_release_req(template (value) Cause cause) runs on BSSGP_ConnHdlr {
+	timer T := 5.0;
+	BSSAP.send(ts_RANAP_IuReleaseRequest(cause));
+	T.start;
+	alt {
+	[] as_iu_release_compl_disc_ext() { T.stop; };
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"Timeout completing the Iu Release procedure");
+	}
+	}
+}
+
+altstep as_ranap_rab_ass_req(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
+	var RANAP_PDU ranap;
+	[] BSSAP.receive(tr_RANAP_RabAssReq(?)) -> value ranap {
+		var RAB_ID rab_id := f_ranap_rab_ass_req_extract_rab_id(ranap);
+		/*TODO: validate received remote IP addr + TEID = apars.ggsn_ip_u + apars.ggsn_tei_u */
+		var template (value) RAB_SetupOrModifiedList l;
+		l := ts_RAB_SMdL_ps(rab_id, oct2bit(apars.rnc_ip_u), apars.rnc_tei_u);
+		BSSAP.send(ts_RANAP_RabAssResp(l));
 	}
 }
 
@@ -693,25 +727,72 @@ function f_process_gtp_ctx_act_req(inout PdpActPars apars, PDU_GTPC gtpc) runs o
 	f_gtp_register_teid(apars.ggsn_tei_c, GTP_GGSN_IDX);
 	f_gtp_register_teid(apars.ggsn_tei_u, GTP_GGSN_IDX);
 }
+private altstep as_ggsn_gtp_ctx_act_req(inout PdpActPars apars, boolean send_recovery := false) runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+	var template Recovery_gtpc recovery := omit;
 
-function f_process_gtp_ctx_upd_req(inout PdpActPars apars, PDU_GTPC gtpc, integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
+		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
+		if (send_recovery) {
+			recovery := ts_Recovery(apars.ggsn_restart_ctr);
+		}
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP[GTP_GGSN_IDX].send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
+						apars.sgsn_tei_c, apars.gtp_resp_cause,
+						apars.ggsn_tei_c, apars.ggsn_tei_u,
+						apars.nsapi,
+						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
+						omit, recovery));
+	}
+}
+
+function f_process_gtp_ctx_upd_req(inout PdpActPars apars,
+				   PDU_GTPC gtpc,
+				   boolean exp_dir_tun := true,
+				   integer ran_index := 0) runs on BSSGP_ConnHdlr {
 	var UpdatePDPContextRequestSGSN upd := gtpc.gtpc_pdu.updatePDPContextRequest.updatePDPContextRequestSGSN;
-
-	if (not ispresent(upd.directTunnelFlags) or upd.directTunnelFlags.dTI != '1'B) {
+	var boolean dti := ispresent(upd.directTunnelFlags) and upd.directTunnelFlags.dTI == '1'B;
+	if (dti != exp_dir_tun) {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 				log2str("Rx UpdatePDPCtxReq with Direct Tunnel Flags ",
-					upd.directTunnelFlags, " vs exp DTI=1"));
+					upd.directTunnelFlags, " vs exp DTI=", dti));
 	}
 
 	if (ispresent(upd.teidControlPlane.teidControlPlane)) {
 		apars.sgsn_tei_c := upd.teidControlPlane.teidControlPlane;
 	}
-	apars.sgsn_tei_u := upd.teidDataI.teidDataI;
 	apars.sgsn_ip_c := upd.sgsn_addr_controlPlane.addressf;
-	apars.sgsn_ip_u := upd.sgsn_addr_traffic.addressf;
-	f_gtp_register_teid(apars.rnc_tei_u, ran2gtp_idx(ran_index));
-	/* TODO: If "Direct Tunnel" flag, update apars.rnc_{tei,ip}_u instead,
-	 * and store "direct_tunnel" in ggsn state */
+	if (dti) {
+		if (apars.rnc_ip_u != upd.sgsn_addr_traffic.addressf or
+		    apars.rnc_tei_u != upd.teidDataI.teidDataI) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("Rx UpdatePDPCtxReq with DTI=1 and wrong RNC IP+TEID: ",
+					upd.sgsn_addr_traffic.addressf, ":", upd.teidDataI.teidDataI,
+					" vs exp ", apars.rnc_ip_u, ":", apars.rnc_tei_u));
+		}
+		f_gtp_register_teid(apars.rnc_tei_u, ran2gtp_idx(ran_index));
+	} else {
+		apars.sgsn_ip_u := upd.sgsn_addr_traffic.addressf;
+		apars.sgsn_tei_u := upd.teidDataI.teidDataI;
+	}
+}
+altstep as_ggsn_gtp_ctx_upd_req(inout PdpActPars apars,
+				boolean send_recovery := false,
+				boolean exp_dir_tun := true,
+				integer ran_index := 0) runs on BSSGP_ConnHdlr {
+	var Gtp1cUnitdata g_ud;
+
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, updatePDPContextRequest, ?)) -> value g_ud {
+		f_process_gtp_ctx_upd_req(apars, g_ud.gtpc,
+					  exp_dir_tun := exp_dir_tun,
+					  ran_index := ran_index);
+		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
+		GTP[GTP_GGSN_IDX].send(ts_GTPC_UpdatePdpRespGGSN(g_ud.peer, seq_nr,
+						apars.sgsn_tei_c, apars.gtp_resp_cause,
+						apars.ggsn_tei_c, apars.ggsn_tei_u,
+						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
+						omit, omit));
+	}
 }
 
 altstep as_pdp_ctx_act_gb(inout PdpActPars apars, integer ran_index := 0) runs on BSSGP_ConnHdlr {
@@ -766,46 +847,20 @@ altstep as_pdp_ctx_act(inout PdpActPars apars, integer ran_index := 0) runs on B
 
 function f_pdp_ctx_act(inout PdpActPars apars, boolean send_recovery := false, integer ran_index := 0, float Tval := 5.0)
 runs on BSSGP_ConnHdlr {
-	var Gtp1cUnitdata g_ud;
-	var template Recovery_gtpc recovery := omit;
 	timer T := Tval;
 
 	f_send_l3(ts_SM_ACT_PDP_REQ(apars.tid, apars.nsapi, apars.sapi, apars.qos, apars.addr,
 				     apars.apn, apars.pco), ran_index);
 
-	if (send_recovery) {
-		recovery := ts_Recovery(apars.ggsn_restart_ctr);
-	}
-	GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, createPDPContextRequest, ?)) -> value g_ud {
-		f_process_gtp_ctx_act_req(apars, g_ud.gtpc);
-		var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
-		GTP[GTP_GGSN_IDX].send(ts_GTPC_CreatePdpResp(g_ud.peer, seq_nr,
-						apars.sgsn_tei_c, apars.gtp_resp_cause,
-						apars.ggsn_tei_c, apars.ggsn_tei_u,
-						apars.nsapi,
-						apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
-						omit, recovery));
-	}
+	as_ggsn_gtp_ctx_act_req(apars, send_recovery := send_recovery);
 
 	T.start;
 	if (is_iu(ran_index)) {
-		var RANAP_PDU ranap;
 		alt {
-		[] BSSAP.receive(tr_RANAP_RabAssReq(?)) -> value ranap {
-			var RAB_ID rab_id := f_ranap_rab_ass_req_extract_rab_id(ranap);
-			var template (value) RAB_SetupOrModifiedList l;
-			l := ts_RAB_SMdL_ps(rab_id, oct2bit(apars.rnc_ip_u), apars.rnc_tei_u);
-			BSSAP.send(ts_RANAP_RabAssResp(l));
-
-			GTP[GTP_GGSN_IDX].receive(tr_GTPC_MsgType(?, updatePDPContextRequest, ?)) -> value g_ud {
-				f_process_gtp_ctx_upd_req(apars, g_ud.gtpc, ran_index);
-				var integer seq_nr := oct2int(g_ud.gtpc.opt_part.sequenceNumber);
-				GTP[GTP_GGSN_IDX].send(ts_GTPC_UpdatePdpRespGGSN(g_ud.peer, seq_nr,
-								apars.sgsn_tei_c, apars.gtp_resp_cause,
-								apars.ggsn_tei_c, apars.ggsn_tei_u,
-								apars.ggsn_ip_c, apars.ggsn_ip_u, apars.chg_id,
-								omit, recovery));
-			}
+		[] as_ranap_rab_ass_req(apars) {
+			as_ggsn_gtp_ctx_upd_req(apars,
+					        send_recovery := send_recovery,
+						ran_index := ran_index);
 			}
 		[] T.timeout {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
@@ -815,7 +870,7 @@ runs on BSSGP_ConnHdlr {
 	}
 
 	alt {
-	[] as_pdp_ctx_act(apars, ran_index) { setverdict(pass); }
+	[] as_pdp_ctx_act(apars, ran_index) { T.stop; setverdict(pass); }
 	[is_gb(ran_index)] BSSGP[ran_index].receive { repeat; }
 	[is_iu(ran_index)] BSSAP.receive { repeat; }
 	[] T.timeout {
