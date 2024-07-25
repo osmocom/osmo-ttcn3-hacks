@@ -85,7 +85,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 # logic of docker containers, which only invalidate their cached ttcn3 dependencies if this
 # file changed.
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
-titan.ProtocolEmulations.M3UA_commit=		f086e78d74defa044d864f17adaad9433fedc961
+titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
 titan.ProtocolEmulations.SCCP_commit=	 	f8a44f2cdef44d0c3adf787ab3184c293a9a58be
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A-4-g20cfaf8
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb175a
