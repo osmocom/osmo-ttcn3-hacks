@@ -1,0 +1,287 @@
+# Copyright 2024 sysmocom - s.f.m.c. GmbH
+# SPDX-License-Identifier: GPL-3.0-or-later
+import atexit
+import datetime
+import json
+import logging
+import multiprocessing
+import os
+import shlex
+import subprocess
+import testenv.cmd
+import testenv.testdir
+import time
+
+image_name = None
+distro = None
+container_name = None  # instance of image
+apt_dir_var_cache = None
+apt_dir_var_lib = None
+feed_watchdog_process = None
+run_shell_on_stop = False
+
+
+def image_exists():
+    return testenv.cmd.run(["podman", "image", "exists", image_name], check=False).returncode == 0
+
+
+def image_up_to_date():
+    history = testenv.cmd.run(
+        ["podman", "history", image_name, "--format", "json"],
+        capture_output=True,
+        text=True,
+    )
+    created = json.loads(history.stdout)[0]["created"].split(".", 1)[0]
+    created = datetime.datetime.strptime(created, "%Y-%m-%dT%H:%M:%S")
+    logging.debug(f"Image creation date: {created}")
+
+    # On a local development system, we can say that the podman image is
+    # outdated if the Dockerfile is newer than the creation date. But this does
+    # not work for jenkins where Dockerfile may just be from a new git
+    # checkout. So allow to skip this check.
+    if os.environ.get("TESTENV_NO_IMAGE_UP_TO_DATE_CHECK"):
+        logging.debug("Assuming the podman image is up-to-date")
+        return True
+
+    dockerfile = os.path.join(testenv.data_dir, "podman/Dockerfile")
+    mtime = os.stat(dockerfile).st_mtime
+    mtime = datetime.datetime.utcfromtimestamp(mtime)
+    logging.debug(f"Dockerfile last modified: {str(mtime).split('.')[0]}")
+
+    return mtime < created
+
+
+def image_build():
+    if image_exists() and image_up_to_date():
+        logging.debug(f"Podman image is up-to-date: {image_name}")
+        if testenv.args.force:
+            logging.debug("Building anyway since --force was used")
+        else:
+            return
+
+    logging.info(f"Building podman image: {image_name}")
+    testenv.cmd.run(
+        [
+            "buildah",
+            "build",
+            "--build-arg",
+            f"DISTRO={distro}",
+            "-t",
+            image_name,
+            os.path.join(testenv.data_dir, "podman"),
+        ]
+    )
+
+
+def generate_env_podman(env={}):
+    ret = []
+
+    for key, val in testenv.cmd.generate_env(env, True).items():
+        ret += ["-e", f"{key}={val}"]
+
+    return ret
+
+
+def init_image_name_distro():
+    global image_name
+    global distro
+
+    distro = getattr(testenv.args, "distro", testenv.distro_default)
+    image_name = f"{distro}-osmo-ttcn3-testenv"
+    image_name = image_name.replace(":", "-").replace("_", "-")
+
+
+def init():
+    global apt_dir_var_cache
+    global apt_dir_var_lib
+    global run_shell_on_stop
+
+    apt_dir_var_cache = os.path.join(testenv.args.cache, "podman", "var-cache-apt")
+    apt_dir_var_lib = os.path.join(testenv.args.cache, "podman", "var-lib-apt")
+
+    os.makedirs(apt_dir_var_cache, exist_ok=True)
+    os.makedirs(apt_dir_var_lib, exist_ok=True)
+    os.makedirs(testenv.args.ccache, exist_ok=True)
+
+    init_image_name_distro()
+
+    if not image_exists():
+        raise testenv.NoTraceException("Missing podman image, run 'testenv.py init podman' first to build it")
+    if not image_up_to_date():
+        logging.warning("The podman image might be outdated, consider running 'testenv.py init podman' to rebuild it")
+
+    atexit.register(stop)
+
+    if testenv.args.shell:
+        run_shell_on_stop = True
+
+
+def exec_cmd(cmd, podman_opts=[], cwd=None, env={}, *args, **kwargs):
+    podman_opts = list(podman_opts)
+    podman_opts += generate_env_podman(env)
+    # Attach a fake tty (eclipse-titan won't print colored output otherwise)
+    podman_opts += ["-t"]
+
+    if cwd:
+        podman_opts += ["-w", cwd]
+
+    if isinstance(cmd, str):
+        cmd = ["sh", "-c", cmd]
+
+    testenv.cmd.run(
+        ["podman", "exec"] + podman_opts + [container_name] + cmd,
+        no_podman=True,
+        *args,
+        **kwargs,
+    )
+
+
+def exec_cmd_background(cmd, podman_opts=[], cwd=None, env={}):
+    podman_opts = list(podman_opts) + generate_env_podman(env)
+
+    if cwd:
+        podman_opts += ["-w", cwd]
+
+    if isinstance(cmd, str):
+        cmd = ["sh", "-c", cmd]
+
+    cmd = ["podman", "exec"] + podman_opts + [container_name] + cmd
+    logging.debug(f"+ {cmd}")
+
+    return subprocess.Popen(cmd)
+
+
+def feed_watchdog_loop():
+    # The script testenv-podman-main.sh checks every 10s for /tmp/watchdog and
+    # deletes the file. Create it here every 5s so the container keeps running.
+    # This ensures that if we run in jenkins and the job gets aborted, the
+    # container will terminate after a few seconds.
+    try:
+        while True:
+            time.sleep(5)
+            p = subprocess.run(["podman", "exec", container_name, "touch", "/tmp/watchdog"])
+            if p.returncode:
+                logging.error("podman container crashed!")
+                return
+    except KeyboardInterrupt:
+        pass
+
+
+def start():
+    global container_name
+    global feed_watchdog_process
+
+    testdir_topdir = testenv.testdir.testdir_topdir
+    osmo_dev_dir = testenv.osmo_dev.get_osmo_dev_dir()
+    container_name = testenv.testdir.prefix
+    # Custom seccomp profile that allows io_uring
+    seccomp = os.path.join(testenv.data_dir, "podman/seccomp.json")
+
+    cmd = [
+        "podman",
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        "--detach",
+        f"--security-opt=seccomp={seccomp}",
+        "--cap-add=NET_ADMIN",  # for dumpcap, tun devices, osmo-pcap-client
+        "--cap-add=NET_RAW",  # for dumpcap, osmo-pcap-client
+        "--device=/dev/net/tun",  # for e.g. ggsn_tests
+        "--volume",
+        f"{apt_dir_var_cache}:/var/cache/apt",
+        "--volume",
+        f"{apt_dir_var_lib}:/var/lib/apt",
+    ]
+
+    if not testenv.args.binary_repo:
+        cmd += [
+            "--volume",
+            f"{osmo_dev_dir}:{osmo_dev_dir}",
+        ]
+
+    cmd += [
+        "--volume",
+        f"{testdir_topdir}:{testdir_topdir}",
+        "--volume",
+        f"{testenv.args.cache}:{testenv.args.cache}",
+        "--volume",
+        f"{testenv.args.ccache}:{testenv.args.ccache}",
+        "--volume",
+        f"{testenv.src_dir}:{testenv.src_dir}",
+        image_name,
+        os.path.join(testenv.data_dir, "scripts/testenv-podman-main.sh"),
+    ]
+
+    testenv.cmd.run(cmd, no_podman=True)
+
+    feed_watchdog_process = multiprocessing.Process(target=feed_watchdog_loop)
+    feed_watchdog_process.start()
+
+    exec_cmd(["rm", "/etc/apt/apt.conf.d/docker-clean"])
+
+    pkgcache = os.path.join(apt_dir_var_cache, "pkgcache.bin")
+    if not os.path.exists(pkgcache):
+        exec_cmd(["apt-get", "-q", "update"])
+
+
+def distro_to_repo_dir(distro):
+    if distro == "debian:bookworm":
+        return "Debian_12"
+    raise RuntimeError(f"Can't translate distro {distro} to repo_dir!")
+
+
+def enable_binary_repo():
+    config = "deb [signed-by=/obs.key]"
+    config += " https://downloads.osmocom.org/packages/"
+    config += testenv.args.binary_repo.replace(":", ":/")
+    config += "/"
+    config += distro_to_repo_dir(distro)
+    config += "/ ./"
+
+    path = "/etc/apt/sources.list.d/osmocom.list"
+
+    exec_cmd(["sh", "-c", f"echo {shlex.quote(config)} > {path}"])
+    exec_cmd(["apt-get", "-q", "update"])
+
+
+def is_running():
+    if container_name is None:
+        return False
+
+    cmd = ["podman", "ps", "-q", "--filter", f"name={container_name}"]
+    if not subprocess.run(cmd, capture_output=True, text=True).stdout:
+        return False
+
+    return True
+
+
+def stop(restart=False):
+    global container_name
+    global run_shell_on_stop
+
+    if not is_running():
+        return
+
+    if not restart and run_shell_on_stop:
+        logging.info("Running interactive shell before stopping container (--shell)")
+
+        # stdin=None: override stdin=/dev/null, so we can type into the shell
+        exec_cmd(["bash"], ["-i"], cwd=testenv.testdir.testdir, stdin=None, check=False)
+
+        run_shell_on_stop = False
+
+    restart_msg = " (restart)" if restart else ""
+    logging.info(f"Stopping podman container{restart_msg}")
+    testenv.cmd.run(["podman", "kill", container_name], no_podman=True)
+
+    if feed_watchdog_process:
+        feed_watchdog_process.terminate()
+
+    if restart:
+        testenv.cmd.run(["podman", "wait", container_name], no_podman=True, check=False)
+
+    container_name = None
+
+    if restart:
+        start()
