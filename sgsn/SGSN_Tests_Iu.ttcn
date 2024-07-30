@@ -12,6 +12,7 @@ import from RANAP_Templates all;
 import from RANAP_PDU_Descriptions all;
 import from RANAP_IEs all;
 
+import from GTPv1C_Templates all;
 import from GTPv1U_Templates all;
 import from GTP_Emulation all;
 
@@ -262,6 +263,67 @@ testcase TC_pmm_idle_rx_mt_data() runs on test_CT {
 	f_cleanup();
 }
 
+/* TS 29.060 7.3.3, 3GPP TS 23.007 15.2: Emulate GGSN sending
+UpdatePDPCtx[NSAPI, Direct Tunnel Flags(EI=1)] due to having receiving an Error
+Indication from RNC while in Direct Tunnel mode. SGSN should attempt recreation
+of the RAB to make sure PDP context is established, since it may be that RNC got
+restarted. */
+private function f_TC_update_ctx_err_ind_from_ggsn(charstring id) runs on BSSGP_ConnHdlr {
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip, mp_ranap_cfg[0].sctp_addr.local_ip_addr));
+	var integer ran_index := 3;
+
+	/* first perform regular attach */
+	f_gmm_attach(umts_aka_challenge := true, force_gsm_sres := false, ran_index := ran_index);
+
+	f_service_request(apars, ran_index := ran_index);
+
+	f_pdp_ctx_act(apars, ran_index := ran_index);
+
+	/* then transceive a downlink PDU */
+	f_gtpu_xceive_mt(apars, f_rnd_octstring(100), ran_index := ran_index);
+	/* RNC answers with Error Indication, it probably crashed and lost state: */
+	f_gtp_register_teid('00000000'O, GTP_GGSN_IDX); /* Ease debugging in case SGSN sends ErrorInd */
+	f_ran_register_imsi(g_pars.imsi, g_pars.p_tmsi); /* Forward Paging below to this component */
+	GTP[ran2gtp_idx(ran_index)].send(ts_GTPU_ErrorIndication(ts_GtpPeerU(apars.ggsn_ip_u),
+							         0, apars.rnc_tei_u,
+								 apars.rnc_ip_u));
+	GTP[GTP_GGSN_IDX].receive(tr_GTPU_ErrorIndication(ts_GtpPeerU(apars.rnc_ip_u),
+							  apars.rnc_tei_u,
+							  apars.rnc_ip_u));
+
+	GTP[GTP_GGSN_IDX].send(ts_GTPC_UpdatePDP_GGSN(ts_GtpPeerC(apars.sgsn_ip_c),
+						      apars.sgsn_tei_c, 2,
+						      apars.nsapi,
+						      g_pars.imsi,
+						      dtf := ts_DirectTunnelFlags(eI := '1'B)));
+
+	GTP[GTP_GGSN_IDX].receive(tr_GTPC_UpdatePdpRespSGSN(ts_GtpPeerC(apars.sgsn_ip_c), 2,
+							    apars.ggsn_tei_c,
+							    GTP_CAUSE_REQUEST_ACCEPTED));
+
+	BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND);
+	g_pars.rnc_send_initial_ue := true;
+	BSSAP.receive(tr_RANAP_Paging(ps_domain, imsi_hex2oct(g_pars.imsi)));
+
+	/* Ue comes back, answering the paging:
+	 * SGSN recreates the Iu ctx and recovers the Direct Tunnel RNC<->GGSN: */
+	f_service_request(apars, pdp_status := '2000'O /*NSAPI=5*/, ran_index := ran_index);
+	as_ranap_rab_ass_req(apars);
+	as_ggsn_gtp_ctx_upd_req(apars, exp_dir_tun := true, ran_index := ran_index);
+
+	/* Now UE is in PMM ENABLED state, tear it down to clean up: */
+	f_pdp_ctx_deact_mo(apars, '00'O, ran_index := ran_index);
+	setverdict(pass);
+}
+testcase TC_update_ctx_err_ind_from_ggsn() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_update_ctx_err_ind_from_ggsn), testcasename(), g_gb, 1004);
+	vc_conn.done;
+	f_cleanup();
+}
+
 control {
 	execute( TC_iu_attach() );
 	execute( TC_iu_attach_encr() );
@@ -270,6 +332,7 @@ control {
 	execute( TC_attach_pdp_act_user() );
 	execute( TC_attach_pdp_act_pmm_idle() );
 	execute( TC_pmm_idle_rx_mt_data() );
+	execute( TC_update_ctx_err_ind_from_ggsn() );
 }
 
 
