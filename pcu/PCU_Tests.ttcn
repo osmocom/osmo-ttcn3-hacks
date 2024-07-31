@@ -65,6 +65,7 @@ import from Osmocom_CTRL_Functions all;
 modulepar {
 	charstring mp_pcu_sock_path := PCU_SOCK_DEFAULT;
 
+	float X2001 := 2.0; /* Timer -2001, Pkt Dl Ass timeout */
 	float X2002 := 0.2; /* Timer -2002, IMM ASSIGN confirm delay */
 
 	charstring mp_pcu_statsd_ip := "127.0.0.1";
@@ -2174,6 +2175,192 @@ testcase TC_t3172_wait_ind_size0() runs on RAW_PCU_Test_CT {
 }
 testcase TC_t3172_wait_ind_size1() runs on RAW_PCU_Test_CT {
 	f_TC_t3172(3000, '1'B);
+}
+
+/* Scenario: MS has an ongoing UL TBF, new DL data arrives at the PCU which then
+ * attempts PKT DL Ass to be able to send data to the MS. The PKT CTRL ACK
+ * confirming the PKt DL Ass never get to the PCU.
+ * The Assignment should time out at some point (X2001). */
+testcase TC_x2001_pacch_pkt_dl_ass_unanswered_timeout() runs on RAW_PCU_Test_CT {
+	var PCUIF_info_ind info_ind := valueof(ts_PCUIF_INFO_default(c_PCUIF_Flags_noMCS));
+	var RlcmacDlBlock dl_block;
+	var octetstring payload;
+	var template (value) LlcBlockHdr blk_hdr;
+	var template (value) LlcBlocks blocks;
+	var uint32_t sched_fn;
+	var uint32_t dl_fn;
+	var template RlcmacDlBlock acknack_tmpl;
+	var GprsMS ms;
+	var octetstring data := f_rnd_octstring(10);
+	var BTS_PDTCH_Block data_msg;
+	var uint3_t rx_usf;
+	var uint32_t dl_ack_nack_poll_fn;
+
+	/* Initialize NS/BSSGP side */
+	f_init_bssgp();
+
+	/* Only 1 TRX with 8 PDCH */
+	f_PCUIF_PDCHMask_set(info_ind, '11111111'B, 0);
+	f_PCUIF_PDCHMask_set(info_ind, '00000000'B, (1 .. 7));
+
+	/* Initialize GPRS MS side */
+	f_init_gprs_ms();
+	ms := g_ms[0]; /* We only use first MS in this test */
+
+	/* Initialize the PCU interface abstraction */
+	f_init_raw(testcasename(), info_ind);
+
+	/* Establish BSSGP connection to the PCU */
+	f_bssgp_establish();
+	f_bssgp_client_llgmm_assign(TLLI_UNUSED, ms.tlli);
+
+	/* Establish an Uplink TBF. 1 TS is assigned over AGCH. */
+	f_ms_establish_ul_tbf(ms);
+
+	/* Wait until PCU starts requesting for UL block on this TBF: */
+	dl_fn := f_ms_wait_usf(ms, nr := f_ms_tx_TsTrxBtsNum(ms));
+	sched_fn := f_next_pdch_block(dl_fn);
+
+	/* Send one UL block (with TLLI since we are in One-Phase Access
+	 * contention resolution) and make sure it is ACKED fine. */
+	payload := f_rnd_octstring(16); /* 16 bytes fills the llc block (because TLLI takes 4 bytes) */
+	blk_hdr := t_RLCMAC_LLCBLOCK_HDR(length_ind := lengthof(payload),
+					 more := false, e := true);
+	blocks := { t_RLCMAC_LLCBLOCK(payload, blk_hdr) };
+	/* Set CV = 15 to signal there's still more than BS_CV_MAX blocks to be sent */
+	f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, fn := sched_fn, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* UL block should be received in SGSN */
+	BSSGP[0].receive(tr_BSSGP_UL_UD(ms.tlli, mp_gb_cfg.bvc[0].cell_id));
+
+	acknack_tmpl := tr_RLCMAC_UL_ACK_NACK_GPRS(ms.ul_tbf.tfi,
+						   tr_UlAckNackGprs(ms.tlli,
+								    tr_AckNackDescription(final_ack := '0'B)))
+	f_rx_rlcmac_dl_block_exp_ack_nack(dl_block, sched_fn, acknack_tmpl, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	timer Tx2001 := X2001 + 0.5; /* 0.5 extra offset: */
+	var integer pkt_dl_ass_count := 1;
+
+	/* SGSN sends DL data, start X2001 on tcn3 side when we receive the 1st one: */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, racap := omit));
+	dl_block := f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_DL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
+	Tx2001.start;
+	/* Count Pkt DL ass during X2001 timespan, make sure we receive several retransmits. */
+	while (true) {
+		var uint32_t poll_fn;
+		var template (value) TsTrxBtsNum nr := f_ms_tx_TsTrxBtsNum(ms);
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					block_nr := nr.blk_nr));
+		alt {
+		[] as_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_DL_PACKET_ASS, nr, dl_block) {
+				pkt_dl_ass_count := pkt_dl_ass_count + 1;
+				log("Received ", pkt_dl_ass_count , " Pkt Dl Ass");
+				rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+				if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+					/* Transmit UL data block to keep UL TBF ongoing */
+					f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := nr);
+				}
+			};
+		[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+							tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+							tr_RLCMAC_DL_DUMMY_CTRL())) -> value data_msg {
+				rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+				if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+					/* Transmit UL data block to keep UL TBF ongoing */
+					f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := nr);
+				}
+			}
+		[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						   tr_RLCMAC_UL_ACK_NACK_GPRS(ul_tfi := ?))) -> value data_msg {
+				rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+				if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+					/* Transmit UL data block to keep UL TBF ongoing */
+					f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := nr);
+				}
+				dl_ack_nack_poll_fn := f_rrbp_ack_fn(data_msg.raw.fn, data_msg.dl_block.ctrl.mac_hdr.rrbp);
+				/* DL ACK/NACK above sets poll+rrbp requesting PACKET CONTROL ACK */
+				f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), dl_ack_nack_poll_fn);
+			}
+		[] Tx2001.timeout {
+			log("Tx2001 timeout!");
+			/* receive last block we requested: */
+			BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+							tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH), *));
+			}
+		}
+		if (not Tx2001.running) {
+			log("Tx2001 stopped")
+			if (pkt_dl_ass_count < 10) {
+				setverdict(fail, "Expected at least 10 Pkt Dl Ass packets, got ", pkt_dl_ass_count);
+				f_shutdown(__BFILE__, __LINE__);
+			}
+			break; /* done */
+		}
+	}
+
+	/* Transmit UL data block to keep UL TBF ongoing */
+	f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* Now, after X2001, make sure we don't keep receiving Pkt Dl Ass: */
+	timer Tafter := 1.0;
+	Tafter.start;
+	while (true) {
+		var uint32_t poll_fn;
+		var template RlcmacDlBlock t_pkt_ass := ?;
+		var template (value) TsTrxBtsNum nr := f_ms_tx_TsTrxBtsNum(ms);
+		BTS.send(ts_PCUIF_RTS_REQ(nr.bts_nr, nr.trx_nr, nr.ts_nr,
+					sapi := PCU_IF_SAPI_PDTCH, fn := 0,
+					arfcn := f_trxnr2arfcn(valueof(nr.trx_nr)),
+					block_nr := nr.blk_nr));
+		alt {
+		[] as_ms_rx_pkt_ass_pacch(ms, poll_fn, tr_RLCMAC_DL_PACKET_ASS, nr, dl_block) {
+				setverdict(fail, "Unexpected Pkt Dl Ass after X2001 timeout");
+				f_shutdown(__BFILE__, __LINE__);
+			};
+		[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+							tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+							tr_RLCMAC_DL_DUMMY_CTRL())) -> value data_msg {
+				rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+				if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+					/* Transmit UL data block to keep UL TBF ongoing */
+					f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := nr);
+				}
+			}
+		[] BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+						   tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH),
+						   tr_RLCMAC_UL_ACK_NACK_GPRS(ul_tfi := ?))) -> value data_msg {
+				rx_usf := f_rlcmac_dl_block_get_usf(data_msg.dl_block);
+				if (rx_usf == ms.ul_tbf.usf[valueof(nr.ts_nr)]) {
+					/* Transmit UL data block to keep UL TBF ongoing */
+					f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := nr);
+				}
+				dl_ack_nack_poll_fn := f_rrbp_ack_fn(data_msg.raw.fn, data_msg.dl_block.ctrl.mac_hdr.rrbp);
+				/* DL ACK/NACK above sets poll+rrbp requesting PACKET CONTROL ACK */
+				f_ms_tx_ul_block(ms, ts_RLCMAC_CTRL_ACK(ms.tlli), dl_ack_nack_poll_fn);
+			}
+		[] Tafter.timeout {
+			log("Tafter timeout!");
+			/* receive last block we requested: */
+			BTS.receive(tr_PCUIF_DATA_PDTCH(nr.bts_nr,
+							tr_PCUIF_DATA(nr.trx_nr, nr.ts_nr, sapi := PCU_IF_SAPI_PDTCH), *));
+			}
+		}
+		if (not Tafter.running) {
+			log("Tafter stopped")
+			break; /* done */
+		}
+	}
+
+	/* Transmit UL data block to keep UL TBF ongoing */
+	f_ms_tx_ul_data_blocks_gprs(ms, blocks, cv := 15, with_tlli := true, nr := f_ms_tx_TsTrxBtsNum(ms));
+
+	/* If new DL data arrives now, PCU should attempt assigning the Pkt Dl Ass again: */
+	BSSGP[0].send(ts_BSSGP_DL_UD(ms.tlli, data, racap := omit));
+	dl_block := f_ms_rx_pkt_ass_pacch(ms, sched_fn, tr_RLCMAC_DL_PACKET_ASS, nr := f_ms_tx_TsTrxBtsNum(ms));
+	f_shutdown(__BFILE__, __LINE__, final := true);
 }
 
 /* Verify PCU handles correctly Countdown Procedure based on BS_CV_MAX */
@@ -7472,6 +7659,7 @@ control {
 	execute( TC_n3105_max_t3195() );
 	execute( TC_t3172_wait_ind_size0() );
 	execute( TC_t3172_wait_ind_size1() );
+	execute( TC_x2001_pacch_pkt_dl_ass_unanswered_timeout() );
 	execute( TC_countdown_procedure() );
 	execute( TC_ul_all_sizes() );
 	execute( TC_ul_data_toolong_fills_padding() );
