@@ -1073,19 +1073,65 @@ module GGSN_Tests {
 
 		var OCT16 dns1_addr := f_PCO_extract_proto(ctx.pco_neg, '0003'O);
 
-		/* Check if we can use valid link-local src addr.  */
-		var OCT16 saddr_ll := f_ipv6_link_local(ctx.eua.endUserAddress.endUserAddressIPv6.ipv6_address);
-		f_send_gtpu(ctx, f_gen_icmpv6_echo(saddr_ll, dns1_addr));
-		if (m_ggsn_impl == GGSN_IMPL_OSMOCOM) {
-			f_wait_icmp6_echo_reply(ctx);
-		} else {
-			f_wait_gtpu_fail(ctx);
-		}
-
 		/* Check if we can use valid global src addr, should work */
 		var OCT16 saddr_glob := f_ipv6_global(ctx.eua.endUserAddress.endUserAddressIPv6.ipv6_address);
 		f_send_gtpu(ctx, f_gen_icmpv6_echo(saddr_glob, dns1_addr));
 		f_wait_icmp6_echo_reply(ctx);
+
+		f_pdp_ctx_del(ctx, '1'B);
+		f_shutdown_helper();
+	}
+
+	/* Same as TC_pdp6_act_deact_gtpu_access, but using the ll addr as src address.
+	 * The ability to reach the DNS IP using this ll-addr is not really
+	 * well-specified, and it really depends on the network/routing setup,
+	 * the address of the DNS server, etc.
+	 * osmo-ggsn (userspace) and open5gs allow using it, but open5gs doesn't support it.
+	 * Also osmo-ggsn (gtp-u kernel module) is unable to use it due to kernel implementation
+	 * constrains, see OS#6382.
+	 * Hence, run the test for completeness to test the GGSN, but expect/allow both behaviors.
+	 */
+	testcase TC_pdp6_act_deact_gtpu_access_ll_saddr() runs on GT_CT {
+		var Gtp1uUnitdata ud;
+
+		f_init();
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), "1234", c_ApnInet6, valueof(t_EuaIPv6Dyn)));
+		ctx.pco_req := valueof(ts_PCO_IPv6_DNS);
+		f_pdp_ctx_act(ctx);
+
+		f_send_gtpu(ctx, f_icmpv6_rs_for_pdp(ctx));
+		f_wait_rtr_adv(ctx);
+		f_send_gtpu(ctx, f_gen_icmpv6_neigh_solicit_for_pdp(ctx));
+
+		var OCT16 dns1_addr := f_PCO_extract_proto(ctx.pco_neg, '0003'O);
+
+		/* Check if we can use valid link-local src addr.  */
+		var OCT16 saddr_ll := f_ipv6_link_local(ctx.eua.endUserAddress.endUserAddressIPv6.ipv6_address);
+		f_send_gtpu(ctx, f_gen_icmpv6_echo(saddr_ll, dns1_addr));
+		T_default.start;
+		alt {
+		[] GTPU.receive(tr_GTPU_GPDU(g_peer_u, ?)) -> value ud {
+			var octetstring gpdu := ud.gtpu.gtpu_IEs.g_PDU_IEs.data;
+			var IPv6_packet ip6 := f_IPv6_dec(gpdu);
+			if (ip6.header.ver != 6 or ip6.header.nexthead != 58) {
+				repeat;
+			}
+			var PDU_ICMPv6 icmp6 := f_dec_PDU_ICMPv6(ip6.payload);
+			if (not match(icmp6, (tr_ICMPv6_ERP,tr_ICMPv6_DU))) {
+				repeat;
+			}
+			log("This GGSN does support forwarding link-local source address.");
+			T_default.stop;
+		}
+		[] GTPU.receive(tr_GTPU_GPDU(?, ?)) { repeat; }
+		[] GTPU.receive  {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Received unexpected GTPU while waiting for ICMPv6: ", (tr_ICMPv6_ERP,tr_ICMPv6_DU)));
+		}
+		[] T_default.timeout {
+			log("This GGSN does NOT support forwarding link-local source address.");
+		}
+		}
 
 		f_pdp_ctx_del(ctx, '1'B);
 		f_shutdown_helper();
@@ -2246,6 +2292,7 @@ module GGSN_Tests {
 			execute(TC_pdp6_act_deact_pcodns());
 			execute(TC_pdp6_act_deact_icmp6());
 			execute(TC_pdp6_act_deact_gtpu_access());
+			execute(TC_pdp6_act_deact_gtpu_access_ll_saddr());
 			execute(TC_pdp6_act_deact_gtpu_access_wrong_ll_saddr());
 			execute(TC_pdp6_act_deact_gtpu_access_wrong_global_saddr());
 			execute(TC_pdp6_act_deact_gtpu_access_ipv4_apn6());
