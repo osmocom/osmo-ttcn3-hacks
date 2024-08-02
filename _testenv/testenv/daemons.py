@@ -55,7 +55,7 @@ def start(cfg):
         if testenv.args.io_uring:
             env["LIBOSMO_IO_BACKEND"] = "IO_URING"
 
-        if testenv.podman.is_running():
+        if testenv.args.podman:
             daemons[section] = testenv.podman.exec_cmd_background(cmd, cwd=cwd, env=env)
         else:
             logging.debug(f"+ {cmd}")

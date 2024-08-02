@@ -82,7 +82,7 @@ def generate_env(env={}, podman=False):
 
 
 def run(cmd, check=True, env={}, no_podman=False, stdin=subprocess.DEVNULL, *args, **kwargs):
-    if not no_podman and testenv.podman.is_running():
+    if not no_podman and testenv.args.podman:
         return testenv.podman.exec_cmd(cmd, check=check, env=env, *args, **kwargs)
 
     logging.debug(f"+ {cmd}")
