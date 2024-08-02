@@ -48,4 +48,14 @@ done
 kill_rm_pidfile "$PIDFILE_PCAP"
 kill_rm_pidfile "$PIDFILE_NETCAT"
 
-gzip -f "$TTCN3_PCAP_PATH/$TESTCASE.pcapng"
+# Add a numeral suffix to subsequent runs of the same test:
+PCAP_FILENAME=$TTCN3_PCAP_PATH/$TESTCASE.pcapng
+if [ -f "$TTCN3_PCAP_PATH/$TESTCASE.pcapng.gz" ]; then
+       i=1
+       while [ -f "$TTCN3_PCAP_PATH/$TESTCASE.$i.pcapng.gz" ];
+               do i=$((i+1))
+       done
+       mv "$PCAP_FILENAME" "$TTCN3_PCAP_PATH/$TESTCASE.$i.pcapng"
+       PCAP_FILENAME="$TTCN3_PCAP_PATH/$TESTCASE.$i.pcapng"
+fi
+gzip -f "$PCAP_FILENAME"
