@@ -159,7 +159,7 @@ def clean():
         logging.info(msg)
         return
 
-    logging.debug("Remving empty log dir")
+    logging.debug("Removing empty log dir")
     testenv.cmd.run(["rm", "-d", testdir_topdir], no_podman=True)
 
     # Remove broken symlink
