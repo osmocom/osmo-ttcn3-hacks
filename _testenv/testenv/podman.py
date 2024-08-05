@@ -22,13 +22,14 @@ run_shell_on_stop = False
 
 
 def image_exists():
-    return testenv.cmd.run(["podman", "image", "exists", image_name], check=False).returncode == 0
+    return testenv.cmd.run(["podman", "image", "exists", image_name], check=False, no_podman=True).returncode == 0
 
 
 def image_up_to_date():
     history = testenv.cmd.run(
         ["podman", "history", image_name, "--format", "json"],
         capture_output=True,
+        no_podman=True,
         text=True,
     )
     created = json.loads(history.stdout)[0]["created"].split(".", 1)[0]
@@ -69,7 +70,8 @@ def image_build():
             "-t",
             image_name,
             os.path.join(testenv.data_dir, "podman"),
-        ]
+        ],
+        no_podman=True,
     )
 
 
