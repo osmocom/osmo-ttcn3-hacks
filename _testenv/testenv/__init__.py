@@ -64,6 +64,20 @@ def parse_args():
         help="build image even if it is up-to-date",
     )
 
+    sub_qemu = sub_init_runtime.add_parser("qemu", help="prepare the qemu image (for 'run --qemu')")
+    sub_qemu.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="build image even if it is up-to-date",
+    )
+    sub_qemu.add_argument(
+        "-q",
+        "--qemu-verbose",
+        action="store_true",
+        help="show QEMU output",
+    )
+
     sub_run = sub.add_parser("run", help="build components and run a testsuite")
 
     group = sub_run.add_argument_group("testsuite options")

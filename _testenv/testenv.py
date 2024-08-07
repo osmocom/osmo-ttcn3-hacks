@@ -10,6 +10,7 @@ import testenv.daemons
 import testenv.osmo_dev
 import testenv.podman
 import testenv.podman_install
+import testenv.qemu_init
 import testenv.requirements
 import testenv.testdir
 import testenv.testenv_cfg
@@ -83,6 +84,10 @@ def init_osmo_dev():
     testenv.osmo_dev.init_clone()
 
 
+def init_qemu():
+    testenv.qemu_init.init()
+
+
 def clean():
     cache_dirs = [
         "git",
@@ -108,6 +113,8 @@ def main():
             init_osmo_dev()
         elif testenv.args.runtime == "podman":
             init_podman()
+        elif testenv.args.runtime == "qemu":
+            init_qemu()
     elif action == "clean":
         clean()
 

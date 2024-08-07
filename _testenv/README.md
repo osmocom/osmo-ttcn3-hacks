@@ -115,6 +115,10 @@ For example:
   Set the directory for sources of Osmocom components. The default is the
   directory above your osmo-ttcn3-hacks.git clone.
 
+* `TESTENV_QEMU_CACHE_DIR`:
+  Set the directory for storing QEMU disk images (when using `--qemu`). The
+  default is `~/.cache/osmo-ttcn3-testenv/qemu`.
+
 * `TESTENV_NO_IMAGE_UP_TO_DATE_CHECK`:
   Do not compare the timestamp of `data/virt/Dockerfile` with the date of the
   podman image. This check does not work on jenkins where we always have
