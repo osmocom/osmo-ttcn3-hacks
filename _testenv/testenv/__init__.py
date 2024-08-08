@@ -145,6 +145,9 @@ def parse_args():
         if args.binary_repo and args.binary_repo.endswith(":latest"):
             logging.debug("Binary repository ends in :latest, using latest configs")
             args.latest = True
+    else:
+        # podman is only used in "testenv run"
+        args.podman = False
 
 
 def verify_args_run():
