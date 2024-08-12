@@ -60,10 +60,10 @@ def init():
 
     extra_opts = []
     if testenv.args.podman:
-        make_dir = os.path.join(testenv.args.cache, "podman", "make")
+        make_dir = os.path.join(testenv.args.cache, "virt", "make")
         extra_opts = [
             "--install-prefix",
-            os.path.join(testenv.args.cache, "podman/usr"),
+            os.path.join(testenv.args.cache, "virt/usr"),
         ]
     else:
         make_dir = os.path.join(testenv.args.cache, "host", "make")

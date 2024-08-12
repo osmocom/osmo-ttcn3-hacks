@@ -87,7 +87,8 @@ def clean():
     cache_dirs = [
         "git",
         "host",
-        "podman",
+        "podman",  # legacy
+        "virt",
     ]
     for cache_dir in cache_dirs:
         path = os.path.join(testenv.cache_dir_default, cache_dir)

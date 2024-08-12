@@ -116,7 +116,7 @@ For example:
   directory above your osmo-ttcn3-hacks.git clone.
 
 * `TESTENV_NO_IMAGE_UP_TO_DATE_CHECK`:
-  Do not compare the timestamp of `data/podman/Dockerfile` with the date of the
+  Do not compare the timestamp of `data/virt/Dockerfile` with the date of the
   podman image. This check does not work on jenkins where we always have
   a fresh clone.
 

@@ -35,13 +35,13 @@ def copy_ttcn3_hacks_dir():
     be incompatible"""
     global ttcn3_hacks_dir
 
-    ttcn3_hacks_dir = os.path.join(testenv.args.cache, "podman", "osmo-ttcn3-hacks")
+    ttcn3_hacks_dir = os.path.join(testenv.args.cache, "virt", "osmo-ttcn3-hacks")
 
     logging.info(f"Copying osmo-ttcn3-hacks sources to: {ttcn3_hacks_dir}")
 
     # Rsync can't directly parse the .gitignore with ! rules, so create a list
     # of files to be copied with git
-    copy_list = os.path.join(testenv.args.cache, "podman", "ttcn3-copy-list")
+    copy_list = os.path.join(testenv.args.cache, "virt", "ttcn3-copy-list")
     testenv.cmd.run(
         f"git ls-files -o -c --exclude-standard > {shlex.quote(copy_list)}",
         cwd=ttcn3_hacks_dir_src,

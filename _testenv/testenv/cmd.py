@@ -17,7 +17,7 @@ def init_env():
 
     if testenv.args.podman:
         if not testenv.args.binary_repo:
-            usr_dir = os.path.join(testenv.args.cache, "podman", "usr")
+            usr_dir = os.path.join(testenv.args.cache, "virt", "usr")
     else:
         usr_dir = os.path.join(testenv.args.cache, "host", "usr")
 
@@ -45,7 +45,7 @@ def init_env():
         env_extra["TESTENV_GIT_DIR"] = testenv.podman_install.git_dir
     else:
         if testenv.args.podman:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "podman", "make")
+            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "virt", "make")
         else:
             env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make")
 

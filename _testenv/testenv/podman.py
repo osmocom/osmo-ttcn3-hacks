@@ -44,7 +44,7 @@ def image_up_to_date():
         logging.debug("Assuming the podman image is up-to-date")
         return True
 
-    dockerfile = os.path.join(testenv.data_dir, "podman/Dockerfile")
+    dockerfile = os.path.join(testenv.data_dir, "virt/Dockerfile")
     mtime = os.stat(dockerfile).st_mtime
     mtime = datetime.datetime.utcfromtimestamp(mtime)
     logging.debug(f"Dockerfile last modified: {str(mtime).split('.')[0]}")
@@ -69,7 +69,7 @@ def image_build():
             f"DISTRO={distro}",
             "-t",
             image_name,
-            os.path.join(testenv.data_dir, "podman"),
+            os.path.join(testenv.data_dir, "virt"),
         ],
         no_podman=True,
     )
@@ -98,8 +98,8 @@ def init():
     global apt_dir_var_lib
     global run_shell_on_stop
 
-    apt_dir_var_cache = os.path.join(testenv.args.cache, "podman", "var-cache-apt")
-    apt_dir_var_lib = os.path.join(testenv.args.cache, "podman", "var-lib-apt")
+    apt_dir_var_cache = os.path.join(testenv.args.cache, "virt", "var-cache-apt")
+    apt_dir_var_lib = os.path.join(testenv.args.cache, "virt", "var-lib-apt")
 
     os.makedirs(apt_dir_var_cache, exist_ok=True)
     os.makedirs(apt_dir_var_lib, exist_ok=True)
@@ -177,7 +177,7 @@ def start():
     osmo_dev_dir = testenv.osmo_dev.get_osmo_dev_dir()
     container_name = testenv.testdir.prefix
     # Custom seccomp profile that allows io_uring
-    seccomp = os.path.join(testenv.data_dir, "podman/seccomp.json")
+    seccomp = os.path.join(testenv.data_dir, "virt/seccomp.json")
 
     cmd = [
         "podman",
