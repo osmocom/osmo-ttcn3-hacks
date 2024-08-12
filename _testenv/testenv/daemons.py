@@ -49,7 +49,7 @@ def start(cfg):
             pipe = f"2>&1 | tee {shlex.quote(log)}"
         else:
             pipe = f">{shlex.quote(log)} 2>&1"
-        cmd = ["sh", "-c", f"{program} 2>&1 {pipe}"]
+        cmd = ["sh", "-c", f"{program} {pipe}"]
 
         env = {}
         if testenv.args.io_uring:
