@@ -23,6 +23,13 @@ def init():
             run_shell_on_stop = True
 
 
+def check_startup_failed(process, name):
+    """Wait shortly and check if a process we just started is still running."""
+    time.sleep(0.2)
+    if process.poll() is not None:
+        raise testenv.NoTraceException(f"program failed to start: {name}")
+
+
 def start(cfg):
     global daemons
 
@@ -61,10 +68,7 @@ def start(cfg):
             logging.debug(f"+ {cmd}")
             daemons[section] = subprocess.Popen(cmd, cwd=cwd, env=testenv.cmd.generate_env(env))
 
-        # Wait 200ms and check if it is still running
-        time.sleep(0.2)
-        if daemons[section].poll() is not None:
-            raise testenv.NoTraceException(f"program failed to start: {program}")
+        check_startup_failed(daemons[section], program)
 
         # Run setup script
         if "setup" in section_data:
