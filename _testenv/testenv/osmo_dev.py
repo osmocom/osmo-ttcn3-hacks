@@ -138,4 +138,5 @@ def make(cfg, limit_section=None):
         sys.exit(1)
 
     logging.info("Building test components")
+    logging.debug(f"cwd={make_dir}")
     testenv.cmd.run(["make"] + targets, cwd=make_dir)
