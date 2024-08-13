@@ -246,6 +246,108 @@ const RanOps MSC_RanOps := {
 	sccp_addr_peer := omit
 }
 
+type record MgwResponse {
+	integer resp,
+	HostName mgw_rtp_ip,
+	/* if set, used after first received MDCX: */
+	HostName mgw_rtp_ip_mdcx optional,
+	PortNumber mgw_rtp_port,
+	MgcpConnectionId mgcp_connection_id
+}
+type record MgcpParameters {
+	integer got_crcx_count,
+	integer got_dlcx_count,
+	MgcpCallId mgcp_call_id optional,
+	MgcpEndpoint mgcp_ep,
+	MgwResponse mgw_conn_ran,
+	MgwResponse mgw_conn_cn,
+	uint7_t rtp_payload_type,
+	charstring rtp_sdp_format,
+	HostName hnb_rtp_ip,
+	PortNumber hnb_rtp_port,
+	HostName cn_rtp_ip,
+	PortNumber cn_rtp_port,
+	boolean use_osmux,
+	integer got_osmux_count
+}
+
+template (value) MgcpParameters t_MgcpParams := {
+	got_crcx_count := 0,
+	got_dlcx_count := 0,
+	mgcp_call_id := omit,
+	mgcp_ep := "rtpbridge/1@mgw",
+	mgw_conn_ran := {
+		resp := 1,
+		mgw_rtp_ip := "127.1.2.1",
+		mgw_rtp_ip_mdcx := omit,
+		mgw_rtp_port := 10000,
+		mgcp_connection_id := '11111'H
+	},
+	mgw_conn_cn := {
+		resp := 1,
+		mgw_rtp_ip := "127.1.2.2",
+		mgw_rtp_ip_mdcx := omit,
+		mgw_rtp_port := 20000,
+		mgcp_connection_id := '22222'H
+	},
+	rtp_payload_type := 112,
+	rtp_sdp_format := "VND.3GPP.IUFP",
+	hnb_rtp_ip := "127.1.1.1",
+	hnb_rtp_port := 10001,
+	cn_rtp_ip := "127.1.3.1",
+	cn_rtp_port := 20001,
+	use_osmux := false,
+	got_osmux_count := 0
+}
+
+type record TestHdlrParams {
+	integer hnb_idx,
+	/* cn_idx indicates which CN link from g_cn[] to connect to the test component.
+	 * See also f_cn_idx(). */
+	integer cn_idx,
+	hexstring imsi,
+	boolean ps_domain,
+	MgcpParameters mgcp_pars optional,
+	HnbConfig hnb optional,
+	boolean expect_separate_sccp_cr,
+	integer tx_sccp_cr_data_len,
+	boolean expect_compl_l3_success,
+	charstring pfcp_local_addr,
+	octetstring nas_pdu optional,
+	/* local and remote SCCP addresses, used in TC_mscpool_paging_* */
+	SCCP_PAR_Address sccp_addr_msc optional,
+	SCCP_PAR_Address sccp_addr_hnbgw optional,
+	/* RAB release cause */
+	RANAP_IEs.Cause rab_rel_cause
+}
+
+/* We extend:
+   * RUA_ConnHdlr (for the Iuh side, emulating the HNB)
+   * RAN_ConnHdlr (for the Iu side, emulating the MSC)
+   * MGCP_ConnHdlr (for the MGCP side, emulating the MGW)
+   * StatsD_ConnHdlr (for the statsd interface, verifying counters)
+ */
+type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr  {
+	var integer g_sccp_conn_id;
+	var TestHdlrParams g_pars;
+	timer g_Tguard;
+
+	port TELNETasp_PT HNBGWVTY;
+}
+
+
+const MGCPOps MSC_MGCPOps := {
+	create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
+	unitdata_cb := refers(MGCP_Emulation.DummyUnitdataCallback)
+}
+
+function f_create_ranap_exp(octetstring l3_enc) runs on ConnHdlr {
+	BSSAP_PROC.call(RAN_register:{l3_enc, self}) {
+		[] BSSAP_PROC.getreply(RAN_register:{?, ?}) {};
+	}
+}
+
+
 const integer NUM_HNB := 2;
 
 type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr, PFCP_ConnHdlr {
@@ -946,6 +1048,42 @@ testcase TC_ue_register_before_hnb_register() runs on test_CT {
 /***********************************************************************
  * RUA / RANAP Testing
  ***********************************************************************/
+
+/* Translate from {msc,sgsn}x{0..n} to the proper index to use in g_cn[].
+ * g_cn[] stores CN links, MSCs and SGSNs in the same array.
+ * For example, for 'sgsn 23', use g_cn[ f_cn_idx(ps_domain := true, cn_nr := 23) ].
+ *
+ * Note the naming:
+ * cn_nr is the number used in the cfg file, as in 'msc 0'.
+ * cn_idx is the array index in g_cn[].
+ */
+private function f_cn_idx(boolean ps_domain, integer cn_nr := 0) return integer
+{
+	if (ps_domain) {
+		return FIRST_SGSN_IDX + cn_nr;
+	}
+	return FIRST_MSC_IDX + cn_nr;
+}
+
+private template (value) TestHdlrParams
+t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
+       boolean expect_separate_sccp_cr := false, integer tx_sccp_cr_data_len := 0,
+       integer cn_nr := 0, template (value) RANAP_IEs.Cause rab_rel_cause := ts_RanapCause_nas_normal) := {
+	hnb_idx := hnb_idx,
+	cn_idx := f_cn_idx(ps_domain, cn_nr),
+	imsi := f_gen_imsi(imsi_suffix),
+	ps_domain := ps_domain,
+	mgcp_pars := t_MgcpParams,
+	hnb := omit,	/* filled in later */
+	expect_separate_sccp_cr := expect_separate_sccp_cr,
+	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
+	expect_compl_l3_success := true,
+	pfcp_local_addr := mp_pfcp_ip_local,
+	nas_pdu := omit,
+	sccp_addr_msc := omit,
+	sccp_addr_hnbgw := omit,
+	rab_rel_cause := rab_rel_cause
+}
 
 /* Create an Iuh connection; send InitialUE; expect it to appear on new SCCP conenction */
 friend function f_tc_initial_ue(charstring id) runs on ConnHdlr {
@@ -1670,7 +1808,33 @@ private function f_ctrs_cn_add(integer cn_nr, charstring countername, integer va
 	f_counter_name_vals_list_add(g_ctr_cn, cn_nr, countername, val);
 }
 
-private function f_tc_cnpool_compl_l3(charstring id) runs on ConnHdlr {
+private function f_perform_compl_l3(octetstring nas, boolean do_clear := true, boolean expect_success := true)
+runs on ConnHdlr {
+	timer T := 10.0;
+
+	if (expect_success) {
+		/* create an expect on the Iu side for the random NAS portion */
+		if (g_pars.expect_separate_sccp_cr) {
+			f_ran_register_sccp_cr_without_payload();
+		} else {
+			f_ran_register_exp(nas);
+		}
+	}
+
+	/* send Connect via Iuh (creating a RUA connection) */
+	var RANAP_PDU tx := f_build_initial_ue_with_nas(g_pars, nas);
+	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
+
+	if (expect_success) {
+		/* Expect same message to arrive at CN */
+		f_bssap_expect(tx);
+	} else {
+		RUA.receive(RUA_Disc_Ind:?);
+	}
+}
+
+private function f_tc_cnpool_compl_l3(charstring id, TestHdlrParams pars) runs on ConnHdlr {
+	f_init_handler(pars);
 	f_perform_compl_l3(g_pars.nas_pdu, expect_success := g_pars.expect_compl_l3_success);
 }
 
@@ -2555,6 +2719,12 @@ testcase TC_second_rab_assignment() runs on test_CT {
 }
 
 /* When no CN was found for a UE / domain, make sure osmo-hnbgw returns a Disconnect (OS#6283) */
+testcase TC_mscpool_L3Compl_no_cn() runs on test_CT {
+	f_TC_cnpool_L3Compl_no_cn(ps_domain := false);
+}
+testcase TC_sgsnpool_L3Compl_no_cn() runs on test_CT {
+	f_TC_cnpool_L3Compl_no_cn(ps_domain := true);
+}
 function f_TC_cnpool_L3Compl_no_cn(boolean ps_domain) runs on test_CT {
 
 	/* Have one MSC and one SGSN but do not allow attaching.
@@ -2566,17 +2736,12 @@ function f_TC_cnpool_L3Compl_no_cn(boolean ps_domain) runs on test_CT {
 	f_ctrs_cn_init(ps_domain := ps_domain);
 
 	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 4);
-	f_TC_cnpool_compl_l3_list(ps_domain, compl3, {0, 0, 0, 0}, omit,
+	f_TC_cnpool_compl_l3_list(ps_domain, compl3, {0, 0, 0, 0}, omit, // FIXME failure counter?
 				  expect_compl_l3_success := false);
 
 	f_shutdown_helper();
 }
-testcase TC_mscpool_L3Compl_no_cn() runs on test_CT {
-	f_TC_cnpool_L3Compl_no_cn(ps_domain := false);
-}
-testcase TC_sgsnpool_L3Compl_no_cn() runs on test_CT {
-	f_TC_cnpool_L3Compl_no_cn(ps_domain := true);
-}
+
 
 control {
 	execute(TC_hnb_register());
