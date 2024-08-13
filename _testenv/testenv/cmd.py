@@ -47,7 +47,8 @@ def init_env():
         if testenv.args.podman:
             env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "virt", "make")
         else:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make")
+            env_extra["OSMO_DEV_MAKE_DIR"] = os.environ.get('TESTENV_MAKE_DIR',
+							    os.path.join(testenv.args.cache, "host", "make"))
 
 
 def exit_error_cmd(completed, error_msg):

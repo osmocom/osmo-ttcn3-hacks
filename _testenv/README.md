@@ -115,6 +115,10 @@ For example:
   Set the directory for sources of Osmocom components. The default is the
   directory above your osmo-ttcn3-hacks.git clone.
 
+* `TESTENV_MAKE_DIR`:
+  Set the osmo-dev make directory.
+  The default is `~/.cache/osmo-ttcn3-testenv/make`.
+
 * `TESTENV_QEMU_CACHE_DIR`:
   Set the directory for storing QEMU disk images (when using `--qemu`). The
   default is `~/.cache/osmo-ttcn3-testenv/qemu`.

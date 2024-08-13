@@ -58,6 +58,7 @@ def init():
     if init_done:
         return
 
+    overwrite_gen_makefile = True
     extra_opts = []
     if testenv.args.podman:
         make_dir = os.path.join(testenv.args.cache, "virt", "make")
@@ -66,31 +67,36 @@ def init():
             os.path.join(testenv.args.cache, "virt/usr"),
         ]
     else:
-        make_dir = os.path.join(testenv.args.cache, "host", "make")
+        make_dir = os.environ.get('TESTENV_MAKE_DIR', None)
+        if make_dir:
+            overwrite_gen_makefile = False
+        else:
+            make_dir = os.path.join(testenv.args.cache, "host", "make")
         extra_opts = [
             "--install-prefix",
             os.path.join(testenv.args.cache, "host/usr"),
         ]
 
-    cmd = [
-        "./gen_makefile.py",
-        "--build-debug",
-        "--make-dir",
-        make_dir,
-        "--no-ldconfig",
-        "--src-dir",
-        testenv.src_dir,
-        "default.opts",
-        "ccache.opts",
-        "iu.opts",
-        "no_dahdi.opts",
-        "no_doxygen.opts",
-        "no_systemd.opts",
-        "werror.opts",
-        os.path.join(testenv.data_dir, "osmo-dev/osmo-bts-trx.opts"),
-    ] + extra_opts
+    if overwrite_gen_makefile or not os.path.exists(os.path.join(make_dir, 'Makefile')):
+        cmd = [
+            "./gen_makefile.py",
+            "--build-debug",
+            "--make-dir",
+            make_dir,
+            "--no-ldconfig",
+            "--src-dir",
+            testenv.src_dir,
+            "default.opts",
+            "ccache.opts",
+            "iu.opts",
+            "no_dahdi.opts",
+            "no_doxygen.opts",
+            "no_systemd.opts",
+            "werror.opts",
+            os.path.join(testenv.data_dir, "osmo-dev/osmo-bts-trx.opts"),
+        ] + extra_opts
 
-    testenv.cmd.run(cmd, cwd=get_osmo_dev_dir())
+        testenv.cmd.run(cmd, cwd=get_osmo_dev_dir())
     init_done = True
 
 
