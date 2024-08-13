@@ -86,12 +86,14 @@ def run(cmd, check=True, env={}, no_podman=False, stdin=subprocess.DEVNULL, *arg
     if not no_podman and testenv.args.podman:
         return testenv.podman.exec_cmd(cmd, check=check, env=env, *args, **kwargs)
 
+    env = generate_env(env)
+    logging.debug(f"+ env={env}")
     logging.debug(f"+ {cmd}")
 
     # Set stdin to /dev/null by default so we can still capture ^C with testenv
     p = subprocess.run(
         cmd,
-        env=generate_env(env),
+        env=env,
         shell=isinstance(cmd, str),
         stdin=stdin,
         *args,
