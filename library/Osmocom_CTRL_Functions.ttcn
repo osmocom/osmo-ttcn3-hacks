@@ -154,19 +154,39 @@ module Osmocom_CTRL_Functions {
 		}
 	}
 
-	template charstring ts_ctrl_ratectr(CtrlVariable grp, integer instance, CtrlVariable name,
-					    CtrlVariable kind := "abs") :=
-		"rate_ctr." & kind & "." & grp & "." & int2str(instance) & "." & name;
+	/* Some objects in osmocom programs have volatile instance indexes that are created by external events rather
+	 * than a fixed config. To access these, allow passing a mapping of an index number as the test expects them to
+	 * instance names given dynamically.
+	 *
+	 * For example, in osmo-hnbgw, hnb.0 could be hnb.123 depending on how many HNB connected beforehand. To use the
+	 * cell ID instead, pass in a mapping of index to cell id, to use the name given by rate_ctr_group_set_name()
+	 * instead; so this would ask the CTRL for 'hnb.my-cell-id-foo' as instance_id_map[0] == 'my-cell-id-foo':
+	 *   f_ctrl_ctr_resolve_instance_id(0, { "my-cell-id-foo", "my-cell-id-bar" });
+	 */
+	private function f_ctrl_ctr_resolve_instance_id(integer instance_idx, charstring_list instance_id_map) return charstring
+	{
+		if (lengthof(instance_id_map) > instance_idx) {
+			return "by_id." & instance_id_map[instance_idx];
+		}
+		return int2str(instance_idx);
+	}
+
+	private template charstring ts_ctrl_ratectr(CtrlVariable grp, integer instance, CtrlVariable name,
+						    CtrlVariable kind := "abs", charstring_list instance_id_map) :=
+		"rate_ctr." & kind & "." & grp & "." & f_ctrl_ctr_resolve_instance_id(instance, instance_id_map) & "." & name;
 
 	function f_ctrl_get_ratectr_abs(IPA_CTRL_PT pt, CtrlVariable grp, integer instance,
-					CtrlVariable name) return integer {
-		return str2int(f_ctrl_get(pt, valueof(ts_ctrl_ratectr(grp, instance, name)), on_err := "-1"));
+					CtrlVariable name, charstring_list instance_id_map := {}) return integer {
+		return str2int(f_ctrl_get(pt,
+					valueof(ts_ctrl_ratectr(grp, instance, name, instance_id_map := instance_id_map)),
+					on_err := "-1"));
 	}
 
 	function f_ctrl_get_exp_ratectr_abs(IPA_CTRL_PT pt, CtrlVariable grp, integer instance,
-					    CtrlVariable name, template integer exp) {
+					    CtrlVariable name, template integer exp,
+					    charstring_list instance_id_map := {}) {
 		var charstring ctrl_resp;
-		var CtrlVariable variable := valueof(ts_ctrl_ratectr(grp, instance, name));
+		var CtrlVariable variable := valueof(ts_ctrl_ratectr(grp, instance, name, instance_id_map := instance_id_map));
 		ctrl_resp := f_ctrl_get(pt, variable);
 		if (not match(str2int(ctrl_resp), exp)) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
@@ -224,13 +244,15 @@ module Osmocom_CTRL_Functions {
 
 	/* Retrieve one instance's rate counter values of the given names. */
 	function f_counter_name_vals_get(IPA_CTRL_PT pt, charstring instance_name, integer instance_nr,
-					 CounterNameVals counternames)
+					 CounterNameVals counternames,
+					 charstring_list instance_id_map := {})
 	return CounterNameVals {
 		var CounterNameVals vals;
 		for (var integer i := 0; i < lengthof(counternames); i := i + 1) {
 			vals[i] := {
 				name := counternames[i].name,
-				val := f_ctrl_get_ratectr_abs(pt, instance_name, instance_nr, counternames[i].name)
+				val := f_ctrl_get_ratectr_abs(pt, instance_name, instance_nr, counternames[i].name,
+							      instance_id_map := instance_id_map)
 			};
 		}
 		return vals;
@@ -307,8 +329,9 @@ module Osmocom_CTRL_Functions {
 	/* For a specific instance, call f_counter_name_vals_get() and compare with expected counter values.
 	 * Set the test verdict accordingly. */
 	function f_counter_name_vals_expect(IPA_CTRL_PT pt, charstring instance_name, integer instance_nr,
-					    CounterNameVals vals) {
-		var CounterNameVals last := f_counter_name_vals_get(pt, instance_name, instance_nr, vals);
+					    CounterNameVals vals, charstring_list instance_id_map := {}) {
+		var CounterNameVals last := f_counter_name_vals_get(pt, instance_name, instance_nr, vals,
+								    instance_id_map := instance_id_map);
 		for (var integer i := 0; i < lengthof(vals); i := i + 1) {
 			if (last[i].name != vals[i].name) {
 				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Internal error");
@@ -325,19 +348,22 @@ module Osmocom_CTRL_Functions {
 
 	/* For N instances, call f_counter_name_vals_get() and compare with expected counter values.
 	 * Set the test verdict accordingly. The number of instances is given by lengthof(valslist). */
-	function f_counter_name_vals_expect_n(IPA_CTRL_PT pt, charstring instance_name, CounterNameValsList valslist) {
+	function f_counter_name_vals_expect_n(IPA_CTRL_PT pt, charstring instance_name, CounterNameValsList valslist,
+					      charstring_list instance_id_map := {}) {
 		for (var integer instance_nr := 0; instance_nr < lengthof(valslist); instance_nr := instance_nr + 1) {
-			f_counter_name_vals_expect(pt, instance_name, instance_nr, valslist[instance_nr]);
+			f_counter_name_vals_expect(pt, instance_name, instance_nr, valslist[instance_nr],
+						   instance_id_map := instance_id_map);
 		}
 	}
 
 	/* For a specific instance, call f_counter_name_vals_get() and indentify counters that have changed with respect
 	 * to 'vals'. Return list of the changed counter names in the order they appear in 'vals'. */
-	function f_counter_name_vals_get_changed(IPA_CTRL_PT pt, charstring instance_name, integer instance_nr,
-						 CounterNameVals vals)
+	private function f_counter_name_vals_get_changed(IPA_CTRL_PT pt, charstring instance_name, integer instance_nr,
+							 CounterNameVals vals,
+							 charstring_list instance_id_map := {})
 	return charstring_list {
 		var charstring_list changed := {};
-		var CounterNameVals last := f_counter_name_vals_get(pt, instance_name, instance_nr, vals);
+		var CounterNameVals last := f_counter_name_vals_get(pt, instance_name, instance_nr, vals, instance_id_map);
 		for (var integer i := 0; i < lengthof(vals); i := i + 1) {
 			if (last[i].name != vals[i].name) {
 				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Internal error");
@@ -351,11 +377,14 @@ module Osmocom_CTRL_Functions {
 
 	/* For N instances, call f_counter_name_vals_get() and indentify counters that have changed with respect
 	 * to 'vals'. Return list of the changed counter names in the order they appear in 'vals'. */
-	function f_counter_name_vals_get_changed_n(IPA_CTRL_PT pt, charstring instance_name, CounterNameValsList valslist)
+	function f_counter_name_vals_get_changed_n(IPA_CTRL_PT pt, charstring instance_name, CounterNameValsList valslist,
+			charstring_list instance_id_map := {})
 	return charstring_list {
 		var charstring_list changed := {};
 		for (var integer instance_nr := 0; instance_nr < lengthof(valslist); instance_nr := instance_nr + 1) {
-			changed := changed & f_counter_name_vals_get_changed(pt, instance_name, instance_nr, valslist[instance_nr]);
+			changed := changed & f_counter_name_vals_get_changed(pt, instance_name, instance_nr,
+						 valslist[instance_nr],
+						 instance_id_map := instance_id_map);
 		}
 		return changed;
 	}
