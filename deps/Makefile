@@ -56,6 +56,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.LANL2asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
+			titan.TestPorts.SIPmsg \
 			titan.TestPorts.TELNETasp \
 			titan.TestPorts.TCPasp \
 			titan.TestPorts.UDPasp \
@@ -71,7 +72,6 @@ OSMOGERRIT_REPOS=	osmo-uecups
 OSMOGITEA_REPOS=	titan.ProtocolModules.BSSMAP \
 			titan.ProtocolModules.MAP \
 			titan.TestPorts.AF_PACKET \
-			titan.TestPorts.SIPmsg \
 			titan.TestPorts.USB
 
 ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
