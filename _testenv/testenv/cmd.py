@@ -78,6 +78,13 @@ def generate_env(env={}, podman=False):
 
     for var in env:
         ret[var] = env[var]
+
+    # Without podman: pass all environment variables from host (OS#6544)
+    if not podman:
+        for var in os.environ:
+            if var not in ret:
+                ret[var] = os.environ.get(var)
+
     return ret
 
 
