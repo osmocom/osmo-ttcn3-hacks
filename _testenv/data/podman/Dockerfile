@@ -121,3 +121,12 @@ RUN	set -x && \
 	apt-get clean && \
 	cd / && \
 	rm -rf /tmp/mongodb
+
+# Install packages from Debian repositories (alphabetic order)
+ENV	DEBIAN_FRONTEND=noninteractive
+RUN	set -x && \
+	apt-get update && \
+	apt-get install -y --no-install-recommends \
+		gdb \
+		&& \
+	apt-get clean
