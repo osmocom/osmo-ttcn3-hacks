@@ -133,6 +133,12 @@ For example:
   Set the directory for sources of Osmocom components. The default is the
   directory above your osmo-ttcn3-hacks.git clone.
 
+* `TESTENV_REBUILD_OUTDATED_IMAGE`:
+  Automatically rebuild the outdated image, instead of only displaying a
+  warning. This is not the default because rebuilding it takes some time and is
+  oftentimes not needed (e.g. if a dependency was added that is not relevant to
+  the testsuite that the user is currently testing).
+
 * `TESTENV_NO_IMAGE_UP_TO_DATE_CHECK`:
   Do not compare the timestamp of `data/podman/Dockerfile` with the date of the
   podman image. This check does not work on jenkins where we always have

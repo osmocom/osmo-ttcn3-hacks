@@ -52,13 +52,14 @@ def image_up_to_date():
     return mtime < created
 
 
-def image_build():
-    if image_exists() and image_up_to_date():
-        logging.debug(f"Podman image is up-to-date: {image_name}")
-        if testenv.args.force:
-            logging.debug("Building anyway since --force was used")
-        else:
-            return
+def image_build(check_existing=True):
+    if check_existing:
+        if image_exists() and image_up_to_date():
+            logging.debug(f"Podman image is up-to-date: {image_name}")
+            if testenv.args.force:
+                logging.debug("Building anyway since --force was used")
+            else:
+                return
 
     logging.info(f"Building podman image: {image_name}")
     testenv.cmd.run(
@@ -110,7 +111,17 @@ def init():
     if not image_exists():
         raise testenv.NoTraceException("Missing podman image, run 'testenv.py init podman' first to build it")
     if not image_up_to_date():
-        logging.warning("The podman image might be outdated, consider running 'testenv.py init podman' to rebuild it")
+        if os.environ.get("TESTENV_REBUILD_OUTDATED_IMAGE") == "1":
+            logging.warning("The podman image is outdated, rebuilding it... (TESTENV_REBUILD_OUTDATED_IMAGE=1)")
+            image_build(False)
+        else:
+            # Rebuilding the image takes some time, and oftentimes it is not
+            # needed. So by default don't force the user to rebuild it, just
+            # show a warning.
+            logging.warning(
+                "The podman image might be outdated, consider running 'testenv.py init podman' to rebuild it"
+            )
+            logging.debug("Set TESTENV_REBUILD_OUTDATED_IMAGE=1 to rebuild it automatically")
 
     atexit.register(stop)
 
