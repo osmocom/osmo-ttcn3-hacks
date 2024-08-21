@@ -1,6 +1,24 @@
 # testenv
 
-Build everything needed for running Osmocom TTCN-3 testsuites and execute them.
+Testenv builds and runs a testsuite and all the components it tests (usually
+one or more Osmocom programs). See `./testenv.py -h` for command-line usage
+help.
+
+Example for running the `mgw` testsuite:
+```
+$ ./testenv.py run mgw
+```
+
+## Virtualization
+
+By default testenv does everything directly on the host, without using a
+container. The `--podman` parameter can be used to build and run everything in
+a container instead.
+
+When passing `--podman`, then just one container is used to build and run
+everything. The container is the same, no matter which testsuite gets executed.
+Additional packages get installed after starting the container, with a package
+cache mounted to avoid unnecessary downloads.
 
 ## testenv.cfg
 
