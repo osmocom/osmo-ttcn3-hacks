@@ -30,19 +30,13 @@ import from S1AP_Constants all;
 
 import from SCTP_Templates all;
 import from S1AP_Server all;
+import from ConnHdlr all;
 
 modulepar {
 	charstring mp_s1gw_enb_ip;	/* eNB facing address of the S1GW */
 	charstring mp_s1gw_mme_ip;	/* MME facing address of the S1GW */
 	charstring mp_mme_bind_ip;	/* MME address on which we get connections from S1GW */
 }
-
-private type record of ConnHdlr ConnHdlrList;
-
-type component ConnHdlr extends S1APSRV_ConnHdlr {
-	port S1AP_CODEC_PT S1AP_ENB;
-	var ConnectionId g_s1ap_conn_id := -1;
-};
 
 type component test_CT {
 	timer g_Tguard;
@@ -53,16 +47,6 @@ private altstep as_Tguard() runs on test_CT {
 	[] g_Tguard.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
 	}
-}
-
-template Global_ENB_ID
-ts_Global_ENB_ID(integer enb_id := 0,
-		 OCT3 plmn_id := '00f110'O) := {
-	pLMNidentity := plmn_id,
-	eNB_ID := {
-		macroENB_ID := int2bit(enb_id, 20)
-	},
-	iE_Extensions := omit
 }
 
 function f_init(float Tval := 20.0) runs on test_CT {
@@ -80,17 +64,6 @@ function f_init_s1ap_srv() runs on test_CT {
 	vc_S1APSRV.start(S1AP_Server.main(cpars));
 }
 
-type record ConnHdlrPars {
-	Global_ENB_ID genb_id
-};
-
-template (value) ConnHdlrPars
-t_ConnHdlrPars(integer enb_id := 0) := {
-	genb_id := ts_Global_ENB_ID(enb_id)
-}
-
-type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
-
 function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
 runs on test_CT return ConnHdlr {
 	var ConnHdlr vc_conn;
@@ -105,150 +78,10 @@ runs on test_CT return ConnHdlr {
 	return vc_conn;
 }
 
-function f_ConnHdlr_connect() runs on ConnHdlr {
-	var Result res;
-	timer T;
-
-	map(self:S1AP_ENB, system:S1AP_CODEC_PT);
-
-	/* initiate SCTP connection establishment */
-	res := S1AP_CodecPort_CtrlFunct.f_IPL4_connect(S1AP_ENB,
-						       mp_s1gw_enb_ip, 36412,
-						       "0.0.0.0", 0, -1,
-						       { sctp := c_SctpTuple_S1AP });
-	if (not ispresent(res.connId)) {
-		setverdict(fail, "Could not create an S1AP socket, check your configuration");
-		mtc.stop;
-	}
-	g_s1ap_conn_id := res.connId;
-
-	/* wait for the establishment confirmation */
-	T.start(2.0);
-	alt {
-	[] S1AP_ENB.receive(tr_SctpAssocChange(SCTP_COMM_UP, g_s1ap_conn_id)) {
-		log("eNB connection established");
-		}
-	[] S1AP_ENB.receive(PortEvent:{sctpEvent := ?}) { repeat; }
-	[] T.timeout {
-		setverdict(fail, "eNB connection establishment timeout");
-		self.stop;
-		}
-	}
-}
-
-function f_ConnHdlr_disconnect() runs on ConnHdlr {
-	var Result res;
-
-	S1AP_CodecPort_CtrlFunct.f_IPL4_close(S1AP_ENB, g_s1ap_conn_id,
-					      { sctp := c_SctpTuple_S1AP });
-	g_s1ap_conn_id := -1;
-	unmap(self:S1AP_ENB, system:S1AP_CODEC_PT);
-
-	S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_DOWN);
-
-	log("eNB connection closed");
-}
-
-function f_ConnHdlr_expect_shutdown() runs on ConnHdlr {
-	S1AP_ENB.receive(tr_SctpShutDownEvent(g_s1ap_conn_id));
-	S1AP_ENB.receive(tr_SctpAssocChange(SCTP_SHUTDOWN_COMP, g_s1ap_conn_id));
-	S1AP_ENB.receive(PortEvent:{connClosed := ?});
-}
-
-function f_ConnHdlr_tx_s1ap_from_enb(template (value) S1AP_PDU pdu)
-runs on ConnHdlr {
-	S1AP_ENB.send(t_S1AP_Send(g_s1ap_conn_id, pdu));
-}
-
-function f_ConnHdlr_tx_s1ap_from_mme(template (value) S1AP_PDU pdu)
-runs on ConnHdlr {
-	S1AP_CONN.send(pdu);
-}
-
-function f_ConnHdlr_rx_s1ap_from_enb(out S1AP_PDU pdu,
-				     template (present) S1AP_PDU tr_pdu := ?,
-				     float Tval := 0.5)
-runs on ConnHdlr {
-	timer T := Tval;
-
-	T.start;
-	alt {
-	[] S1AP_CONN.receive(tr_pdu) -> value pdu {
-		setverdict(pass);
-		T.stop;
-		}
-	[] S1AP_CONN.receive(S1AP_PDU:?) -> value pdu {
-		setverdict(fail, "Rx unexpected S1AP PDU from eNB: ", pdu);
-		T.stop;
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for S1AP PDU from eNB: ", tr_pdu);
-		}
-	}
-}
-
-function f_ConnHdlr_rx_s1ap_from_mme(out S1AP_PDU pdu,
-				     template (present) S1AP_PDU tr_pdu := ?,
-				     float Tval := 0.5)
-runs on ConnHdlr {
-	var S1AP_RecvFrom recv;
-	timer T := Tval;
-
-	T.start;
-	alt {
-	[] S1AP_ENB.receive(t_S1AP_RecvFrom(tr_pdu)) -> value recv {
-		pdu := recv.msg;
-		setverdict(pass);
-		T.stop;
-		}
-	[] S1AP_ENB.receive(t_S1AP_RecvFrom(?)) -> value recv {
-		pdu := recv.msg;
-		setverdict(fail, "Rx unexpected S1AP PDU from MME: ", pdu);
-		T.stop;
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for S1AP PDU from MME: ", tr_pdu);
-		}
-	}
-}
-
-function f_ConnHdlr_setup(Global_ENB_ID genb_id) runs on ConnHdlr {
-	var S1AP_PDU pdu;
-	timer T;
-
-	var SupportedTAs supported_tas_dummy := {
-		{
-			tAC := '0000'O,
-			broadcastPLMNs := { '00f000'O },
-			iE_Extensions := omit
-		}
-	};
-
-	f_ConnHdlr_tx_s1ap_from_enb(ts_S1AP_SetupReq(genb_id,
-						     supported_tas_dummy,
-						     v32));
-	T.start(1.0);
-	alt {
-	[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_UP) { repeat; }
-	[] S1AP_CONN.receive(tr_S1AP_SetupReq) {
-		setverdict(pass);
-		T.stop;
-		}
-	[] S1AP_CONN.receive(S1AP_PDU:?) -> value pdu {
-		setverdict(fail, "Rx unexpected S1AP PDU: ", pdu);
-		T.stop;
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for S1AP SetupReq");
-		}
-	}
-}
-
-
 function f_TC_setup(ConnHdlrPars pars) runs on ConnHdlr {
 	f_ConnHdlr_register(pars.genb_id);
 
-	f_ConnHdlr_connect();
+	f_ConnHdlr_connect(mp_s1gw_enb_ip);
 	f_ConnHdlr_setup(pars.genb_id);
 	f_sleep(0.5); /* keep the connection idle for some time */
 	f_ConnHdlr_disconnect();
@@ -287,7 +120,7 @@ testcase TC_setup_multi() runs on test_CT {
 function f_TC_conn_term_by_mme(ConnHdlrPars pars) runs on ConnHdlr {
 	f_ConnHdlr_register(pars.genb_id);
 
-	f_ConnHdlr_connect();
+	f_ConnHdlr_connect(mp_s1gw_enb_ip);
 	f_ConnHdlr_setup(pars.genb_id);
 	f_sleep(0.5); /* keep the connection idle for some time */
 
@@ -313,7 +146,7 @@ testcase TC_conn_term_by_mme() runs on test_CT {
 /* MME is not available, expect S1GW to terminate the eNB connection */
 function f_TC_conn_term_mme_unavail(ConnHdlrPars pars) runs on ConnHdlr {
 	/* establish an eNB connection to the S1GW */
-	f_ConnHdlr_connect();
+	f_ConnHdlr_connect(mp_s1gw_enb_ip);
 	/* expect our eNB connection to be released gracefully */
 	f_ConnHdlr_expect_shutdown();
 	setverdict(pass);
@@ -337,7 +170,7 @@ function f_TC_e_rab_setup(ConnHdlrPars pars) runs on ConnHdlr {
 	var S1AP_PDU pdu;
 
 	f_ConnHdlr_register(pars.genb_id);
-	f_ConnHdlr_connect();
+	f_ConnHdlr_connect(mp_s1gw_enb_ip);
 	f_ConnHdlr_setup(pars.genb_id);
 
 	log("eNB -> [S1GW] -> MME: E-RAB SETUP REQUEST");

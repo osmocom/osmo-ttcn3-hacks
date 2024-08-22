@@ -1,0 +1,200 @@
+/* OsmoS1GW (S1AP Gateway) ConnHdlr
+ *
+ * (C) 2024 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
+ *
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from S1AP_CodecPort all;
+import from S1AP_CodecPort_CtrlFunct all;
+import from S1AP_Types all;
+import from S1AP_Templates all;
+import from S1AP_PDU_Descriptions all;
+import from S1AP_IEs all;
+import from S1AP_PDU_Contents all;
+import from S1AP_Constants all;
+
+import from SCTP_Templates all;
+import from S1AP_Server all;
+
+type component ConnHdlr extends S1APSRV_ConnHdlr {
+	port S1AP_CODEC_PT S1AP_ENB;
+	var ConnectionId g_s1ap_conn_id := -1;
+};
+type record of ConnHdlr ConnHdlrList;
+
+type record ConnHdlrPars {
+	Global_ENB_ID genb_id
+};
+
+template Global_ENB_ID
+ts_Global_ENB_ID(integer enb_id := 0,
+		 OCT3 plmn_id := '00f110'O) := {
+	pLMNidentity := plmn_id,
+	eNB_ID := {
+		macroENB_ID := int2bit(enb_id, 20)
+	},
+	iE_Extensions := omit
+}
+
+template (value) ConnHdlrPars
+t_ConnHdlrPars(integer enb_id := 0) := {
+	genb_id := ts_Global_ENB_ID(enb_id)
+}
+
+type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+
+function f_ConnHdlr_connect(charstring remote_addr) runs on ConnHdlr {
+	var Result res;
+	timer T;
+
+	map(self:S1AP_ENB, system:S1AP_CODEC_PT);
+
+	/* initiate SCTP connection establishment */
+	res := S1AP_CodecPort_CtrlFunct.f_IPL4_connect(S1AP_ENB,
+						       remote_addr, 36412,
+						       "0.0.0.0", 0, -1,
+						       { sctp := c_SctpTuple_S1AP });
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not create an S1AP socket, check your configuration");
+		mtc.stop;
+	}
+	g_s1ap_conn_id := res.connId;
+
+	/* wait for the establishment confirmation */
+	T.start(2.0);
+	alt {
+	[] S1AP_ENB.receive(tr_SctpAssocChange(SCTP_COMM_UP, g_s1ap_conn_id)) {
+		log("eNB connection established");
+		}
+	[] S1AP_ENB.receive(PortEvent:{sctpEvent := ?}) { repeat; }
+	[] T.timeout {
+		setverdict(fail, "eNB connection establishment timeout");
+		self.stop;
+		}
+	}
+}
+
+function f_ConnHdlr_disconnect() runs on ConnHdlr {
+	var Result res;
+
+	S1AP_CodecPort_CtrlFunct.f_IPL4_close(S1AP_ENB, g_s1ap_conn_id,
+					      { sctp := c_SctpTuple_S1AP });
+	g_s1ap_conn_id := -1;
+	unmap(self:S1AP_ENB, system:S1AP_CODEC_PT);
+
+	S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_DOWN);
+
+	log("eNB connection closed");
+}
+
+function f_ConnHdlr_expect_shutdown() runs on ConnHdlr {
+	S1AP_ENB.receive(tr_SctpShutDownEvent(g_s1ap_conn_id));
+	S1AP_ENB.receive(tr_SctpAssocChange(SCTP_SHUTDOWN_COMP, g_s1ap_conn_id));
+	S1AP_ENB.receive(PortEvent:{connClosed := ?});
+}
+
+function f_ConnHdlr_tx_s1ap_from_enb(template (value) S1AP_PDU pdu)
+runs on ConnHdlr {
+	S1AP_ENB.send(t_S1AP_Send(g_s1ap_conn_id, pdu));
+}
+
+function f_ConnHdlr_tx_s1ap_from_mme(template (value) S1AP_PDU pdu)
+runs on ConnHdlr {
+	S1AP_CONN.send(pdu);
+}
+
+function f_ConnHdlr_rx_s1ap_from_enb(out S1AP_PDU pdu,
+				     template (present) S1AP_PDU tr_pdu := ?,
+				     float Tval := 0.5)
+runs on ConnHdlr {
+	timer T := Tval;
+
+	T.start;
+	alt {
+	[] S1AP_CONN.receive(tr_pdu) -> value pdu {
+		setverdict(pass);
+		T.stop;
+		}
+	[] S1AP_CONN.receive(S1AP_PDU:?) -> value pdu {
+		setverdict(fail, "Rx unexpected S1AP PDU from eNB: ", pdu);
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for S1AP PDU from eNB: ", tr_pdu);
+		}
+	}
+}
+
+function f_ConnHdlr_rx_s1ap_from_mme(out S1AP_PDU pdu,
+				     template (present) S1AP_PDU tr_pdu := ?,
+				     float Tval := 0.5)
+runs on ConnHdlr {
+	var S1AP_RecvFrom recv;
+	timer T := Tval;
+
+	T.start;
+	alt {
+	[] S1AP_ENB.receive(t_S1AP_RecvFrom(tr_pdu)) -> value recv {
+		pdu := recv.msg;
+		setverdict(pass);
+		T.stop;
+		}
+	[] S1AP_ENB.receive(t_S1AP_RecvFrom(?)) -> value recv {
+		pdu := recv.msg;
+		setverdict(fail, "Rx unexpected S1AP PDU from MME: ", pdu);
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for S1AP PDU from MME: ", tr_pdu);
+		}
+	}
+}
+
+function f_ConnHdlr_setup(Global_ENB_ID genb_id) runs on ConnHdlr {
+	var S1AP_PDU pdu;
+	timer T;
+
+	var SupportedTAs supported_tas_dummy := {
+		{
+			tAC := '0000'O,
+			broadcastPLMNs := { '00f000'O },
+			iE_Extensions := omit
+		}
+	};
+
+	f_ConnHdlr_tx_s1ap_from_enb(ts_S1AP_SetupReq(genb_id,
+						     supported_tas_dummy,
+						     v32));
+	T.start(1.0);
+	alt {
+	[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_UP) { repeat; }
+	[] S1AP_CONN.receive(tr_S1AP_SetupReq) {
+		setverdict(pass);
+		T.stop;
+		}
+	[] S1AP_CONN.receive(S1AP_PDU:?) -> value pdu {
+		setverdict(fail, "Rx unexpected S1AP PDU: ", pdu);
+		T.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for S1AP SetupReq");
+		}
+	}
+}
+
+}
