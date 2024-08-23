@@ -8,6 +8,7 @@ FILES="
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
+	PFCP_CodecPort_CtrlFunctDef.cc
 	S1AP_CodecPort_CtrlFunctDef.cc
 	S1AP_EncDec.cc
 	TCCConversion.cc

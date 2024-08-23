@@ -28,20 +28,28 @@ import from S1AP_IEs all;
 import from S1AP_PDU_Contents all;
 import from S1AP_Constants all;
 
+import from PFCP_Types all;
+import from PFCP_Emulation all;
+import from PFCP_Templates all;
+import from PFCP_CodecPort all;
+
 import from SCTP_Templates all;
 import from S1AP_Server all;
 import from ConnHdlr all;
 
 modulepar {
-	charstring mp_s1gw_enb_ip;	/* eNB facing address of the S1GW */
-	charstring mp_s1gw_mme_ip;	/* MME facing address of the S1GW */
-	charstring mp_enb_bind_ip;	/* eNB address to use locally when connecting to S1GW */
-	charstring mp_mme_bind_ip;	/* MME address on which we get connections from S1GW */
+	charstring mp_s1gw_enb_ip := "127.0.1.1";	/* eNB facing address of the S1GW */
+	charstring mp_s1gw_mme_ip := "127.0.2.1";	/* MME facing address of the S1GW */
+	charstring mp_s1gw_upf_ip := "127.0.3.1";	/* UPF facing address of the S1GW */
+	charstring mp_enb_bind_ip := "127.0.1.10";	/* eNB address to use locally when connecting to S1GW */
+	charstring mp_mme_bind_ip := "127.0.2.10";	/* MME address on which we get connections from S1GW */
+	charstring mp_upf_bind_ip := "127.0.3.10";	/* UPF address on which we get connections from S1GW */
 }
 
 type component test_CT {
 	timer g_Tguard;
 	var S1AP_Server_CT vc_S1APSRV;
+	var PFCP_Emulation_CT vc_PFCP;
 };
 
 private altstep as_Tguard() runs on test_CT {
@@ -50,9 +58,18 @@ private altstep as_Tguard() runs on test_CT {
 	}
 }
 
-function f_init(float Tval := 20.0) runs on test_CT {
+function f_init(boolean s1apsrv_start := true,
+		boolean upf_start := true,
+		float Tval := 20.0) runs on test_CT {
 	g_Tguard.start(Tval);
 	activate(as_Tguard());
+
+	if (s1apsrv_start) {
+		f_init_s1ap_srv();
+	}
+	if (upf_start) {
+		f_init_pfcp();
+	}
 }
 
 function f_init_s1ap_srv() runs on test_CT {
@@ -65,36 +82,54 @@ function f_init_s1ap_srv() runs on test_CT {
 	vc_S1APSRV.start(S1AP_Server.main(cpars));
 }
 
+function f_init_pfcp() runs on test_CT {
+	var PFCP_Emulation_Cfg pfcp_cfg := {
+		pfcp_bind_ip := mp_upf_bind_ip,
+		pfcp_bind_port := PFCP_PORT,
+		pfcp_remote_ip := mp_s1gw_upf_ip,
+		pfcp_remote_port := PFCP_PORT,
+		role := UPF
+	};
+
+	vc_PFCP := PFCP_Emulation_CT.create("PFCP-" & testcasename()) alive;
+	vc_PFCP.start(PFCP_Emulation.main(pfcp_cfg));
+}
+
 function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
 runs on test_CT return ConnHdlr {
 	var ConnHdlr vc_conn;
+	var charstring id := "ConnHdlr-" & testcasename() & "-" & int2str(pars.idx);
 
-	vc_conn := ConnHdlr.create("ConnHdlr-" & testcasename()) alive;
-	if (vc_S1APSRV.running) {
+	vc_conn := ConnHdlr.create(id) alive;
+	if (isbound(vc_S1APSRV) and vc_S1APSRV.running) {
 		connect(vc_conn:S1AP_CONN, vc_S1APSRV:S1AP_CLIENT);
 		connect(vc_conn:S1AP_PROC, vc_S1APSRV:S1AP_PROC);
 	}
-	vc_conn.start(derefers(fn)(pars));
+	if (isbound(vc_PFCP) and vc_PFCP.running) {
+		connect(vc_conn:PFCP, vc_PFCP:CLIENT);
+		connect(vc_conn:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+	}
+	vc_conn.start(f_ConnHdlr_init(fn, id, pars));
 
 	return vc_conn;
 }
 
-function f_TC_setup(ConnHdlrPars pars) runs on ConnHdlr {
-	f_ConnHdlr_register(pars.genb_id);
+function f_TC_setup(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_register_pfcp();
+	f_ConnHdlr_register(g_pars.genb_id);
 
 	f_ConnHdlr_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
-	f_ConnHdlr_setup(pars.genb_id);
+	f_ConnHdlr_setup(g_pars.genb_id);
 	f_sleep(0.5); /* keep the connection idle for some time */
 	f_ConnHdlr_disconnect();
 
-	f_ConnHdlr_unregister(pars.genb_id);
+	f_ConnHdlr_unregister(g_pars.genb_id);
 }
 testcase TC_setup() runs on test_CT {
 	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
 	var ConnHdlr vc_conn;
 
 	f_init();
-	f_init_s1ap_srv();
 
 	vc_conn := f_ConnHdlr_spawn(refers(f_TC_setup), pars);
 	vc_conn.done;
@@ -103,7 +138,6 @@ testcase TC_setup_multi() runs on test_CT {
 	var ConnHdlrList vc_conns := { };
 
 	f_init();
-	f_init_s1ap_srv();
 
 	for (var integer i := 0; i < 42; i := i + 1) {
 		var ConnHdlrPars pars := valueof(t_ConnHdlrPars(i));
@@ -118,26 +152,26 @@ testcase TC_setup_multi() runs on test_CT {
 
 
 /* MME terminates connection, expect S1GW to terminate the eNB connection */
-function f_TC_conn_term_by_mme(ConnHdlrPars pars) runs on ConnHdlr {
-	f_ConnHdlr_register(pars.genb_id);
+function f_TC_conn_term_by_mme(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_register_pfcp();
+	f_ConnHdlr_register(g_pars.genb_id);
 
 	f_ConnHdlr_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
-	f_ConnHdlr_setup(pars.genb_id);
+	f_ConnHdlr_setup(g_pars.genb_id);
 	f_sleep(0.5); /* keep the connection idle for some time */
 
 	/* MME (S1AP_Server_CT) terminates connection */
-	f_ConnHdlr_close_conn(pars.genb_id);
+	f_ConnHdlr_close_conn(g_pars.genb_id);
 	/* expect our eNB connection to be released gracefully */
 	f_ConnHdlr_expect_shutdown();
 
-	f_ConnHdlr_unregister(pars.genb_id);
+	f_ConnHdlr_unregister(g_pars.genb_id);
 }
 testcase TC_conn_term_by_mme() runs on test_CT {
 	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
 	var ConnHdlr vc_conn;
 
 	f_init();
-	f_init_s1ap_srv();
 
 	vc_conn := f_ConnHdlr_spawn(refers(f_TC_conn_term_by_mme), pars);
 	vc_conn.done;
@@ -145,7 +179,8 @@ testcase TC_conn_term_by_mme() runs on test_CT {
 
 
 /* MME is not available, expect S1GW to terminate the eNB connection */
-function f_TC_conn_term_mme_unavail(ConnHdlrPars pars) runs on ConnHdlr {
+function f_TC_conn_term_mme_unavail(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_register_pfcp();
 	/* establish an eNB connection to the S1GW */
 	f_ConnHdlr_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
 	/* expect our eNB connection to be released gracefully */
@@ -156,21 +191,22 @@ testcase TC_conn_term_mme_unavail() runs on test_CT {
 	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
 	var ConnHdlr vc_conn;
 
-	f_init();
+	f_init(s1apsrv_start := false);
 
 	vc_conn := f_ConnHdlr_spawn(refers(f_TC_conn_term_mme_unavail), pars);
 	vc_conn.done;
 }
 
-function f_TC_e_rab_setup(ConnHdlrPars pars) runs on ConnHdlr {
+function f_TC_e_rab_setup(charstring id) runs on ConnHdlr {
 	const integer mme_id := 7;
 	const integer enb_id := 9;
 	const integer erab_id := 6;
 	var S1AP_PDU pdu;
 
-	f_ConnHdlr_register(pars.genb_id);
+	f_ConnHdlr_register_pfcp();
+	f_ConnHdlr_register(g_pars.genb_id);
 	f_ConnHdlr_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
-	f_ConnHdlr_setup(pars.genb_id);
+	f_ConnHdlr_setup(g_pars.genb_id);
 
 	log("eNB <- [S1GW] <- MME: E-RAB SETUP REQUEST");
 	var template (value) E_RABToBeSetupListBearerSUReq items_req;
@@ -224,14 +260,13 @@ function f_TC_e_rab_setup(ConnHdlrPars pars) runs on ConnHdlr {
 	f_ConnHdlr_rx_s1ap_from_enb(pdu, tr_S1AP_RABSetupRsp(mme_id, enb_id, items_res));
 
 	f_ConnHdlr_disconnect();
-	f_ConnHdlr_unregister(pars.genb_id);
+	f_ConnHdlr_unregister(g_pars.genb_id);
 }
 testcase TC_e_rab_setup() runs on test_CT {
 	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
 	var ConnHdlr vc_conn;
 
 	f_init();
-	f_init_s1ap_srv();
 
 	vc_conn := f_ConnHdlr_spawn(refers(f_TC_e_rab_setup), pars);
 	vc_conn.done;

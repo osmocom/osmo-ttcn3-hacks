@@ -19,6 +19,11 @@ import from Native_Functions all;
 import from IPL4asp_Types all;
 import from Misc_Helpers all;
 
+import from PFCP_Types all;
+import from PFCP_Emulation all;
+import from PFCP_Templates all;
+import from PFCP_CodecPort all;
+
 import from S1AP_CodecPort all;
 import from S1AP_CodecPort_CtrlFunct all;
 import from S1AP_Types all;
@@ -31,13 +36,15 @@ import from S1AP_Constants all;
 import from SCTP_Templates all;
 import from S1AP_Server all;
 
-type component ConnHdlr extends S1APSRV_ConnHdlr {
+type component ConnHdlr extends S1APSRV_ConnHdlr, PFCP_ConnHdlr {
+	var ConnHdlrPars g_pars;
 	port S1AP_CODEC_PT S1AP_ENB;
 	var ConnectionId g_s1ap_conn_id := -1;
 };
 type record of ConnHdlr ConnHdlrList;
 
 type record ConnHdlrPars {
+	integer idx,
 	Global_ENB_ID genb_id
 };
 
@@ -52,11 +59,19 @@ ts_Global_ENB_ID(integer enb_id := 0,
 }
 
 template (value) ConnHdlrPars
-t_ConnHdlrPars(integer enb_id := 0) := {
-	genb_id := ts_Global_ENB_ID(enb_id)
+t_ConnHdlrPars(integer idx := 0) := {
+	idx := idx,
+	genb_id := ts_Global_ENB_ID(idx)
 }
 
-type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+type function void_fn(charstring id) runs on ConnHdlr;
+
+function f_ConnHdlr_init(void_fn fn, charstring id, ConnHdlrPars pars)
+runs on ConnHdlr {
+	g_pars := pars;
+	fn.apply(id);
+}
+
 
 function f_ConnHdlr_connect(charstring local_addr, charstring remote_addr) runs on ConnHdlr {
 	var Result res;
@@ -209,4 +224,50 @@ function f_ConnHdlr_setup(Global_ENB_ID genb_id, float Tval := 5.0) runs on Conn
 	}
 }
 
+altstep as_pfcp_handle_assoc_setup_req(template (present) PDU_PFCP exp_rx := tr_PFCP_Assoc_Setup_Req(), boolean do_repeat := false)
+runs on ConnHdlr
+{
+	var PDU_PFCP rx;
+
+	[] PFCP.receive(exp_rx) -> value rx {
+		var Node_ID upf_node_id := valueof(ts_PFCP_Node_ID_fqdn("\07osmocom\03org"));
+		PFCP.send(ts_PFCP_Assoc_Setup_Resp(rx.sequence_number, upf_node_id,
+						   ts_PFCP_Cause(REQUEST_ACCEPTED),
+						   1234));
+		if (do_repeat) {
+			repeat;
+		}
+	}
+}
+
+private function f_pfcp_wait_assoc_setup(template (present) PDU_PFCP exp_rx := tr_PFCP_Assoc_Setup_Req(),
+					 float wait_time := 10.0)
+runs on ConnHdlr
+{
+	timer T := wait_time;
+	T.start;
+	alt {
+	[] as_pfcp_handle_assoc_setup_req(exp_rx);
+	[] PFCP.receive(PDU_PFCP:?) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Got an unexpected PFCP message, was waiting for ", exp_rx));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Timeout waiting for PFCP ", exp_rx));
+		}
+	}
+	T.stop;
+}
+
+function f_ConnHdlr_register_pfcp() runs on ConnHdlr
+{
+	f_pfcp_register();
+	if (g_pars.idx == 0) {
+		/* First ConnHdlr answers the AssocSetup: */
+		activate(as_pfcp_handle_assoc_setup_req(do_repeat := true));
+	} else {
+		activate(as_pfcp_ignore(PFCP, tr_PFCP_Assoc_Setup_Req()));
+	}
+}
 }
