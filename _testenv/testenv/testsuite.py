@@ -162,9 +162,8 @@ def run(cfg):
     start_testsuite = os.path.join(ttcn3_hacks_dir, "start-testsuite.sh")
     suite = os.path.join(ttcn3_hacks_dir, testenv.args.testsuite, section_data["program"])
 
-    env = {
-        "TTCN3_PCAP_PATH": os.path.join(testenv.testdir.testdir, "testsuite"),
-    }
+    pcap_path = os.path.join(testenv.testdir.testdir, "testsuite")
+    env = testenv.cmd.generate_env({ "TTCN3_PCAP_PATH" : pcap_path })
 
     cmd = [start_testsuite, suite, section_data["config"]]
 
