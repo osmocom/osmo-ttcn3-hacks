@@ -32,6 +32,7 @@ import from StatsD_Types all;
 import from StatsD_CodecPort all;
 import from StatsD_CodecPort_CtrlFunct all;
 
+import from General_Types all;
 import from Osmocom_Types all;
 #ifdef STATSD_HAVE_VTY
 import from Osmocom_VTY_Functions all;
@@ -51,13 +52,6 @@ type record StatsDExpect {
 };
 
 type set of StatsDExpect StatsDExpects;
-
-type record StatsDExpectPriv {
-	StatsDExpect expect,
-	integer seen
-}
-
-type set of StatsDExpectPriv StatsDExpectPrivs;
 
 type enumerated StatsDResultType {
 	e_Matched,
@@ -151,27 +145,27 @@ private function f_compare_expect(StatsDMetric metric, StatsDExpect expect) retu
 	}
 }
 
-private function f_statsd_checker_metric_expects(StatsDExpectPrivs exp_seen, StatsDMetric metric)
+private function f_statsd_checker_metric_expects(StatsDExpects expects, StatsDMetric metric)
 return StatsDExpectResult {
 	var StatsDExpectResult result := {
 		kind := e_NotFound,
 		idx := -1
 	};
 
-	for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
-		var StatsDExpectPriv exp := exp_seen[i];
-		if (exp.expect.name != metric.name) {
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		var StatsDExpect exp := expects[i];
+		if (exp.name != metric.name) {
 			continue;
 		}
-		if (not f_compare_expect(metric, exp.expect)) {
-			log("EXP mismatch: ", metric, " vs ", exp.expect);
+		if (not f_compare_expect(metric, exp)) {
+			log("EXP mismatch: ", metric, " vs ", exp);
 			result := {
 				kind := e_Mismatched,
 				idx := i
 			};
 			break;
 		} else {
-			log("EXP match: ", metric, " vs ", exp.expect);
+			log("EXP match: ", metric, " vs ", exp);
 			result := {
 				kind := e_Matched,
 				idx := i
@@ -182,19 +176,16 @@ return StatsDExpectResult {
 	return result;
 }
 
-template StatsDExpectPriv t_statsd_expect_priv(template StatsDExpect expect) := {
-	expect := expect,
-	seen := 0
-}
-
 private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_Checker_CT return boolean {
 	var default t;
 	var StatsDMessage msg;
 	var StatsDExpectResult res;
-	var StatsDExpectPrivs exp_seen := {};
+	var Booleans matched := {};
+	var integer matched_remain := 0;
 
 	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
-		exp_seen := exp_seen & {valueof(t_statsd_expect_priv(expects[i]))};
+		matched := matched & {false};
+		matched_remain := matched_remain + 1;
 	}
 
 	/* Dismiss any messages we might have skipped from the last report */
@@ -206,20 +197,19 @@ private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_C
 	/* Assume caller knows previous state, eg. gauges may have been 0 due to IUT being reset */
 #endif
 
-	var boolean seen_all := false;
 	T_statsd.start;
-	while (not seen_all) {
+	while (matched_remain > 0) {
 		var StatsD_RecvFrom rf;
 		alt {
 		[] STATS.receive(tr_StatsD_RecvFrom(?, ?)) -> value rf {
 			msg := rf.msg;
 			}
 		[] T_statsd.timeout {
-			for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
+			for (var integer i := 0; i < lengthof(expects); i := i + 1) {
 				/* We're still missing some expects, keep looking */
-				if (exp_seen[i].seen == 0) {
-					log("Timeout waiting for ", exp_seen[i].expect.name, " (min: ", exp_seen[i].expect.min,
-						", max: ", exp_seen[i].expect.max, ")");
+				if (not matched[i]) {
+					log("Timeout waiting for ", expects[i].name,
+					    " (min: ", expects[i].min, ", max: ", expects[i].max, ")");
 				}
 			}
 			setverdict(fail, "Timeout waiting for metrics");
@@ -230,34 +220,28 @@ private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_C
 		for (var integer i := 0; i < lengthof(msg); i := i + 1) {
 			var StatsDMetric metric := msg[i];
 
-			res := f_statsd_checker_metric_expects(exp_seen, metric);
+			res := f_statsd_checker_metric_expects(expects, metric);
 			if (res.kind == e_NotFound) {
 				continue;
 			}
-
 			if (res.kind == e_Mismatched) {
 				log("Metric: ", metric);
-				log("Expect: ", exp_seen[res.idx].expect);
-				setverdict(fail, "Metric failed expectation ", metric, " vs ", exp_seen[res.idx].expect);
+				log("Expect: ", expects[res.idx]);
+				setverdict(fail, "Metric failed expectation ", metric, " vs ", expects[res.idx]);
 				return false;
-			} else if (res.kind == e_Matched) {
-				exp_seen[res.idx].seen := exp_seen[res.idx].seen + 1;
 			}
-		}
-
-		/* Check if all expected metrics were received */
-		seen_all := true;
-		for (var integer i := 0; i < lengthof(exp_seen); i := i + 1) {
-			/* We're still missing some expects, keep looking */
-			if (exp_seen[i].seen == 0) {
-				seen_all := false;
-				break;
+			if (res.kind == e_Matched) {
+				if (not matched[res.idx]) {
+					matched[res.idx] := true;
+					matched_remain := matched_remain - 1;
+				}
+				continue;
 			}
 		}
 	}
 
 	T_statsd.stop;
-	return seen_all;
+	return true;
 }
 
 function f_init_statsd(charstring id, inout StatsD_Checker_CT vc_STATSD, charstring local_addr, integer local_port) {
