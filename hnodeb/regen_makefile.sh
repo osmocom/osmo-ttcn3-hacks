@@ -33,6 +33,7 @@ FILES="
 
 export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
+	-DSTATSD_HAVE_VTY
 "
 
 ../regen-makefile.sh -e $NAME $FILES

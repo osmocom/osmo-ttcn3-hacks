@@ -22,6 +22,7 @@ FILES="
 export CPPFLAGS_TTCN3="
 	-DBSSGP_EM_L3
 	-DNS_EMULATION_FR
+	-DSTATSD_HAVE_VTY
 "
 
 ../regen-makefile.sh -e $NAME $FILES
