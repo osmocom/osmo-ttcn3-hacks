@@ -44,13 +44,23 @@ modulepar {
 	boolean mp_enable_stats := true;
 }
 
+type record StatsDMetricKey {
+	MetricName	name,
+	MetricType	mtype
+};
+type set of StatsDMetricKey StatsDMetricKeys;
+
+template (value) StatsDMetricKey ts_StatsDMetricKey(template (value) MetricName	name, template (value) MetricType mtype) := {
+	name := name,
+	mtype := mtype
+}
+
 type record StatsDExpect {
 	MetricName	name,
 	MetricType	mtype,
 	MetricValue	min,
 	MetricValue	max
 };
-
 type set of StatsDExpect StatsDExpects;
 
 type enumerated StatsDResultType {
@@ -78,10 +88,11 @@ type component StatsD_ConnHdlr {
 }
 
 signature STATSD_reset();
-signature STATSD_expect(in StatsDExpects expects) return boolean;
+signature STATSD_snapshot(in StatsDMetricKeys keys, in boolean since_last_snapshot) return StatsDMetrics;
+signature STATSD_expect(in StatsDExpects expects, in boolean wait_converge, in boolean use_snapshot, in StatsDMetrics snapshot) return boolean;
 
 type port STATSD_PROC_PT procedure {
-	inout STATSD_reset, STATSD_expect;
+	inout STATSD_reset, STATSD_snapshot, STATSD_expect;
 } with {extension "internal"};
 
 /* Expect templates and functions */
@@ -90,7 +101,12 @@ type port STATSD_PROC_PT procedure {
 /* StatsD checker component */
 function main(charstring statsd_host, integer statsd_port) runs on StatsD_Checker_CT {
 	var StatsD_ConnHdlr vc_conn;
+	var StatsDMetricKeys keys;
+	var boolean since_last_snapshot;
 	var StatsDExpects expects;
+	var boolean wait_converge;
+	var boolean use_snapshot;
+	var StatsDMetrics snapshot;
 	var Result res;
 
 	while (not mp_enable_stats) {
@@ -126,26 +142,126 @@ function main(charstring statsd_host, integer statsd_port) runs on StatsD_Checke
 						"STATSD_reset not supported, StatsD_Checker was built without VTY support");
 #endif
 			}
-		[] STATSD_PROC.getcall(STATSD_expect:{?}) -> param(expects) sender vc_conn {
-			var boolean success := f_statsd_checker_expect(expects);
-			STATSD_PROC.reply(STATSD_expect:{expects} value success) to vc_conn;
+		[] STATSD_PROC.getcall(STATSD_snapshot:{?, ?}) -> param(keys, since_last_snapshot) sender vc_conn {
+			snapshot := f_statsd_checker_snapshot(keys, since_last_snapshot);
+			STATSD_PROC.reply(STATSD_snapshot:{keys, since_last_snapshot} value snapshot) to vc_conn;
+			}
+		[] STATSD_PROC.getcall(STATSD_expect:{?, ?, ?, ?}) -> param(expects, wait_converge, use_snapshot, snapshot) sender vc_conn {
+			var boolean success := f_statsd_checker_expect(expects, wait_converge, use_snapshot, snapshot);
+			STATSD_PROC.reply(STATSD_expect:{expects, wait_converge, use_snapshot, snapshot} value success) to vc_conn;
 			}
 		}
 	}
 }
 
-
-/* Return false if the expectation doesn't match the metric, otherwise return true */
-private function f_compare_expect(StatsDMetric metric, StatsDExpect expect) return boolean {
-	if ((metric.name == expect.name) and (metric.mtype == expect.mtype)
-		and (metric.val >= expect.min) and (metric.val <= expect.max)) {
-		return true;
-	} else {
-		return false;
+/* Updates "metrics" & "seen" with content from "it". Returns true if the metric becomes known (for first time) as a result. */
+private function f_statsd_metrics_update_value(inout StatsDMetrics metrics, inout Booleans seen, StatsDMetric it) return boolean
+{
+	for (var integer i := 0; i < lengthof(metrics); i := i + 1) {
+		if (it.name != metrics[i].name or it.mtype != metrics[i].mtype) {
+			continue;
+		}
+		metrics[i] := it;
+		if (seen[i]) {
+			return false;
+		} else {
+			seen[i] := true;
+			return true;
+		}
 	}
+	return false;
 }
 
-private function f_statsd_checker_metric_expects(StatsDExpects expects, StatsDMetric metric)
+
+private function f_statsd_checker_snapshot(StatsDMetricKeys keys, boolean since_last_snapshot := true) runs on StatsD_Checker_CT return StatsDMetrics {
+	var StatsDMessage msg;
+	var StatsDMetrics metrics := {};
+	var Booleans seen := {};
+	var integer seen_remain := 0;
+
+	for (var integer i := 0; i < lengthof(keys); i := i + 1) {
+		metrics := metrics & {valueof(ts_StatsDMetric(keys[i].name, 0, keys[i].mtype))};
+		seen := seen & {false};
+		seen_remain := seen_remain + 1;
+	}
+
+	if (not since_last_snapshot) {
+		STATS.clear;
+	}
+
+	T_statsd.start;
+	while (seen_remain > 0) {
+		var StatsD_RecvFrom rf;
+		alt {
+		[] STATS.receive(tr_StatsD_RecvFrom(?, ?)) -> value rf {
+			msg := rf.msg;
+			}
+		[] T_statsd.timeout {
+			for (var integer i := 0; i < lengthof(metrics); i := i + 1) {
+				/* We're still missing some expects, keep looking */
+				if (not seen[i]) {
+					log("Timeout waiting for ", metrics[i].name);
+				}
+			}
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for metrics: ", keys, seen));
+		}
+		}
+
+		for (var integer i := 0; i < lengthof(msg); i := i + 1) {
+			var StatsDMetric metric := msg[i];
+			if (f_statsd_metrics_update_value(metrics, seen, metric)) {
+				seen_remain := seen_remain - 1;
+			}
+		}
+	}
+	T_statsd.stop;
+
+	return metrics;
+}
+
+private function get_val_from_snapshot(inout integer val, StatsDMetric metric, StatsDMetrics snapshot) return boolean
+{
+	for (var integer i := 0; i < lengthof(snapshot); i := i + 1) {
+		if (metric.name != snapshot[i].name or metric.mtype != snapshot[i].mtype) {
+			continue;
+		}
+		val := snapshot[i].val;
+		return true;
+	}
+	return false;
+}
+
+/* Return false if the expectation doesn't match the metric, otherwise return true */
+private function f_compare_expect(StatsDMetric metric,
+				  StatsDExpect expect,
+				  boolean use_snapshot := false,
+				  StatsDMetrics snapshot := {}) return boolean {
+	var integer val := 0;
+	if ((metric.name != expect.name) or (metric.mtype != expect.mtype)) {
+		return false;
+	}
+	if (use_snapshot) {
+		var integer prev_val := 0;
+		if (not get_val_from_snapshot(prev_val, metric, snapshot)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Metric ", metric.name, " not found in snapshot ", snapshot));
+		}
+		val := metric.val - prev_val;
+	} else {
+		val := metric.val;
+	}
+
+	if ((val < expect.min) or (val > expect.max)) {
+		return false;
+	}
+	return true;
+}
+
+private function f_statsd_checker_metric_expects(StatsDExpects expects,
+						 StatsDMetric metric,
+						 boolean use_snapshot := false,
+						 StatsDMetrics snapshot := {})
 return StatsDExpectResult {
 	var StatsDExpectResult result := {
 		kind := e_NotFound,
@@ -157,15 +273,15 @@ return StatsDExpectResult {
 		if (exp.name != metric.name) {
 			continue;
 		}
-		if (not f_compare_expect(metric, exp)) {
-			log("EXP mismatch: ", metric, " vs ", exp);
+		if (not f_compare_expect(metric, exp, use_snapshot, snapshot)) {
+			log("EXP mismatch: ", metric, " vs exp ", exp, " | use_snapshot=", use_snapshot, ", snapshot=", snapshot);
 			result := {
 				kind := e_Mismatched,
 				idx := i
 			};
 			break;
 		} else {
-			log("EXP match: ", metric, " vs ", exp);
+			log("EXP match: ", metric, " vs exp ", exp);
 			result := {
 				kind := e_Matched,
 				idx := i
@@ -176,7 +292,10 @@ return StatsDExpectResult {
 	return result;
 }
 
-private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_Checker_CT return boolean {
+private function f_statsd_checker_expect(StatsDExpects expects,
+					 boolean wait_converge := false,
+					 boolean use_snapshot := false,
+					 StatsDMetrics snapshot := {}) runs on StatsD_Checker_CT return boolean {
 	var default t;
 	var StatsDMessage msg;
 	var StatsDExpectResult res;
@@ -191,11 +310,13 @@ private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_C
 	/* Dismiss any messages we might have skipped from the last report */
 	STATS.clear;
 
+	if (not use_snapshot) {
 #ifdef STATSD_HAVE_VTY
-	f_vty_transceive(STATSVTY, "stats report");
+		f_vty_transceive(STATSVTY, "stats report");
 #else
-	/* Assume caller knows previous state, eg. gauges may have been 0 due to IUT being reset */
+		/* Assume caller knows previous state, eg. gauges may have been 0 due to IUT being reset */
 #endif
+	}
 
 	T_statsd.start;
 	while (matched_remain > 0) {
@@ -219,12 +340,15 @@ private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_C
 
 		for (var integer i := 0; i < lengthof(msg); i := i + 1) {
 			var StatsDMetric metric := msg[i];
-
-			res := f_statsd_checker_metric_expects(expects, metric);
+			res := f_statsd_checker_metric_expects(expects, metric, use_snapshot, snapshot);
 			if (res.kind == e_NotFound) {
 				continue;
 			}
 			if (res.kind == e_Mismatched) {
+				if (wait_converge and not matched[res.idx]) {
+					log("Waiting convergence: Ignoring metric mismatch metric=", metric, " expect=", expects[res.idx])
+					continue;
+				}
 				log("Metric: ", metric);
 				log("Expect: ", expects[res.idx]);
 				setverdict(fail, "Metric failed expectation ", metric, " vs ", expects[res.idx]);
@@ -239,7 +363,6 @@ private function f_statsd_checker_expect(StatsDExpects expects) runs on StatsD_C
 			}
 		}
 	}
-
 	T_statsd.stop;
 	return true;
 }
@@ -263,15 +386,53 @@ function f_statsd_reset() runs on StatsD_ConnHdlr {
 	}
 }
 
-function f_statsd_expect(StatsDExpects expects) runs on StatsD_ConnHdlr return boolean {
+/* Useful to automatically generate param for f_statsd_snapshot() from StatsDExpects used in f_statsd_expect_from_snapshot() */
+function f_statsd_keys_from_expect(StatsDExpects expects) return StatsDMetricKeys
+{
+	var StatsDMetricKeys keys := {}
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		keys := keys & {valueof(ts_StatsDMetricKey(expects[i].name, expects[i].mtype))}
+	}
+	return keys;
+}
+
+/* Retrieve current values obtained at statsd server.
+* If since_last_snapshot is false, then clear the received packets in port. */
+function f_statsd_snapshot(StatsDMetricKeys keys, boolean since_last_snapshot := true) runs on StatsD_ConnHdlr return StatsDMetrics {
+	var StatsDMetrics snapshot;
+	if (not mp_enable_stats) {
+		return {};
+	}
+
+	STATSD_PROC.call(STATSD_snapshot:{keys, since_last_snapshot}) {
+		[] STATSD_PROC.getreply(STATSD_snapshot:{keys, since_last_snapshot}) -> value snapshot;
+	}
+	return snapshot;
+}
+
+function f_statsd_expect(StatsDExpects expects, boolean wait_converge := false) runs on StatsD_ConnHdlr return boolean {
 	var boolean res;
 
 	if (not mp_enable_stats) {
 		return true;
 	}
 
-	STATSD_PROC.call(STATSD_expect:{expects}) {
-		[] STATSD_PROC.getreply(STATSD_expect:{expects}) -> value res;
+	STATSD_PROC.call(STATSD_expect:{expects, wait_converge, false, {}}) {
+		[] STATSD_PROC.getreply(STATSD_expect:{expects, wait_converge, false, {}}) -> value res;
+	}
+	return res;
+}
+
+function f_statsd_expect_from_snapshot(StatsDExpects expects, boolean wait_converge := false,
+				       StatsDMetrics snapshot := {}) runs on StatsD_ConnHdlr return boolean {
+	var boolean res;
+
+	if (not mp_enable_stats) {
+		return true;
+	}
+
+	STATSD_PROC.call(STATSD_expect:{expects, wait_converge, true, snapshot}) {
+		[] STATSD_PROC.getreply(STATSD_expect:{expects, wait_converge, true, snapshot}) -> value res;
 	}
 	return res;
 }
