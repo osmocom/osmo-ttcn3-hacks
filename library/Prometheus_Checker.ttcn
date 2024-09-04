@@ -1,0 +1,408 @@
+module Prometheus_Checker {
+
+/* (C) 2024 by sysmocom s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from Misc_Helpers all;
+import from Socket_API_Definitions all;
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from HTTP_Adapter all;
+import from HTTPmsg_Types all;
+
+const integer c_prometheus_default_http_port := 9090;
+
+type enumerated PrometheusMetricType {
+	COUNTER,
+	GAUGE
+};
+
+type record PrometheusMetricKey {
+	charstring name,
+	PrometheusMetricType mtype
+};
+type set of PrometheusMetricKey PrometheusMetricKeys;
+
+type record PrometheusMetric {
+	PrometheusMetricKey key,
+	integer val
+};
+type set of PrometheusMetric PrometheusMetrics;
+
+type record PrometheusExpect {
+	PrometheusMetricKey key,
+	integer min,
+	integer max
+};
+type set of PrometheusExpect PrometheusExpects;
+
+modulepar {
+	boolean mp_enable_stats := true
+}
+
+type enumerated PrometheusResultType {
+	e_Matched,
+	e_Mismatched,
+	e_NotFound
+}
+
+type record PrometheusExpectResult {
+	PrometheusResultType kind,
+	integer idx
+}
+
+type component Prometheus_Checker_CT extends http_CT {
+	var float g_tout_http := 5.0;
+};
+
+template (value) PrometheusMetricKey
+ts_PrometheusMetricKey(template (value) charstring name,
+		       template (value) PrometheusMetricType mtype) := {
+	name := name,
+	mtype := mtype
+};
+
+template (value) PrometheusMetric
+ts_PrometheusMetric(template (value) charstring name,
+		    template (value) PrometheusMetricType mtype,
+		    template (value) integer val := 0) := {
+	key := ts_PrometheusMetricKey(name, mtype),
+	val := val
+};
+
+template (value) PrometheusExpect
+ts_PrometheusExpect(template (value) charstring name,
+		    template (value) PrometheusMetricType mtype,
+		    template (value) integer min,
+		    template (value) integer max) := {
+	key := ts_PrometheusMetricKey(name, mtype),
+	min := min,
+	max := max
+};
+
+function f_prometheus_init(charstring http_host, integer http_port := c_prometheus_default_http_port) runs on Prometheus_Checker_CT {
+	var HTTP_Adapter_Params http_adapter_pars := {
+		http_host := http_host,
+		http_port := http_port,
+		use_ssl := false
+	};
+	f_http_init(http_adapter_pars);
+}
+
+private function f_prometheus_metric_mtype_from_string(charstring str) return PrometheusMetricType
+{
+	var PrometheusMetricType mtype;
+	if (str == "counter") {
+		mtype := COUNTER;
+	} else if (str == "gauge") {
+		mtype:= GAUGE;
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unknown Prometheus metric type: ", str));
+	}
+	return mtype;
+}
+
+private function f_prometheus_parse_http_response(charstring body) return PrometheusMetrics
+{
+	var PrometheusMetrics metrics := {};
+	var Misc_Helpers.ro_charstring lines := f_str_split(body, "\n");
+	for (var integer i := 0; i + 2 < lengthof(lines); i := i + 3) {
+		var PrometheusMetric it;
+		/* HELP line, example: "# HELP cx_rx_unknown Received Cx unknown messages" */
+		if (not f_str_startswith(lines[i], "# HELP ")) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Failed parsing Prometheus HTTP response line: ", lines[i]));
+		}
+
+		/* TYPE line, example: "# TYPE cx_rx_unknown counter" */
+		if (not f_str_startswith(lines[i + 1], "# TYPE ")) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Failed parsing Prometheus HTTP response line: ", lines[i + 1]));
+		}
+		var Misc_Helpers.ro_charstring type_tokens := f_str_split(lines[i + 1], " ");
+		if (lengthof(type_tokens) < 4) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Failed parsing Prometheus HTTP response line: ", type_tokens));
+		}
+		it.key.name := type_tokens[2];
+		it.key.mtype := f_prometheus_metric_mtype_from_string(type_tokens[3]);
+
+		/* Value line, example: "cx_rx_unknown 0" */
+		if (not f_str_startswith(lines[i + 2], it.key.name)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Failed parsing Prometheus HTTP response line: ", lines[i + 2]));
+		}
+		var Misc_Helpers.ro_charstring value_tokens := f_str_split(lines[i + 2], " ");
+		it.val := str2int(value_tokens[1]);
+
+		metrics := metrics & { it };
+	}
+	return metrics;
+}
+
+private function f_prometheus_get_http_metrics() runs on Prometheus_Checker_CT return charstring
+{
+	var HTTPMessage http_resp;
+	f_http_tx_request(url := "/metrics", method := "GET", tout := g_tout_http);
+	http_resp := f_http_rx_response(tr_HTTP_Resp(200), tout := g_tout_http);
+	return http_resp.response.body;
+}
+
+private function f_prometheus_get_metrics() runs on Prometheus_Checker_CT return PrometheusMetrics
+{
+	var PrometheusMetrics metrics;
+	var charstring str;
+	str := f_prometheus_get_http_metrics();
+	metrics := f_prometheus_parse_http_response(str);
+	return metrics;
+}
+
+/* Updates "metrics" & "seen" with content from "it". Returns true if the metric becomes known (for first time) as a result. */
+private function f_prometheus_metrics_update_value(inout PrometheusMetrics metrics, inout Booleans seen, PrometheusMetric it) return boolean
+{
+	for (var integer i := 0; i < lengthof(metrics); i := i + 1) {
+		if (it.key.name != metrics[i].key.name or it.key.mtype != metrics[i].key.mtype) {
+			continue;
+		}
+		metrics[i] := it;
+		if (seen[i]) {
+			return false;
+		} else {
+			seen[i] := true;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Useful to automatically generate param for f_statsd_snapshot() from StatsDExpects used in f_statsd_expect_from_snapshot() */
+function f_prometheus_keys_from_expect(PrometheusExpects expects) return PrometheusMetricKeys
+{
+	var PrometheusMetricKeys keys := {}
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		keys := keys & { expects[i].key }
+	}
+	return keys;
+}
+
+function f_prometheus_snapshot(PrometheusMetricKeys keys, float time_out := 10.0) runs on Prometheus_Checker_CT return PrometheusMetrics {
+	var PrometheusMetrics rx_metrics;
+	var PrometheusMetrics metrics := {};
+	var Booleans seen := {};
+	var integer seen_remain := 0;
+	timer T_snapshot := time_out;
+
+	if (not mp_enable_stats) {
+		return metrics;
+	}
+
+	for (var integer i := 0; i < lengthof(keys); i := i + 1) {
+		metrics := metrics & {valueof(ts_PrometheusMetric(keys[i].name, keys[i].mtype, 0))};
+		seen := seen & {false};
+		seen_remain := seen_remain + 1;
+	}
+
+	T_snapshot.start;
+	while (seen_remain > 0) {
+		if (not T_snapshot.running) {
+			for (var integer i := 0; i < lengthof(metrics); i := i + 1) {
+				/* We're still missing some expects, keep looking */
+				if (not seen[i]) {
+					log("Timeout waiting for ", metrics[i].key.name);
+				}
+			}
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for metrics: ", keys, seen));
+		}
+
+		rx_metrics := f_prometheus_get_metrics();
+
+		for (var integer i := 0; i < lengthof(rx_metrics); i := i + 1) {
+			var PrometheusMetric metric := rx_metrics[i];
+			if (f_prometheus_metrics_update_value(metrics, seen, metric)) {
+				seen_remain := seen_remain - 1;
+			}
+		}
+
+		if (seen_remain > 0) {
+			/* Wait 1 second before retrieving stats again: */
+			f_sleep(1.0);
+		}
+	}
+	T_snapshot.stop;
+
+	return metrics;
+}
+
+private function f_compare_PrometheusMetricKey(PrometheusMetricKey a, PrometheusMetricKey b) return boolean {
+	return a.name == b.name and a.mtype == b.mtype;
+}
+
+private function get_val_from_snapshot(inout integer val, PrometheusMetric metric, PrometheusMetrics snapshot) return boolean
+{
+	for (var integer i := 0; i < lengthof(snapshot); i := i + 1) {
+		if (not f_compare_PrometheusMetricKey(metric.key, snapshot[i].key)) {
+			continue;
+		}
+		val := snapshot[i].val;
+		return true;
+	}
+	return false;
+}
+
+
+/* Return false if the expectation doesn't match the metric, otherwise return true */
+private function f_compare_expect(PrometheusMetric metric,
+				  PrometheusExpect expect,
+				  boolean use_snapshot := false,
+				  PrometheusMetrics snapshot := {}) return boolean {
+	var integer val := 0;
+	if (not f_compare_PrometheusMetricKey(metric.key, expect.key)) {
+		return false;
+	}
+	if (use_snapshot) {
+		var integer prev_val := 0;
+		if (not get_val_from_snapshot(prev_val, metric, snapshot)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Metric ", metric.key, " not found in snapshot ", snapshot));
+		}
+		val := metric.val - prev_val;
+	} else {
+		val := metric.val;
+	}
+
+	if ((val < expect.min) or (val > expect.max)) {
+		return false;
+	}
+	return true;
+}
+
+
+private function f_prometheus_metric_expects(PrometheusExpects expects,
+					     PrometheusMetric metric,
+					     boolean use_snapshot := false,
+					     PrometheusMetrics snapshot := {})
+return PrometheusExpectResult {
+	var PrometheusExpectResult result := {
+		kind := e_NotFound,
+		idx := -1
+	};
+
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		var PrometheusExpect exp := expects[i];
+		if (exp.key.name != metric.key.name) {
+			continue;
+		}
+		if (not f_compare_expect(metric, exp, use_snapshot, snapshot)) {
+			log("EXP mismatch: ", metric, " vs exp ", exp, " | use_snapshot=", use_snapshot, ", snapshot=", snapshot);
+			result := {
+				kind := e_Mismatched,
+				idx := i
+			};
+			break;
+		} else {
+			log("EXP match: ", metric, " vs exp ", exp);
+			result := {
+				kind := e_Matched,
+				idx := i
+			};
+			break;
+		}
+	}
+	return result;
+}
+
+private function f_prometheus_expect_ext(PrometheusExpects expects,
+					 boolean wait_converge := false,
+					 boolean use_snapshot := false,
+					 PrometheusMetrics snapshot := {},
+					 float time_out := 10.0)
+runs on Prometheus_Checker_CT return boolean {
+	var PrometheusMetrics rx_metrics;
+	var PrometheusExpectResult res;
+	var Booleans matched := {};
+	var integer matched_remain := 0;
+	timer T_expect := time_out;
+
+	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+		matched := matched & {false};
+		matched_remain := matched_remain + 1;
+	}
+
+	T_expect.start;
+	while (matched_remain > 0) {
+		if (not T_expect.running) {
+			for (var integer i := 0; i < lengthof(expects); i := i + 1) {
+				/* We're still missing some expects, keep looking */
+				if (not matched[i]) {
+					log("Timeout waiting for ", expects[i].key,
+					    " (min: ", expects[i].min, ", max: ", expects[i].max, ")");
+				}
+			}
+			setverdict(fail, "Timeout waiting for metrics ", expects, matched);
+			return false;
+		}
+
+		rx_metrics := f_prometheus_get_metrics();
+
+		for (var integer i := 0; i < lengthof(rx_metrics); i := i + 1) {
+			var PrometheusMetric metric := rx_metrics[i];
+			res := f_prometheus_metric_expects(expects, metric, use_snapshot, snapshot);
+			if (res.kind == e_NotFound) {
+				continue;
+			}
+			if (res.kind == e_Mismatched) {
+				if (wait_converge and not matched[res.idx]) {
+					log("Waiting convergence: Ignoring metric mismatch metric=", metric, " expect=", expects[res.idx])
+					continue;
+				}
+				log("Metric: ", metric);
+				log("Expect: ", expects[res.idx]);
+				setverdict(fail, "Metric failed expectation ", metric, " vs ", expects[res.idx]);
+				return false;
+			}
+			if (res.kind == e_Matched) {
+				if (not matched[res.idx]) {
+					matched[res.idx] := true;
+					matched_remain := matched_remain - 1;
+				}
+				continue;
+			}
+		}
+
+		if (matched_remain > 0) {
+			/* Wait 1 second before retrieving stats again: */
+			f_sleep(1.0);
+		}
+	}
+
+	T_expect.stop;
+	return true;
+}
+
+function f_prometheus_expect(PrometheusExpects expects,
+			     boolean wait_converge := false,
+			     float time_out := 10.0)
+runs on Prometheus_Checker_CT return boolean {
+	return f_prometheus_expect_ext(expects, wait_converge, false, {}, time_out);
+}
+
+function f_prometheus_expect_from_snapshot(PrometheusExpects expects,
+					   boolean wait_converge := false,
+					   PrometheusMetrics snapshot := {},
+					   float time_out := 10.0)
+runs on Prometheus_Checker_CT return boolean {
+	return f_prometheus_expect_ext(expects, wait_converge, true, snapshot, time_out);
+}
+
+}
