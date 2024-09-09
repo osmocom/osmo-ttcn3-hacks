@@ -49,6 +49,27 @@ def handle_latest(cfg, path):
             del cfg[section][key]
 
 
+def get_vty_host_port(cfg, path=None):
+    host = "127.0.0.1"
+    port = None
+
+    for section in cfg:
+        if "vty_port" in cfg[section]:
+            if port:
+                logging.error(f"Error in {path}, section {section}:")
+                logging.error("  Found vty_port in multiple sections. This is not supported.")
+                sys.exit(1)
+            port = cfg[section]["vty_port"]
+        if "vty_host" in cfg[section]:
+            if not port:
+                logging.error(f"Error in {path}, section {section}:")
+                logging.error("  Found vty_host in section without vty_port.")
+                sys.exit(1)
+            host = cfg[section]["vty_host"]
+
+    return host, port
+
+
 def verify(cfg, path):
     keys_valid_testsuite = [
         "clean",
@@ -64,6 +85,8 @@ def verify(cfg, path):
         "prepare",
         "program",
         "setup",
+        "vty_host",
+        "vty_port",
     ]
     keys_invalid = {
         "configs": "config",
@@ -107,6 +130,8 @@ def verify(cfg, path):
             logging.error(f"{path}: missing make= in section [{section}].")
             logging.error("If this is on purpose, set make=no.")
             exit_error_readme()
+
+    get_vty_host_port(cfg, path)
 
 
 def raise_error_config_arg(glob_result):

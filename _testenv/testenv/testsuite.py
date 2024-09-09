@@ -165,6 +165,13 @@ def run(cfg):
     env = {
         "TTCN3_PCAP_PATH": os.path.join(testenv.testdir.testdir, "testsuite"),
     }
+
+    # Let ttcn3-tcpdump-stop.sh retrieve talloc reports
+    host, port = testenv.testenv_cfg.get_vty_host_port(cfg)
+    if port:
+        env["OSMO_SUT_HOST"] = host
+        env["OSMO_SUT_PORT"] = port
+
     env = testenv.cmd.generate_env(env, testenv.args.podman)
 
     cmd = [start_testsuite, suite, section_data["config"]]
