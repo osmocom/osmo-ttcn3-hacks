@@ -51,7 +51,10 @@ type record of ConnHdlr ConnHdlrList;
 type record ConnHdlrPars {
 	integer idx,
 	Global_ENB_ID genb_id,
-	charstring statsd_prefix
+	charstring statsd_prefix,
+	charstring pfcp_loc_addr,
+	charstring pfcp_rem_addr,
+	ERabList erabs
 };
 
 template Global_ENB_ID
@@ -289,7 +292,9 @@ type record ERab {
 	ERabParams u2c,		/* UPF -> Core params */
 	ERabParams c2u,		/* Core -> UPF params */
 	ERabParams a2u,		/* Access -> UPF params */
-	ERabParams u2a		/* UPF -> Access params */
+	ERabParams u2a,		/* UPF -> Access params */
+	OCT8 pfcp_loc_seid,
+	OCT8 pfcp_rem_seid optional
 };
 
 type record ERabParams {
@@ -392,6 +397,141 @@ runs on ConnHdlr return S1AP_PDU {
 
 	f_ConnHdlr_rx_s1ap_from_enb(pdu, tr_S1AP_RABSetupRsp(mme_ue_id, enb_ue_id, items));
 	return pdu;
+}
+
+function f_ConnHdlr_rx_session_establish_req(in ERab erab)
+runs on ConnHdlr return PDU_PFCP {
+	var OCT4 addr := f_inet_addr(g_pars.pfcp_rem_addr);
+
+	/* Packet Detection Rules */
+	var template (present) Outer_Header_Removal ohr;
+	var template (present) Create_PDR pdr1;
+	var template (present) Create_PDR pdr2;
+
+	ohr := tr_PFCP_Outer_Header_Removal(GTP_U_UDP_IPV4);
+	pdr1 := tr_PFCP_Create_PDR(pdr_id := 1, /* -- for Core -> Access */
+				   pdi := tr_PFCP_PDI(CORE),
+				   ohr := ohr,
+				   far_id := 1);
+	pdr2 := tr_PFCP_Create_PDR(pdr_id := 2, /* -- for Access -> Core */
+				   pdi := tr_PFCP_PDI(ACCESS),
+				   ohr := ohr,
+				   far_id := 2);
+
+	/* Forwarding Action Rules */
+	var template (present) Outer_Header_Creation ohc2;
+	var template (present) Forwarding_Parameters fpars2;
+	var template (present) Create_FAR far1;
+	var template (present) Create_FAR far2;
+
+	ohc2 := tr_PFCP_Outer_Header_Creation_GTP_ipv4(erab.u2c.teid,
+						       f_inet_addr(erab.u2c.tla));
+	fpars2 := tr_PFCP_Forwarding_Parameters(CORE, ohc2);
+
+	far1 := tr_PFCP_Create_FAR(far_id := 1, /* -- for Core -> Access */
+				   aa := tr_PFCP_Apply_Action_DROP,
+				   fp := omit);
+	far2 := tr_PFCP_Create_FAR(far_id := 2, /* -- for Access -> Core */
+				   aa := tr_PFCP_Apply_Action_FORW,
+				   fp := fpars2);
+
+	/* The final Session Establishment Request PDU */
+	var template (present) PDU_PFCP tr_pdu;
+	tr_pdu := tr_PFCP_Session_Est_Req(node_id := tr_PFCP_Node_ID_ipv4(addr),
+					  cp_f_seid := tr_PFCP_F_SEID_ipv4(addr),
+					  create_pdr := {pdr1, pdr2},
+					  create_far := {far1, far2});
+	return f_ConnHdlr_pfcp_expect(tr_pdu);
+}
+
+function f_ConnHdlr_tx_session_establish_resp(in ERab erab,
+					      in PDU_PFCP req)
+runs on ConnHdlr {
+	var OCT4 addr := f_inet_addr(g_pars.pfcp_loc_addr);
+	var PFCP_Session_Establishment_Request serq;
+
+	serq := req.message_body.pfcp_session_establishment_request;
+
+	/* Created Packet Detection Rules */
+	var template (value) Created_PDR pdr1;
+	var template (value) Created_PDR pdr2;
+	pdr1 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[0].grouped_ie.pdr_id,
+				    local_F_TEID := ts_PFCP_F_TEID_ipv4(erab.c2u.teid,
+									f_inet_addr(erab.c2u.tla)));
+	pdr2 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[1].grouped_ie.pdr_id,
+				    local_F_TEID := ts_PFCP_F_TEID_ipv4(erab.a2u.teid,
+									f_inet_addr(erab.a2u.tla)));
+
+	/* The final Session Establishment Response PDU */
+	var template (value) PDU_PFCP resp;
+	resp := ts_PFCP_Session_Est_Resp(seq_nr := req.sequence_number,
+					 node_id := ts_PFCP_Node_ID_ipv4(addr),
+					 seid := erab.pfcp_rem_seid,
+					 f_seid := ts_PFCP_F_SEID_ipv4(addr, erab.pfcp_loc_seid),
+					 created_pdr := {pdr1, pdr2});
+	PFCP.send(resp);
+}
+
+function f_ConnHdlr_rx_session_modify_req(in ERab erab)
+runs on ConnHdlr return PDU_PFCP {
+	/* Forwarding Action Rules */
+	var template (present) Outer_Header_Creation ohc1;
+	var template (present) Update_Forwarding_Parameters fpars1;
+	var template (present) Update_FAR far1;
+
+	ohc1 := tr_PFCP_Outer_Header_Creation_GTP_ipv4(erab.u2a.teid,
+						       f_inet_addr(erab.u2a.tla));
+	fpars1 := tr_PFCP_Update_Forwarding_Parameters(ohc := ohc1);
+
+	far1 := tr_PFCP_Update_FAR(far_id := 1, /* -- for Core -> Access */
+				   aa := tr_PFCP_Apply_Action_FORW,
+				   fp := fpars1);
+
+	/* The final Session Modification Request PDU */
+	var template (present) PDU_PFCP tr_pdu;
+	tr_pdu := tr_PFCP_Session_Mod_Req(seid := erab.pfcp_loc_seid,
+					  update_far := far1);
+	return f_ConnHdlr_pfcp_expect(tr_pdu);
+}
+
+function f_ConnHdlr_tx_session_modify_resp(in ERab erab,
+					   in PDU_PFCP req)
+runs on ConnHdlr {
+	/* The final Session Modification Response PDU */
+	var template (value) PDU_PFCP resp;
+	resp := ts_PFCP_Session_Mod_Resp(seq_nr := req.sequence_number,
+					 seid := erab.pfcp_rem_seid);
+	PFCP.send(resp);
+}
+
+function f_ConnHdlr_erab_setup_req(inout ERabList erabs)
+runs on ConnHdlr {
+	log("eNB <- [S1GW <- MME]: E-RAB SETUP REQUEST");
+	f_ConnHdlr_tx_erab_setup_req(erabs);
+	for (var integer i := 0; i < lengthof(erabs); i := i + 1) {
+		log("UPF <- S1GW: PFCP Session Establishment Request for E-RAB ID ", erabs[i].erab_id);
+		var PDU_PFCP pdu := f_ConnHdlr_rx_session_establish_req(erabs[i]);
+		/* store peer's SEID, so that it can be used in outgoing PDUs later */
+		erabs[i].pfcp_rem_seid := pdu.message_body.pfcp_session_establishment_request.CP_F_SEID.seid;
+		log("UPF -> S1GW: PFCP Session Establishment Response for E-RAB ID ", erabs[i].erab_id);
+		f_ConnHdlr_tx_session_establish_resp(erabs[i], pdu);
+	}
+	log("[eNB <- S1GW] <- MME: E-RAB SETUP REQUEST");
+	f_ConnHdlr_rx_erab_setup_req(erabs);
+}
+
+function f_ConnHdlr_erab_setup_rsp(in ERabList erabs)
+runs on ConnHdlr {
+	log("[eNB -> S1GW] -> MME: E-RAB SETUP RESPONSE");
+	f_ConnHdlr_tx_erab_setup_rsp(erabs);
+	for (var integer i := 0; i < lengthof(erabs); i := i + 1) {
+		log("UPF <- S1GW: PFCP Session Modification Request for E-RAB ID ", erabs[i].erab_id);
+		var PDU_PFCP pdu := f_ConnHdlr_rx_session_modify_req(erabs[i]);
+		log("UPF -> S1GW: PFCP Session Modification Response for E-RAB ID ", erabs[i].erab_id);
+		f_ConnHdlr_tx_session_modify_resp(erabs[i], pdu);
+	}
+	log("eNB -> [S1GW -> MME]: E-RAB SETUP RESPONSE");
+	f_ConnHdlr_rx_erab_setup_rsp(erabs);
 }
 
 }
