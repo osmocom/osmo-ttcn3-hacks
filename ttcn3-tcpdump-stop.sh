@@ -83,3 +83,5 @@ if [ -f "$TTCN3_PCAP_PATH/$TESTCASE.pcap.gz" ]; then
        PCAP_FILENAME="$TTCN3_PCAP_PATH/$TESTCASE.$i.pcap"
 fi
 gzip -f "$PCAP_FILENAME"
+
+rm -f "$TTCN3_PCAP_PATH/.current_test"

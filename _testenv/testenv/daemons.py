@@ -9,6 +9,7 @@ import subprocess
 import testenv
 import testenv.testdir
 import time
+import sys
 
 daemons = {}
 run_shell_on_stop = False
@@ -98,6 +99,24 @@ def kill(pid):
         ppids.append(items)
 
     kill_process_tree(pid, ppids)
+
+
+def check_if_crashed():
+    crashed = False
+    for daemon_name, daemon_proc in daemons.items():
+        if not testenv.testsuite.is_running(daemon_proc.pid):
+            crashed = True
+            break
+    if not crashed:
+        return
+
+    current_test = testenv.testsuite.get_current_test()
+    if current_test:
+        logging.error(f"{daemon_name} crashed during {current_test}!")
+        testenv.testsuite.wait_until_test_stopped()
+    else:
+        logging.error(f"{daemon_name} crashed!")
+    sys.exit(1)
 
 
 def stop():

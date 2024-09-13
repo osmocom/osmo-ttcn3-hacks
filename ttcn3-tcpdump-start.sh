@@ -120,3 +120,5 @@ do
 	fi
 done
 kill $PID
+
+echo "$TESTCASE" > "$TTCN3_PCAP_PATH/.current_test"

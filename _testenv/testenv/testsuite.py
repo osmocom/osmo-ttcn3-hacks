@@ -200,9 +200,7 @@ def run(cfg):
             stop()
             break
 
-        for daemon_name, daemon_proc in testenv.daemons.daemons.items():
-            if not is_running(daemon_proc.pid):
-                raise testenv.NoTraceException(f"{daemon_name} crashed!")
+        testenv.daemons.check_if_crashed()
 
     merge_log_files(cfg)
     format_log_files(cfg)
@@ -215,6 +213,29 @@ def run_prepare_script(cfg):
 
     logging.info("Running testsuite prepare script")
     testenv.cmd.run(section_data["prepare"])
+
+
+def get_current_test():
+    path = os.path.join(testenv.testdir.testdir, "testsuite/.current_test")
+    try:
+        with open(path, "r") as h:
+            return h.readline().rstrip()
+    except:
+        # File may not exist, e.g. if test was stopped
+        return None
+
+
+def wait_until_test_stopped():
+    path = os.path.join(testenv.testdir.testdir, "testsuite/.current_test")
+
+    logging.debug("Waiting until test has stopped...")
+
+    for i in range(0, 1200):
+        time.sleep(0.1)
+        if not os.path.exists(path):
+            return
+
+    raise testenv.NoTraceError("Timeout in wait_until_test_stopped()")
 
 
 def stop():
