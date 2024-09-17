@@ -22,6 +22,7 @@ RUN	set -x && \
 		ccache \
 		cmake \
 		flex \
+		gdb \
 		git \
 		iproute2 \
 		iputils-ping \

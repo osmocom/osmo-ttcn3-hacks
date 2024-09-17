@@ -10,6 +10,7 @@ import shlex
 import subprocess
 import testenv.cmd
 import testenv.testdir
+import testenv.coredump
 import time
 
 image_name = None
@@ -275,6 +276,10 @@ def stop(restart=False):
 
     if not is_running():
         return
+
+    # If we have a coredump, we must get the backtrace by running gdb inside
+    # the container. So do it before stopping the container.
+    testenv.coredump.get_backtrace()
 
     if not restart and run_shell_on_stop:
         logging.info("Running interactive shell before stopping container (--shell)")

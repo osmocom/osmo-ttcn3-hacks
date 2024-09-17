@@ -7,6 +7,7 @@ import os.path
 import shlex
 import subprocess
 import testenv
+import testenv.coredump
 import testenv.testdir
 import time
 import sys
@@ -17,6 +18,8 @@ run_shell_on_stop = False
 
 def init():
     global run_shell_on_stop
+
+    atexit.register(testenv.coredump.get_backtrace)
 
     if not testenv.args.podman:
         atexit.register(stop)
@@ -111,6 +114,8 @@ def check_if_crashed():
         return
 
     current_test = testenv.testsuite.get_current_test()
+    testenv.coredump.get_from_coredumpctl()
+
     if current_test:
         logging.error(f"{daemon_name} crashed during {current_test}!")
         testenv.testsuite.wait_until_test_stopped()
