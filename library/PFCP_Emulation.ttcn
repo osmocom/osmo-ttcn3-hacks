@@ -1,6 +1,6 @@
 /* PFCP Emulation in TTCN-3
  *
- * (C) 2022 sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * (C) 2022-2024 sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -14,6 +14,8 @@ module PFCP_Emulation {
 import from IPL4asp_Types all;
 import from General_Types all;
 import from Osmocom_Types all;
+import from Misc_Helpers all;
+
 import from PFCP_Types all;
 import from PFCP_Templates all;
 import from PFCP_CodecPort all;
@@ -53,7 +55,12 @@ type component PFCP_Emulation_CT {
 	var integer g_pfcp_conn_id;
 	var integer g_recovery_timestamp;
 
-	var PFCPEM_conns g_conns;
+	/* List of PFCP_ConnHdlr subscribed for broadcast */
+	var PFCPEM_conns g_conns_bcast;
+	/* List of PFCP_ConnHdlr subscribed for SEID */
+	var PFCPEM_conns g_conns_seqnr;
+	/* List of PFCP_ConnHdlr subscribed for SeqNr */
+	var PFCPEM_conns g_conns_seid;
 
 	var integer g_next_sequence_nr_state;
 };
@@ -69,16 +76,16 @@ private function f_PFCPEM_next_sequence_nr() runs on PFCP_Emulation_CT return in
 type record PFCPEM_conn {
 	PFCP_ConnHdlr vc_conn,
 	OCT8 seid optional,
-	LIN3_BO_LAST pfcp_msg_sequence_number optional
+	LIN3_BO_LAST seqnr optional
 };
 
 type record of PFCPEM_conn PFCPEM_conns;
 
 private function f_PFCPEM_conn_by_seqnr(LIN3_BO_LAST seqnr)
 runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
-	for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
-		if (seqnr == g_conns[i].pfcp_msg_sequence_number) {
-			return g_conns[i].vc_conn;
+	for (var integer i := 0; i < lengthof(g_conns_seqnr); i := i + 1) {
+		if (seqnr == g_conns_seqnr[i].seqnr) {
+			return g_conns_seqnr[i].vc_conn;
 		}
 	}
 	return null;
@@ -86,9 +93,9 @@ runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
 
 private function f_PFCPEM_conn_by_seid(OCT8 seid)
 runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
-	for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
-		if (seid == g_conns[i].seid) {
-			return g_conns[i].vc_conn;
+	for (var integer i := 0; i < lengthof(g_conns_seid); i := i + 1) {
+		if (seid == g_conns_seid[i].seid) {
+			return g_conns_seid[i].vc_conn;
 		}
 	}
 	return null;
@@ -100,6 +107,7 @@ runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
 
 	vc_conn := f_PFCPEM_conn_by_seqnr(pdu.sequence_number);
 	if (vc_conn != null) {
+		f_PFCPEM_conns_seqnr_del(pdu.sequence_number);
 		return vc_conn;
 	}
 
@@ -111,16 +119,97 @@ runs on PFCP_Emulation_CT return PFCP_ConnHdlr {
 	return vc_conn;
 };
 
-private function f_PFCPEM_conn_add_or_update(in PFCPEM_conn conn)
-runs on PFCP_Emulation_CT {
-	for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
-		if (g_conns[i].vc_conn == conn.vc_conn) {
-			g_conns[i] := conn; /* update */
-			return;
+/* subscribe/unsubscribe for/from broadcast PDUs */
+private function f_PFCPEM_conns_bcast_add(PFCP_ConnHdlr vc_conn)
+runs on PFCP_Emulation_CT return boolean {
+	for (var integer i := 0; i < lengthof(g_conns_bcast); i := i + 1) {
+		if (g_conns_bcast[i].vc_conn == vc_conn) {
+			log(__SCOPE__, "(): vc_conn ", vc_conn, " is already in the list");
+			return false;
 		}
 	}
-	/* Not in the list yet, add. */
-	g_conns := g_conns & { conn };
+	g_conns_bcast := g_conns_bcast & {{vc_conn, omit, omit}};
+	log(__SCOPE__, "(): vc_conn ", vc_conn, " subscribed for broadcast");
+	return true;
+}
+private function f_PFCPEM_conns_bcast_del(PFCP_ConnHdlr vc_conn)
+runs on PFCP_Emulation_CT return boolean {
+	var PFCPEM_conns conns := { };
+
+	for (var integer i := 0; i < lengthof(g_conns_bcast); i := i + 1) {
+		if (g_conns_bcast[i].vc_conn != vc_conn) {
+			conns := conns & { g_conns_bcast[i] };
+		}
+	}
+	if (lengthof(conns) == lengthof(g_conns_bcast)) {
+		log(__SCOPE__, "(): vc_conn ", vc_conn, " was not in the list");
+		return false;
+	}
+	log(__SCOPE__, "(): vc_conn ", vc_conn, " unsubscribed from broadcast");
+	g_conns_bcast := conns;
+	return true;
+}
+
+/* subscribe/unsubscribe for/from PDUs with the given SeqNr value */
+private function f_PFCPEM_conns_seqnr_add(PFCP_ConnHdlr vc_conn,
+					  LIN3_BO_LAST seqnr)
+runs on PFCP_Emulation_CT return boolean {
+	for (var integer i := 0; i < lengthof(g_conns_seqnr); i := i + 1) {
+		if (g_conns_seqnr[i].seqnr == seqnr) {
+			log(__SCOPE__, "(): SeqNr ", seqnr, " is already claimed",
+			    " by vc_conn ", g_conns_seqnr[i].vc_conn);
+			return false;
+		}
+	}
+	g_conns_seqnr := g_conns_seqnr & { {vc_conn, omit, seqnr} };
+	return true;
+}
+private function f_PFCPEM_conns_seqnr_del(LIN3_BO_LAST seqnr)
+runs on PFCP_Emulation_CT return boolean {
+	var PFCPEM_conns conns := { };
+
+	for (var integer i := 0; i < lengthof(g_conns_seqnr); i := i + 1) {
+		if (g_conns_seqnr[i].seqnr != seqnr) {
+			conns := conns & { g_conns_seqnr[i] };
+		}
+	}
+	if (lengthof(conns) == lengthof(g_conns_seqnr)) {
+		log(__SCOPE__, "(): SeqNr ", seqnr, " was not in the list");
+		return false;
+	}
+	g_conns_seqnr := conns;
+	return true;
+}
+
+/* subscribe/unsubscribe for/from PDUs with the given SEID value */
+private function f_PFCPEM_conns_seid_add(PFCP_ConnHdlr vc_conn,
+					 OCT8 seid)
+runs on PFCP_Emulation_CT return boolean {
+	for (var integer i := 0; i < lengthof(g_conns_seid); i := i + 1) {
+		if (g_conns_seid[i].seid == seid) {
+			log(__SCOPE__, "(): SEID ", seid, " is already claimed",
+			    " by vc_conn ", g_conns_seid[i].vc_conn);
+			return false;
+		}
+	}
+	g_conns_seid := g_conns_seid & { {vc_conn, seid, omit} };
+	return true;
+}
+private function f_PFCPEM_conns_seid_del(OCT8 seid)
+runs on PFCP_Emulation_CT return boolean {
+	var PFCPEM_conns conns := { };
+
+	for (var integer i := 0; i < lengthof(g_conns_seid); i := i + 1) {
+		if (g_conns_seid[i].seid != seid) {
+			conns := conns & { g_conns_seid[i] };
+		}
+	}
+	if (lengthof(conns) == lengthof(g_conns_seid)) {
+		log(__SCOPE__, "(): SEID ", seid, " was not in the list");
+		return false;
+	}
+	g_conns_seid := conns;
+	return true;
 }
 
 private function f_init(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
@@ -133,7 +222,9 @@ private function f_init(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
 	g_recovery_timestamp := f_rnd_int(4294967296);
 	g_pfcp_cfg := cfg;
 
-	g_conns := {};
+	g_conns_bcast := { };
+	g_conns_seqnr := { };
+	g_conns_seid := { };
 
 	g_next_sequence_nr_state := (1 + f_rnd_int(1000)) * 10000;
 }
@@ -142,6 +233,7 @@ function main(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
 	var PFCP_ConnHdlr vc_conn;
 	var PFCP_Unitdata ud;
 	var PDU_PFCP pdu;
+	var OCT8 seid;
 
 	f_init(cfg);
 
@@ -162,9 +254,9 @@ function main(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
 					log("found destination ", vc_conn);
 					CLIENT.send(ud.pdu) to vc_conn;
 				} else {
-					log("sending to all conns: ", g_conns);
-					for (var integer i := 0; i < lengthof(g_conns); i := i + 1) {
-						CLIENT.send(ud.pdu) to g_conns[i].vc_conn;
+					for (var integer i := 0; i < lengthof(g_conns_bcast); i := i + 1) {
+						log("broadcasting to ", g_conns_bcast[i].vc_conn);
+						CLIENT.send(ud.pdu) to g_conns_bcast[i].vc_conn;
 					}
 				}
 			}
@@ -183,19 +275,33 @@ function main(PFCP_Emulation_Cfg cfg) runs on PFCP_Emulation_CT {
 					pdu := pdu
 				};
 
-				f_PFCPEM_conn_add_or_update({vc_conn, pdu.seid, pdu.sequence_number});
+				/* route the response back to this vc_conn */
+				f_PFCPEM_conns_seqnr_add(vc_conn, pdu.sequence_number);
 
 				PFCP.send(ud);
 			}
 
-		[] CLIENT_PROC.getcall(PFCPEM_register:{}) -> sender vc_conn {
-				log("PFCP_Emulation main() CLIENT_PROC.getcall(PFCPEM_register)");
-				f_PFCPEM_conn_add_or_update({vc_conn, omit, omit});
-				CLIENT_PROC.reply(PFCPEM_register:{}) to vc_conn;
+		/* subscribe/unsubscribe for/from broadcast PDUs */
+		[] CLIENT_PROC.getcall(PFCPEM_subscribe_bcast:{?}) -> sender vc_conn {
+				var boolean res := f_PFCPEM_conns_bcast_add(vc_conn);
+				CLIENT_PROC.reply(PFCPEM_subscribe_bcast:{res}) to vc_conn;
+			}
+		[] CLIENT_PROC.getcall(PFCPEM_unsubscribe_bcast:{?}) -> sender vc_conn {
+				var boolean res := f_PFCPEM_conns_bcast_del(vc_conn);
+				CLIENT_PROC.reply(PFCPEM_unsubscribe_bcast:{res}) to vc_conn;
+			}
+
+		/* subscribe/unsubscribe for/from PDUs with the given SEID value */
+		[] CLIENT_PROC.getcall(PFCPEM_subscribe_seid:{?, ?}) -> param(seid := seid) sender vc_conn {
+				var boolean res := f_PFCPEM_conns_seid_add(vc_conn, seid);
+				CLIENT_PROC.reply(PFCPEM_subscribe_seid:{seid, res}) to vc_conn;
+			}
+		[] CLIENT_PROC.getcall(PFCPEM_unsubscribe_seid:{?, ?}) -> param(seid := seid) sender vc_conn {
+				var boolean res := f_PFCPEM_conns_seid_del(seid);
+				CLIENT_PROC.reply(PFCPEM_unsubscribe_seid:{seid, res}) to vc_conn;
 			}
 
 		[] CLIENT_PROC.getcall(PFCPEM_get_recovery_timestamp:{?}) -> sender vc_conn {
-				log("PFCP_Emulation main() CLIENT_PROC.getcall(PFCPEM_get_recovery_timestamp)");
 				CLIENT_PROC.reply(PFCPEM_get_recovery_timestamp:{g_recovery_timestamp}) to vc_conn;
 			}
 		}
@@ -210,11 +316,17 @@ type port PFCPEM_PT message {
 	inout PDU_PFCP;
 } with { extension "internal" };
 
-signature PFCPEM_register();
+signature PFCPEM_subscribe_bcast(out boolean success);
+signature PFCPEM_unsubscribe_bcast(out boolean success);
+signature PFCPEM_subscribe_seid(in OCT8 seid, out boolean success);
+signature PFCPEM_unsubscribe_seid(in OCT8 seid, out boolean success);
 signature PFCPEM_get_recovery_timestamp(out integer rts);
 
 type port PFCPEM_PROC_PT procedure {
-	inout PFCPEM_register;
+	inout PFCPEM_subscribe_bcast;
+	inout PFCPEM_unsubscribe_bcast;
+	inout PFCPEM_subscribe_seid;
+	inout PFCPEM_unsubscribe_seid;
 	inout PFCPEM_get_recovery_timestamp;
 } with { extension "internal" };
 
@@ -227,13 +339,47 @@ type component PFCP_ConnHdlr {
 	port PFCPEM_PROC_PT PFCP_PROC;
 };
 
-function f_pfcp_register() runs on PFCP_ConnHdlr {
-	PFCP_PROC.call(PFCPEM_register:{}) {
-		[] PFCP_PROC.getreply(PFCPEM_register:{});
+/* subscribe/unsubscribe for/from broadcast PDUs */
+function f_PFCPEM_subscribe_bcast() runs on PFCP_ConnHdlr {
+	PFCP_PROC.call(PFCPEM_subscribe_bcast:{-}) {
+		[] PFCP_PROC.getreply(PFCPEM_subscribe_bcast:{true});
+		[] PFCP_PROC.getreply(PFCPEM_subscribe_bcast:{false}) {
+			setverdict(fail, __SCOPE__, "() failed");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+}
+function f_PFCPEM_unsubscribe_bcast() runs on PFCP_ConnHdlr {
+	PFCP_PROC.call(PFCPEM_unsubscribe_bcast:{-}) {
+		[] PFCP_PROC.getreply(PFCPEM_unsubscribe_bcast:{true});
+		[] PFCP_PROC.getreply(PFCPEM_unsubscribe_bcast:{false}) {
+			setverdict(fail, __SCOPE__, "() failed");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
 	}
 }
 
-function f_pfcp_get_recovery_timestamp()
+/* subscribe/unsubscribe for/from PDUs with the given SEID value */
+function f_PFCPEM_subscribe_seid(in OCT8 seid) runs on PFCP_ConnHdlr {
+	PFCP_PROC.call(PFCPEM_subscribe_seid:{seid, -}) {
+		[] PFCP_PROC.getreply(PFCPEM_subscribe_seid:{seid, true});
+		[] PFCP_PROC.getreply(PFCPEM_subscribe_seid:{seid, false}) {
+			setverdict(fail, __SCOPE__, "() failed");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+}
+function f_PFCPEM_unsubscribe_seid(in OCT8 seid) runs on PFCP_ConnHdlr {
+	PFCP_PROC.call(PFCPEM_unsubscribe_seid:{seid, -}) {
+		[] PFCP_PROC.getreply(PFCPEM_unsubscribe_seid:{seid, true});
+		[] PFCP_PROC.getreply(PFCPEM_unsubscribe_seid:{seid, false}) {
+			setverdict(fail, __SCOPE__, "() failed");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+}
+
+function f_PFCPEM_get_recovery_timestamp()
 runs on PFCP_ConnHdlr return integer {
 	var integer rts;
 
