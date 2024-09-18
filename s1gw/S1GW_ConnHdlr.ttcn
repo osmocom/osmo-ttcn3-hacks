@@ -18,6 +18,7 @@ import from Osmocom_Types all;
 import from Native_Functions all;
 import from IPL4asp_Types all;
 import from Misc_Helpers all;
+import from Mutex all;
 
 import from PFCP_Types all;
 import from PFCP_Emulation all;
@@ -40,7 +41,7 @@ import from StatsD_Checker all;
 
 import from S1AP_Server all;
 
-type component ConnHdlr extends S1APSRV_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr {
+type component ConnHdlr extends MutexCT, S1APSRV_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr {
 	var ConnHdlrPars g_pars;
 	port S1AP_CODEC_PT S1AP_ENB;
 	var ConnectionId g_s1ap_conn_id := -1;
@@ -556,9 +557,16 @@ function f_ConnHdlr_erab_setup_req(inout ERabList erabs)
 runs on ConnHdlr {
 	const OCT8 c_SEID0 := '0000000000000000'O;
 
-	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
-	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
+	/* This code block cannot be executed by more than one component at a time because
+	 * the S1AP E-RAB SETUP REQUEST triggers the IUT to send PFCP Session Establishment
+	 * Request PDU(s), with need to be routed to the respective ConnHdlr component (us).
+	 * As per 3GPP TS 29.244, section 7.2.2.4.2, these PFCP PDUs shall all have SEID=0,
+	 * so that the PFCPEM component cannot route them unambiguously.   This is why we
+	 * need to ensure that only one ConnHdlr is triggering PFCP session establishment
+	 * at the given moment of time. */
+	f_Mutex_lock(__BFILE__, __LINE__);
 	f_PFCPEM_subscribe_seid(c_SEID0);
+
 	log("eNB <- [S1GW <- MME]: E-RAB SETUP REQUEST");
 	f_ConnHdlr_tx_erab_setup_req(erabs);
 	for (var integer i := 0; i < lengthof(erabs); i := i + 1) {
@@ -571,8 +579,13 @@ runs on ConnHdlr {
 		log("UPF -> S1GW: PFCP Session Establishment Response for E-RAB ID ", erabs[i].erab_id);
 		f_ConnHdlr_tx_session_establish_resp(erabs[i], pdu);
 	}
-	/* We no longer expect to receive PFCP Session Establishment Request PDU(s). */
+
+	/* We're done establishing PFCP sessions, so at this point we no longer expect to
+	 * receive Session Establishment Request PDUs with SEID=0.  Unregister and unlock
+	 * the mutex, enabling other components to establish PFCP sessions after us. */
 	f_PFCPEM_unsubscribe_seid(c_SEID0);
+	f_Mutex_unlock(__BFILE__, __LINE__);
+
 	log("[eNB <- S1GW] <- MME: E-RAB SETUP REQUEST");
 	f_ConnHdlr_rx_erab_setup_req(erabs);
 }
