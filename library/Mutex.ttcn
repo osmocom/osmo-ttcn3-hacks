@@ -1,0 +1,135 @@
+/* Generic Mutex API for parallel components.
+ *
+ * (C) 2024 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
+ *
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module Mutex {
+
+import from Misc_Helpers all;
+
+type component MutexCT {
+	port MutexPT LOCK;	/* port for LOCKing the mutex */
+	port MutexPT UNLOCK;	/* port for UNLOCKing the mutex */
+	var integer g_mutex_ref;
+};
+
+type port MutexPT procedure {
+	inout MUTEX_LOCK;
+	inout MUTEX_UNLOCK;
+} with { extension "internal" };
+
+private signature MUTEX_LOCK(out integer ref);
+private signature MUTEX_UNLOCK(in integer ref) noblock;
+
+type component MutexDispCT extends MutexCT { };
+
+private function f_MutexDisp_main()
+runs on MutexDispCT {
+	var boolean locked := false;
+	var MutexCT vc_conn;
+
+	g_mutex_ref := 0;
+
+	alt {
+	[not locked] LOCK.getcall(MUTEX_LOCK:{?}) -> sender vc_conn {
+		LOCK.reply(MUTEX_LOCK:{g_mutex_ref}) to vc_conn;
+		locked := true;
+		repeat;
+		}
+	[locked] UNLOCK.getcall(MUTEX_UNLOCK:{g_mutex_ref}) {
+		g_mutex_ref := g_mutex_ref + 1;
+		locked := false;
+		repeat;
+		}
+	[not locked] UNLOCK.getcall -> sender vc_conn {
+		setverdict(fail, __SCOPE__, "(): ",
+			   "mutex unlock without prior lock from ", vc_conn);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	[locked] UNLOCK.getcall(MUTEX_UNLOCK:{?}) -> sender vc_conn {
+		setverdict(fail, __SCOPE__, "(): ",
+			   "mutex unlock was not unexpected from ", vc_conn);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+}
+
+/* used by the MTC to start the mutex dispatcher */
+function f_MutexDisp_start()
+return MutexDispCT {
+	var MutexDispCT vc_disp;
+
+	vc_disp := MutexDispCT.create("MutexDispCT-" & testcasename());
+	vc_disp.start(f_MutexDisp_main());
+
+	return vc_disp;
+}
+
+/* used by the MTC to connect a parallel component to the mutex dispatcher */
+function f_MutexDisp_connect(MutexDispCT vc_disp, MutexCT vc_conn)
+{
+	connect(vc_disp:LOCK, vc_conn:LOCK);
+	connect(vc_disp:UNLOCK, vc_conn:UNLOCK);
+}
+
+/* used by parallel components to lock the mutex (blocking) */
+function f_Mutex_lock(charstring file, integer line,
+		      float Tval := 10.0)
+runs on MutexCT {
+	LOCK.call(MUTEX_LOCK:{-}, Tval) {
+		[] LOCK.getreply(MUTEX_LOCK:{?}) -> param(g_mutex_ref) {
+			log(__SCOPE__, "(): mutex acquired @ ", file, ":", line);
+		}
+		[] LOCK.catch(timeout) {
+			setverdict(fail, __SCOPE__, "(): timeout @ ", file, ":", line);
+			Misc_Helpers.f_shutdown(file, line);
+		}
+	}
+}
+
+/* used by parallel components to unlock the mutex (non-blocking) */
+function f_Mutex_unlock(charstring file, integer line)
+runs on MutexCT {
+	UNLOCK.call(MUTEX_UNLOCK:{g_mutex_ref});
+	log(__SCOPE__, "(): mutex released @ ", file, ":", line);
+}
+
+
+/* self-test for this module */
+private type component TestCT { };
+private type component TestChildCT extends MutexCT { };
+
+private function f_TC_selftest()
+runs on TestChildCT {
+	f_Mutex_lock(__BFILE__, __LINE__);
+	/* yay, we're the only one ruling this parallel world! */
+	f_Mutex_unlock(__BFILE__, __LINE__);
+	setverdict(pass);
+}
+
+testcase TC_selftest() runs on TestCT {
+	var TestChildCT vc_conns[42];
+	var MutexDispCT vc_disp;
+
+	vc_disp := f_MutexDisp_start();
+
+	for (var integer i := 0; i < sizeof(vc_conns); i := i + 1) {
+		vc_conns[i] := TestChildCT.create("TestChildCT-" & int2str(i));
+		f_MutexDisp_connect(vc_disp, vc_conns[i]);
+		vc_conns[i].start(f_TC_selftest());
+	}
+
+	for (var integer i := 0; i < sizeof(vc_conns); i := i + 1) {
+		vc_conns[i].done;
+	}
+}
+
+}
