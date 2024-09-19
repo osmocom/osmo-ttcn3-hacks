@@ -85,11 +85,9 @@ vty_port=4243
   This can be used to wait until the program is ready or to fill a test
   database for example. See below for `PATH`.
 
-* `clean=`: optional script to run before `prepare=` and on exit. This can be
-  used to clean up network devices for example, or to fix name collisions when
-  running a test with multiple configs (`rename_junit_xml_classname.sh`). See
-  below for `PATH`. A `TESTENV_CLEAN_REASON` env var is set to `prepare`,
-  `crashed` or `finished` depending on when the script runs.
+* `clean=`: same as in the Testsuite section above, but runs at a slightly
+  different time: before/after/on crash of the program instead of the
+  testsuite.
 
 * `vty_port=`: optionally set the VTY port for the SUT component to obtain a
   talloc report after each test case has been executed. If this is not set, no
