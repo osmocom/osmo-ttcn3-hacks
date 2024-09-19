@@ -52,8 +52,7 @@ def copy_ttcn3_hacks_dir():
     testenv.cmd.run(
         [
             "rsync",
-            "--links",
-            "--recursive",
+            "--archive",
             f"--files-from={copy_list}",
             f"{ttcn3_hacks_dir_src}/",
             f"{ttcn3_hacks_dir}/",
