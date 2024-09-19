@@ -55,14 +55,14 @@ vty_port=4243
 * `clean=`: optional script to run before running the testsuite and on exit.
   This can be used to clean up network devices for example, or to fix name
   collisions when running a test with multiple configs
-  (`rename_junit_xml_classname.sh`). See below for `PATH`. A
+  (`rename_junit_xml_classname.sh`). See below for `PATH` and `PWD`. A
   `TESTENV_CLEAN_REASON` env var is set to `prepare`, `crashed` or `finished`
   depending on when the script runs.
 
 #### Component section
 
 * `program=`: executable for starting a test component, may contain arguments.
-  See below for `PATH`.
+  See below for `PATH` and `PWD`.
 
 * `copy=`: file(s) to copy from the testsuite directory to the test directory,
   like `.cfg` and `.confmerge` files. Multiple values are separated by spaces.
@@ -78,12 +78,12 @@ vty_port=4243
 
 * `prepare=`: optional script to run before staring the program (after files
   are copied to the test directory). Typically this is used to create configs
-  with `osmo-config-merge`. See below for `PATH`.
+  with `osmo-config-merge`. See below for `PATH` and `PWD`.
 
 * `setup=`: optional script to run after the program was started. Execution of
   the next program / the testsuite will wait until the setup script has quit.
   This can be used to wait until the program is ready or to fill a test
-  database for example. See below for `PATH`.
+  database for example. See below for `PATH` and `PWD`.
 
 * `clean=`: same as in the Testsuite section above, but runs at a slightly
   different time: before/after/on crash of the program instead of the
@@ -96,7 +96,9 @@ vty_port=4243
 * `vty_host=`: optionally set the VTY host for the SUT component to be used
   when obtaining a talloc report. If this is not set, `127.0.0.1` is used.
 
-### PATH
+### Executables
+
+#### $PATH
 
 Executables mentioned in `program=`, `prepare=`, `setup=` and `clean=` run
 with a `PATH` environment variable containing:
@@ -104,6 +106,22 @@ with a `PATH` environment variable containing:
 * The directory of the testsuite
 * The directory for binaries built from source
 * The directory `_testenv/data/scripts` (which has e.g. `respawn.sh`)
+
+#### $PWD (current working dir)
+
+The executables run inside a directory with the component name, inside the log
+dir. For example:
+
+```
+/tmp/logs
+├── ggsn                   # Executables from [ggsn] section run in this dir
+│   ├── ggsn.log
+│   └── osmo-ggsn.cfg
+└── testsuite              # Executables from [testsuite] run in this dir
+    ├── Common.cfg
+    ├── GGSN_Tests.cfg
+    └── GGSN_Tests.default
+```
 
 ### Latest configs
 
