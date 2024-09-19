@@ -57,7 +57,8 @@ vty_port=4243
   collisions when running a test with multiple configs
   (`rename_junit_xml_classname.sh`). See below for `PATH` and `PWD`. A
   `TESTENV_CLEAN_REASON` env var is set to `prepare`, `crashed` or `finished`
-  depending on when the script runs.
+  depending on when the script runs. The script will not run on crash if podman
+  is used, as the container gets shutdown beforehand.
 
 #### Component section
 

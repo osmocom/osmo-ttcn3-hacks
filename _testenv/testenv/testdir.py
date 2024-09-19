@@ -170,8 +170,14 @@ def clean():
 def clean_run_scripts(reason="crashed"):
     global clean_scripts
 
-    for section, script in clean_scripts.items():
-        logging.info(f"Running {section} clean script (reason: {reason})")
-        env = {"TESTENV_CLEAN_REASON": reason}
-        testenv.cmd.run(script, cwd=os.path.join(testdir, section), env=env)
+    if not clean_scripts:
+        return
+    elif testenv.args.podman and not testenv.podman.is_running():
+        logging.debug("Skipping clean up scripts, podman container has already stopped")
+    else:
+        for section, script in clean_scripts.items():
+            logging.info(f"Running {section} clean script (reason: {reason})")
+            env = {"TESTENV_CLEAN_REASON": reason}
+            testenv.cmd.run(script, cwd=os.path.join(testdir, section), env=env)
+
     clean_scripts = {}
