@@ -131,6 +131,10 @@ def init():
 
 
 def exec_cmd(cmd, podman_opts=[], cwd=None, env={}, *args, **kwargs):
+    if not container_name:
+        raise RuntimeError("Attempting to execute a command in podman, but the"
+                           f" container isn't running anymore: {cmd}")
+
     podman_opts = list(podman_opts)
     podman_opts += generate_env_podman(env)
     # Attach a fake tty (eclipse-titan won't print colored output otherwise)
