@@ -91,12 +91,12 @@ vty_port=4243
   below for `PATH`. A `TESTENV_CLEAN_REASON` env var is set to `prepare`,
   `crashed` or `finished` depending on when the script runs.
 
-* `vty_port`: optionally set the VTY port for the SUT component to obtain a
+* `vty_port=`: optionally set the VTY port for the SUT component to obtain a
   talloc report after each test case has been executed. If this is not set, no
   talloc reports will be obtained.
 
-* `vty_host`: optionally set the VTY host for the SUT component to be used when
-  obtaining a talloc report. If this is not set, `127.0.0.1` is used.
+* `vty_host=`: optionally set the VTY host for the SUT component to be used
+  when obtaining a talloc report. If this is not set, `127.0.0.1` is used.
 
 ### PATH
 
