@@ -80,11 +80,19 @@ def prepare(cfg_name, cfg):
             testenv.cmd.run(["install", "-Dm644", path, path_dest])
 
         if "copy" in section_data:
-            for file in section_data["copy"].split(" "):
-                path = os.path.join(testsuite_dir, file)
-                path_dest = os.path.join(section_dir, file)
-                mode = 755 if os.access(path, os.X_OK) else 644
-                testenv.cmd.run(["install", f"-Dm{mode}", path, path_dest])
+            for copy_entry in section_data["copy"].split(" "):
+                path = os.path.join(testsuite_dir, copy_entry)
+                if os.path.isdir(path):
+                    pattern = os.path.join(path, "**")
+                    paths = glob.glob(pattern, recursive=True)
+                else:
+                    paths = [path]
+                for path in paths:
+                    if os.path.isdir(path):
+                        continue
+                    path_dest = os.path.join(section_dir, os.path.relpath(path, testsuite_dir))
+                    mode = 755 if os.access(path, os.X_OK) else 644
+                    testenv.cmd.run(["install", f"-Dm{mode}", path, path_dest])
 
         if "clean" in section_data:
             logging.info(f"Running {section} clean script (reason: prepare)")

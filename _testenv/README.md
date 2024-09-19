@@ -65,8 +65,9 @@ vty_port=4243
 * `program=`: executable for starting a test component, may contain arguments.
   See below for `PATH` and `PWD`.
 
-* `copy=`: file(s) to copy from the testsuite directory to the test directory,
-  like `.cfg` and `.confmerge` files. Multiple values are separated by spaces.
+* `copy=`: optionally copy a space separated list of files or directories from
+  the testsuite directory to the test directory, like `.cfg` and `.confmerge`
+  files.
 
 * `make=`: osmo-dev make target for building from source, if running without
   `--binary-repo`. This is usually the name of the git repository, but could
