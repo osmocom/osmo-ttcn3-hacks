@@ -3,7 +3,10 @@ DIR="$1"
 COMMIT="$2"
 
 cd "$DIR"
-git fetch
+
+if ! git cat-file -e "$COMMIT"; then
+	git fetch
+fi
 
 if git rev-parse "origin/$COMMIT" 2>/dev/null; then
 	set -x
