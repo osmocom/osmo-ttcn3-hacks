@@ -158,15 +158,7 @@ ifneq ($$($(1)_ORIGIN),$(2)/$(1))
 	cd $(1) && git remote set-url origin $(2)/$(1) && git fetch
 endif
 ifneq ($$($(1)_HEAD),$($(1)_commit))
-	cd $(1) && \
-		git fetch && \
-		if git rev-parse "origin/$($(1)_commit)" 2>/dev/null; then \
-			set -x && \
-			git checkout -q -f "origin/$($(1)_commit)"; \
-		else \
-			set -x && \
-			git checkout -q -f "$($(1)_commit)"; \
-		fi
+	./update.sh "$(1)" "$($(1)_commit)"
 endif
 endif
 
