@@ -4,6 +4,11 @@ COMMIT="$2"
 
 cd "$DIR"
 
+if [ "$(git rev-parse HEAD)" = "$COMMIT" ]; then
+	# Commit is already checked out, nothing to do!
+	exit 0
+fi
+
 if ! git cat-file -e "$COMMIT"; then
 	echo "[$DIR] Missing $COMMIT, fetching git repository"
 	git fetch
