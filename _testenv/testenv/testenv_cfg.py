@@ -1,6 +1,7 @@
 # Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
 import configparser
+import fnmatch
 import glob
 import logging
 import os.path
@@ -134,14 +135,14 @@ def verify(cfg, path):
     get_vty_host_port(cfg, path)
 
 
-def raise_error_config_arg(glob_result):
+def raise_error_config_arg(glob_result, config_arg):
     valid = []
     for path in glob_result:
         basename = os.path.basename(path)
         if basename != "testenv.cfg":
             valid += [basename.split("_", 1)[1].split(".", -1)[0]]
 
-    msg = f"Invalid parameter for --config: {testenv.args.config}"
+    msg = f"Invalid parameter for --config: {config_arg}"
 
     if valid:
         msg += f" (valid: all, {', '.join(valid)})"
@@ -154,7 +155,7 @@ def raise_error_config_arg(glob_result):
 def find_configs():
     dir_testsuite = os.path.join(testenv.testsuite.ttcn3_hacks_dir_src, testenv.args.testsuite)
     pattern = os.path.join(dir_testsuite, "testenv*.cfg")
-    ret = glob.glob(pattern)
+    ret = sorted(glob.glob(pattern))
 
     if not ret:
         logging.error(f"Missing testenv.cfg in: {dir_testsuite}")
@@ -185,6 +186,8 @@ def find_configs():
 def init():
     global cfgs
 
+    cfgs_all = {}
+
     config_paths = find_configs()
 
     for path in config_paths:
@@ -201,14 +204,27 @@ def init():
         handle_latest(cfg, path)
         verify(cfg, path)
 
+        # No --config argument given, and there is only one testenv.cfg
         if not testenv.args.config:
             cfgs[basename] = cfg
-            continue
+            return
 
-        for config_arg in testenv.args.config:
-            if config_arg == "all" or f"testenv_{config_arg}.cfg" == basename:
-                cfgs[basename] = cfg
-                break
+        cfgs_all[basename] = cfg
 
-    if not cfgs:
-        raise_error_config_arg(config_paths)
+    # Select configs based on --config argument(s)
+    for config_arg in testenv.args.config:
+        if config_arg == "all":
+            if len(testenv.args.config) != 1:
+                raise testenv.NoTraceException("Can't use multiple --config arguments if one of them is 'all'")
+            cfgs = cfgs_all
+            return
+
+        matched = False
+        for basename in cfgs_all:
+            pattern = f"testenv_{config_arg}.cfg"
+            if fnmatch.fnmatch(basename, pattern):
+                matched = True
+                cfgs[basename] = cfgs_all[basename]
+
+        if not matched:
+            raise_error_config_arg(config_paths, config_arg)

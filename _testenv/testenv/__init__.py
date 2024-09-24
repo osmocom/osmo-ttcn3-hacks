@@ -43,7 +43,9 @@ def parse_args():
         "  ./testenv.py run mgw --test TC_crcx\n"
         "  ./testenv.py run mgw --podman --binary-repo osmocom:latest\n"
         "  ./testenv.py run mgw --io-uring\n"
-        "  ./testenv.py run bts --config oml\n",
+        "  ./testenv.py run ggsn --config open5gs\n"
+        "  ./testenv.py run ggsn --config 'osmo_ggsn_v4_only'\n"
+        "  ./testenv.py run ggsn --config 'osmo_ggsn*'\n",
     )
 
     sub = parser.add_subparsers(title="action", dest="action", required=True)
@@ -77,7 +79,7 @@ def parse_args():
         "-c",
         "--config",
         action="append",
-        help="which testenv.cfg to use, in case the testsuite has multiple (e.g. generic|oml|hopping for bts)",
+        help="which testenv.cfg to use (supports * wildcards via fnmatch)",
     )
     group.add_argument("-i", "--io-uring", action="store_true", help="set LIBOSMO_IO_BACKEND=IO_URING")
 

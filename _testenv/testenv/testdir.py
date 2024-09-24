@@ -28,7 +28,7 @@ def init():
 
     prefix = f"testenv-{testenv.args.testsuite}-"
     if testenv.args.config:
-        prefix += f"{'-'.join(testenv.args.config)}-"
+        prefix += f"{'-'.join(testenv.args.config).replace('*','')}-"
     if testenv.args.binary_repo:
         prefix += f"{testenv.args.binary_repo.replace(':','-')}-"
     prefix += datetime.datetime.now().strftime("%Y%m%d-%H%M")
