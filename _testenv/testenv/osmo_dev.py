@@ -82,6 +82,7 @@ def init():
         testenv.src_dir,
         "default.opts",
         "ccache.opts",
+        "gtp_linux.opts",
         "iu.opts",
         "no_dahdi.opts",
         "no_doxygen.opts",
