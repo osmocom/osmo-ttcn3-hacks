@@ -71,6 +71,39 @@ def get_vty_host_port(cfg, path=None):
     return host, port
 
 
+def verify_qemu_cfgs():
+    """Check if -C or -K is set, but any of the selected configs can't run with
+    QEMU."""
+    if not testenv.args.kernel:
+        return
+
+    for basename, cfg in cfgs.items():
+        missing = True
+
+        for section in cfg.keys():
+            if "qemu" in cfg[section]:
+                missing = False
+                break
+
+        if missing:
+            testsuite = testenv.args.testsuite
+            logging.critical(f"{testsuite}/{basename}: doesn't support running in QEMU")
+            exit_error_readme()
+
+
+def verify_qemu_section(path, cfg, section):
+    """Verify that qemu= has proper values."""
+    if "qemu" not in cfg[section]:
+        return
+
+    valid = ["optional"]
+    value = cfg[section]["qemu"]
+
+    if value not in valid:
+        logging.error(f"{path}: [{section}]: qemu={value} is invalid, must be one of: {valid}")
+        exit_error_readme()
+
+
 def verify(cfg, path):
     keys_valid_testsuite = [
         "clean",
@@ -85,6 +118,7 @@ def verify(cfg, path):
         "package",
         "prepare",
         "program",
+        "qemu",
         "setup",
         "vty_host",
         "vty_port",
@@ -126,6 +160,8 @@ def verify(cfg, path):
 
             logging.error(msg)
             exit_error_readme()
+
+        verify_qemu_section(path, cfg, section)
 
         if section not in ["DEFAULT", "testsuite"] and "make" not in cfg[section]:
             logging.error(f"{path}: missing make= in section [{section}].")
@@ -207,6 +243,7 @@ def init():
         # No --config argument given, and there is only one testenv.cfg
         if not testenv.args.config:
             cfgs[basename] = cfg
+            verify_qemu_cfgs()
             return
 
         cfgs_all[basename] = cfg
@@ -228,3 +265,5 @@ def init():
 
         if not matched:
             raise_error_config_arg(config_paths, config_arg)
+
+        verify_qemu_cfgs()

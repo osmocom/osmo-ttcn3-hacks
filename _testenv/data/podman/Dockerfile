@@ -12,20 +12,29 @@ COPY	obs.key /obs.key
 # Install packages from Debian repositories (alphabetic order)
 ENV	DEBIAN_FRONTEND=noninteractive
 RUN	set -x && \
+	mkdir -p /etc/kernel/postinst.d && \
+	touch /etc/kernel/postinst.d/initramfs-tools && \
 	apt-get update && \
-	apt-get install -y --no-install-recommends \
+	apt-get install \
+		-y \
+		--no-install-recommends \
+		-o Dpkg::Options::="--force-confold" \
 		autoconf \
 		automake \
+		bc \
 		bison \
 		bridge-utils \
 		build-essential \
+		busybox-static \
 		ca-certificates \
 		ccache \
 		cmake \
+		cpio \
 		erlang-nox \
 		flex \
 		gdb \
 		git \
+		gzip \
 		iproute2 \
 		iputils-ping \
 		libbson-dev \
@@ -34,6 +43,8 @@ RUN	set -x && \
 		libcurl4-gnutls-dev \
 		libdbd-sqlite3 \
 		libdbi-dev \
+		libelf-dev \
+		libgcc-11-dev \
 		libgcrypt-dev \
 		libgnutls28-dev \
 		libidn11-dev \
@@ -57,13 +68,16 @@ RUN	set -x && \
 		libusb-1.0-0-dev \
 		libyaml-dev \
 		libzmq3-dev \
+		linux-image-amd64 \
 		meson \
 		netcat-openbsd \
+		pax-utils \
 		pcscd \
 		pkg-config \
 		procps \
 		psmisc \
 		python3-pip \
+		qemu-system-x86 \
 		rsync \
 		source-highlight \
 		sqlite3 \

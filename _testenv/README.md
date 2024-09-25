@@ -20,6 +20,24 @@ everything. The container is the same, no matter which testsuite gets executed.
 Additional packages get installed after starting the container, with a package
 cache mounted to avoid unnecessary downloads.
 
+### QEMU
+
+For SUTs that interact with kernel drivers, it is desirable to run them with a
+separate kernel in QEMU. This can be enabled by running `./testenv.py run` with
+the `-D` (Debian kernel) or `-C` (custom kernel) arguments. See the `ggsn`
+testsuite for reference.
+
+#### Custom kernel
+
+When using `-C`, testenv uses a `.linux` file in the `osmo-ttcn3-hacks` dir as
+kernel. You can download a pre-built kernel from jenkins:
+
+$ wget -O .linux "https://jenkins.osmocom.org/jenkins/job/build-kernel-torvalds/lastSuccessfulBuild/artifact/output/linux"
+$ wget -O .linux "https://jenkins.osmocom.org/jenkins/job/build-kernel-net-next/lastSuccessfulBuild/artifact/output/linux"
+
+Or build your own kernel, see:
+https://gitea.osmocom.org/osmocom/osmo-ci/src/branch/master/scripts/kernel
+
 ## testenv.cfg
 
 The `testenv.cfg` file has one `[testsuite]` section, typically with one or
@@ -98,6 +116,11 @@ vty_port=4243
 * `vty_host=`: optionally set the VTY host for the SUT component to be used
   when obtaining a talloc report. If this is not set, `127.0.0.1` is used.
 
+* `qemu=`: set to `optional` to allow running this test component in QEMU.
+  Additional logic must be added to build an initrd with the test component and
+  actually run it in QEMU, this is done by sourcing `qemu_functions.sh` and
+  using functions from there. See the `ggsn` testsuite for reference.
+
 ### Executables
 
 #### $PATH
@@ -108,6 +131,7 @@ with a `PATH` environment variable containing:
 * The directory of the testsuite
 * The directory for binaries built from source
 * The directory `_testenv/data/scripts` (which has e.g. `respawn.sh`)
+* The directory `_testenv/data/scripts/qemu`
 
 #### $PWD (current working dir)
 
@@ -179,6 +203,11 @@ For example:
   The argument to pass to `source-highlight` for formatting the junit log xml
   files. Jenkins sets this to `esc` instead of `esc256` for better contrast on
   white background.
+
+* `TESTENV_NO_KVM`:
+  Do not mount /dev/kvm in podman. This is used in jenkins where /dev/kvm is
+  available but doesn't work in podman. QEMU runs a bit slower when this is
+  set.
 
 ## Troubleshooting
 

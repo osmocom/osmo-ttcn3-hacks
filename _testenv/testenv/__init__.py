@@ -13,6 +13,7 @@ args = None
 
 src_dir = os.environ.get("TESTENV_SRC_DIR", os.path.realpath(f"{__file__}/../../../.."))
 data_dir = os.path.join(os.path.realpath(f"{__file__}/../.."), "data")
+custom_kernel_path = os.path.join(os.path.realpath(f"{__file__}/../../.."), ".linux")
 distro_default = "debian:bookworm"
 cache_dir_default = os.path.join(os.path.expanduser("~/.cache"), "osmo-ttcn3-testenv")
 ccache_dir_default = os.path.join(cache_dir_default, "ccache")
@@ -91,6 +92,29 @@ def parse_args():
         metavar="OBS_PROJECT",
         help="use binary packages from this Osmocom OBS project instead (e.g. osmocom:nightly)",
     )
+
+    group = sub_run.add_argument_group(
+        "QEMU options",
+        "For some tests, the SUT can or must run in QEMU, typically to use kernel GTP-U.",
+    )
+    group = group.add_mutually_exclusive_group()
+    group.add_argument(
+        "-D",
+        "--debian-kernel",
+        action="store_const",
+        dest="kernel",
+        const="debian",
+        help="run SUT in QEMU with debian kernel",
+    )
+    group.add_argument(
+        "-C",
+        "--custom-kernel",
+        action="store_const",
+        dest="kernel",
+        const="custom",
+        help=f"run SUT in QEMU with custom kernel ({custom_kernel_path})",
+    )
+
     group = sub_run.add_argument_group(
         "config file options",
         "Testsuite and test component configs"
@@ -158,6 +182,15 @@ def verify_args_run():
 
     if args.binary_repo and not args.podman:
         raise NoTraceException("--binary-repo requires --podman")
+
+    if args.kernel == "debian" and not args.podman:
+        raise NoTraceException("--kernel-debian requires --podman")
+
+    if args.kernel == "custom" and not os.path.exists(custom_kernel_path):
+        logging.critical(
+            "See _testenv/README.md for more information on downloading a pre-built kernel or building your own kernel."
+        )
+        raise NoTraceException(f"For --kernel-custom, put a symlink or copy of your kernel to: {custom_kernel_path}")
 
     ttcn3_hacks_dir_src = os.path.realpath(f"{__file__}/../../..")
     testsuite_dir = os.path.join(ttcn3_hacks_dir_src, args.testsuite)
