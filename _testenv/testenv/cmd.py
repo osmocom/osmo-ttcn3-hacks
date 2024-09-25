@@ -49,6 +49,13 @@ def init_env():
         else:
             env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make")
 
+    if testenv.args.kernel == "debian":
+        env_extra["TESTENV_QEMU_KERNEL"] = "debian"
+    elif testenv.args.kernel == "custom":
+        env_extra["TESTENV_QEMU_KERNEL"] = testenv.custom_kernel_path
+    if testenv.args.kernel:
+        env_extra["TESTENV_QEMU_SCRIPTS"] = os.path.join(testenv.data_dir, "scripts/qemu")
+
 
 def exit_error_cmd(completed, error_msg):
     """:param completed: return from run_cmd() below"""
@@ -62,6 +69,7 @@ def exit_error_cmd(completed, error_msg):
 def generate_env(env={}, podman=False):
     ret = dict(env_extra)
     path = os.path.join(testenv.data_dir, "scripts")
+    path += f":{os.path.join(testenv.data_dir, 'scripts/qemu')}"
     if testenv.testsuite.ttcn3_hacks_dir:
         path += f":{os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)}"
 

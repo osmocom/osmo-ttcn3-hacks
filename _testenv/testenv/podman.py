@@ -221,6 +221,13 @@ def start():
             f"{osmo_dev_dir}:{osmo_dev_dir}",
         ]
 
+    if testenv.args.kernel:
+        if not os.environ.get("TESTENV_NO_KVM") and os.path.exists("/dev/kvm"):
+            cmd += ["--volume", "/dev/kvm:/dev/kvm"]
+        if os.path.islink(testenv.custom_kernel_path):
+            dest = os.readlink(testenv.custom_kernel_path)
+            cmd += ["--volume", "{dest}:{dest}:ro"]
+
     cmd += [
         "--volume",
         f"{testdir_topdir}:{testdir_topdir}",

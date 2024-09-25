@@ -36,6 +36,15 @@ def check_programs():
             "wget",
         ]
 
+        if testenv.args.kernel:
+            programs += [
+                "busybox",
+                "cpio",
+                "gzip",
+                "lddtree",
+                "qemu-system-x86_64",
+            ]
+
     abort = False
     for program in programs:
         if not shutil.which(program):
