@@ -209,6 +209,10 @@ def start():
         f"{apt_dir_var_cache}:/var/cache/apt",
         "--volume",
         f"{apt_dir_var_lib}:/var/lib/apt",
+        "--sysctl",
+        "net.ipv4.conf.all.send_redirects=0",  # OS#6575
+        "--sysctl",
+        "net.ipv4.conf.default.send_redirects=0",  # OS#6575
     ]
 
     if not testenv.args.binary_repo:
