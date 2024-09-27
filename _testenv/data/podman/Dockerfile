@@ -121,4 +121,5 @@ RUN	set -x && \
 	apt-get install -y mongodb-org && \
 	apt-get clean && \
 	cd / && \
-	rm -rf /tmp/mongodb
+	rm -rf /tmp/mongodb && \
+	rm /etc/apt/sources.list.d/mongodb-org.list
