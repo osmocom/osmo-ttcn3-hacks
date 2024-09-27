@@ -22,6 +22,15 @@ check_usage() {
 	esac
 }
 
+check_usage_qemu() {
+	if [ -n "$TESTENV_QEMU_KERNEL" ] && [ "$CONFIG" = "all" ]; then
+		set +x
+		echo "ERROR: '--config osmo_ggsn_all' uses multiple APNs, which is currently not supported with kernel" \
+			"gtp-u! (OS#6106)"
+		exit 1
+	fi
+}
+
 replace_ips() {
 	# Run osmo-ggsn on 172.18.3.x (testenv0 bridge) instead of
 	# 127.0.0.1 (lo), so it works when running osmo-ggsn in QEMU to test
@@ -37,6 +46,10 @@ adjust_osmo_ggsn_config() {
 		> osmo-ggsn.cfg
 
 	replace_ips osmo-ggsn.cfg
+
+	if [ -n "$TESTENV_QEMU_KERNEL" ]; then
+		sed -i "s/gtpu-mode tun/gtpu-mode kernel-gtp/" osmo-ggsn.cfg
+	fi
 }
 
 adjust_ttcn3_config() {
@@ -49,7 +62,9 @@ adjust_ttcn3_config() {
 }
 
 setcap_osmo_ggsn() {
-	sudo setcap CAP_NET_ADMIN=+eip $(which osmo-ggsn)
+	if [ -z "$TESTENV_QEMU_KERNEL" ]; then
+		sudo setcap CAP_NET_ADMIN=+eip $(which osmo-ggsn)
+	fi
 }
 
 rename_junit_xml_classname() {
@@ -64,10 +79,15 @@ check_usage
 # Add a bridge reachable through the GTP tunnel that can answer ICMP
 # pings (for e.g. TC_pdp4_act_deact_gtpu_access). The bridge is also used to
 # connect the SUT when it runs in QEMU.
-EXTRA_IPS="172.18.3.201 fd02:db8:3::201 172.18.3.2" add_remove_testenv0_bridge.sh
+if [ -n "$TESTENV_QEMU_KERNEL" ]; then
+	add_remove_testenv0_bridge.sh
+else
+	EXTRA_IPS="172.18.3.201 fd02:db8:3::201 172.18.3.2" add_remove_testenv0_bridge.sh
+fi
 
 case "$TESTENV_CLEAN_REASON" in
 	prepare)
+		check_usage_qemu
 		adjust_osmo_ggsn_config
 		adjust_ttcn3_config
 		setcap_osmo_ggsn
