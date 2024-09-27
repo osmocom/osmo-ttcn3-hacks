@@ -22,11 +22,21 @@ check_usage() {
 	esac
 }
 
+replace_ips() {
+	# Run osmo-ggsn on 172.18.3.x (testenv0 bridge) instead of
+	# 127.0.0.1 (lo), so it works when running osmo-ggsn in QEMU to test
+	# kernel GTP-U too. We keep 127.0.0.x in the configs, so they can be
+	# used without testenv too.
+	sed -i 's/127\.0\.0\./172.18.3./g' "$1"
+}
+
 adjust_osmo_ggsn_config() {
 	osmo-config-merge \
 		osmo-ggsn/osmo-ggsn.src.cfg \
 		osmo-ggsn/osmo-ggsn-"$CONFIG".confmerge \
 		> osmo-ggsn.cfg
+
+	replace_ips osmo-ggsn.cfg
 }
 
 adjust_ttcn3_config() {
@@ -34,6 +44,8 @@ adjust_ttcn3_config() {
 
 	sed -i "s/^GGSN_Tests.m_ggsn_conf := .*/GGSN_Tests.m_ggsn_conf := GGSN_CONF_$config_upper/" \
 		../testsuite/GGSN_Tests.cfg
+
+	replace_ips ../testsuite/GGSN_Tests.cfg
 }
 
 setcap_osmo_ggsn() {
@@ -52,7 +64,7 @@ check_usage
 # Add a bridge reachable through the GTP tunnel that can answer ICMP
 # pings (for e.g. TC_pdp4_act_deact_gtpu_access). The bridge is also used to
 # connect the SUT when it runs in QEMU.
-EXTRA_IPS="172.18.3.201 fd02:db8:3::201" add_remove_testenv0_bridge.sh
+EXTRA_IPS="172.18.3.201 fd02:db8:3::201 172.18.3.2" add_remove_testenv0_bridge.sh
 
 case "$TESTENV_CLEAN_REASON" in
 	prepare)
