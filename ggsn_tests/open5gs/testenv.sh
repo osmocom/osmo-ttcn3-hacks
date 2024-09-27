@@ -1,5 +1,4 @@
 #!/bin/sh -ex
-DEV=ggsn_dummy
 
 check_usage() {
 	if [ -z "$TESTENV_CLEAN_REASON" ]; then
@@ -65,34 +64,21 @@ del_tun_all() {
 	del_tun "ogstun46"
 }
 
-add_dummy_netdev() {
-	# Add a network device reachable through the GTP tunnel that can answer ICMP
-	# pings (for e.g. TC_pdp4_act_deact_gtpu_access)
-	sudo ip link add "$DEV" type dummy
-	sudo ip addr add "172.18.3.201" dev "$DEV"
-	sudo ip addr add "fd02:db8:3::201" dev "$DEV"
-	sudo ip link set "$DEV" up
-}
-
-del_dummy_netdev() {
-	if ip link ls dev "$DEV" >/dev/null 2>&1; then
-		sudo ip link del "$DEV"
-	fi
-}
-
 check_usage
+
+# Add a bridge reachable through the GTP tunnel that can answer ICMP
+# pings (for e.g. TC_pdp4_act_deact_gtpu_access). The bridge is also used to
+# connect the SUT when it runs in QEMU.
+add_remove_testenv0_bridge.sh
 
 case "$TESTENV_CLEAN_REASON" in
 	prepare)
 		setcap_open5gs_upfd
 		adjust_ttcn3_config
-		del_dummy_netdev
 		del_tun_all
-		add_dummy_netdev
 		add_tun_all
 		;;
 	crashed|finished)
-		del_dummy_netdev
 		del_tun_all
 		;;
 	*)

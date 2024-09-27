@@ -24,6 +24,7 @@ def check_programs():
         programs += [
             "autoconf",
             "automake",
+            "brctl",
             "ccache",
             "dumpcap",
             "g++",

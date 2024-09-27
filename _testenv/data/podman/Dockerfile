@@ -17,6 +17,7 @@ RUN	set -x && \
 		autoconf \
 		automake \
 		bison \
+		bridge-utils \
 		build-essential \
 		ca-certificates \
 		ccache \
