@@ -21,6 +21,7 @@ RUN	set -x && \
 		ca-certificates \
 		ccache \
 		cmake \
+		erlang-nox \
 		flex \
 		gdb \
 		git \
@@ -62,7 +63,6 @@ RUN	set -x && \
 		procps \
 		psmisc \
 		python3-pip \
-		rebar3 \
 		rsync \
 		source-highlight \
 		sqlite3 \
@@ -73,6 +73,14 @@ RUN	set -x && \
 		wireshark-common \
 		&& \
 	apt-get clean
+
+# Install rebar3 as described in https://rebar3.org/docs/getting-started/
+# instead of using the Debian package, as the latter pulls in ~600 MB of GUI
+# dependencies that we don't need:
+# https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1083096
+RUN	wget https://s3.amazonaws.com/rebar3/rebar3 -O /usr/bin/rebar3 && \
+	chmod +x /usr/bin/rebar3 && \
+	rebar3 --version
 
 # Ccache is installed above so it can be optionally used when rebuilding the
 # testsuites inside the docker containers. Don't use it by default.
