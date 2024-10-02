@@ -50,6 +50,8 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.SNDCP_v7.0.0 \
 			titan.ProtocolModules.PFCP_v15.1.0 \
 			titan.ProtocolModules.HTTP2 \
+			titan.ProtocolModules.JSON_v07_2006 \
+			titan.ProtocolModules.5G_system_TS29571_CommonData_v15 \
 			titan.ProtocolModules.5G_system_TS29503_Nudm_v15 \
 			titan.TestPorts.Common_Components.Socket-API \
 			titan.TestPorts.Common_Components.Abstract_Socket \
@@ -122,7 +124,9 @@ titan.ProtocolModules.TCP_commit=		R.3.A-5-g39e5f45
 titan.ProtocolModules.UDP_commit=		R.4.A-5-geea8aa3
 titan.ProtocolModules.PFCP_v15.1.0_commit=	d550ad9ddb6f9c823c9a555254cd76cf0e738d18
 titan.ProtocolModules.HTTP2_commit=		297ac60099b567c8819ad349e22f185ec89a9c58
-titan.ProtocolModules.5G_system_TS29503_Nudm_v15_commit = 8a5e187dda2bf0cee5c107d42ab7a75769384f65
+titan.ProtocolModules.JSON_v07_2006_commit=	72dcf199247b5a7379c2a525d40a393f48a0422c
+titan.ProtocolModules.5G_system_TS29571_CommonData_v15_commit= 1ca2ed328eb63a963e922a905c2abfca721a0a12
+titan.ProtocolModules.5G_system_TS29503_Nudm_v15_commit= 8a5e187dda2bf0cee5c107d42ab7a75769384f65
 titan.TestPorts.AF_PACKET_commit=		0.1-5-g89ebea6
 titan.TestPorts.Common_Components.Socket-API_commit=	R.6.A-6-gf4380d0
 titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
