@@ -38,6 +38,12 @@ def check_programs():
     abort = False
     for program in programs:
         if not shutil.which(program):
+            if os.path.exists(os.path.join("/usr/sbin", program)):
+                # Debian: some programs such as setcap are in /usr/sbin, which
+                # is not in PATH unless using sudo. Therefore "shutil.which()"
+                # won't find it.
+                continue
+
             logging.error(f"Missing program: {program}")
 
             if program == "ttcn3_compiler":
