@@ -52,7 +52,7 @@ check_usage
 # Add a bridge reachable through the GTP tunnel that can answer ICMP
 # pings (for e.g. TC_pdp4_act_deact_gtpu_access). The bridge is also used to
 # connect the SUT when it runs in QEMU.
-add_remove_testenv0_bridge.sh
+EXTRA_IPS="172.18.3.201 fd02:db8:3::201" add_remove_testenv0_bridge.sh
 
 case "$TESTENV_CLEAN_REASON" in
 	prepare)
