@@ -3,12 +3,124 @@ module UDM2HSS {
 import from General_Types all;
 import from Osmocom_Types all;
 
-type component test_CT {
+import from Misc_Helpers all;
+
+import from PIPEasp_PortType all;
+import from PIPEasp_Types all;
+
+import from TS29503_Nudm_UEAU all;
+
+modulepar {
+        /* IP address at which the BSC can be reached */
+        charstring mp_proxy_ip := "127.0.0.1";
+        /* port number to which to establish the IPA OML connections */
+        integer mp_proxy_port := 29503;
+	/* */
+	charstring mp_suci := "0-208-93-0-0-0-00007487";
 }
 
+type component test_CT {
+	port PIPEasp_PT PIPE;
+	timer g_T_guard := 10.0;
+}
+
+private altstep as_Tguard() runs on test_CT {
+	[] g_T_guard.timeout {
+		setverdict(fail, "Timeout of T_guard");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+}
+
+private function f_init() runs on test_CT {
+	/* Start the guard timer */
+	g_T_guard.start;
+	activate(as_Tguard());
+}
+
+private function f_init_pipe() runs on test_CT {
+	map(self:PIPE, system:PIPE);
+}
+
+template (value) ASP_PExecute ts_Exec(charstring cmd) := {
+	command := cmd,
+	stdin := ""
+}
+
+template (present) ASP_PResult tr_Result(template (present) charstring stdout,
+					 template (present) charstring stderr,
+					 template (present) integer code) := {
+	stdout := stdout,
+	stderr := stderr,
+	code := code
+}
+
+template (value) charstring ts_url(charstring proxy_ip := mp_proxy_ip,
+				   integer proxy_port := mp_proxy_port,
+				   charstring suci := mp_suci) :=
+	"http://" & proxy_ip & ":" & int2str(proxy_port) & "/nudm-ueau/v1/suci-" & suci & "/security-information/generate-auth-data";
+
+template (value) AuthenticationInfoRequest
+ts_AuthenticationInfoRequest := {
+	supportedFeatures := omit,
+	servingNetworkName := "5G:mnc093.mcc208.3gppnetwork.org",
+	resynchronizationInfo := omit,
+	ausfInstanceId := "03a29405-b56e-498e-9d13-cb5b2664239d"
+}
+
+function escape_quotes(charstring input) return charstring {
+	var charstring result := "";
+	for (var integer i := 0; i < lengthof(input); i := i + 1) {
+		if (substr(input, i, 1) == "\"") {
+			result := result & "\\\""; // Escape das Anführungszeichen
+		} else {
+			result := result & substr(input, i, 1);
+		}
+	}
+	return result;
+}
 
 testcase TC_auth() runs on test_CT {
-	log(f_dec_AuthenticationInfoRequest(....));
+	var template AuthenticationInfoRequest pdu := ts_AuthenticationInfoRequest;
+	var octetstring json_out;
+	var template charstring url;
+	var charstring cmd_line;
+	var ASP_PResult result;
+
+	f_init();
+	f_init_pipe();
+
+	url := ts_url();
+	log("Created URL: ", url);
+
+	log("Encoding PDU: ", pdu);
+	json_out := f_enc_AuthenticationInfoRequest(valueof(pdu));
+	log("Endoded PDU in JSON: ", json_out);
+
+	cmd_line := "./run_curl.sh " & valueof(url) & " " & oct2char(json_out);
+
+	log("Executing command: ", cmd_line);
+
+	PIPE.send(ts_Exec(cmd_line));
+	timer T := 4.0;
+	T.start;
+	alt {
+	[] PIPE.receive(tr_Result(?,?,?)) -> value result {
+		var integer code := result.code;
+		if (f_PIPE_WIFEXITED(code)) {
+			code := f_PIPE_WEXITSTATUS(code);
+		}
+		if (code != 0) {
+			setverdict(fail, "unexpected result code curl command: ", code);
+		}
+	}
+	[] PIPE.receive {
+		setverdict(fail, "unexpected response from curl command");
+	}
+	[] T.timeout {
+		setverdict(fail, "no response from curl command");
+		}
+	}
+
 	setverdict(pass);
 }
 

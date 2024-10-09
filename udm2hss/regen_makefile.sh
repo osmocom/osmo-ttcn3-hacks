@@ -9,6 +9,7 @@ FILES="
 	TCCConversion.cc
 	TCCInterface.cc
 	HTTP2_EncDec.cc
+	PIPEasp_PT.cc
 "
 
 export CPPFLAGS_TTCN3="

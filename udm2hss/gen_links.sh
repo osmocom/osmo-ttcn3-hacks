@@ -12,12 +12,16 @@ DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
-FILES="Socket_API_Definitions.ttcn"
-gen_links $DIR $FILES
+#DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
+#FILES="Socket_API_Definitions.ttcn"
+#gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
-FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
+#DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
+#FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
+#gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
+FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn "
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
