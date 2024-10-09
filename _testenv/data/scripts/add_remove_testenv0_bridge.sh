@@ -3,8 +3,8 @@
 # bridge device, which can be used to talk to a SUT running in QEMU.
 # Set env var EXTRA_IPS to add additional IP addresses to the device.
 DEV="testenv0"
-IP4="172.18.3.201/24"
-IP6="fd02:db8:3::201/128"
+IP4="172.18.3.1/24"
+IP6="fd02:db8:3::1/128"
 set -x
 
 add_bridge() {
