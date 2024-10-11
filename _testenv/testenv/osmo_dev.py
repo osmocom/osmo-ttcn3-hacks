@@ -75,6 +75,7 @@ def init():
     cmd = [
         "./gen_makefile.py",
         "--build-debug",
+        "--no-make-check",
         "--make-dir",
         make_dir,
         "--no-ldconfig",
