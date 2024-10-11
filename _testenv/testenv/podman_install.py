@@ -24,7 +24,7 @@ def init():
     git_dir = os.path.join(testenv.args.cache, "git")
     bb_dir = os.path.join(git_dir, "osmocom-bb")
     trxcon_dir = os.path.join(bb_dir, "src/host/trxcon")
-    sccp_dir = os.path.join(git_dir, "libosmo-sccp")
+    sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
     jobs = multiprocessing.cpu_count() + 1
 
     os.makedirs(git_dir, exist_ok=True)
@@ -59,9 +59,9 @@ def clone_osmocom_bb():
     )
 
 
-def clone_libosmo_sccp():
+def clone_libosmo_sigtran():
     if os.path.exists(sccp_dir):
-        logging.debug("libosmo-sccp: already cloned")
+        logging.debug("libosmo-sigtran: already cloned")
         return
 
     testenv.cmd.run(
@@ -72,7 +72,7 @@ def clone_libosmo_sccp():
             "clone",
             "--depth",
             "1",
-            "https://gerrit.osmocom.org/libosmo-sccp",
+            "https://gerrit.osmocom.org/libosmo-sigtran",
         ]
     )
 
@@ -104,7 +104,7 @@ def from_source_sccp_demo_user():
     )
 
     if not os.path.exists(sccp_demo_user_path):
-        clone_libosmo_sccp()
+        clone_libosmo_sigtran()
         logging.info("Building sccp_demo_user")
         testenv.cmd.run(["autoreconf", "-fi"], cwd=sccp_dir)
         testenv.cmd.run(["./configure"], cwd=sccp_dir)
