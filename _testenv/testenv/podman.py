@@ -20,6 +20,7 @@ apt_dir_var_cache = None
 apt_dir_var_lib = None
 feed_watchdog_process = None
 run_shell_on_stop = False
+restart_count = 0
 
 
 def image_exists():
@@ -190,7 +191,8 @@ def start():
 
     testdir_topdir = testenv.testdir.testdir_topdir
     osmo_dev_dir = testenv.osmo_dev.get_osmo_dev_dir()
-    container_name = testenv.testdir.prefix
+    container_name = f"{testenv.testdir.prefix}-{restart_count}"
+
     # Custom seccomp profile that allows io_uring
     seccomp = os.path.join(testenv.data_dir, "podman/seccomp.json")
 
@@ -287,6 +289,7 @@ def is_running():
 def stop(restart=False):
     global container_name
     global run_shell_on_stop
+    global restart_count
 
     if not is_running():
         return
@@ -316,4 +319,5 @@ def stop(restart=False):
     container_name = None
 
     if restart:
+        restart_count += 1
         start()
