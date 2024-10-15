@@ -8,8 +8,11 @@ FILES="
 	Native_FunctionDefs.cc
 	TCCConversion.cc
 	TCCInterface.cc
-	HTTP2_EncDec.cc
 	PIPEasp_PT.cc
+	DIAMETER_EncDec.cc
+	DIAMETER_CodecPort_CtrlFunctDef.cc
+	IPL4asp_PT.cc
+	IPL4asp_discovery.cc
 "
 
 export CPPFLAGS_TTCN3="

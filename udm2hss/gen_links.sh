@@ -12,12 +12,13 @@ DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 gen_links $DIR $FILES
 
+# Required by DIAMETER
+DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
+FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
+gen_links $DIR $FILES
+
 #DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
 #FILES="Socket_API_Definitions.ttcn"
-#gen_links $DIR $FILES
-
-#DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
-#FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
 #gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
@@ -36,8 +37,15 @@ DIR=$BASEDIR/titan.ProtocolModules.5G_system_TS29503_Nudm_v15/src
 FILES="TS29503_Nudm_UEAU.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
+FILES="DIAMETER_EncDec.cc"
+gen_links $DIR $FILES
+
 DIR=../library
-FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc"
+FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
+FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
+FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
+FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

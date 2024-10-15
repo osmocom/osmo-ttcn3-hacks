@@ -8,20 +8,52 @@ import from Misc_Helpers all;
 import from PIPEasp_PortType all;
 import from PIPEasp_Types all;
 
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_ts29_272_Templates all;
+import from DIAMETER_Emulation all;
+
 import from TS29503_Nudm_UEAU all;
 
 modulepar {
-        /* IP address at which the BSC can be reached */
-        charstring mp_proxy_ip := "127.0.0.1";
-        /* port number to which to establish the IPA OML connections */
-        integer mp_proxy_port := 29503;
-	/* */
+	/* authentication parameters */
 	charstring mp_suci := "0-208-93-0-0-0-00007487";
+	hexstring mp_imsi := str2hex("208930000007487");
+	charstring mp_network_name := "5G:mnc093.mcc208.3gppnetwork.org";
+	charstring mp_ausfInstanceId := "03a29405-b56e-498e-9d13-cb5b2664239d";
+
+	/* UDM */
+        charstring mp_proxy_ip := "127.0.0.1";
+        integer mp_proxy_port := 29503;
+
+	/* HSS */
+	charstring mp_hss_local_ip := "127.0.0.8";
+	integer mp_hss_local_port := 3868;
+	charstring mp_hss_remote_ip := "127.0.0.1";
+	integer mp_hss_remote_port := -1;
+	charstring mp_hss_local_diam_realm := "localdomain";
+	charstring mp_hss_local_diam_host := "proxy.localdomain";
 }
 
 type component test_CT {
 	port PIPEasp_PT PIPE;
 	timer g_T_guard := 10.0;
+
+	/* S6a/S6d interface of emulated HSS */
+	var DIAMETER_Emulation_CT vc_DIAMETER;
+	port DIAMETER_PT DIAMETER_UNIT;
+	port DIAMETEREM_PROC_PT DIAMETER_PROC;
+}
+
+type component ConnHdlr extends DIAMETER_ConnHdlr {
+	var ConnHdlrPars g_pars;
+
+	port PIPEasp_PT PIPE;
+}
+
+type record ConnHdlrPars {
+	hexstring imsi,
+	charstring suci
 }
 
 private altstep as_Tguard() runs on test_CT {
@@ -54,17 +86,108 @@ template (present) ASP_PResult tr_Result(template (present) charstring stdout,
 	code := code
 }
 
-template (value) charstring ts_url(charstring proxy_ip := mp_proxy_ip,
-				   integer proxy_port := mp_proxy_port,
-				   charstring suci := mp_suci) :=
+friend function DiameterForwardUnitdataCallback(PDU_DIAMETER msg)
+runs on DIAMETER_Emulation_CT return template PDU_DIAMETER {
+	DIAMETER_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_diameter(charstring id) runs on test_CT {
+	var DIAMETEROps ops := {
+		create_cb := refers(DIAMETER_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(DiameterForwardUnitdataCallback),
+		raw := false /* handler mode (IMSI based routing) */
+	};
+	var DIAMETER_conn_parameters pars := {
+		remote_ip := mp_hss_remote_ip,
+		remote_sctp_port := mp_hss_remote_port,
+		local_ip := mp_hss_local_ip,
+		local_sctp_port := mp_hss_local_port,
+		origin_host := mp_hss_local_diam_host,
+		origin_realm := mp_hss_local_diam_realm,
+		auth_app_id := omit,
+		vendor_app_id := c_DIAMETER_3GPP_S6_AID
+	};
+	vc_DIAMETER := DIAMETER_Emulation_CT.create(id);
+	map(vc_DIAMETER:DIAMETER, system:DIAMETER_CODEC_PT);
+	connect(vc_DIAMETER:DIAMETER_UNIT, self:DIAMETER_UNIT);
+	connect(vc_DIAMETER:DIAMETER_PROC, self:DIAMETER_PROC);
+	vc_DIAMETER.start(DIAMETER_Emulation.main(ops, pars, id));
+
+	f_diameter_wait_capability(DIAMETER_UNIT);
+}
+
+/* generate parameters for a connection handler */
+friend function f_init_pars(hexstring imsi,
+			    charstring suci)
+runs on test_CT return ConnHdlrPars {
+	var ConnHdlrPars pars := {
+		imsi := imsi,
+		suci := suci
+	};
+	return pars;
+}
+
+type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+
+/* start a connection handler with given parameters */
+friend function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer s1ap_idx := 0)
+runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename() & int2str(s1ap_idx);
+
+	vc_conn := ConnHdlr.create(id);
+	connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
+	connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+
+	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
+	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
+	vc_conn.start(derefers(fn)(pars));
+	return vc_conn;
+}
+
+friend function f_init_handler(ConnHdlrPars pars) runs on ConnHdlr {
+	f_diameter_expect_imsi(g_pars.imsi);
+}
+
+/* Exepect AuthInfoReq (AIR) from HSS; respond with AuthInforAnswer (AIA) */
+private altstep as_DIA_AuthInfo() runs on ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_AIR(g_pars.imsi)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var octetstring vplmn_id;
+		var hexstring imsi;
+		var template (value) AVP_list auth_info_content;
+
+		/* retrieve input data */
+		imsi := valueof(f_DIAMETER_get_imsi(rx_dia));
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_AAA_3GPP_Visited_PLMN_Id);
+		vplmn_id := valueof(avp.avp_data.avp_AAA_3GPP_Visited_PLMN_Id);
+
+		/* compute tuple */
+		auth_info_content := { ts_AVP_EutranVec(1, '20080c3818183b522614162c07601d0d'O, '6a91970e838fd079'O, 'f11b89a2a8be00001f9c526f3d75d44c'O, '95AFAD9A0D29AFAA079A9451DF7161D7EE4CBF2AF9387F766D058BB6B44B905D'O) };
+
+		DIAMETER.send(ts_DIA_AIA(auth_info_content, sess_id,
+					 hbh_id := rx_dia.hop_by_hop_id,
+					 ete_id := rx_dia.end_to_end_id));
+	}
+}
+
+template (value) charstring ts_url(charstring suci,
+				   charstring proxy_ip := mp_proxy_ip,
+				   integer proxy_port := mp_proxy_port) :=
 	"http://" & proxy_ip & ":" & int2str(proxy_port) & "/nudm-ueau/v1/suci-" & suci & "/security-information/generate-auth-data";
 
 template (value) AuthenticationInfoRequest
-ts_AuthenticationInfoRequest := {
+	ts_AuthenticationInfoRequest(charstring network_name := mp_network_name,
+				     charstring ausfInstanceId := mp_ausfInstanceId) := {
 	supportedFeatures := omit,
-	servingNetworkName := "5G:mnc093.mcc208.3gppnetwork.org",
+	servingNetworkName := network_name,
 	resynchronizationInfo := omit,
-	ausfInstanceId := "03a29405-b56e-498e-9d13-cb5b2664239d"
+	ausfInstanceId := ausfInstanceId
 }
 
 function escape_quotes(charstring input) return charstring {
@@ -79,17 +202,14 @@ function escape_quotes(charstring input) return charstring {
 	return result;
 }
 
-testcase TC_auth() runs on test_CT {
+private function f_TC_auth(ConnHdlrPars pars) runs on ConnHdlr {
 	var template AuthenticationInfoRequest pdu := ts_AuthenticationInfoRequest;
 	var octetstring json_out;
 	var template charstring url;
 	var charstring cmd_line;
 	var ASP_PResult result;
 
-	f_init();
-	f_init_pipe();
-
-	url := ts_url();
+	url := ts_url(g_pars.suci);
 	log("Created URL: ", url);
 
 	log("Encoding PDU: ", pdu);
@@ -122,6 +242,25 @@ testcase TC_auth() runs on test_CT {
 	}
 
 	setverdict(pass);
+}
+testcase TC_auth() runs on test_CT {
+	var charstring id := testcasename();
+
+	log("before init");
+	f_init();
+	log("before init pipe");
+	f_init_pipe();
+	log("before init dia");
+	f_init_diameter(id);
+	mtc.stop;
+	log("before sleep");
+	f_sleep(10.0);
+	log("after sleep");
+
+	var ConnHdlrPars pars := f_init_pars(mp_imsi, mp_suci);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_with_pars(refers(f_TC_auth), pars);
+	vc_conn.done;
 }
 
 
