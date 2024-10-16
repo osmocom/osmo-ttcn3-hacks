@@ -18,7 +18,7 @@ import from TS29503_Nudm_UEAU all;
 modulepar {
 	/* authentication parameters */
 	charstring mp_suci := "0-208-93-0-0-0-00007487";
-	hexstring mp_imsi := str2hex("208930000007487");
+	hexstring mp_imsi := '2089300007487'H;
 	charstring mp_network_name := "5G:mnc093.mcc208.3gppnetwork.org";
 	charstring mp_ausfInstanceId := "03a29405-b56e-498e-9d13-cb5b2664239d";
 
@@ -36,7 +36,6 @@ modulepar {
 }
 
 type component test_CT {
-	port PIPEasp_PT PIPE;
 	timer g_T_guard := 10.0;
 
 	/* S6a/S6d interface of emulated HSS */
@@ -67,10 +66,6 @@ private function f_init() runs on test_CT {
 	/* Start the guard timer */
 	g_T_guard.start;
 	activate(as_Tguard());
-}
-
-private function f_init_pipe() runs on test_CT {
-	map(self:PIPE, system:PIPE);
 }
 
 template (value) ASP_PExecute ts_Exec(charstring cmd) := {
@@ -128,7 +123,7 @@ runs on test_CT return ConnHdlrPars {
 	return pars;
 }
 
-type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+type function void_fn(charstring id) runs on ConnHdlr;
 
 /* start a connection handler with given parameters */
 friend function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer s1ap_idx := 0)
@@ -139,15 +134,20 @@ runs on test_CT return ConnHdlr {
 	vc_conn := ConnHdlr.create(id);
 	connect(vc_conn:DIAMETER, vc_DIAMETER:DIAMETER_CLIENT);
 	connect(vc_conn:DIAMETER_PROC, vc_DIAMETER:DIAMETER_PROC);
+	map(vc_conn:PIPE, system:PIPE);
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
-	vc_conn.start(derefers(fn)(pars));
+	vc_conn.start(f_init_handler(fn, id, pars));
 	return vc_conn;
 }
 
-friend function f_init_handler(ConnHdlrPars pars) runs on ConnHdlr {
-	f_diameter_expect_imsi(g_pars.imsi);
+friend function f_init_handler(void_fn fn, charstring id, ConnHdlrPars pars)
+runs on ConnHdlr {
+	g_pars := pars;
+	log("f_diameter_expect_imsi(", g_pars.imsi, ")");
+	f_diameter_expect_imsi(g_pars.imsi); // XXX: move to f_TC_blabla body
+	fn.apply(id);
 }
 
 /* Exepect AuthInfoReq (AIR) from HSS; respond with AuthInforAnswer (AIA) */
@@ -202,7 +202,7 @@ function escape_quotes(charstring input) return charstring {
 	return result;
 }
 
-private function f_TC_auth(ConnHdlrPars pars) runs on ConnHdlr {
+private function f_TC_auth(charstring id) runs on ConnHdlr {
 	var template AuthenticationInfoRequest pdu := ts_AuthenticationInfoRequest;
 	var octetstring json_out;
 	var template charstring url;
@@ -224,6 +224,7 @@ private function f_TC_auth(ConnHdlrPars pars) runs on ConnHdlr {
 	timer T := 4.0;
 	T.start;
 	alt {
+	[] as_DIA_AuthInfo() { repeat; };
 	[] PIPE.receive(tr_Result(?,?,?)) -> value result {
 		var integer code := result.code;
 		if (f_PIPE_WIFEXITED(code)) {
@@ -232,10 +233,14 @@ private function f_TC_auth(ConnHdlrPars pars) runs on ConnHdlr {
 		if (code != 0) {
 			setverdict(fail, "unexpected result code curl command: ", code);
 		}
-	}
+		var AuthenticationInfoResult rsp_pdu;
+		log("curl gave us: ", result.stdout);
+		f_dec_AuthenticationInfoResult(char2oct(result.stdout), rsp_pdu); // XXX: check rc
+		log(rsp_pdu);
+		}
 	[] PIPE.receive {
 		setverdict(fail, "unexpected response from curl command");
-	}
+		}
 	[] T.timeout {
 		setverdict(fail, "no response from curl command");
 		}
@@ -246,16 +251,8 @@ private function f_TC_auth(ConnHdlrPars pars) runs on ConnHdlr {
 testcase TC_auth() runs on test_CT {
 	var charstring id := testcasename();
 
-	log("before init");
 	f_init();
-	log("before init pipe");
-	f_init_pipe();
-	log("before init dia");
 	f_init_diameter(id);
-	mtc.stop;
-	log("before sleep");
-	f_sleep(10.0);
-	log("after sleep");
 
 	var ConnHdlrPars pars := f_init_pars(mp_imsi, mp_suci);
 	var ConnHdlr vc_conn;
