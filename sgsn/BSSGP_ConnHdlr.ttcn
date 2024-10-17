@@ -103,6 +103,8 @@ type record BSSGP_ConnHdlrPars {
 	/* only in IuPS / RANAP case */
 	SCCP_PAR_Address sccp_addr_local optional,
 	SCCP_PAR_Address sccp_addr_peer optional,
+	/* Whether to expect an specific addr format in RAB Ass Req: true = X.213, false = raw IPv4, omit = don't care */
+	boolean ranap_exp_itu_x213_addr_format optional,
 	/* Whether to encode HNBGW addr with ITU X.213 format when sending RAB Ass Resp: */
 	boolean ranap_use_itu_x213_addr_format,
 	octetstring ranap_itu_x213_addr_format_padding
@@ -129,6 +131,7 @@ function f_new_BSSGP_ConnHdlrPars(integer imsi_suffix,
                 t_guard := t_guard,
                 sccp_addr_local := omit,
                 sccp_addr_peer := omit,
+                ranap_exp_itu_x213_addr_format := omit,
                 ranap_use_itu_x213_addr_format := false,
                 ranap_itu_x213_addr_format_padding := ''O
         }
@@ -698,22 +701,38 @@ function f_iu_release_req(template (value) Cause cause) runs on BSSGP_ConnHdlr {
 	}
 }
 
+/* Validate received IP address + TEID from SGSN is the one we
+ * did set up from the GGSN, since the SGSN is expected to do
+ * Direct Tunnel: */
+private function f_ranap_rab_ass_req_validate_tli(RANAP_PDU rab_ass_req, PdpActPars apars)
+runs on BSSGP_ConnHdlr {
+	var TransportLayerInformation tli := f_ranap_rab_ass_req_extract_tli(rab_ass_req);
+	var template (present) TransportLayerAddress exp_tla_x213 := decmatch tr_NSAP_Address_IANA_BIN_IPv4(apars.ggsn_ip_u);
+	var template (present) TransportLayerAddress exp_tla_raw := oct2bit(apars.ggsn_ip_u);
+	var template (present) TransportLayerAddress exp_tla;
+	var template (present) TransportLayerInformation exp_tli;
+	if (ispresent(g_pars.ranap_exp_itu_x213_addr_format)) {
+		if (g_pars.ranap_exp_itu_x213_addr_format) {
+			exp_tla := exp_tla_x213;
+		} else {
+			exp_tla := exp_tla_raw;
+		}
+	} else { /* Accept any of the known formats: */
+		exp_tla := (exp_tla_x213, exp_tla_raw);
+	}
+	exp_tli := tr_TLI_ps(exp_tla, apars.ggsn_tei_u);
+	if (not match(tli, exp_tli)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Rx RAB Ass Req with TLI ", tli, " vs exp ", exp_tli));
+	}
+}
+
 altstep as_ranap_rab_ass_req(inout PdpActPars apars) runs on BSSGP_ConnHdlr {
 	var RANAP_PDU ranap;
 	[] BSSAP.receive(tr_RANAP_RabAssReq(?)) -> value ranap {
 		var RAB_ID rab_id := f_ranap_rab_ass_req_extract_rab_id(ranap);
-		var TransportLayerInformation tli := f_ranap_rab_ass_req_extract_tli(ranap);
 
-		/* Validate received IP address + TEID from SGSN is the one we
-		 * did set up from the GGSN, since the SGSN is expected to do
-		 * Direct Tunnel: */
-		var template (present) TransportLayerInformation exp_tli :=
-			tr_TLI_ps(oct2bit(enc_NSAP_Address(valueof(ts_NSAP_Address_IANA_BIN_IPv4Len20(apars.ggsn_ip_u)))),
-				  apars.ggsn_tei_u);
-		if (not match(tli, exp_tli)) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-				log2str("Rx RAB Ass Req with TLI ", tli, " vs exp ", exp_tli));
-		}
+		f_ranap_rab_ass_req_validate_tli(ranap, apars);
 
 		var template (value) RAB_SetupOrModifiedList l;
 		var bitstring tla_bits;
