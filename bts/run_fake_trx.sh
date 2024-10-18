@@ -1,7 +1,15 @@
 #!/bin/bash
-
 # Most BTS_Tests require to have fake_trx running.
 # fake trx is part of osmo-trx
+
+if [ "$TESTENV_BINARY_REPO" = 1 ]; then
+	# testenv with --binary-repo -> osmocom-bb cloned separately
+	FAKE_TRX_DIR="$TESTENV_GIT_DIR"/osmocom-bb/src/target/trx_toolkit
+elif [ -n "$TESTENV_SRC_DIR" ]; then
+	# testenv without --binary-repo -> osmocom-bb cloned via osmo-dev
+	FAKE_TRX_DIR="$TESTENV_SRC_DIR"/osmocom-bb/src/target/trx_toolkit
+fi
+
 FAKE_TRX_DIR="${FAKE_TRX_DIR:-../../osmo-trx/osmocom-bb/src/target/trx_toolkit}"
 
 cd "$FAKE_TRX_DIR"
