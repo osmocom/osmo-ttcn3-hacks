@@ -28,7 +28,7 @@ FILES+="S1AP_EncDec.cc S1AP_Types.ttcn S1AP_Templates.ttcn "
 gen_links $DIR $FILES
 
 DIR=../library
-FILES="Misc_Helpers.ttcn Mutex.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn "
+FILES="Misc_Helpers.ttcn Mutex.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn PFCP_Templates.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn "
 FILES+="SCTP_Templates.ttcn "
