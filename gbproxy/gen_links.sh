@@ -92,7 +92,7 @@ FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 # IPA_Emulation + dependencies
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn
-GTPv1C_Templates.ttcn IPCP_Types.ttcn "
+GTPv1C_Templates.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

@@ -96,7 +96,7 @@ FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_Ctr
 FILES+="PCO_Types.ttcn GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1C_Templates.ttcn Osmocom_Gb_Types.ttcn "
 FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn "
-FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn RAW_NS.ttcnpp "
+FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn RAW_NS.ttcnpp "
 gen_links $DIR $FILES
 
 ignore_pp_results

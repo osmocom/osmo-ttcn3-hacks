@@ -65,7 +65,7 @@ FILES+="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Osmocom_VTY_Func
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1C_Templates.ttcn "
 FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn "
-FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn GSM_Types.ttcn "
+FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn GSM_Types.ttcn "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
