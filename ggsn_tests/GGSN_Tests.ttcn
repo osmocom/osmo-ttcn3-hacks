@@ -957,9 +957,14 @@ module GGSN_Tests {
 					repeat;
 				}
 				/* We are waiting for RA, update ctx */
-				if (match(icmp6, tr_ICMPv6_RA(?, 64))) {
-					ctx.ip6_prefix := icmp6.routerAdvertisement.options[0].prefixInformation.prefix;
-					log("RA with /64 prefix ", ctx.ip6_prefix);
+				if (match(icmp6, tr_ICMPv6_RA(?))) {
+					for (var integer i := 0; i < lengthof(icmp6.routerAdvertisement.options); i := i + 1) {
+						var OptionField opt := icmp6.routerAdvertisement.options[i];
+						if (ischosen(opt.prefixInformation)) {
+							ctx.ip6_prefix := opt.prefixInformation.prefix;
+							log("RA with /64 prefix ", ctx.ip6_prefix);
+						}
+					}
 				}
 			}
 			[] GTPU.receive(tr_GTPU_GPDU(?, ?)) { repeat; }
@@ -976,8 +981,15 @@ module GGSN_Tests {
 	}
 
 	/* wait for GGSN to send us an ICMPv6 router advertisement */
-	function f_wait_rtr_adv(PdpContext ctx) runs on GT_CT {
-		f_wait_icmp6(ctx, tr_ICMPv6_RA(?, 64));
+	function f_wait_rtr_adv(PdpContext ctx, template integer mtu := *) runs on GT_CT {
+		var template (present) OptionField opt_prefix := tr_ICMP6_OptPrefix(?, 64);
+		var template (present) Options opts;
+		if (istemplatekind(mtu, "*")) {
+			opts := ( { opt_prefix }, { opt_prefix, tr_ICMP6_OptMTU(?) } );
+		} else {
+			opts := { opt_prefix, tr_ICMP6_OptMTU(mtu) };
+		}
+		f_wait_icmp6(ctx, tr_ICMPv6_RA(opts));
 	}
 
 	/* Wait for ICMPv6 echo request from GTP */
@@ -1091,6 +1103,30 @@ module GGSN_Tests {
 		f_send_gtpu(ctx, f_gen_icmpv6_neigh_solicit_for_pdp(ctx));
 
 		f_pdp_ctx_del(ctx, '1'B);
+		f_shutdown_helper();
+	}
+
+	/* Test PDP context activation for dynamic IPv6 EUA with MTU in router solicitation/advertisement */
+	testcase TC_pdp6_act_deact_mtu() runs on GT_CT {
+		f_init();
+		if (m_ggsn_impl == GGSN_IMPL_OSMOCOM) {
+			f_vty_set_mtu(m_configured_mtu);
+		} else {
+			/* In GGSN_IMPL_OPEN5GS we expect open5gs-smfd to be
+			 * configured with mtu value m_configured_mtu */
+		}
+
+		var PdpContext ctx := valueof(t_DefinePDP(f_rnd_imsi('26242'H), "1234", c_ApnInet6, valueof(t_EuaIPv6Dyn)));
+		f_pdp_ctx_act(ctx);
+
+		f_send_gtpu(ctx, f_icmpv6_rs_for_pdp(ctx));
+		f_wait_rtr_adv(ctx, m_configured_mtu);
+		f_send_gtpu(ctx, f_gen_icmpv6_neigh_solicit_for_pdp(ctx));
+
+		f_pdp_ctx_del(ctx, '1'B);
+		if (m_ggsn_impl == GGSN_IMPL_OSMOCOM) {
+			f_vty_set_mtu(-1);
+		}
 		f_shutdown_helper();
 	}
 
@@ -1752,6 +1788,10 @@ module GGSN_Tests {
 								" vs exp ", tr_PCO_P_UV_U16(m_configured_mtu)));
 		}
 
+		f_send_gtpu(ctx, f_icmpv6_rs_for_pdp(ctx));
+		f_wait_rtr_adv(ctx, m_configured_mtu);
+		f_send_gtpu(ctx, f_gen_icmpv6_neigh_solicit_for_pdp(ctx));
+
 		f_pdp_ctx_del(ctx, '1'B);
 		if (m_ggsn_impl == GGSN_IMPL_OSMOCOM) {
 			f_vty_set_mtu(-1);
@@ -2387,6 +2427,7 @@ module GGSN_Tests {
 			execute(TC_pdp6_act_deact());
 			execute(TC_pdp6_act_deact_pcodns());
 			execute(TC_pdp6_act_deact_icmp6());
+			execute(TC_pdp6_act_deact_mtu());
 			execute(TC_pdp6_act_deact_gtpu_access());
 			execute(TC_pdp6_act_deact_gtpu_access_ll_saddr());
 			execute(TC_pdp6_act_deact_gtpu_access_wrong_ll_saddr());
