@@ -1,5 +1,6 @@
 #!/bin/sh -ex
 INITRD_DIR="$PWD/_initrd"
+CORE_DIR="$PWD/_coredump"
 
 # Add one or more files to the initramfs, with parent directories.
 # usr-merge: resolve symlinks for /lib -> /usr/lib etc. so "cp --parents" does
@@ -171,6 +172,8 @@ qemu_run() {
 		machine_arg="-machine pc"
 	fi
 
+	mkdir -p "$CORE_DIR"
+
 	# sudo is required to set up networking in qemu_ifup.sh
 	# </dev/null to deatch stdin, so qemu doesn't capture ^C
 	sudo sh -c "
@@ -186,6 +189,13 @@ qemu_run() {
 			-serial stdio \
 			-netdev 'tap,id=nettest,script=$TESTENV_QEMU_SCRIPTS/qemu_ifup.sh' \
 			-device 'virtio-net-pci,netdev=nettest,mac=$(qemu_random_mac)' \
+			-virtfs 'local,path=$CORE_DIR,mount_tag=coredir,security_model=passthrough,fmode=666,writeout=immediate' \
 		</dev/null
 	"
+
+	# Show coredump backtrace
+	if [ -e "$CORE_DIR/coredump" ]; then
+		execfn="$(file "$CORE_DIR/coredump" | grep -o "execfn: '.*'" | cut -d "'" -f 2)"
+		gdb --batch "$execfn" "$CORE_DIR/coredump" -ex bt
+	fi
 }
