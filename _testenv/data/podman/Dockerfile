@@ -19,6 +19,7 @@ RUN	set -x && \
 		-y \
 		--no-install-recommends \
 		-o Dpkg::Options::="--force-confold" \
+		asciidoc-base \
 		autoconf \
 		automake \
 		bc \

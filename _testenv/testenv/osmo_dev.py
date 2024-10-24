@@ -84,6 +84,8 @@ def init():
         "default.opts",
         "ccache.opts",
         "gtp_linux.opts",
+        "hnbgw_with_nftables.opts",
+        "hnbgw_with_pfcp.opts",
         "iu.opts",
         "no_dahdi.opts",
         "no_doxygen.opts",
