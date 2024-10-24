@@ -209,11 +209,10 @@ def find_configs():
         sys.exit(1)
 
     if len(ret) > 1 and not testenv.args.config:
-        logging.error("Found multiple testenv.cfg files:")
+        logging.error("Found multiple testenv.cfg files, use one of:")
         for path in ret:
-            logging.error(f" * {os.path.basename(path)}")
-        example = os.path.basename(ret[0]).split("_", 1)[1].split(".cfg", 1)[0]
-        logging.error(f"Select a specific config (e.g. '-c {example}') or all ('-c all')")
+            logging.error(f" -c {os.path.basename(path).replace('testenv_', '', 1).replace('.cfg', '')}")
+        logging.error("You can also select all of them (-c all) or use the * character as wildcard.")
         sys.exit(1)
 
     return ret
