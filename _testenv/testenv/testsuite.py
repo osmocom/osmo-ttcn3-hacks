@@ -205,15 +205,6 @@ def run(cfg):
     format_log_files(cfg)
 
 
-def run_prepare_script(cfg):
-    section_data = cfg["testsuite"]
-    if "prepare" not in section_data:
-        return
-
-    logging.info("Running testsuite prepare script")
-    testenv.cmd.run(section_data["prepare"])
-
-
 def get_current_test():
     path = os.path.join(testenv.testdir.testdir, "testsuite/.current_test")
     try:

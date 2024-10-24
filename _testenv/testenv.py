@@ -38,11 +38,6 @@ def run():
     testenv.testsuite.init()
     testenv.testsuite.build()
 
-    # Run prepare functions of testsuites (may enable extra repos)
-    for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
-        testenv.testenv_cfg.set_current(cfg_name)
-        testenv.testsuite.run_prepare_script(cfg)
-
     # Build all components first
     if not testenv.args.binary_repo:
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
