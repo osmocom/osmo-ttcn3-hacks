@@ -70,6 +70,10 @@ vty_port=4243
   directory, useful for include files mentioned in the config. Multiple values
   are separated by spaces.
 
+* `prepare=`: optional script to run before staring the testsuite (after files
+  are copied to the test directory). This can be used to change module
+  parameters in the testsuite's config.
+
 * `clean=`: optional script to run before running the testsuite and on exit.
   This can be used to clean up network devices for example, or to fix name
   collisions when running a test with multiple configs

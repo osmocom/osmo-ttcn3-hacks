@@ -109,6 +109,7 @@ def verify(cfg, path):
         "clean",
         "config",
         "copy",
+        "prepare",
         "program",
     ]
     keys_valid_component = [

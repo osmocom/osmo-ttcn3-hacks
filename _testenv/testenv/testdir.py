@@ -94,16 +94,6 @@ def prepare(cfg_name, cfg):
                     mode = 755 if os.access(path, os.X_OK) else 644
                     testenv.cmd.run(["install", f"-Dm{mode}", path, path_dest])
 
-        if "clean" in section_data:
-            logging.info(f"Running {section} clean script (reason: prepare)")
-            clean_scripts[section] = section_data["clean"]
-            env = {"TESTENV_CLEAN_REASON": "prepare"}
-            testenv.cmd.run(section_data["clean"], cwd=section_dir, env=env)
-
-        if "prepare" in section_data:
-            logging.info(f"Running {section} prepare script")
-            testenv.cmd.run(section_data["prepare"], cwd=section_dir)
-
     # Referenced in testsuite cfgs: *.default
     pattern = os.path.join(testsuite_dir, "*.default")
     for path in glob.glob(pattern):
@@ -146,6 +136,24 @@ def prepare(cfg_name, cfg):
                     cfg_file,
                 ]
             )
+
+    # Run prepare and clean scripts
+    for section in cfg:
+        if section in ["DEFAULT"]:
+            continue
+
+        section_data = cfg[section]
+        section_dir = os.path.join(testdir, section)
+
+        if "clean" in section_data:
+            logging.info(f"Running {section} clean script (reason: prepare)")
+            clean_scripts[section] = section_data["clean"]
+            env = {"TESTENV_CLEAN_REASON": "prepare"}
+            testenv.cmd.run(section_data["clean"], cwd=section_dir, env=env)
+
+        if "prepare" in section_data:
+            logging.info(f"Running {section} prepare script")
+            testenv.cmd.run(section_data["prepare"], cwd=section_dir)
 
 
 def clean():
