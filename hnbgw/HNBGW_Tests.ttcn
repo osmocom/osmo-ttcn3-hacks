@@ -73,11 +73,29 @@ import from L3_Common all;
 
 import from SCCPasp_Types all;
 
+import from ConnHdlr all;
+
 const integer NUM_MSC := 4;
 const integer NUM_SGSN := 4;
 
 const integer FIRST_MSC_IDX := 0;
 const integer FIRST_SGSN_IDX := NUM_MSC;
+
+/* Translate from {msc,sgsn}x{0..n} to the proper index to use in g_cn[].
+ * g_cn[] stores CN links, MSCs and SGSNs in the same array.
+ * For example, for 'sgsn 23', use g_cn[ f_cn_idx(ps_domain := true, cn_nr := 23) ].
+ *
+ * Note the naming:
+ * cn_nr is the number used in the cfg file, as in 'msc 0'.
+ * cn_idx is the array index in g_cn[].
+ */
+private function f_cn_idx(boolean ps_domain, integer cn_nr := 0) return integer
+{
+	if (ps_domain) {
+		return FIRST_SGSN_IDX + cn_nr;
+	}
+	return FIRST_MSC_IDX + cn_nr;
+}
 
 modulepar {
 	/* IP address at which the HNodeB can be reached */
@@ -225,113 +243,7 @@ const RanOps MSC_RanOps := {
 	sccp_addr_peer := omit
 }
 
-type record MgwResponse {
-	integer resp,
-	HostName mgw_rtp_ip,
-	/* if set, used after first received MDCX: */
-	HostName mgw_rtp_ip_mdcx optional,
-	PortNumber mgw_rtp_port,
-	MgcpConnectionId mgcp_connection_id
-}
-type record MgcpParameters {
-	integer got_crcx_count,
-	integer got_dlcx_count,
-	MgcpCallId mgcp_call_id optional,
-	MgcpEndpoint mgcp_ep,
-	MgwResponse mgw_conn_ran,
-	MgwResponse mgw_conn_cn,
-	uint7_t rtp_payload_type,
-	charstring rtp_sdp_format,
-	HostName hnb_rtp_ip,
-	PortNumber hnb_rtp_port,
-	HostName cn_rtp_ip,
-	PortNumber cn_rtp_port,
-	boolean use_osmux,
-	integer got_osmux_count
-}
-
-template (value) MgcpParameters t_MgcpParams := {
-	got_crcx_count := 0,
-	got_dlcx_count := 0,
-	mgcp_call_id := omit,
-	mgcp_ep := "rtpbridge/1@mgw",
-	mgw_conn_ran := {
-		resp := 1,
-		mgw_rtp_ip := "127.1.2.1",
-		mgw_rtp_ip_mdcx := omit,
-		mgw_rtp_port := 10000,
-		mgcp_connection_id := '11111'H
-	},
-	mgw_conn_cn := {
-		resp := 1,
-		mgw_rtp_ip := "127.1.2.2",
-		mgw_rtp_ip_mdcx := omit,
-		mgw_rtp_port := 20000,
-		mgcp_connection_id := '22222'H
-	},
-	rtp_payload_type := 112,
-	rtp_sdp_format := "VND.3GPP.IUFP",
-	hnb_rtp_ip := "127.1.1.1",
-	hnb_rtp_port := 10001,
-	cn_rtp_ip := "127.1.3.1",
-	cn_rtp_port := 20001,
-	use_osmux := false,
-	got_osmux_count := 0
-}
-
-type record TestHdlrParams {
-	integer hnb_idx,
-	/* cn_idx indicates which CN link from g_cn[] to connect to the test component.
-	 * See also f_cn_idx(). */
-	integer cn_idx,
-	hexstring imsi,
-	boolean ps_domain,
-	MgcpParameters mgcp_pars optional,
-	HnbConfig hnb optional,
-	boolean expect_separate_sccp_cr,
-	integer tx_sccp_cr_data_len,
-	charstring pfcp_local_addr,
-	octetstring nas_pdu optional,
-	/* local and remote SCCP addresses, used in TC_mscpool_paging_* */
-	SCCP_PAR_Address sccp_addr_msc optional,
-	SCCP_PAR_Address sccp_addr_hnbgw optional,
-	/* RAB release cause */
-	RANAP_IEs.Cause rab_rel_cause
-}
-
-/* We extend:
-   * RUA_ConnHdlr (for the Iuh side, emulating the HNB)
-   * RAN_ConnHdlr (for the Iu side, emulating the MSC)
-   * MGCP_ConnHdlr (for the MGCP side, emulating the MGW)
-   * StatsD_ConnHdlr (for the statsd interface, verifying counters)
- */
-type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr  {
-	var integer g_sccp_conn_id;
-	var TestHdlrParams g_pars;
-	timer g_Tguard;
-
-	port TELNETasp_PT HNBGWVTY;
-}
-
-
-const MGCPOps MSC_MGCPOps := {
-	create_cb := refers(MGCP_Emulation.ExpectedCreateCallback),
-	unitdata_cb := refers(MGCP_Emulation.DummyUnitdataCallback)
-}
-
-function f_create_ranap_exp(octetstring l3_enc) runs on ConnHdlr {
-	BSSAP_PROC.call(RAN_register:{l3_enc, self}) {
-		[] BSSAP_PROC.getreply(RAN_register:{?, ?}) {};
-	}
-}
-
-
 const integer NUM_HNB := 2;
-
-type record HnbConfig {
-	LocationAreaIdentification lai,
-	integer sac
-}
 
 type component test_CT extends CTRL_Adapter_CT, StatsD_Checker_CT {
 	var boolean g_initialized := false;
@@ -587,6 +499,24 @@ function f_start_hnbs() runs on test_CT {
 /***********************************************************************
  * code running in test_CT, preparing start of per-UE ConnHdlr
  ***********************************************************************/
+private function f_TestHdlrParams(integer imsi_suffix,
+				  boolean ps_domain := false,
+				  boolean expect_separate_sccp_cr := false,
+				  integer tx_sccp_cr_data_len := 0,
+				  integer cn_nr := 0,
+				  template (value) RANAP_IEs.Cause rab_rel_cause := ts_RanapCause_nas_normal)
+return TestHdlrParams {
+	var template (value) TestHdlrParams pars;
+	pars := t_pars(imsi_suffix,
+		       ps_domain := ps_domain,
+		       expect_separate_sccp_cr := expect_separate_sccp_cr,
+		       tx_sccp_cr_data_len := tx_sccp_cr_data_len,
+		       cn_idx := f_cn_idx(ps_domain, cn_nr),
+		       pfcp_local_addr := mp_pfcp_ip_local,
+		       rab_rel_cause := rab_rel_cause,
+		       hnbgw_timer_x31 := mp_hnbgw_timer_x31);
+	return valueof(pars);
+}
 
 /* inbound RUA connection establishment on Iuh side */
 function IuhRanapCreateCallback(ContextId context_id, RUA_IEs.CN_DomainIndicator domain, charstring id)
@@ -644,268 +574,6 @@ runs on test_CT return ConnHdlr {
 	f_start_handler_run(vc_conn, fn, valueof(pars));
 	return vc_conn;
 }
-
-/***********************************************************************
- * code running inside per-UE ConnHdlr
- ***********************************************************************/
-
-type function void_fn(charstring id, TestHdlrParams pars) runs on ConnHdlr;
-
-function f_init_handler(TestHdlrParams pars, float t_guard := 20.0) runs on ConnHdlr {
-	/* make parameters available via component variable */
-	g_pars := pars;
-
-	/* start guard timer and activate it as default */
-	g_Tguard.start(t_guard);
-	activate(as_Tguard_ConnHdlr());
-
-	map(self:HNBGWVTY, system:HNBGWVTY);
-	f_vty_set_prompts(HNBGWVTY);
-	f_vty_transceive(HNBGWVTY, "enable");
-
-	/* TODO: CTRL? */
-
-	f_sleep(1.0);
-}
-
-/* global altstep for global guard timer; */
-private altstep as_Tguard_ConnHdlr() runs on ConnHdlr {
-	[] g_Tguard.timeout {
-		setverdict(fail, "Timeout of T_guard");
-		mtc.stop;
-	}
-}
-
-private function f_bssap_expect(template (present) RANAP_PDU exp_rx) runs on ConnHdlr return RANAP_PDU
-{
-	var RANAP_PDU rx;
-	timer T := 5.0;
-	T.start;
-	alt {
-	[] BSSAP.receive(exp_rx) -> value rx {
-		setverdict(pass);
-		}
-	[] BSSAP.receive(RANAP_PDU:?) {
-		setverdict(fail, "Got an unexpected RANAP message on BSSAP port, was waiting for ", exp_rx);
-		mtc.stop;
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for RANAP on BSSAP port: ", exp_rx);
-		mtc.stop;
-		}
-	}
-	T.stop;
-	return rx;
-}
-
-/* send RANAP on Iuh and expect it to show up on Iu */
-function f_iuh2iu(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
-runs on ConnHdlr return RANAP_PDU {
-	var RANAP_PDU rx;
-	timer T := 5.0;
-
-	if (istemplatekind(exp_rx, "omit")) {
-		exp_rx := tx;
-	}
-
-	RUA.send(tx);
-
-	return f_bssap_expect(exp_rx);
-}
-
-/* send RANAP on Iu and expect it to show up on Iuh */
-function f_iu2iuh(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
-runs on ConnHdlr return RANAP_PDU {
-	if (istemplatekind(exp_rx, "omit")) {
-		exp_rx := tx;
-	}
-
-	BSSAP.send(tx);
-
-	return f_rua_expect(exp_rx)
-}
-
-/* expect to receive a specific RUA message on Iuh */
-private function f_rua_expect(template (present) RANAP_PDU exp_rx) runs on ConnHdlr return RANAP_PDU
-{
-	var RANAP_PDU rx;
-	timer T := 5.0;
-	T.start;
-	alt {
-	[] RUA.receive(exp_rx) -> value rx {
-		setverdict(pass);
-		}
-	[] RUA.receive(RANAP_PDU:?) {
-		setverdict(fail, "Got an unexpected RUA message, was waiting for ", exp_rx);
-		mtc.stop;
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for Iuh ", exp_rx);
-		mtc.stop;
-		}
-	}
-	T.stop;
-	return rx;
-}
-
-/* send RANAP on Iuh and expect it to show up on Iu */
-function f_iuh2iu_connect(template (present) RANAP_PDU tx, template RANAP_PDU exp_rx := omit)
-runs on ConnHdlr return RANAP_PDU {
-	var RANAP_PDU rx;
-	timer T := 5.0;
-
-	if (istemplatekind(exp_rx, "omit")) {
-		exp_rx := tx;
-	}
-
-	/* create an expect on the Iu side for the random NAS portion */
-	if (g_pars.expect_separate_sccp_cr) {
-		f_ran_register_sccp_cr_without_payload();
-	} else {
-		var template (omit) octetstring nas := f_ranap_extract_l3(valueof(tx));
-		f_ran_register_exp(valueof(nas));
-	}
-
-	/* send it via Iuh (creating a RUA connection) */
-	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
-
-	if (g_pars.expect_separate_sccp_cr) {
-		/* Acknowledge the empty SCCP CR. RAN_Emulation does the confirmation, no need to respond. */
-		BSSAP.receive(tr_RANAP_Conn_Req());
-	}
-
-	/* expect to receive it on the Iu side */
-	return f_bssap_expect(exp_rx);
-}
-
-/* 3GPP TS 48.006 9.2 Connection release:
- *
- *  The MSC sends a SCCP released message. This message shall not contain
- *  any user data field.
- *
- * So what we expect normally is:
- *
- *                            HNBGW                    MSC
- *  RUA --id-Disconnect-------> | ---Data-Form-1(!)---> |  Iu-ReleaseComplete
- *                              | <--Released---------- |  (no data)
- *
- * This function tests osmo-hnbgw behavior if the CN fails to send a RLSD:
- * after some timeout, osmo-hnbgw should send a RLSD to the CN.
- */
-function f_iuh2iu_disconnect(template (present) RANAP_PDU tx, RUA_IEs.Cause cause,
-			     template RANAP_PDU exp_rx := omit)
-runs on ConnHdlr return RANAP_PDU {
-	var RANAP_PDU rx
-	timer T := int2float(mp_hnbgw_timer_x31) + 1.0;
-
-	if (istemplatekind(exp_rx, "omit")) {
-		exp_rx := tx;
-	}
-
-	/* send it via Iuh (creating a RUA connection) */
-	RUA.send(RUA_Disc_Req:{tx, cause});
-
-	/* expect to receive it on the Iu side */
-	rx := f_bssap_expect(exp_rx);
-
-	/* expect disconnect on the Iu side */
-	T.start;
-	alt {
-	[] BSSAP.receive(RAN_Conn_Prim:MSC_CONN_PRIM_DISC_IND) {
-		setverdict(pass);
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for Iu disconnect");
-		return rx;
-		}
-
-	}
-	return rx;
-}
-
-private function f_build_initial_ue_with_nas(TestHdlrParams pars, octetstring nas)
-  return RANAP_PDU {
-	var RANAP_IEs.LAI lai := {
-		pLMNidentity := hex2oct(pars.hnb.lai.mcc_mnc),
-		lAC := int2oct(pars.hnb.lai.lac, 2),
-		iE_Extensions := omit
-	};
-	var RANAP_IEs.SAI sai := {
-		pLMNidentity := lai.pLMNidentity,
-		lAC := lai.lAC,
-		sAC := int2oct(pars.hnb.sac, 2),
-		iE_Extensions := omit
-	}
-	var IuSignallingConnectionIdentifier sigc_id := int2bit(f_rnd_int(1000), 24);
-	var GlobalRNC_ID grnc_id := {
-		pLMNidentity := lai.pLMNidentity,
-		rNC_ID := 2342
-	}
-	var template RANAP_PDU ret;
-	if (pars.ps_domain) {
-		var RANAP_IEs.RAC rac := '00'O;
-		ret := ts_RANAP_initialUE_PS(lai, rac, sai, nas, sigc_id, grnc_id);
-	} else {
-		ret := ts_RANAP_initialUE_CS(lai, sai, nas, sigc_id, grnc_id);
-	}
-	return valueof(ret);
-}
-
-/* build a RANAP InitialUE based on the TestHdlrParams */
-friend function f_build_initial_ue(TestHdlrParams pars) return RANAP_PDU {
-
-	var octetstring nas;
-
-	if (pars.tx_sccp_cr_data_len == 0) {
-		nas := f_rnd_octstring(10);
-	} else {
-		/* The test asks for an exact number of Optional Data bytes. */
-
-		/* First see what size the RANAP part of the payload data is,
-		 * to adjust the NAS PDU size to the size requested by the test (pars.tx_sccp_cr_data_len). */
-		var RANAP_PDU initial_ue := f_build_initial_ue_with_nas(pars, '00'O);
-
-		var octetstring ranap_plus_one_byte_nas := enc_RANAP_PDU(initial_ue);
-		var integer ranap_length := lengthof(ranap_plus_one_byte_nas) - 1;
-
-		log("ranap_plus_one_byte_nas = ", lengthof(ranap_plus_one_byte_nas), " bytes, ", initial_ue, " = ",
-		    ranap_plus_one_byte_nas);
-		log("ranap_length = ", ranap_length);
-
-		/* SCCP CR has a payload length limit of 130 bytes. To trigger this limit, the RANAP + NAS PDU has to be
-		 * > 130 bytes. It doesn't need to be 131 bytes in the NAS PDU alone, but let's just make it definitely
-		 * large enough. To test for this limit, pars.tx_sccp_cr_data_len asks for a specific amount of data len. */
-		nas := f_rnd_octstring(pars.tx_sccp_cr_data_len - ranap_length);
-	}
-
-	var RANAP_PDU ret := f_build_initial_ue_with_nas(pars, nas);
-
-	if (pars.tx_sccp_cr_data_len != 0) {
-		for (var integer attempts := 0; attempts < 2; attempts := attempts + 1) {
-			var octetstring check_len := enc_RANAP_PDU(ret);
-			log("final RANAP PDU length = ", lengthof(check_len));
-			if (lengthof(check_len) == pars.tx_sccp_cr_data_len) {
-				return ret;
-			}
-			nas := f_rnd_octstring(lengthof(nas) + (pars.tx_sccp_cr_data_len - lengthof(check_len)));
-			log("that was off, changed NAS length to ", lengthof(nas), " and trying again");
-			ret := f_build_initial_ue_with_nas(pars, nas);
-		}
-		setverdict(fail, "Ended up with wrong Optional Data length");
-		mtc.stop;
-	}
-	return ret;
-}
-
-/* build a RANAP RAB AssignmentResponse based on the TestHdlrParams */
-friend function f_build_rab_ass_resp(TestHdlrParams pars) return RANAP_PDU {
-	var template RAB_SetupOrModifiedList rab_sml;
-
-	rab_sml := ts_RAB_SMdL(t_RAB_id(23), f_ts_RAB_TLA("192.168.1.23"), t_RAB_binding_port(1234));
-
-	return valueof(ts_RANAP_RabAssResp(rab_sml));
-}
-
 
 /***********************************************************************
  * HNBAP Testing
@@ -1171,41 +839,6 @@ testcase TC_ue_register_before_hnb_register() runs on test_CT {
  * RUA / RANAP Testing
  ***********************************************************************/
 
-/* Translate from {msc,sgsn}x{0..n} to the proper index to use in g_cn[].
- * g_cn[] stores CN links, MSCs and SGSNs in the same array.
- * For example, for 'sgsn 23', use g_cn[ f_cn_idx(ps_domain := true, cn_nr := 23) ].
- *
- * Note the naming:
- * cn_nr is the number used in the cfg file, as in 'msc 0'.
- * cn_idx is the array index in g_cn[].
- */
-private function f_cn_idx(boolean ps_domain, integer cn_nr := 0) return integer
-{
-	if (ps_domain) {
-		return FIRST_SGSN_IDX + cn_nr;
-	}
-	return FIRST_MSC_IDX + cn_nr;
-}
-
-private template (value) TestHdlrParams
-t_pars(integer imsi_suffix, boolean ps_domain := false, integer hnb_idx := 0,
-       boolean expect_separate_sccp_cr := false, integer tx_sccp_cr_data_len := 0,
-       integer cn_nr := 0, template (value) RANAP_IEs.Cause rab_rel_cause := ts_RanapCause_nas_normal) := {
-	hnb_idx := hnb_idx,
-	cn_idx := f_cn_idx(ps_domain, cn_nr),
-	imsi := f_gen_imsi(imsi_suffix),
-	ps_domain := ps_domain,
-	mgcp_pars := t_MgcpParams,
-	hnb := omit,	/* filled in later */
-	expect_separate_sccp_cr := expect_separate_sccp_cr,
-	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
-	pfcp_local_addr := mp_pfcp_ip_local,
-	nas_pdu := omit,
-	sccp_addr_msc := omit,
-	sccp_addr_hnbgw := omit,
-	rab_rel_cause := rab_rel_cause
-}
-
 /* Create an Iuh connection; send InitialUE; expect it to appear on new SCCP conenction */
 friend function f_tc_initial_ue(charstring id, TestHdlrParams pars) runs on ConnHdlr {
 	f_init_handler(pars);
@@ -1218,7 +851,7 @@ testcase TC_ranap_cs_initial_ue() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), f_TestHdlrParams(1));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1229,7 +862,7 @@ testcase TC_ranap_ps_initial_ue() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), f_TestHdlrParams(2, true));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1257,7 +890,7 @@ testcase TC_ranap_cs_initial_ue_empty_cr() runs on test_CT {
 
 	f_vty_set_sccp_max_optional_data(HNBGWVTY, 0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(1, expect_separate_sccp_cr := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), f_TestHdlrParams(1, expect_separate_sccp_cr := true));
 	vc_conn.done;
 
 	/* reset */
@@ -1273,7 +906,7 @@ testcase TC_ranap_ps_initial_ue_empty_cr() runs on test_CT {
 
 	f_vty_set_sccp_max_optional_data(HNBGWVTY, 0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), t_pars(2, true, expect_separate_sccp_cr := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue), f_TestHdlrParams(2, true, expect_separate_sccp_cr := true));
 	vc_conn.done;
 
 	/* reset */
@@ -1321,10 +954,10 @@ testcase TC_sccp_cr_limit() runs on test_CT {
 			f_vty_set_sccp_max_optional_data(HNBGWVTY, t.max_optional_data);
 			var ConnHdlr vc_conn;
 			vc_conn := f_start_handler_with_pars(refers(f_tc_initial_ue),
-							     t_pars(100 + i,
-								    ps_domain := ps_domain,
-								    expect_separate_sccp_cr := t.expect_separate_sccp_cr,
-								    tx_sccp_cr_data_len := t.data_len));
+							     f_TestHdlrParams(100 + i,
+									      ps_domain := ps_domain,
+									      expect_separate_sccp_cr := t.expect_separate_sccp_cr,
+									      tx_sccp_cr_data_len := t.data_len));
 			vc_conn.done;
 		}
 	}
@@ -1333,213 +966,6 @@ testcase TC_sccp_cr_limit() runs on test_CT {
 	f_vty_set_sccp_max_optional_data(HNBGWVTY);
 
 	f_shutdown_helper();
-}
-
-/* Reply to a received CRCX with an OK (or the reply configured in cpars), using the given parameters.
- * Return true when an OK reply was sent, false otherwise.
- * Count occurrence of Osmux, include Osmux parameters in the reply if necessary. */
-function f_handle_crcx(inout MgcpParameters pars, MgcpCommand mgcp_cmd) return template MgcpResponse {
-	var MgwResponse conn := pars.mgw_conn_ran;
-	if (pars.got_crcx_count > 0) {
-		conn := pars.mgw_conn_cn;
-	}
-	pars.got_crcx_count := pars.got_crcx_count + 1;
-
-	var MgcpMessage mgcp_msg := {
-		command := mgcp_cmd
-	}
-	var template MgcpResponse mgcp_resp;
-	var MgcpOsmuxCID osmux_cid;
-	var MgcpCallId call_id := f_MgcpCmd_extract_call_id(mgcp_cmd);
-	if (ispresent(pars.mgcp_call_id)) {
-		if (pars.mgcp_call_id != call_id) {
-			setverdict(fail, "CRCX contained unexpected call id. Expected:", pars.mgcp_call_id, " got:", call_id);
-			mtc.stop;
-		}
-	} else {
-		pars.mgcp_call_id := call_id;
-	}
-
-	/* When the endpoint contains a wildcard we keep the endpoint
-	 * identifier we have set up in pars. Otherwise we use the
-	 * endpoint name that the call agent has supplied */
-	if (match(mgcp_cmd.line.ep, t_MGCP_EP_wildcard) == false) {
-		pars.mgcp_ep := mgcp_cmd.line.ep;
-	}
-
-	if (conn.resp == -1) {
-		/* Reply with rror */
-		var MgcpResponse mgcp_rsp := {
-			line := {
-				code := "542",
-				trans_id := mgcp_cmd.line.trans_id,
-				string := "FORCED_FAIL"
-			},
-			sdp := omit
-
-		}
-		var MgcpParameter mgcp_rsp_param := {
-			code := "Z",
-			val := pars.mgcp_ep
-		};
-		mgcp_rsp.params[0] := mgcp_rsp_param;
-		return mgcp_rsp;
-	}
-
-	if (conn.resp == 0) {
-		/* Do not reply at all */
-		return omit;
-	}
-
-	if (conn.resp != 1) {
-		setverdict(fail, "Unexpected value for pars.mgw_conn_*.resp, expect -1, 0 or 1");
-		mtc.stop;
-	}
-
-	var SDP_Message sdp := valueof(ts_SDP(conn.mgw_rtp_ip, conn.mgw_rtp_ip,
-						hex2str(pars.mgcp_call_id), "42",
-						conn.mgw_rtp_port,
-						{ int2str(pars.rtp_payload_type) },
-						{ valueof(ts_SDP_rtpmap(pars.rtp_payload_type,
-									pars.rtp_sdp_format)),
-						  valueof(ts_SDP_ptime(20)) }));
-
-	if (f_mgcp_contains_par(mgcp_msg, "X-OSMUX")) {
-		if (not pars.use_osmux) {
-			setverdict(fail, "MSC sent X-Osmux parameter in MGCP, but not expecting any Osmux");
-			mtc.stop;
-		}
-		pars.got_osmux_count := pars.got_osmux_count + 1;
-		/* we expect MSC to use wildcard here, i.e. osmux_cid == -1 */
-		osmux_cid := f_MgcpCmd_extract_osmux_cid(mgcp_cmd);
-		log("f_handle_crcx(): got Osmux CID: ", osmux_cid);
-		if (osmux_cid != -1) {
-			setverdict(fail, "MSC using unexpected CID " & int2str(osmux_cid) & " != -1");
-			mtc.stop;
-		}
-
-		osmux_cid := 0;
-		mgcp_resp := ts_CRCX_ACK_osmux(mgcp_cmd.line.trans_id, conn.mgcp_connection_id, osmux_cid, sdp);
-	} else {
-		mgcp_resp := ts_CRCX_ACK(mgcp_cmd.line.trans_id, conn.mgcp_connection_id, sdp);
-	}
-
-	f_mgcp_par_append(mgcp_resp.params, ts_MgcpParSpecEP(pars.mgcp_ep));
-
-	return mgcp_resp;
-}
-
-friend function f_create_rab(inout MgcpParameters pars) runs on ConnHdlr {
-	f_rab_ass_req(pars);
-	f_rab_ass_resp(pars);
-}
-
-friend function f_rab_ass_req(inout MgcpParameters pars) runs on ConnHdlr {
-	var MgcpCommand mgcp_cmd;
-	var RANAP_PDU tx;
-	var template RAB_SetupOrModifyList rab_sml;
-	timer T := 5.0;
-
-	/* Send RAB Assignment Request */
-	rab_sml := ts_RAB_SML(t_RAB_id(23), f_ts_RAB_TLA(pars.cn_rtp_ip), t_RAB_binding_port(pars.cn_rtp_port));
-	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
-	BSSAP.send(tx);
-	T.start;
-
-	/* Handle MGCP CRCX */
-	alt {
-	[] MGCP.receive(tr_CRCX) -> value mgcp_cmd {
-		log("CRCX1", mgcp_cmd);
-		var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
-		MGCP.send(valueof(mgcp_rsp));
-		}
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for MGCP");
-		}
-	}
-	T.stop;
-
-	/* Expect RAB Assignment Request with IP/port from CRCX ACK via Iuh */
-	rab_sml := ts_RAB_SML(t_RAB_id(23), f_ts_RAB_TLA(pars.mgw_conn_ran.mgw_rtp_ip), t_RAB_binding_port(pars.mgw_conn_ran.mgw_rtp_port));
-	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
-
-	f_rua_expect(tx);
-}
-
-friend function f_rab_ass_resp(inout MgcpParameters pars) runs on ConnHdlr {
-	var MgcpCommand mgcp_cmd;
-	var RANAP_PDU tx;
-	var template RAB_SetupOrModifiedList rab_smdl;
-
-	/* Send back RAB Assignment Response via Iuh */
-	rab_smdl := ts_RAB_SMdL(t_RAB_id(23), f_ts_RAB_TLA(pars.hnb_rtp_ip), t_RAB_binding_port(pars.hnb_rtp_port));
-	tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
-	RUA.send(tx);
-
-	interleave {
-	/* Expect MDCX with IP/port from RAB Assignment Response */
-	[] MGCP.receive(tr_MDCX(tr_SDP(pars.hnb_rtp_ip, pars.hnb_rtp_port))) -> value mgcp_cmd {
-		var HostName mgw_rtp_ip;
-		var boolean exp_rua_rab_reass := false;
-		log("MDCX1", mgcp_cmd);
-		if (ispresent(pars.mgw_conn_ran.mgw_rtp_ip_mdcx)) {
-			mgw_rtp_ip := pars.mgw_conn_ran.mgw_rtp_ip_mdcx;
-			if (pars.mgw_conn_ran.mgw_rtp_ip != pars.mgw_conn_ran.mgw_rtp_ip_mdcx) {
-				exp_rua_rab_reass := true;
-			}
-		} else {
-			mgw_rtp_ip := pars.mgw_conn_ran.mgw_rtp_ip;
-		}
-
-		/* Verify SDP of MDCX */
-		var SDP_Message sdp := valueof(ts_SDP(mgw_rtp_ip, mgw_rtp_ip, hex2str(pars.mgcp_call_id), "42", pars.mgw_conn_ran.mgw_rtp_port,
-			{ int2str(pars.rtp_payload_type) }, { valueof(ts_SDP_rtpmap(pars.rtp_payload_type, pars.rtp_sdp_format)), valueof(ts_SDP_ptime(20)) } ));
-		var template MgcpResponse mgcp_rsp := ts_MDCX_ACK(mgcp_cmd.line.trans_id, pars.mgw_conn_ran.mgcp_connection_id, sdp);
-		MGCP.send(valueof(mgcp_rsp));
-
-		/* If IP address changed, we expect HNBGW to Modify the RAB through RAB-Ass-Req: */
-		if (exp_rua_rab_reass) {
-			var template RAB_SetupOrModifyList rab_sml;
-			/* Expect RAB Assignment Request with IP/port from MDCX ACK via Iuh */
-			rab_sml := ts_RAB_SML(t_RAB_id(23), f_ts_RAB_TLA(pars.mgw_conn_ran.mgw_rtp_ip_mdcx), t_RAB_binding_port(pars.mgw_conn_ran.mgw_rtp_port));
-			tx := valueof(ts_RANAP_RabAssReq(rab_sml));
-
-			f_rua_expect(tx);
-			/* Send back RAB Assignment Response via Iuh */
-			rab_smdl := ts_RAB_SMdL(t_RAB_id(23), f_ts_RAB_TLA(pars.hnb_rtp_ip), t_RAB_binding_port(pars.hnb_rtp_port));
-			tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
-			RUA.send(tx);
-			/* This shouldn't trigger any MGCP, since nothing changed on the HNB IP side. Continue below. */
-		}
-		}
-	/* Handle CRCX for second leg of endpoint, answer with IP/port */
-	[] MGCP.receive(tr_CRCX(pars.mgcp_ep, tr_SDP(pars.cn_rtp_ip, pars.cn_rtp_port))) -> value mgcp_cmd {
-		log("CRCX2", mgcp_cmd);
-		/* Verify SDP of CRCX */
-		var template MgcpResponse mgcp_rsp := f_handle_crcx(pars, mgcp_cmd);
-		MGCP.send(valueof(mgcp_rsp));
-	}
-	}
-
-	/* Expect RAB Assignment Response with IP/port from second CRCX ACK */
-	rab_smdl := ts_RAB_SMdL(t_RAB_id(23), f_ts_RAB_TLA(pars.mgw_conn_cn.mgw_rtp_ip), t_RAB_binding_port(pars.mgw_conn_cn.mgw_rtp_port));
-	tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
-
-	f_bssap_expect(tx);
-}
-
-private altstep as_mgcp_dlcx(inout TestHdlrParams pars) runs on ConnHdlr {
-	var MgcpCommand mgcp_cmd;
-
-	[] MGCP.receive(tr_DLCX(pars.mgcp_pars.mgcp_ep)) -> value mgcp_cmd {
-		log("DLCX", mgcp_cmd);
-		MGCP.send(ts_DLCX_ACK2(mgcp_cmd.line.trans_id));
-		pars.mgcp_pars.got_dlcx_count := pars.mgcp_pars.got_dlcx_count + 1;
-		if (pars.mgcp_pars.got_dlcx_count != pars.mgcp_pars.got_crcx_count) {
-			repeat;
-		}
-		setverdict(pass);
-	}
 }
 
 friend function f_tc_rab_assignment(charstring id, TestHdlrParams pars) runs on ConnHdlr {
@@ -1594,7 +1020,7 @@ testcase TC_rab_assignment() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assignment), t_pars(3));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assignment), f_TestHdlrParams(3));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1650,7 +1076,7 @@ testcase TC_rab_assign_fail() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_fail), t_pars(4, rab_rel_cause := ts_RanapCause_radio_conn_lost));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_fail), f_TestHdlrParams(4, rab_rel_cause := ts_RanapCause_radio_conn_lost));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1713,7 +1139,7 @@ testcase TC_rab_release() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_release), t_pars(5));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_release), f_TestHdlrParams(5));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1726,7 +1152,7 @@ testcase TC_rab_release_abnormal() runs on test_CT {
 	f_init();
 
 	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_release),
-					     t_pars(8, rab_rel_cause := ts_RanapCause_radio_conn_lost));
+					     f_TestHdlrParams(8, rab_rel_cause := ts_RanapCause_radio_conn_lost));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1776,7 +1202,7 @@ testcase TC_rab_assign_mgcp_to() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_mgcp_to), t_pars(6));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assign_mgcp_to), f_TestHdlrParams(6));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1789,7 +1215,7 @@ testcase TC_rab_assign_mgw_iuup_addr_chg() runs on test_CT {
 	var ConnHdlr vc_conn;
 	g_num_hnbs := 1;
 	f_init();
-	var template (value) TestHdlrParams pars := t_pars(3);
+	var template (value) TestHdlrParams pars := f_TestHdlrParams(3);
 	/* Emulate change of local IuUP IP address after rx MDCX: */
 	pars.mgcp_pars.mgw_conn_ran.mgw_rtp_ip_mdcx := "127.3.2.1";
 
@@ -1819,7 +1245,7 @@ testcase TC_ranap_cs_bidir() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), t_pars(3));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), f_TestHdlrParams(3));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1829,7 +1255,7 @@ testcase TC_ranap_ps_bidir() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), t_pars(4, true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_bidir), f_TestHdlrParams(4, true));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1855,7 +1281,7 @@ testcase TC_ranap_cs_mo_disconnect() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_mo_disconnect), t_pars(5));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_mo_disconnect), f_TestHdlrParams(5));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1865,7 +1291,7 @@ testcase TC_ranap_ps_mo_disconnect() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_mo_disconnect), t_pars(6));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ranap_mo_disconnect), f_TestHdlrParams(6));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -1917,28 +1343,6 @@ template GtpParameters t_GtpParameters := {
 			teid := '44004400'O
 		}
 	}
-}
-
-private function f_pfcp_expect(template (present) PDU_PFCP exp_rx, float wait_time := 5.0) runs on ConnHdlr return PDU_PFCP
-{
-	var PDU_PFCP rx;
-	timer T := wait_time;
-	T.start;
-	alt {
-	[] PFCP.receive(exp_rx) -> value rx {
-			setverdict(pass);
-		}
-	[] PFCP.receive(PDU_PFCP:?) {
-			setverdict(fail, "Got an unexpected PFCP message, was waiting for ", exp_rx);
-			mtc.stop;
-		}
-	[] T.timeout {
-			setverdict(fail, "Timeout waiting for PFCP ", exp_rx);
-			mtc.stop;
-		}
-	}
-	T.stop;
-	return rx;
 }
 
 friend function f_tc_ps_rab_assignment_with_pfcp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
@@ -2048,17 +1452,10 @@ testcase TC_ps_rab_assignment_with_pfcp() runs on test_CT {
 	f_init_pfcp(testcasename());
 	f_sleep(1.0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_with_pfcp), t_pars(7, ps_domain := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_with_pfcp), f_TestHdlrParams(7, ps_domain := true));
 	vc_conn.done;
 
 	f_shutdown_helper();
-}
-
-altstep as_disallow_pfcp() runs on ConnHdlr {
-	[] PFCP.receive(PDU_PFCP:?) {
-			setverdict(fail, "Received PFCP message, but no PFCP communication expected");
-			mtc.stop;
-		}
 }
 
 friend function f_tc_ps_rab_assignment_without_pfcp(charstring id, TestHdlrParams pars) runs on ConnHdlr {
@@ -2113,7 +1510,7 @@ testcase TC_ps_rab_assignment_without_pfcp() runs on test_CT {
 	f_init_pfcp(testcasename());
 	f_sleep(1.0);
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_without_pfcp), t_pars(7, ps_domain := true));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment_without_pfcp), f_TestHdlrParams(7, ps_domain := true));
 	vc_conn.done;
 
 	f_shutdown_helper();
@@ -2173,27 +1570,6 @@ private function f_ctrs_cn_add(integer cn_nr, charstring countername, integer va
 	f_counter_name_vals_list_add(g_ctr_cn, cn_nr, countername, val);
 }
 
-private function f_perform_compl_l3(octetstring nas, boolean do_clear := true, boolean expect_iu_l3 := true)
-runs on ConnHdlr {
-	timer T := 10.0;
-
-	/* create an expect on the Iu side for the random NAS portion */
-	if (g_pars.expect_separate_sccp_cr) {
-		f_ran_register_sccp_cr_without_payload();
-	} else {
-		f_ran_register_exp(nas);
-	}
-
-	/* send Connect via Iuh (creating a RUA connection) */
-	var RANAP_PDU tx := f_build_initial_ue_with_nas(g_pars, nas);
-	RUA.send(RUA_Conn_Req:{g_pars.ps_domain, tx});
-
-	if (expect_iu_l3) {
-		/* Expect same message to arrive at CN */
-		f_bssap_expect(tx);
-	}
-}
-
 private function f_tc_cnpool_compl_l3(charstring id, TestHdlrParams pars) runs on ConnHdlr {
 	f_init_handler(pars);
 	f_perform_compl_l3(g_pars.nas_pdu);
@@ -2202,7 +1578,7 @@ private function f_tc_cnpool_compl_l3(charstring id, TestHdlrParams pars) runs o
 private function f_TC_cnpool_compl_l3(boolean ps_domain, octetstring nas_pdu, integer cn_nr,
 				      template (omit) charstring inc_countername := omit) runs on test_CT {
 	var ConnHdlr vc_conn;
-	var template (value) TestHdlrParams pars := t_pars(0, ps_domain := ps_domain, cn_nr := cn_nr);
+	var template (value) TestHdlrParams pars := f_TestHdlrParams(0, ps_domain := ps_domain, cn_nr := cn_nr);
 	pars.nas_pdu := nas_pdu;
 	log("XXX ", pars);
 	vc_conn := f_start_handler_with_pars(refers(f_tc_cnpool_compl_l3), pars);
@@ -2671,7 +2047,7 @@ testcase TC_mscpool_paging_imsi() runs on test_CT {
 	f_ctrs_cn_init(ps_domain := ps_domain);
 
 	var ConnHdlr vc_conn1;
-	var template (value) TestHdlrParams pars1 := t_pars(0, ps_domain := ps_domain, cn_nr := 0);
+	var template (value) TestHdlrParams pars1 := f_TestHdlrParams(0, ps_domain := ps_domain, cn_nr := 0);
 	pars1.sccp_addr_hnbgw := g_cn[valueof(pars1.cn_idx)].sccp_addr_peer;
 	pars1.sccp_addr_msc := g_cn[valueof(pars1.cn_idx)].sccp_addr_own;
 	vc_conn1 := f_start_handler_with_pars(refers(f_tc_mscpool_paging_imsi), pars1);
@@ -2724,7 +2100,7 @@ testcase TC_mscpool_paging_tmsi() runs on test_CT {
 	f_ctrs_cn_init(ps_domain := ps_domain);
 
 	var ConnHdlr vc_conn1;
-	var template (value) TestHdlrParams pars1 := t_pars(0, ps_domain := ps_domain, cn_nr := 0);
+	var template (value) TestHdlrParams pars1 := f_TestHdlrParams(0, ps_domain := ps_domain, cn_nr := 0);
 	pars1.sccp_addr_hnbgw := g_cn[valueof(pars1.cn_idx)].sccp_addr_peer;
 	pars1.sccp_addr_msc := g_cn[valueof(pars1.cn_idx)].sccp_addr_own;
 	vc_conn1 := f_start_handler_with_pars(refers(f_tc_mscpool_paging_tmsi), pars1);
@@ -2928,7 +2304,7 @@ testcase TC_apply_sccp() runs on test_CT
 	f_sleep(1.0);
 
 	var ConnHdlr vc_conn;
-	var template (value) TestHdlrParams pars := t_pars(0);
+	var template (value) TestHdlrParams pars := f_TestHdlrParams(0);
 	vc_conn := f_start_handler_with_pars(refers(f_tc_apply_sccp), pars);
 	vc_conn.done;
 
@@ -2996,7 +2372,7 @@ testcase TC_second_rab_assignment() runs on test_CT {
 	g_num_hnbs := 1;
 	f_init();
 
-	vc_conn := f_start_handler_with_pars(refers(f_tc_second_rab_assignment), t_pars(3));
+	vc_conn := f_start_handler_with_pars(refers(f_tc_second_rab_assignment), f_TestHdlrParams(3));
 	vc_conn.done;
 
 	f_shutdown_helper();
