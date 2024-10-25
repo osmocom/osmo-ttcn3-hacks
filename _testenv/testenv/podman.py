@@ -146,7 +146,7 @@ def exec_cmd(cmd, podman_opts=[], cwd=None, env={}, *args, **kwargs):
     if isinstance(cmd, str):
         cmd = ["sh", "-c", cmd]
 
-    testenv.cmd.run(
+    return testenv.cmd.run(
         ["podman", "exec"] + podman_opts + [container_name] + cmd,
         no_podman=True,
         *args,

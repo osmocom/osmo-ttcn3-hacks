@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import logging
 import os
+import shlex
 import sys
 import testenv
 import testenv.cmd
@@ -92,7 +93,12 @@ def init():
         os.path.join(testenv.data_dir, "osmo-dev/osmo-bts-trx.opts"),
     ] + extra_opts
 
-    testenv.cmd.run(cmd, cwd=get_osmo_dev_dir())
+    cwd = get_osmo_dev_dir()
+    if testenv.cmd.run(cmd, cwd=cwd, check=False).returncode:
+        logging.critical("gen_makefile.py from osmo-dev failed!")
+        logging.critical("Your osmo-dev.git clone might be outdated, try:")
+        logging.critical(f"$ git -C {shlex.quote(cwd)} pull")
+        sys.exit(1)
     init_done = True
 
 
