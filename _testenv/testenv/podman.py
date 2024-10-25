@@ -239,6 +239,8 @@ def start():
         "net.ipv4.conf.all.send_redirects=0",  # OS#6575
         "--sysctl",
         "net.ipv4.conf.default.send_redirects=0",  # OS#6575
+        "-e",
+        "PODMAN=1",
     ]
 
     if not testenv.args.binary_repo:
