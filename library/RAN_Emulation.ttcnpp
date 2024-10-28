@@ -57,6 +57,7 @@ import from Osmocom_CTRL_Adapter all;
 #ifdef RAN_EMULATION_RANAP
 import from RANAP_CodecPort all;
 import from RANAP_PDU_Descriptions all;
+import from RANAP_PDU_Contents all;
 import from RANAP_Constants all;
 import from RANAP_IEs all;
 import from RANAP_Templates all;
@@ -239,6 +240,13 @@ type record ImsiMapping {
 	OCT4		tmsi
 }
 
+#ifdef RAN_EMULATION_RANAP
+type record IuSigConIdMapping {
+	RAN_ConnHdlr	comp_ref,
+	IuSignallingConnectionIdentifier sigc_id optional
+}
+#endif
+
 type component RAN_Emulation_CT {
 	/* SCCP ports on the bottom side, using ASP primitives */
 #ifdef RAN_EMULATION_BSSAP
@@ -246,6 +254,8 @@ type component RAN_Emulation_CT {
 #endif
 #ifdef RAN_EMULATION_RANAP
 	port RANAP_CODEC_PT RANAP;
+	/* tables for mapping inbound unitdata (like Reset Resource) */
+	var IuSigConIdMapping IuSigConIdTable[16];
 #endif
 	/* BSSAP port to the per-connection clients */
 	port RAN_Conn_PT CLIENT;
@@ -427,6 +437,12 @@ runs on RAN_Emulation_CT {
 		ImsiTable[i].imsi := omit;
 		ImsiTable[i].tmsi := 'FFFFFFFF'O;
 	}
+#ifdef RAN_EMULATION_RANAP
+	for (var integer i := 0; i < sizeof(IuSigConIdTable); i := i+1) {
+		IuSigConIdTable[i].comp_ref := null;
+		IuSigConIdTable[i].sigc_id := omit;
+	}
+#endif
 }
 
 private function f_conn_table_add(RAN_ConnHdlr comp_ref, integer sccp_conn_id)
@@ -711,8 +727,22 @@ runs on RAN_Emulation_CT return template RANAP_PDU {
 			return omit;
 		}
 		log("CommonRanapUnitdataCallback: IMSI/TMSI not found in table");
-	} else {
-		log("CommonRanapUnitdataCallback: Not a paging message");
+	} else if (match(ranap, tr_RANAP_ResetResource(?, ?, ?))) {
+		/* extract IuSigConId */
+		if (lengthof(ranap.initiatingMessage.value_.resetResource.protocolIEs) > 2 and
+		    ranap.initiatingMessage.value_.resetResource.protocolIEs[2].id == id_IuSigConIdList) {
+			var RANAP_PDU_Contents.ResetResourceList res_li := ranap.initiatingMessage.value_.resetResource.protocolIEs[2].value_.resetResourceList;
+			for (var integer i := 0; i < lengthof(res_li); i := i + 1) {
+				var IuSignallingConnectionIdentifier sigc_id sigc_id := res_li[i][0].value_.resetResourceItem.iuSigConId;
+				var RAN_ConnHdlr client := null;
+				log("CommonRanapUnitdataCallback: Lookup IuSigConId", sigc_id);
+				client := f_IuSigConId_table_find(sigc_id);
+				if (client != null) {
+					log("CommonRanapUnitdataCallback: IuSigConId found in table, dispatching to ", client);
+					CLIENT.send(ranap) to client;
+				}
+			}
+		}
 	}
 
 	/* ELSE: handle in user callback */
@@ -1284,6 +1314,9 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 		var hexstring imsi;
 		var OCT4 tmsi;
 		var integer targetPointCode;
+#ifdef RAN_EMULATION_RANAP
+		var IuSignallingConnectionIdentifier sigc_id;
+#endif
 
 		alt {
 		[g_ran_ops.protocol == RAN_PROTOCOL_BSSAP] as_main_bssap();
@@ -1333,7 +1366,12 @@ function main(RanOps ops, charstring id) runs on RAN_Emulation_CT {
 			f_destroy_imsi(imsi, vc_hdlr);
 			PROC.reply(RAN_unregister_imsi:{imsi, vc_hdlr}) to vc_hdlr;
 			}
-
+#ifdef RAN_EMULATION_RANAP
+		[] PROC.getcall(RAN_register_IuSigConId:{?,?}) -> param(sigc_id, vc_hdlr) {
+			f_create_IuSigConId(sigc_id, vc_hdlr);
+			PROC.reply(RAN_register_IuSigConId:{sigc_id, vc_hdlr}) to vc_hdlr;
+			}
+#endif
 		}
 	}
 }
@@ -1377,7 +1415,11 @@ signature RAN_continue_after_n_sd(N_Sd_Array last_n_sd, in RAN_ConnHdlr hdlr);
 
 type port RAN_PROC_PT procedure {
 	inout RAN_register, RAN_register_imsi, RAN_unregister_imsi, RAN_register_n_connect,
-	      RAN_register_sccp_cr_without_payload, RAN_last_n_sd, RAN_continue_after_n_sd;
+	      RAN_register_sccp_cr_without_payload, RAN_last_n_sd, RAN_continue_after_n_sd
+#ifdef RAN_EMULATION_RANAP
+		, RAN_register_IuSigConId
+#endif
+	;
 } with { extension "internal" };
 
 #ifdef RAN_EMULATION_BSSAP
@@ -1444,6 +1486,11 @@ runs on RAN_Emulation_CT return RAN_ConnHdlr {
 #endif
 
 #ifdef RAN_EMULATION_RANAP
+
+/* procedure based port to register for incoming unitdata based on Iu Signalling
+ * Connection Identifier, useful to eg. catch RANAP Reset Resource */
+signature RAN_register_IuSigConId(in IuSignallingConnectionIdentifier sigc_id, in RAN_ConnHdlr hdlr);
+
 /* CreateCallback that can be used as create_cb and will use the expectation table */
 function RanapExpectedCreateCallback(RANAP_N_CONNECT_ind conn_ind, charstring id)
 runs on RAN_Emulation_CT return RAN_ConnHdlr {
@@ -1481,6 +1528,30 @@ runs on RAN_Emulation_CT return RAN_ConnHdlr {
 	setverdict(fail, "Couldn't find Expect for incoming connection ", conn_ind);
 	mtc.stop;
 	return ret;
+}
+
+private function f_create_IuSigConId(IuSignallingConnectionIdentifier sigc_id, RAN_ConnHdlr hdlr)
+runs on RAN_Emulation_CT {
+	for (var integer i := 0; i < sizeof(IuSigConIdTable); i := i+1) {
+		if (not ispresent(IuSigConIdTable[i].sigc_id)) {
+			IuSigConIdTable[i].sigc_id := sigc_id;
+			IuSigConIdTable[i].comp_ref := hdlr;
+			log("Created IuSigConId[", i, "] for ", sigc_id, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	setverdict(fail, "No space left in IuSigConIdTable");
+	mtc.stop;
+}
+
+private function f_IuSigConId_table_find(IuSignallingConnectionIdentifier sigc_id)
+runs on RAN_Emulation_CT return RAN_ConnHdlr {
+	for (var integer i := 0; i < sizeof(IuSigConIdTable); i := i+1) {
+		if (isvalue(IuSigConIdTable[i].sigc_id) and match(IuSigConIdTable[i].sigc_id, sigc_id)) {
+			return IuSigConIdTable[i].comp_ref;
+		}
+	}
+	return null;
 }
 #endif
 
@@ -1593,6 +1664,14 @@ function f_ran_register_sccp_cr_without_payload() runs on RAN_ConnHdlr {
 }
 
 #ifdef RAN_EMULATION_RANAP
+/* helper function for clients to register their IMSI/TMSI */
+function f_ran_register_IuSigConId(IuSignallingConnectionIdentifier sigc_id)
+runs on RAN_ConnHdlr {
+	BSSAP_PROC.call(RAN_register_IuSigConId:{sigc_id, self}) {
+		[] BSSAP_PROC.getreply(RAN_register_IuSigConId:{?,?}) {};
+	}
+}
+
 /* expect a IuReleaseCommand; Confirm that; expect SCCP-level N-DISCONNET.ind */
 altstep as_iu_release_compl_disc() runs on RAN_ConnHdlr {
 	var RANAP_PDU ranap;
