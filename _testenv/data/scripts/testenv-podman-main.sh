@@ -5,16 +5,20 @@
 # This ensures the podman container stops a few seconds after a jenkins job was
 # aborted, or if a test is stuck in a loop for hours.
 
+echo "Running testenv-podman-main.sh"
+
 stop_time=$(($(date +%s) + 3600 * 4))
 
 while [ $(date +%s) -lt $stop_time ]; do
 	sleep 10
 
 	if ! [ -e /tmp/watchdog ]; then
-		break
+		echo "ERROR: /tmp/watchdog was not created, exiting"
+		exit 1
 	fi
 
 	rm /tmp/watchdog
 done
 
+echo "ERROR: timeout reached!"
 exit 1

@@ -185,6 +185,27 @@ def feed_watchdog_loop():
         pass
 
 
+def wait_until_started():
+    for i in range(100):
+        time.sleep(0.1)
+        if is_running():
+            return
+    raise RuntimeError("Podman failed to start")
+
+
+def start_in_background(cmd):
+    log_dir = os.path.join(testenv.testdir.testdir_topdir, "podman")
+    os.makedirs(log_dir, exist_ok=True)
+
+    logging.debug(f"+ {cmd}")
+    subprocess.Popen(cmd, env=testenv.cmd.generate_env())
+
+    wait_until_started()
+
+    feed_watchdog_process = multiprocessing.Process(target=feed_watchdog_loop)
+    feed_watchdog_process.start()
+
+
 def start():
     global container_name
     global feed_watchdog_process
@@ -202,7 +223,10 @@ def start():
         "--rm",
         "--name",
         container_name,
-        "--detach",
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        f"path={testdir_topdir}/podman/{container_name}.log",
         f"--security-opt=seccomp={seccomp}",
         "--cap-add=NET_ADMIN",  # for dumpcap, tun devices, osmo-pcap-client
         "--cap-add=NET_RAW",  # for dumpcap, osmo-pcap-client
@@ -243,10 +267,7 @@ def start():
         os.path.join(testenv.data_dir, "scripts/testenv-podman-main.sh"),
     ]
 
-    testenv.cmd.run(cmd, no_podman=True)
-
-    feed_watchdog_process = multiprocessing.Process(target=feed_watchdog_loop)
-    feed_watchdog_process.start()
+    start_in_background(cmd)
 
     exec_cmd(["rm", "/etc/apt/apt.conf.d/docker-clean"])
 
