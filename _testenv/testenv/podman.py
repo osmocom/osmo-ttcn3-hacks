@@ -311,6 +311,7 @@ def stop(restart=False):
     global container_name
     global run_shell_on_stop
     global restart_count
+    global feed_watchdog_process
 
     if not is_running():
         return
@@ -329,10 +330,13 @@ def stop(restart=False):
 
     restart_msg = " (restart)" if restart else ""
     logging.info(f"Stopping podman container{restart_msg}")
-    testenv.cmd.run(["podman", "kill", container_name], no_podman=True)
 
     if feed_watchdog_process:
         feed_watchdog_process.terminate()
+        feed_watchdog_process.wait()
+        feed_watchdog_process = None
+
+    testenv.cmd.run(["podman", "kill", container_name], no_podman=True, check=False)
 
     if restart:
         testenv.cmd.run(["podman", "wait", container_name], no_podman=True, check=False)
