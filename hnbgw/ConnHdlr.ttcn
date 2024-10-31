@@ -193,6 +193,26 @@ template (value) GtpParameters t_GtpParams := {
 	}
 }
 
+const OCT8 c_SEID0 := '0000000000000000'O;
+const OCT8 c_SEID1 := '1111111111111111'O;
+type record PfcpParameters {
+	/* whether we expect HNBGW to manage a UPF through PFCP: */
+	boolean pfcp_enabled,
+	charstring pfcp_local_addr,
+	 Node_ID upf_node_id,
+	F_SEID up_f_seid,
+	F_SEID hnbgw_f_seid optional
+}
+
+template (value) PfcpParameters t_PfcpParams(boolean pfcp_enabled := false,
+					     charstring pfcp_local_addr := "127.0.0.1") := {
+	pfcp_enabled := pfcp_enabled,
+	pfcp_local_addr := pfcp_local_addr,
+	upf_node_id := valueof(ts_PFCP_Node_ID_fqdn("\07osmocom\03org")),
+	up_f_seid := ts_PFCP_F_SEID_ipv4(f_inet_addr(pfcp_local_addr), c_SEID1),
+	hnbgw_f_seid := omit
+}
+
 type record HnbConfig {
 	LocationAreaIdentification lai,
 	integer sac
@@ -211,7 +231,7 @@ type record TestHdlrParams {
 	boolean expect_separate_sccp_cr,
 	integer tx_sccp_cr_data_len,
 	boolean expect_compl_l3_success,
-	charstring pfcp_local_addr,
+	PfcpParameters pfcp_pars,
 	octetstring nas_pdu optional,
 	/* local and remote SCCP addresses, used to transmit conectionless
 	 * (unitdata) messages: */
@@ -232,7 +252,7 @@ t_pars(integer imsi_suffix,
        integer tx_sccp_cr_data_len := 0,
        boolean expect_compl_l3_success := true,
        integer cn_idx := 0,
-       charstring pfcp_local_addr := "127.0.0.1",
+       template (value) PfcpParameters pfcp_pars := t_PfcpParams(),
        template (value) RANAP_IEs.Cause rab_rel_cause := ts_RanapCause_nas_normal,
        integer hnbgw_timer_x31 := 5,
        float t_guard := 20.0) := {
@@ -246,7 +266,7 @@ t_pars(integer imsi_suffix,
 	expect_separate_sccp_cr := expect_separate_sccp_cr,
 	tx_sccp_cr_data_len := tx_sccp_cr_data_len,
 	expect_compl_l3_success := expect_compl_l3_success,
-	pfcp_local_addr := pfcp_local_addr,
+	pfcp_pars := pfcp_pars,
 	nas_pdu := omit,
 	sccp_addr_msc := omit,
 	sccp_addr_hnbgw := omit,
@@ -713,6 +733,141 @@ friend function f_rab_ass_resp_cs() runs on ConnHdlr {
 function f_create_rab_cs() runs on ConnHdlr {
 	f_rab_ass_req_cs();
 	f_rab_ass_resp_cs();
+}
+
+function f_pfcp_wait_assoc_setup_req() runs on ConnHdlr {
+	/* ask PFCPEM to route all PDUs to us */
+	f_PFCPEM_subscribe_bcast();
+
+	var PDU_PFCP m;
+
+	m := f_pfcp_expect(tr_PFCP_Assoc_Setup_Req(), wait_time := 15.0);
+	PFCP.send(ts_PFCP_Assoc_Setup_Resp(m.sequence_number, g_pars.pfcp_pars.upf_node_id,
+					   ts_PFCP_Cause(REQUEST_ACCEPTED), 1234));
+	/* ask PFCPEM to *not* route all PDUs to us anymore */
+	f_PFCPEM_unsubscribe_bcast();
+}
+
+function f_rab_ass_req_ps_with_pfcp() runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var RANAP_PDU rx;
+	var PDU_PFCP m;
+
+	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
+	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
+	f_PFCPEM_subscribe_seid(c_SEID0);
+
+	/* Send RAB Assignment Request */
+	var template RAB_SetupOrModifyList rab_sml;
+	rab_sml := ts_RAB_SML_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.core.remote.addr), g_pars.gtp_pars.core.remote.teid);
+	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	BSSAP.send(tx);
+
+	/* Expect PFCP Session Establishment Request. */
+	m := f_pfcp_expect(tr_PFCP_Session_Est_Req());
+	/* Ask PFCPEM to route PDUs with to be indicated F-SEID to us. */
+	f_PFCPEM_subscribe_seid(c_SEID1);
+	/* We no longer expect to receive PFCP Session Establishment Request PDU(s). */
+	f_PFCPEM_unsubscribe_seid(c_SEID0);
+
+	var PFCP_Session_Establishment_Request serq := m.message_body.pfcp_session_establishment_request;
+	/* Store HNBGW F-SEID for later: */
+	g_pars.pfcp_pars.hnbgw_f_seid := serq.CP_F_SEID;
+
+	/* Acting as UPF, invent a new PFCP SEID to send to HNBGW. Respond to the Session Establishment.
+	 * The PFCP response must have the same sequence_number as the request. */
+	var template F_TEID f_teid1 := ts_PFCP_F_TEID_ipv4(g_pars.gtp_pars.core.local.teid,
+							   f_inet_addr(g_pars.gtp_pars.core.local.addr));
+	var template F_TEID f_teid2 := ts_PFCP_F_TEID_ipv4(g_pars.gtp_pars.access.local.teid,
+							   f_inet_addr(g_pars.gtp_pars.access.local.addr));
+	var template Created_PDR pdr1 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[0].grouped_ie.pdr_id,
+							     local_F_TEID := f_teid1);
+	var template Created_PDR pdr2 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[1].grouped_ie.pdr_id,
+							     local_F_TEID := f_teid2);
+	var template PDU_PFCP r := ts_PFCP_Session_Est_Resp(seq_nr := m.sequence_number,
+							    node_id := g_pars.pfcp_pars.upf_node_id,
+							    seid := g_pars.pfcp_pars.hnbgw_f_seid.seid,
+							    f_seid := g_pars.pfcp_pars.up_f_seid,
+							    created_pdr := {pdr1, pdr2});
+	PFCP.send(r);
+
+	/* Expect on Iuh: RAB Assignment Request with IP/port from PFCP Session Est Resp */
+	rab_sml := ts_RAB_SML_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.access.local.addr),
+				 g_pars.gtp_pars.access.local.teid);
+	rx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	f_rua_expect(rx);
+}
+
+function f_rab_ass_resp_ps_with_pfcp() runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var RANAP_PDU rx;
+	var template PDU_PFCP r;
+	var PDU_PFCP m;
+
+	/* Send back RAB Assignment Response via Iuh */
+	var template RAB_SetupOrModifiedList rab_smdl;
+	rab_smdl := ts_RAB_SMdL_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.access.remote.addr),
+				   g_pars.gtp_pars.access.remote.teid);
+	tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
+	RUA.send(tx);
+
+	m := f_pfcp_expect(tr_PFCP_Session_Mod_Req(g_pars.pfcp_pars.up_f_seid.seid));
+	r := ts_PFCP_Session_Mod_Resp(m.sequence_number, g_pars.pfcp_pars.hnbgw_f_seid.seid);
+	PFCP.send(r);
+
+	rab_smdl := ts_RAB_SMdL_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.core.local.addr), g_pars.gtp_pars.core.local.teid);
+	f_bssap_expect(tr_RANAP_RabAssResp(rab_smdl));
+}
+
+function f_create_rab_ps_with_pfcp() runs on ConnHdlr {
+	f_rab_ass_req_ps_with_pfcp();
+	f_rab_ass_resp_ps_with_pfcp();
+}
+
+function f_rab_ass_req_ps_without_pfcp() runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var RANAP_PDU rx;
+
+	/* ask PFCPEM to route all PDUs to us */
+	f_PFCPEM_subscribe_bcast();
+	activate(as_disallow_pfcp());
+
+	var template RAB_SetupOrModifyList rab_sml;
+	rab_sml := ts_RAB_SML_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.core.remote.addr), g_pars.gtp_pars.core.remote.teid);
+	tx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	BSSAP.send(tx);
+
+	/* Expect on Iuh: unmodified RAB Assignment Request */
+	rx := valueof(ts_RANAP_RabAssReq(rab_sml));
+	f_rua_expect(rx);
+}
+
+function f_rab_ass_resp_ps_without_pfcp() runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var RANAP_PDU rx;
+
+	/* Send back RAB Assignment Response via Iuh */
+	var template RAB_SetupOrModifiedList rab_smdl;
+	rab_smdl := ts_RAB_SMdL_ps(t_RAB_id(23), f_ts_RAB_TLA(g_pars.gtp_pars.access.remote.addr),
+				   g_pars.gtp_pars.access.remote.teid);
+	tx := valueof(ts_RANAP_RabAssResp(rab_smdl));
+	RUA.send(tx);
+
+	/* Expect on IuPS: unmodified RAB Assignment Response */
+	f_bssap_expect(tr_RANAP_RabAssResp(rab_smdl));
+}
+
+function f_create_rab_ps_without_pfcp() runs on ConnHdlr {
+	f_rab_ass_req_ps_without_pfcp();
+	f_rab_ass_resp_ps_without_pfcp();
+}
+
+function f_create_rab_ps() runs on ConnHdlr {
+	if (g_pars.pfcp_pars.pfcp_enabled) {
+		f_create_rab_ps_with_pfcp();
+	} else {
+		f_create_rab_ps_without_pfcp();
+	}
 }
 
 altstep as_mgcp_dlcx() runs on ConnHdlr {
