@@ -247,7 +247,7 @@ const RanOps MSC_RanOps := {
 
 const integer NUM_HNB := 2;
 
-type component test_CT extends CTRL_Adapter_CT, StatsD_Checker_CT {
+type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr, PFCP_ConnHdlr {
 	var boolean g_initialized := false;
 
 	/********************* Iu side */
@@ -266,7 +266,7 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_Checker_CT {
 	var StatsD_Checker_CT vc_STATSD;
 	var PFCP_Emulation_CT vc_PFCP;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
-	timer T_guard := 30.0;
+	timer T_guard := 45.0;
 
 	/* The cnlink type 'msc' or 'sgsn', to be used in CTRL commands to obtain counters */
 	var charstring g_ctr_cn_node_name;
@@ -314,6 +314,49 @@ function f_init_mgcp(charstring id) runs on test_CT {
 	vc_MGCP.start(MGCP_Emulation.main(ops, pars, id));
 }
 
+private function f_statsd_pfcp_associated() runs on test_CT return boolean
+{
+	var charstring key_name := mp_statsd_prefix & "upf.0.pfcp_associated";
+	var StatsDMetricKeys statsd_keys := { valueof(ts_StatsDMetricKey(key_name, "g")) };
+	var StatsDMetrics statsd_snapshot;
+	var boolean pfcp_associated;
+
+	statsd_snapshot := f_statsd_snapshot(statsd_keys, since_last_snapshot := false);
+	pfcp_associated := statsd_snapshot[0].val == 1;
+
+	return pfcp_associated;
+}
+
+private function f_pfcp_wait_assoc_setup_req(boolean fail_timeout := true) runs on test_CT {
+	var PDU_PFCP m;
+	timer T := 16.0;
+	/* ask PFCPEM to route all PDUs to us */
+	f_PFCPEM_subscribe_bcast();
+
+	T.start;
+	alt {
+	[] PFCP.receive(tr_PFCP_Assoc_Setup_Req()) -> value m {
+			PFCP.send(ts_PFCP_Assoc_Setup_Resp(m.sequence_number, ts_PFCP_Node_ID_fqdn(mp_pfcp_upf_node_id),
+					   ts_PFCP_Cause(REQUEST_ACCEPTED), 1234));
+			setverdict(pass);
+		}
+	[] PFCP.receive(PDU_PFCP:?) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Got an unexpected PFCP message, was waiting for ", tr_PFCP_Assoc_Setup_Req()));
+		}
+	[fail_timeout] T.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for PFCP ", tr_PFCP_Assoc_Setup_Req()));
+		}
+	[not fail_timeout] T.timeout {
+			log("Timeout waiting for PFCP ", tr_PFCP_Assoc_Setup_Req());
+		}
+	}
+	T.stop;
+	/* ask PFCPEM to *not* route all PDUs to us anymore */
+	f_PFCPEM_unsubscribe_bcast();
+}
+
 function f_init_pfcp(charstring id) runs on test_CT {
 	id := id & "-PFCP";
 
@@ -327,6 +370,32 @@ function f_init_pfcp(charstring id) runs on test_CT {
 
 	vc_PFCP := PFCP_Emulation_CT.create(id) alive;
 	vc_PFCP.start(PFCP_Emulation.main(pfcp_cfg));
+
+	if (not mp_enable_pfcp_tests) {
+		return;
+	}
+
+	/* Temporarily access Statsd during test startup: */
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	/* osmo-hnbgw <= 1.6.0 doesn't support the stats "pfcp_associated".
+	 * Assume we have to wait for IUT to send PFCP Assoc Setup Req,
+	 * but avoid failing if we don't receive any. */
+	var boolean validate_pfcp_assoc := Misc_Helpers.f_osmo_repo_is("nightly");
+	var boolean pfcp_associated := false;
+	if (validate_pfcp_assoc) {
+		pfcp_associated := f_statsd_pfcp_associated();
+	}
+
+	if (not pfcp_associated) {
+		connect(self:PFCP, vc_PFCP:CLIENT);
+		connect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+		f_pfcp_wait_assoc_setup_req(fail_timeout := validate_pfcp_assoc);
+		disconnect(self:PFCP, vc_PFCP:CLIENT);
+		disconnect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+	}
+
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
 }
 
 function f_init_hnodeb(charstring id, integer hnb_idx, RuaOps rua_ops) runs on test_CT {
@@ -413,13 +482,17 @@ private function f_cn_idx_disconnect(integer cn_idx) runs on test_CT {
 }
 
 /* global initialization function */
-function f_init(charstring id := "HNBGW", float guard_timeout := 30.0, integer nr_msc := 1, integer nr_sgsn := 1,
+function f_init(charstring id := "HNBGW", float guard_timeout := 45.0, integer nr_msc := 1, integer nr_sgsn := 1,
 		boolean start_hnb := true) runs on test_CT {
 
 	T_guard.start(guard_timeout);
 	activate(as_Tguard());
 
 	f_init_statsd("VirtHNBGW", vc_STATSD, mp_local_statsd_ip, mp_local_statsd_port);
+	f_init_vty("VirtHNBGW");
+	f_ipa_ctrl_start_client(mp_hnbgw_ip, mp_hnbgw_ctrl_port);
+
+	f_init_pfcp(id);
 
 	/* RUA/RANAP emulation on top of lower-layer Iuh */
 	var RuaOps rua_ops := {
@@ -436,9 +509,6 @@ function f_init(charstring id := "HNBGW", float guard_timeout := 30.0, integer n
 		};
 		f_init_hnodeb(testcasename(), i, rua_ops);
 	}
-
-	f_init_vty("VirtHNBGW");
-	f_ipa_ctrl_start_client(mp_hnbgw_ip, mp_hnbgw_ctrl_port);
 
 	/* MSC emulation */
 
@@ -564,10 +634,8 @@ private function f_start_handler_create(TestHdlrParams pars) runs on test_CT ret
 
 	connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
 
-	if (isbound(vc_PFCP)) {
-		connect(vc_conn:PFCP, vc_PFCP:CLIENT);
-		connect(vc_conn:PFCP_PROC, vc_PFCP:CLIENT_PROC);
-	}
+	connect(vc_conn:PFCP, vc_PFCP:CLIENT);
+	connect(vc_conn:PFCP_PROC, vc_PFCP:CLIENT_PROC);
 
 	return vc_conn;
 }
@@ -1368,10 +1436,6 @@ testcase TC_cs_iu_release_req_rua_disconnect() runs on test_CT {
 friend function f_tc_ps_rab_assignment(charstring id) runs on ConnHdlr {
 	var RANAP_PDU tx;
 
-	if (g_pars.pfcp_pars.pfcp_enabled) {
-		f_pfcp_wait_assoc_setup_req();
-	}
-
 	tx := f_build_initial_ue(g_pars);
 	f_iuh2iu_connect(tx);
 
@@ -1385,7 +1449,6 @@ testcase TC_ps_rab_assignment() runs on test_CT {
 	var ConnHdlr vc_conn;
 	g_num_hnbs := 1;
 	f_init();
-	f_init_pfcp(testcasename());
 	f_sleep(1.0);
 
 	vc_conn := f_start_handler_with_pars(refers(f_tc_ps_rab_assignment), f_TestHdlrParams(7, ps_domain := true));
