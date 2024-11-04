@@ -179,7 +179,7 @@ def feed_watchdog_loop():
             time.sleep(5)
             p = subprocess.run(["podman", "exec", container_name, "touch", "/tmp/watchdog"])
             if p.returncode:
-                logging.error("podman container crashed!")
+                logging.debug("feed_watchdog_loop: podman container has stopped")
                 return
     except KeyboardInterrupt:
         pass

@@ -195,6 +195,8 @@ def run(cfg):
         time.sleep(1)
 
         if not is_running(testsuite_proc.pid):
+            if testenv.args.podman and not testenv.podman.is_running():
+                raise testenv.NoTraceException("podman container crashed!")
             logging.debug("Testsuite is done")
             stop()
             break
