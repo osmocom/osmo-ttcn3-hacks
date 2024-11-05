@@ -145,10 +145,10 @@ def cat_junit_logs():
         colors = os.environ.get("TESTENV_SOURCE_HIGHLIGHT_COLORS", "esc256")
         tool = f"source-highlight -f {shlex.quote(colors)} -s xml -i"
 
-    pattern = os.path.join(testenv.testdir.testdir, "testsuite", "junit-*.log")
-    for path in glob.glob(pattern):
+    pattern = os.path.join(testenv.testdir.testdir_topdir, "**", "junit-*.log")
+    for path in glob.glob(pattern, recursive=True):
         cmd = f"echo && {tool} {shlex.quote(path)} && echo"
-        logging.info(f"Showing {os.path.basename(path)}")
+        logging.info(f"Showing {os.path.relpath(path, testenv.testdir.testdir_topdir)}")
         testenv.cmd.run(cmd)
 
 

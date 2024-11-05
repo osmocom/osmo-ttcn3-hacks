@@ -47,6 +47,10 @@ def run():
     # Run the components + testsuite
     cfg_count = 0
     for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
+        # Restart podman container before running with another config
+        if testenv.args.podman and cfg_count:
+            testenv.podman.stop(True)
+
         testenv.testenv_cfg.set_current(cfg_name)
 
         if testenv.args.binary_repo:
@@ -58,15 +62,15 @@ def run():
         testenv.testsuite.run(cfg)
         testenv.daemons.stop()
         testenv.testdir.clean_run_scripts("finished")
-        testenv.testsuite.cat_junit_logs()
 
         cfg_count += 1
         testenv.set_log_prefix("[testenv]")
 
-        # Restart podman container before running with another config
-        if testenv.args.podman:
-            restart = cfg_count < len(testenv.testenv_cfg.cfgs)
-            testenv.podman.stop(restart)
+    # Show test results
+    testenv.testsuite.cat_junit_logs()
+
+    if testenv.args.podman:
+        testenv.podman.stop()
 
 
 def init_podman():
