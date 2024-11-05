@@ -176,8 +176,8 @@ def feed_watchdog_loop():
     # container will terminate after a few seconds.
     try:
         while True:
-            time.sleep(5)
-            p = subprocess.run(["podman", "exec", container_name, "touch", "/tmp/watchdog"])
+            time.sleep(2)
+            p = subprocess.run(["podman", "exec", container_name, "touch", "/tmp/watchdog"], stderr=subprocess.DEVNULL)
             if p.returncode:
                 logging.debug("feed_watchdog_loop: podman container has stopped")
                 return
@@ -339,9 +339,6 @@ def stop(restart=False):
         feed_watchdog_process = None
 
     testenv.cmd.run(["podman", "kill", container_name], no_podman=True, check=False)
-
-    if restart:
-        testenv.cmd.run(["podman", "wait", container_name], no_podman=True, check=False)
 
     container_name = None
 
