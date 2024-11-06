@@ -105,6 +105,7 @@ FILES+="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn O
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
 FILES+="L3_Templates.ttcn L3_Common.ttcn "
 FILES+="SCTP_Templates.ttcn "
+FILES+="Mutex.ttcn "
 gen_links $DIR $FILES
 
 ignore_pp_results

@@ -74,6 +74,8 @@ import from L3_Common all;
 import from SCCPasp_Types all;
 import from SCCP_Templates all;
 
+import from Mutex all;
+
 /***********************************************************************
  * code running inside per-UE ConnHdlr
  ***********************************************************************/
@@ -84,13 +86,15 @@ import from SCCP_Templates all;
    * MGCP_ConnHdlr (for the MGCP side, emulating the MGW)
    * StatsD_ConnHdlr (for the statsd interface, verifying counters)
  */
-type component ConnHdlr extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr  {
+type component ConnHdlr
+extends RAN_ConnHdlr, MGCP_ConnHdlr, RUA_ConnHdlr, PFCP_ConnHdlr, StatsD_ConnHdlr, MutexCT {
 	var integer g_sccp_conn_id;
 	var TestHdlrParams g_pars;
 	timer g_Tguard;
 
 	port TELNETasp_PT HNBGWVTY;
 }
+type record of ConnHdlr ConnHdlrList;
 
 type record MgwResponse {
 	integer resp,
@@ -774,6 +778,15 @@ function f_rab_ass_req_ps_with_pfcp() runs on ConnHdlr {
 	var RANAP_PDU rx;
 	var PDU_PFCP m;
 
+	/* This code block cannot be executed by more than one component at a time because
+	 * the RANAP RAB Ass Request triggers the IUT to send PFCP Session Establishment
+	 * Request PDU(s), which needs to be routed to the respective ConnHdlr component (us).
+	 * As per 3GPP TS 29.244, section 7.2.2.4.2, these PFCP PDUs shall all have SEID=0,
+	 * so that the PFCPEM component cannot route them unambiguously.   This is why we
+	 * need to ensure that only one ConnHdlr is triggering PFCP session establishment
+	 * at the given moment of time. */
+	f_Mutex_lock(__BFILE__, __LINE__);
+
 	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
 	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
 	f_PFCPEM_subscribe_seid(c_SEID0);
@@ -788,8 +801,11 @@ function f_rab_ass_req_ps_with_pfcp() runs on ConnHdlr {
 	m := f_pfcp_expect(tr_PFCP_Session_Est_Req());
 	/* Ask PFCPEM to route PDUs with to be indicated F-SEID to us. */
 	f_PFCPEM_subscribe_seid(g_pars.pfcp_pars.upf_f_seid.seid);
-	/* We no longer expect to receive PFCP Session Establishment Request PDU(s). */
+	/* We're done establishing PFCP sessions, so at this point we no longer expect to
+	 * receive Session Establishment Request PDUs with SEID=0.  Unregister and unlock
+	 * the mutex, enabling other components to establish PFCP sessions after us. */
 	f_PFCPEM_unsubscribe_seid(c_SEID0);
+	f_Mutex_unlock(__BFILE__, __LINE__);
 
 	var PFCP_Session_Establishment_Request serq := m.message_body.pfcp_session_establishment_request;
 	/* Store HNBGW F-SEID for later: */
