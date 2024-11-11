@@ -29,15 +29,18 @@ RUN	set -x && \
 		busybox-static \
 		ca-certificates \
 		ccache \
+		clang \
 		cmake \
 		cpio \
 		erlang-nox \
 		flex \
+		gcc-multilib \
 		gdb \
 		git \
 		gzip \
 		iproute2 \
 		iputils-ping \
+		libbpf-dev \
 		libbson-dev \
 		libc-ares-dev \
 		libcsv-dev \
@@ -70,6 +73,7 @@ RUN	set -x && \
 		libyaml-dev \
 		libzmq3-dev \
 		linux-image-amd64 \
+		llvm \
 		meson \
 		netcat-openbsd \
 		pax-utils \
@@ -147,3 +151,17 @@ RUN	set -x && \
 	cd / && \
 	rm -rf /tmp/mongodb && \
 	rm /etc/apt/sources.list.d/mongodb-org.list
+
+# Add go and swag for eUPF
+# https://github.com/edgecomllc/eupf/tree/main?tab=readme-ov-file#running-from-sources
+# https://github.com/edgecomllc/eupf/blob/55ce219c09776470f9a8f66bea020466a61e4e87/go.mod#L3
+RUN	set -x && \
+	apt-get update && \
+	apt-get install -y --no-install-recommends wget ca-certificates && \
+	export GO_VERSION=1.22.3 && \
+	wget https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz && \
+	tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz && \
+	ln -s /usr/local/go/bin/go /usr/bin/go && \
+	rm go$GO_VERSION.linux-amd64.tar.gz && \
+	go install github.com/swaggo/swag/cmd/swag@v1.8.12 && \
+	ln -s /root/go/bin/swag /usr/bin/swag
