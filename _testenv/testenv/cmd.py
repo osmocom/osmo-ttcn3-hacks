@@ -36,6 +36,8 @@ def init_env():
         env_extra["LD_LIBRARY_PATH"] = ld_library_path
 
     env_extra["CCACHE_DIR"] = testenv.args.ccache
+    env_extra["GOCACHE"] = testenv.args.gocache
+    env_extra["GOMODCACHE"] = testenv.args.gomodcache
     env_extra["TESTENV_CACHE_DIR"] = testenv.args.cache
     env_extra["TESTENV_SRC_DIR"] = testenv.src_dir
 

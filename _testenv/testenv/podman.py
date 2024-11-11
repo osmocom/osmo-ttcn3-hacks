@@ -107,6 +107,8 @@ def init():
     os.makedirs(apt_dir_var_cache, exist_ok=True)
     os.makedirs(apt_dir_var_lib, exist_ok=True)
     os.makedirs(testenv.args.ccache, exist_ok=True)
+    os.makedirs(testenv.args.gocache, exist_ok=True)
+    os.makedirs(testenv.args.gomodcache, exist_ok=True)
 
     init_image_name_distro()
 
@@ -263,6 +265,10 @@ def start():
         f"{testenv.args.cache}:{testenv.args.cache}",
         "--volume",
         f"{testenv.args.ccache}:{testenv.args.ccache}",
+        "--volume",
+        f"{testenv.args.gocache}:{testenv.args.gocache}",
+        "--volume",
+        f"{testenv.args.gomodcache}:{testenv.args.gomodcache}",
         "--volume",
         f"{testenv.src_dir}:{testenv.src_dir}",
         image_name,

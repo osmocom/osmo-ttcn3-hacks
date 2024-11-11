@@ -17,6 +17,8 @@ custom_kernel_path = os.path.join(os.path.realpath(f"{__file__}/../../.."), ".li
 distro_default = "debian:bookworm"
 cache_dir_default = os.path.join(os.path.expanduser("~/.cache"), "osmo-ttcn3-testenv")
 ccache_dir_default = os.path.join(cache_dir_default, "ccache")
+gocache_dir_default = os.path.expanduser("~/.cache/go-build")
+gomodcache_dir_default = os.path.join(cache_dir_default, "go-pkg-mod")
 
 log_prefix = "[testenv]"
 
@@ -168,6 +170,16 @@ def parse_args():
         "--ccache",
         help=f"ccache path (default: {ccache_dir_default})",
         default=ccache_dir_default,
+    )
+    group.add_argument(
+        "--gocache",
+        help=f"go build cache path (similar to ccache, default: {gocache_dir_default})",
+        default=gocache_dir_default,
+    )
+    group.add_argument(
+        "--gomodcache",
+        help=f"go module cache path (has git repos, default: {gomodcache_dir_default})",
+        default=gomodcache_dir_default,
     )
 
     sub.add_parser("clean", help="clean previous build artifacts")
