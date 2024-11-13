@@ -82,6 +82,10 @@ FILES="RANAP_CommonDataTypes.asn RANAP_Constants.asn RANAP_Containers.asn RANAP_
 FILES+="RANAP_Types.ttcn RANAP_Templates.ttcn RANAP_CodecPort.ttcn RANAP_EncDec.cc "
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.NAS_EPS_15.2.0.1/src
+FILES="NAS_EPS_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn "
 FILES+="RAW_NS.ttcnpp NS_Provider_IPL4.ttcn NS_Emulation.ttcnpp "
@@ -91,6 +95,7 @@ FILES+="Osmocom_VTY_Functions.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
 FILES+="LLC_Templates.ttcn L3_Templates.ttcn L3_Common.ttcn "
 FILES+="ITU_X213_Types.ttcn "
+FILES+="NAS_EPS_Templates.ttcn "
 FILES+="RAN_Emulation.ttcnpp SCCP_Adapter.ttcnpp RAN_Adapter.ttcnpp SCCP_Templates.ttcn "
 # IPA_Emulation + dependencies
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc Native_Functions.ttcn Native_FunctionDefs.cc "
