@@ -62,6 +62,12 @@ import from Osmocom_VTY_Functions all;
 import from MobileL3_MM_Types all;
 
 import from BSSGP_ConnHdlr all;
+//import from NAS_EPS_Types {
+//	type GUTI
+//};
+
+import from NAS_EPS_Types all;
+import from NAS_Templates all;
 
 modulepar {
 	/* IP/port on which we run our internal GSUP/HLR emulation */
@@ -1686,7 +1692,7 @@ testcase TC_attach_detach_check_subscriber_list() runs on test_CT {
 /* Attempt an attach, but loose the Identification Request (IMEI) */
 private function f_TC_attach_no_imei_response(charstring id) runs on BSSGP_ConnHdlr {
 	var integer count_req := 0;
-	var MobileIdentityLV mi;
+	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
 
 	f_send_l3(ts_GMM_ATTACH_REQ(f_mi_get_lv(), f_random_RAI(), true, false, omit, omit));
 
@@ -1732,7 +1738,7 @@ testcase TC_attach_no_imei_response() runs on test_CT {
 /* Attempt an attach, but loose the Identification Request (IMSI) */
 private function f_TC_attach_no_imsi_response(charstring id) runs on BSSGP_ConnHdlr {
 	var integer count_req := 0;
-	var MobileIdentityLV mi;
+	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
 
 	/* set p_tmsi to use it in Attach Req via f_mi_get_lv() */
 	g_pars.p_tmsi := 'c0000035'O;
@@ -2016,7 +2022,7 @@ testcase TC_attach_rau_a_b_wrong_old_ra() runs on test_CT {
 
 private function f_TC_attach_gmm_attach_req_while_gmm_attach(charstring id) runs on BSSGP_ConnHdlr {
 	var integer count_req := 0;
-	var MobileIdentityLV mi;
+	var MobileL3_CommonIE_Types.MobileIdentityLV mi;
 	var RoutingAreaIdentificationV rand_rai := f_random_RAI();
 	var PDU_L3_SGSN_MS l3_mt;
 
@@ -3104,23 +3110,92 @@ testcase TC_sgsn_context_req_in() runs on test_CT {
 	f_cleanup();
 }
 
+/* 3GPP TS 23.401 D.3.5, TS 23.003 2.8.2.1 */
+function guti2rai_ptmsi(in NAS_EPS_Types.GUTI guti, in OCT2 truncated_nas_token, out RoutingAreaIdentificationV rai, out OCT4 ptmsi, out OCT3 ptmsi_sig)  {
+	var bitstring mtmsi_bits := oct2bit(guti.mTMSI);
+	var bitstring ptmsi_bits;
+	var bitstring ptmsi_sig_bits;
+
+	rai := {
+		mccDigit1 := guti.mccDigit1,
+		mccDigit2 := guti.mccDigit2,
+		mccDigit3 := guti.mccDigit3,
+		mncDigit3 := guti.mncDigit3,
+		mncDigit1 := guti.mncDigit1,
+		mncDigit2 := guti.mncDigit2,
+		lac := guti.mMEGI,
+		rac :=  guti.mMEC
+	};
+	/* 3GPP TS 23.003 2.8.2.0: "P-TMSI shall be of 32 bits length where the two topmost bits are
+	 * reserved and always set to '11'. Hence, for a UE which may handover to GERAN/UTRAN (based on
+	 * subscription and UE capabilities), the corresponding bits in the M-TMSI are set to '11'"
+	 */
+	ptmsi_bits := '11'B & substr(mtmsi_bits, 2, 6) & oct2bit(guti.mMEC) & substr(mtmsi_bits, 16, 16);
+	ptmsi_sig_bits := substr(mtmsi_bits, 8, 8) & oct2bit(truncated_nas_token);
+	ptmsi := bit2oct(ptmsi_bits);
+	ptmsi_sig := bit2oct(ptmsi_sig_bits);
+	/* TODO: The UE shall fill the remaining 2 octets of the <P-TMSI signature> according to clauses 9.1.1, 9.4.1, 10.2.1, or
+	 * 10.5.1 of 3GPP TS.33.401 [89] , as appropriate, for RAU/Attach procedures.*/
+}
+
+function rai_to_oct(in RoutingAreaIdentity rai) return OCT6 {
+	var OCT6 ret;
+	ret := hex2oct(rai.mcc_digits[1] & rai.mcc_digits[0]) &
+		hex2oct(rai.mnc_digits[2] & rai.mcc_digits[2]) &
+		hex2oct(rai.mnc_digits[1] & rai.mnc_digits[0]) &
+  		rai.lac & rai.rac;
+	return ret;
+}
+
 /* SGSN originated SGSN Context Request procedure (SGSN requests, we respond)
  * 3GPP TS 23.401, Figure D.3.5-1 "Routing Area Update procedure" */
 private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr {
 	var integer seq_nr := f_rnd_int(65535);
 	var Gtp1cUnitdata gtpc_ud;
 	timer T;
+        var RoutingAreaIdentificationV rai;
+	var P_TMSI_TypeTV p_tmsi_type;
+	var OCT3 p_tmsi_sig;
+	var OCT4 add_p_tmsi;
+	var OCT6 add_rai_oct;
+	var RoutingAreaIdentificationV add_rai;
 
+	var Gtp1cPeer peer := {
+		connId := 1,
+		remName := mp_sgsn_gtp_ip,
+		remPort := GTP1C_PORT
+	}
+	g_pars.vec := f_gen_auth_vec_3g();
+
+	/* SGSN Context Req doesn't necessarily contain IMSI, hence expect it through TEID=0 */
+	f_gtp_register_teid('00000000'O);
+	f_gtp_register_teid('12345678'O);
+
+	g_pars.ra := f_random_RAI();
+	var NAS_EPS_Types.GUTI guti := valueof(ts_NAS_GUTI(
+			mcc_mnc := g_pars.ra.mccDigit1 & g_pars.ra.mccDigit2 & g_pars.ra.mccDigit3 &
+				   g_pars.ra.mncDigit3 & g_pars.ra.mncDigit1 & g_pars.ra.mncDigit2,
+                        mmegi := '000c'O,
+                        mmec := '06'O,
+                        tmsi := '12345678'O));
+
+	guti2rai_ptmsi(guti, '8888'O, add_rai, add_p_tmsi, p_tmsi_sig);
+
+	// add_rai_oct := rai_to_oct(add_rai);
 	/* The MS goes to GERAN/UTRAN from an LTE cell */
-	f_send_l3(ts_GMM_RAU_REQ(mi_lv := valueof(ts_MI_TMSI_LV('DE42DE42'O)),
+	f_send_l3(ts_GMM_RAU_REQ(mi_lv := valueof(ts_MI_TMSI_LV(add_p_tmsi)),
 				 upd_type := GPRS_UPD_T_RA,
-				 old_ra := f_random_RAI()), 0);
-
+				 old_ra := add_rai,
+				 p_tmsi_sig := ts_PtmsiSigTV(p_tmsi_sig),
+				 p_tmsi_type := ts_PtmsiTypeTV(c_GMM_PMTSI_TYPE_MAPPED),
+				 ms_network_cap := ts_GMM_MsNetCapV
+				 ), 0);
 
 	/* The SGSN has no idea about the MS and inquires the MME about it */
 	T.start(2.0);
 	alt {
-	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(?, ?)) -> value gtpc_ud {
+	// [] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(g_gn_iface_peer, tr_SGSNContextReqPDU(rai := rai, ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig), rat_type := int2oct(enum2int(rat_type), 1)))) -> value gtpc_pdu {
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(peer, ?)) -> value gtpc_ud {
 		log("Rx SGSN Context Req from SGSN");
 		setverdict(pass);
 		T.stop;
@@ -3145,7 +3220,8 @@ private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr
 	}
 
 	/* The MME responds */
-	var OCT8 kc := f_rnd_octstring(8);
+	var OCT16 ck := f_rnd_octstring(16);
+	var OCT16 ik := f_rnd_octstring(16);
 
 	var template (value) PDP_Context_GTPC pdp_ctx;
 	pdp_ctx := ts_PDP_Context_GTPC(pdp_addr := f_inet_addr("10.10.10.10"),
@@ -3153,14 +3229,16 @@ private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr
 				       apn := '08696E7465726E6574'O);
 
 	var template (value) GTPC_PDUs ctx_rsp;
+	var OCT4 old_sgsn_remote_teid := gtpc_ud.gtpc.gtpc_pdu.sgsn_ContextRequest.teidControlPlane.teidControlPlane;
 	ctx_rsp := ts_SGSNContextRespPDU(cause := GTP_CAUSE_REQUEST_ACCEPTED,
 					 imsi := g_pars.imsi,
 					 teic := '12345678'O,
-					 mm_context := ts_MM_ContextGSM(kc),
+					 mm_context := ts_MM_ContextUMTS(ck, ik),
 					 pdp_ctx_list := { pdp_ctx });
-	GTP[GTP_GGSN_IDX].send(ts_GTPC_SGSNContextResp(gtpc_ud.peer, '12345678'O, seq_nr, ctx_rsp));
-
-	/* TODO: Security Functions (auth/ciphering?) */
+	GTP[GTP_GGSN_IDX].send(ts_GTPC_SGSNContextResp(gtpc_ud.peer,
+						       old_sgsn_remote_teid,
+						       oct2int(gtpc_ud.gtpc.opt_part.sequenceNumber),
+						       ctx_rsp));
 
 	/* The SGSN ACKs */
 	T.start(2.0);
@@ -3170,6 +3248,7 @@ private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr
 		setverdict(pass);
 		T.stop;
 		}
+	[] as_gmm_auth(umts_aka_challenge := true, expect_sai := true) { repeat; };
 	[] T.timeout {
 		setverdict(fail, "Timeout waiting for SGSN Contect ACK");
 		mtc.stop;
@@ -3193,6 +3272,7 @@ private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr
 		mtc.stop;
 		}
 	}
+	f_sleep(1.0);
 }
 testcase TC_sgsn_context_req_out() runs on test_CT {
 	var BSSGP_ConnHdlr vc_conn;
