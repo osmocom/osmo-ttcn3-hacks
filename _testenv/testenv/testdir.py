@@ -51,14 +51,19 @@ def init():
         testenv.cmd.run(["ln", "-sf", testdir_topdir, "/tmp/logs"], no_podman=True)
 
 
-def prepare(cfg_name, cfg):
+def prepare(cfg_name, cfg, loop_count):
     global testdir
     global clean_scripts
 
+    topdir = testdir_topdir
+
+    if testenv.args.until_nok:
+        topdir = os.path.join(topdir, f"loop-{loop_count}")
+
     if len(testenv.testenv_cfg.cfgs) == 1:
-        testdir = testdir_topdir
+        testdir = topdir
     else:
-        testdir = os.path.join(testdir_topdir, cfg_name.replace("testenv_", "").replace(".cfg", ""))
+        testdir = os.path.join(topdir, cfg_name.replace("testenv_", "").replace(".cfg", ""))
 
     logging.info(f"Preparing testdir: {testdir}")
     testsuite_dir = os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)
