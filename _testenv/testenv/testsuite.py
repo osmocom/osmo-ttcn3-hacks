@@ -225,7 +225,7 @@ def get_current_test():
     try:
         with open(path, "r") as h:
             return h.readline().rstrip()
-    except:
+    except:  # noqa
         # File may not exist, e.g. if test was stopped
         return None
 

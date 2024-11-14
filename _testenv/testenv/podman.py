@@ -254,7 +254,7 @@ def start():
             cmd += ["--volume", "/dev/kvm:/dev/kvm"]
         if os.path.islink(testenv.custom_kernel_path):
             dest = os.readlink(testenv.custom_kernel_path)
-            cmd += ["--volume", "{dest}:{dest}:ro"]
+            cmd += ["--volume", f"{dest}:{dest}:ro"]
 
     cmd += [
         "--volume",
