@@ -93,6 +93,14 @@ def parse_args():
         help="use binary packages from this Osmocom OBS project instead (e.g. osmocom:nightly)",
     )
 
+    group = sub_run.add_argument_group("loop options", "Run the testsuite / a single test multiple times.")
+    group.add_argument(
+        "-u",
+        "--until-nok",
+        action="store_true",
+        help="run until there was either a failure or error",
+    )
+
     group = sub_run.add_argument_group(
         "QEMU options",
         "For some tests, the SUT can or must run in QEMU, typically to use kernel GTP-U.",

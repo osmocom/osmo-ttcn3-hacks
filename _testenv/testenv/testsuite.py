@@ -138,6 +138,11 @@ def format_log_files(cfg):
     testenv.cmd.run(cmd, cwd=cwd)
 
 
+def get_junit_logs(topdir):
+    pattern = os.path.join(topdir, "**", "junit-*.log")
+    return glob.glob(pattern, recursive=True)
+
+
 def cat_junit_logs():
     tool = "cat"
 
@@ -145,11 +150,19 @@ def cat_junit_logs():
         colors = os.environ.get("TESTENV_SOURCE_HIGHLIGHT_COLORS", "esc256")
         tool = f"source-highlight -f {shlex.quote(colors)} -s xml -i"
 
-    pattern = os.path.join(testenv.testdir.testdir_topdir, "**", "junit-*.log")
-    for path in glob.glob(pattern, recursive=True):
+    for path in get_junit_logs(testenv.testdir.testdir_topdir):
         cmd = f"echo && {tool} {shlex.quote(path)} && echo"
         logging.info(f"Showing {os.path.relpath(path, testenv.testdir.testdir_topdir)}")
         testenv.cmd.run(cmd)
+
+
+def check_junit_logs_have(loop_count, match_str):
+    topdir = os.path.join(testenv.testdir.testdir_topdir, f"loop-{loop_count}")
+    for path in get_junit_logs(topdir):
+        cmd = ["grep", "-q", match_str, path]
+        if testenv.cmd.run(cmd, check=False).returncode:
+            return False
+    return True
 
 
 def run(cfg):

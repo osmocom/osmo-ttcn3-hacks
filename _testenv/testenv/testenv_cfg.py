@@ -13,16 +13,20 @@ cfgs = {}
 current = None
 
 
-def set_current(cfg_name):
+def set_current(cfg_name, loop_count=0):
     global current
     current = cfg_name
+    loop_str = ""
+
+    if testenv.args.until_nok:
+        loop_str = f"[loop-{loop_count}]"
 
     if cfg_name == "testenv.cfg":
-        testenv.set_log_prefix("[testenv]")
+        testenv.set_log_prefix(f"[testenv]{loop_str}")
     else:
         cfg_name = cfg_name.replace("testenv_", "")
         cfg_name = cfg_name.replace(".cfg", "")
-        testenv.set_log_prefix(f"[testenv][{cfg_name}]")
+        testenv.set_log_prefix(f"[testenv]{loop_str}[{cfg_name}]")
 
 
 def exit_error_readme():
