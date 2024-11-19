@@ -243,7 +243,12 @@ def start():
         "PODMAN=1",
     ]
 
-    if not testenv.args.binary_repo:
+    if testenv.args.binary_repo:
+        cmd += [
+            "-e",
+            "TESTENV_BINARY_REPO=1",
+        ]
+    else:
         cmd += [
             "--volume",
             f"{osmo_dev_dir}:{osmo_dev_dir}",
