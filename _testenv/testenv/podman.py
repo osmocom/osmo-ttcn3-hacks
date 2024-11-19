@@ -9,8 +9,8 @@ import os
 import shlex
 import subprocess
 import testenv.cmd
-import testenv.testdir
 import testenv.coredump
+import testenv.testdir
 import time
 
 image_name = None
@@ -218,6 +218,7 @@ def start(cfg):
 
     # Custom seccomp profile that allows io_uring
     seccomp = os.path.join(testenv.data_dir, "podman/seccomp.json")
+    seccomp = "unconfined"  # FIXME
 
     cmd = [
         "podman",
@@ -252,6 +253,9 @@ def start(cfg):
             "--cap-add=BPF",  # eUPF
             "--cap-add=SYS_ADMIN",  # eUPF
             "--cap-add=SYS_RESOURCE",  # eUPF
+            "--memory=0",  # eUPF
+            "--ulimit=memlock=-1:-1",
+            "--privileged",  # FIXME
         ]
 
     if not testenv.args.binary_repo:
