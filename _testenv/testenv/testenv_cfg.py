@@ -75,6 +75,20 @@ def get_vty_host_port(cfg, path=None):
     return host, port
 
 
+def get_ebpf(cfg, path=None):
+    if "ebpf" not in cfg["testsuite"]:
+        return False
+
+    val = cfg["testsuite"]["ebpf"]
+
+    if val != "yes":
+        logging.error(f"Error in {path}, section testsuite:")
+        logging.error(f"  ebpf={val} is invalid, consider setting ebpf=yes or removing it.")
+        sys.exit(1)
+
+    return True
+
+
 def verify_qemu_cfgs():
     """Check if -C or -K is set, but any of the selected configs can't run with
     QEMU."""
@@ -113,6 +127,7 @@ def verify(cfg, path):
         "clean",
         "config",
         "copy",
+        "ebpf",
         "prepare",
         "program",
     ]
@@ -174,6 +189,7 @@ def verify(cfg, path):
             exit_error_readme()
 
     get_vty_host_port(cfg, path)
+    get_ebpf(cfg, path)
 
 
 def raise_error_config_arg(glob_result, config_arg):

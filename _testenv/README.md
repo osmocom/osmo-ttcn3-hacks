@@ -82,6 +82,10 @@ vty_port=4243
   depending on when the script runs. The script will not run on crash if podman
   is used, as the container gets shutdown beforehand.
 
+* `ebpf=`: set to `yes` to mount `/sys/fs/bpf` on the host. If running with
+  `--podman`, mount it there as well and make related capabilities available.
+  This is required for eUPF.
+
 #### Component section
 
 * `program=`: executable for starting a test component, may contain arguments.

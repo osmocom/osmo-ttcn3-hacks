@@ -97,3 +97,10 @@ def check():
 
     if not testenv.args.podman:
         check_fftranscode()
+
+
+def mount_sys_fs_bpf():
+    for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
+        if testenv.testenv_cfg.get_ebpf(cfg):
+            testenv.cmd.run('mount | grep -q " on /sys/fs/bpf" || sudo mount bpffs /sys/fs/bpf -t bpf', no_podman=True)
+            return

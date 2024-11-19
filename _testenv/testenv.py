@@ -38,6 +38,7 @@ def run():
         testenv.osmo_dev.check_init_needed()
 
     testenv.requirements.check()
+    testenv.requirements.mount_sys_fs_bpf()
     testenv.podman_install.init()
     testenv.cmd.init_env()
     testenv.testdir.init()

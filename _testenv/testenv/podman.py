@@ -245,6 +245,15 @@ def start(cfg):
         "PODMAN=1",
     ]
 
+    if testenv.testenv_cfg.get_ebpf(cfg):
+        cmd += [
+            "-v",
+            "/sys/fs/bpf:/sys/fs/bpf",
+            "--cap-add=BPF",  # eUPF
+            "--cap-add=SYS_ADMIN",  # eUPF
+            "--cap-add=SYS_RESOURCE",  # eUPF
+        ]
+
     if not testenv.args.binary_repo:
         cmd += [
             "--volume",
