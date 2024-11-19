@@ -271,3 +271,7 @@ def init():
             raise_error_config_arg(config_paths, config_arg)
 
         verify_qemu_cfgs()
+
+
+def get_first():
+    return next(iter(cfgs.items()))[1]

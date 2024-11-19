@@ -208,7 +208,7 @@ def start_in_background(cmd):
     feed_watchdog_process.start()
 
 
-def start():
+def start(cfg):
     global container_name
     global feed_watchdog_process
 
@@ -315,7 +315,7 @@ def is_running():
     return True
 
 
-def stop(restart=False):
+def stop(restart_cfg=None):
     global container_name
     global run_shell_on_stop
     global restart_count
@@ -328,7 +328,7 @@ def stop(restart=False):
     # the container. So do it before stopping the container.
     testenv.coredump.get_backtrace()
 
-    if not restart and run_shell_on_stop:
+    if not restart_cfg and run_shell_on_stop:
         logging.info("Running interactive shell before stopping container (--shell)")
 
         # stdin=None: override stdin=/dev/null, so we can type into the shell
@@ -336,7 +336,7 @@ def stop(restart=False):
 
         run_shell_on_stop = False
 
-    restart_msg = " (restart)" if restart else ""
+    restart_msg = " (restart)" if restart_cfg else ""
     logging.info(f"Stopping podman container{restart_msg}")
 
     if feed_watchdog_process:
@@ -348,6 +348,6 @@ def stop(restart=False):
 
     container_name = None
 
-    if restart:
+    if restart_cfg:
         restart_count += 1
-        start()
+        start(restart_cfg)

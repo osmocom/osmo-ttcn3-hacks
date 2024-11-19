@@ -45,7 +45,7 @@ def run():
 
     if testenv.args.podman:
         testenv.podman.init()
-        testenv.podman.start()
+        testenv.podman.start(testenv.testenv_cfg.get_first())
 
     if not testenv.args.binary_repo:
         testenv.osmo_dev.init()
@@ -64,13 +64,13 @@ def run():
     while loop_continue_cond(loop_count):
         # Restart podman container before running again
         if testenv.args.podman and loop_count:
-            testenv.podman.stop(True)
+            testenv.podman.stop(testenv.testenv_cfg.get_first())
 
         cfg_count = 0
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
             # Restart podman container before running with another config
             if testenv.args.podman and cfg_count:
-                testenv.podman.stop(True)
+                testenv.podman.stop(cfg)
 
             testenv.testenv_cfg.set_current(cfg_name, loop_count)
 
