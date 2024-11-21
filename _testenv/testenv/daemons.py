@@ -68,6 +68,7 @@ def start(cfg):
         # Wait 200ms and check if it is still running
         time.sleep(0.2)
         if daemons[section].poll() is not None:
+            testenv.coredump.get_from_coredumpctl()
             raise testenv.NoTraceException(f"program failed to start: {program}")
 
         # Run setup script
