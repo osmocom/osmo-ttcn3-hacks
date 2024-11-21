@@ -12,7 +12,12 @@ while [ $i -lt $max_i ]; do
 	$* &
 	LAST_PID=$!
 	wait $LAST_PID
-	echo "respawn: $i: stopped pid $LAST_PID with status $?"
+	LAST_STATUS=$?
+	echo "respawn: $i: stopped pid $LAST_PID with status $LAST_STATUS"
+	if [ $LAST_STATUS -ge 128 ]; then
+		echo "respawn: process was terminated abnormally, not respawning"
+		exit $LAST_STATUS
+	fi
 	if [ $SLEEP_BEFORE_RESPAWN -gt 0 ]; then
 		echo "respawn: sleeping $SLEEP_BEFORE_RESPAWN seconds..."
 		sleep $SLEEP_BEFORE_RESPAWN
