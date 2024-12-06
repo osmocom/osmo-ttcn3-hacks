@@ -11,25 +11,16 @@ import testenv.cmd
 import testenv.podman
 
 git_dir = None
-bb_dir = None
-trxcon_dir = None
-virtphy_dir = None
 sccp_dir = None
 jobs = None
 
 
 def init():
     global git_dir
-    global bb_dir
-    global trxcon_dir
-    global virtphy_dir
     global sccp_dir
     global jobs
 
     git_dir = os.path.join(testenv.args.cache, "git")
-    bb_dir = os.path.join(git_dir, "osmocom-bb")
-    trxcon_dir = os.path.join(bb_dir, "src/host/trxcon")
-    virtphy_dir = os.path.join(bb_dir, "src/host/virt_phy")
     sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
     jobs = multiprocessing.cpu_count() + 1
 
@@ -101,24 +92,6 @@ def apt_install(pkgs):
     testenv.cmd.run(["apt-get", "-q", "install", "-y", "--no-install-recommends"] + pkgs)
 
 
-def clone_osmocom_bb():
-    if os.path.exists(bb_dir):
-        logging.debug("osmocom-bb: already cloned")
-        return
-
-    testenv.cmd.run(
-        [
-            "git",
-            "-C",
-            git_dir,
-            "clone",
-            "--depth",
-            "1",
-            "https://gerrit.osmocom.org/osmocom-bb",
-        ]
-    )
-
-
 def clone_libosmo_sigtran():
     if os.path.exists(sccp_dir):
         logging.debug("libosmo-sigtran: already cloned")
@@ -135,34 +108,6 @@ def clone_libosmo_sigtran():
             "https://gerrit.osmocom.org/libosmo-sigtran",
         ]
     )
-
-
-def from_source_trxcon():
-    trxcon_in_srcdir = os.path.join(trxcon_dir, "src/trxcon")
-
-    if not os.path.exists(trxcon_in_srcdir):
-        clone_osmocom_bb()
-        apt_install(["libosmocore-dev"])
-        logging.info("Building trxcon")
-        testenv.cmd.run(["autoreconf", "-fi"], cwd=trxcon_dir)
-        testenv.cmd.run(["./configure"], cwd=trxcon_dir)
-        testenv.cmd.run(["make", "-j", f"{jobs}"], cwd=trxcon_dir)
-
-    testenv.cmd.run(["ln", "-s", trxcon_in_srcdir, "/usr/local/bin/trxcon"])
-
-
-def from_source_virtphy():
-    virtphy_in_srcdir = os.path.join(virtphy_dir, "src/virtphy")
-
-    if not os.path.exists(virtphy_in_srcdir):
-        clone_osmocom_bb()
-        apt_install(["libosmocore-dev"])
-        logging.info("Building virtphy")
-        testenv.cmd.run(["autoreconf", "-fi"], cwd=virtphy_dir)
-        testenv.cmd.run(["./configure"], cwd=virtphy_dir)
-        testenv.cmd.run(["make", "-j", f"{jobs}"], cwd=virtphy_dir)
-
-    testenv.cmd.run(["ln", "-s", virtphy_in_srcdir, "/usr/local/bin/virtphy"])
 
 
 def from_source_sccp_demo_user():
@@ -196,12 +141,6 @@ def from_source_sccp_demo_user():
 
 def from_source(cfg, cfg_name, section):
     program = cfg[section]["program"].split(" ", 1)[0]
-    if program == "trxcon":
-        return from_source_trxcon()
-    if program == "virtphy":
-        return from_source_virtphy()
-    if program == "run_fake_trx.sh":
-        return clone_osmocom_bb()
     if program == "run_sccp_demo_user.sh":
         return from_source_sccp_demo_user()
 
