@@ -89,7 +89,7 @@ vty_port=4243
 
 * `copy=`: optionally copy a space separated list of files or directories from
   the testsuite directory to the test directory, like `.cfg` and `.confmerge`
-  files.
+  files. Testenv runs `cp -a <SOURCES> <TEST DIR>` internally.
 
 * `make=`: osmo-dev make target for building from source, if running without
   `--binary-repo`. This is usually the name of the git repository, but could

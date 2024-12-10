@@ -85,19 +85,8 @@ def prepare(cfg_name, cfg, loop_count):
             testenv.cmd.run(["install", "-Dm644", path, path_dest])
 
         if "copy" in section_data:
-            for copy_entry in section_data["copy"].split(" "):
-                path = os.path.join(testsuite_dir, copy_entry)
-                if os.path.isdir(path):
-                    pattern = os.path.join(path, "**")
-                    paths = glob.glob(pattern, recursive=True)
-                else:
-                    paths = [path]
-                for path in paths:
-                    if os.path.isdir(path):
-                        continue
-                    path_dest = os.path.join(section_dir, os.path.relpath(path, testsuite_dir))
-                    mode = 755 if os.access(path, os.X_OK) else 644
-                    testenv.cmd.run(["install", f"-Dm{mode}", path, path_dest])
+            sources = section_data["copy"].split(" ")
+            testenv.cmd.run(["cp", "-a"] + sources + [section_dir], no_podman=True, cwd=testsuite_dir)
 
     # Referenced in testsuite cfgs: *.default
     pattern = os.path.join(testsuite_dir, "*.default")
