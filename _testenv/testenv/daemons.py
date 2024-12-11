@@ -107,9 +107,11 @@ def kill(pid):
 
 def check_if_crashed():
     crashed = False
+    returncode = None
     for daemon_name, daemon_proc in daemons.items():
         if not testenv.testsuite.is_running(daemon_proc.pid):
             crashed = True
+            returncode = daemon_proc.poll()
             break
     if not crashed:
         return
@@ -118,10 +120,10 @@ def check_if_crashed():
     testenv.coredump.get_from_coredumpctl()
 
     if current_test:
-        logging.error(f"{daemon_name} crashed during {current_test}!")
+        logging.error(f"{daemon_name} unexpected exit during {current_test}! rc={returncode}")
         testenv.testsuite.wait_until_test_stopped()
     else:
-        logging.error(f"{daemon_name} crashed!")
+        logging.error(f"{daemon_name} unexpected exit! rc={returncode}")
     sys.exit(1)
 
 
