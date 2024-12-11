@@ -85,6 +85,7 @@ RUN	set -x && \
 		sudo \
 		tcpdump \
 		vim \
+		vsmartcard-vpcd \
 		wget \
 		wireshark-common \
 		&& \
