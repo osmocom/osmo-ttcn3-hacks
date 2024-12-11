@@ -3606,6 +3606,129 @@ testcase TC_sgsn_context_req_out() runs on test_CT {
 	f_cleanup();
 }
 
+/* SGSN originated SGSN Context Request procedure (SGSN requests, we respond), but don't know IMSI
+ * 3GPP TS 23.401, Figure D.3.5-1 "Routing Area Update procedure" */
+private function f_TC_sgsn_context_req_out_imsi_unknown(charstring id) runs on BSSGP_ConnHdlr {
+	var integer seq_nr := f_rnd_int(65535);
+	var Gtp1cUnitdata gtpc_ud;
+	/* Used by SGSN Ctx Req/Resp/Ack */
+	var OCT4 ctx_teidc := f_gtp_teid_random();
+	/* Used for the UE which is transmited via Ctx Response */
+	var OCT4 pdp_teidc := f_gtp_teid_random();
+	timer T;
+        var RoutingAreaIdentificationV rai;
+	var P_TMSI_TypeTV p_tmsi_type;
+	var OCT3 p_tmsi_sig;
+	var OCT4 add_p_tmsi;
+	var OCT6 add_rai_oct;
+	var RoutingAreaIdentificationV add_rai;
+	var PdpActPars apars := valueof(t_PdpActPars(mp_ggsn_ip));
+
+	var Gtp1cPeer peer := {
+		connId := 1,
+		remName := mp_sgsn_gtp_ip,
+		remPort := GTP1C_PORT
+	}
+	g_pars.vec := f_gen_auth_vec_3g();
+
+	/* SGSN Context Req doesn't necessarily contain IMSI, hence expect it through TEID=0 */
+	f_gtp_register_teid('00000000'O);
+	f_gtp_register_teid(ctx_teidc);
+	f_gtp_register_teid(pdp_teidc);
+
+	g_pars.ra := f_random_RAI();
+	var NAS_EPS_Types.GUTI guti := valueof(ts_NAS_GUTI(
+			mcc_mnc := g_pars.ra.mccDigit1 & g_pars.ra.mccDigit2 & g_pars.ra.mccDigit3 &
+				   g_pars.ra.mncDigit3 & g_pars.ra.mncDigit1 & g_pars.ra.mncDigit2,
+                        mmegi := '000c'O,
+                        mmec := '06'O,
+                        tmsi := '12345679'O));
+
+	guti2rai_ptmsi(guti, '8888'O, add_rai, add_p_tmsi, p_tmsi_sig);
+
+	// add_rai_oct := rai_to_oct(add_rai);
+	/* The MS goes to GERAN/UTRAN from an LTE cell */
+	f_send_l3(ts_GMM_RAU_REQ(mi_lv := valueof(ts_MI_TMSI_LV(add_p_tmsi)),
+				 upd_type := GPRS_UPD_T_RA,
+				 old_ra := add_rai,
+				 p_tmsi_sig := ts_PtmsiSigTV(p_tmsi_sig),
+				 p_tmsi_type := ts_PtmsiTypeTV(c_GMM_PMTSI_TYPE_MAPPED),
+				 ms_network_cap := ts_GMM_MsNetCapV
+				 ), 0);
+
+	/* The SGSN has no idea about the MS and inquires the MME about it */
+	T.start(2.0);
+	alt {
+	// [] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(g_gn_iface_peer, tr_SGSNContextReqPDU(rai := rai, ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig), rat_type := int2oct(enum2int(rat_type), 1)))) -> value gtpc_pdu {
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(peer, ?)) -> value gtpc_ud {
+		log("Rx SGSN Context Req from SGSN");
+		setverdict(pass);
+		T.stop;
+		}
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextResp) {
+		setverdict(fail, "Rx unexpected SGSN Context Req");
+		mtc.stop;
+		}
+	[] BSSGP[0].receive(tr_LLC_XID_MT_CMD(?, ?)) {
+		/* Ignore XID Reset */
+		repeat;
+		}
+	[] BSSGP[0].receive(tr_GMM_RAU_REJECT) {
+		/* osmo-sgsn -latest would send RAU Reject (Implicitly detached) */
+		setverdict(fail, "Rx unexpected RAU Reject");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SGSN Context Req");
+		mtc.stop;
+		}
+	}
+
+	/* The MME responds with IMSI unknown */
+	var template (value) PDP_Context_GTPC pdp_ctx;
+	pdp_ctx := ts_PDP_Context_GTPC(pdp_addr := f_inet_addr("10.10.10.10"),
+				       ggsn_gsn_addr := f_inet_addr(mp_ggsn_ip),
+				       apn := '08696E7465726E6574'O,
+				       ggsn_teic := pdp_teidc);
+
+	var template (value) GTPC_PDUs ctx_rsp;
+	var OCT4 old_sgsn_remote_teid := gtpc_ud.gtpc.gtpc_pdu.sgsn_ContextRequest.teidControlPlane.teidControlPlane;
+	ctx_rsp := ts_SGSNContextRespPDU(cause := GTP_CAUSE_IMSI_IMEI_NOT_KNOWN);
+	GTP[GTP_GGSN_IDX].send(ts_GTPC_SGSNContextResp(gtpc_ud.peer,
+						       old_sgsn_remote_teid,
+						       oct2int(gtpc_ud.gtpc.opt_part.sequenceNumber),
+						       ctx_rsp));
+
+	/* Expect a RAU REJECT with MS can't be derived */
+	alt {
+	[] BSSGP[0].receive(tr_GMM_RAU_REJECT(cause := c_MM_CAUSE_MS_NOT_DERIVED)) {
+		setverdict(pass);
+		}
+	[] GTP[GTP_GGSN_IDX].receive(tr_GTPC_SGSNContextReq(peer, ?)) {
+		setverdict(fail, "Received a second SGSN Context Req");
+		mtc.stop;
+		}
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for SGSN SAI");
+		mtc.stop;
+		}
+	}
+
+	f_gmm_attach(false, false);
+	setverdict(pass);
+
+	f_sleep(1.0);
+}
+
+testcase TC_sgsn_context_req_out_imsi_unknown() runs on test_CT {
+	var BSSGP_ConnHdlr vc_conn;
+	f_init();
+	f_sleep(1.0);
+	vc_conn := f_start_handler(refers(f_TC_sgsn_context_req_out_imsi_unknown), testcasename(), g_gb, 74);
+	vc_conn.done;
+	f_cleanup();
+}
+
 control {
 	execute( TC_attach() );
 	execute( TC_attach_mnc3() );
@@ -3688,6 +3811,7 @@ control {
 
 	execute( TC_sgsn_context_req_in() );
 	execute( TC_sgsn_context_req_out() );
+	execute( TC_sgsn_context_req_out_imsi_unknown() );
 
 	/* At the end, may crash osmo-sgsn, see OS#3957, OS#4245 */
 	execute( TC_attach_req_id_req_ra_update() );
