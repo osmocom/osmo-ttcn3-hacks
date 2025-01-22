@@ -170,6 +170,14 @@ def parse_args():
         default=ccache_dir_default,
     )
 
+    group = sub_run.add_argument_group("experimental options")
+    group.add_argument(
+        "-A",
+        "--autoreconf-in-src-copy",
+        action="store_true",
+        help="run autoreconf in a copy of the source dir, avoids 'run make distclean' errors",
+    )
+
     sub.add_parser("clean", help="clean previous build artifacts")
 
     args = parser.parse_args()
