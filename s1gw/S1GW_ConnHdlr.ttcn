@@ -302,6 +302,20 @@ private const S1AP_IEs.Cause c_REL_CMD_CAUSE := { nas := normal_release };
 private const LIN4_BO_LAST c_PFCP_FAR_ID_C2A := 1; /* Core -> Access */
 private const LIN4_BO_LAST c_PFCP_FAR_ID_A2C := 2; /* Access -> Core */
 
+/* look-up an E-RAB in the given list by SEID of the received PFCP PDU */
+private function f_ERabList_find_by_pdu(in ERabList erabs, in PDU_PFCP rsp)
+return integer {
+	for (var integer i := 0; i < lengthof(erabs); i := i + 1) {
+		if (erabs[i].pfcp_loc_seid == rsp.seid) {
+			return i;
+		}
+	}
+
+	setverdict(fail, __SCOPE__, "(): no matching E-RAB found");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	return -1; /* make compiler happy */
+}
+
 function f_ConnHdlr_tx_erab_setup_req(in ERabList erabs)
 runs on ConnHdlr {
 	var template (value) E_RABToBeSetupListBearerSUReq items;
@@ -747,15 +761,27 @@ runs on ConnHdlr {
 
 function f_ConnHdlr_session_delete(inout ERabList erabs)
 runs on ConnHdlr {
-	for (var integer i := 0; i < lengthof(erabs); i := i + 1) {
-		log("UPF <- S1GW: PFCP Session Deletion Request for E-RAB ID ", erabs[i].erab_id);
-		var PDU_PFCP pdu := f_ConnHdlr_rx_session_delete_req(erabs[i]);
-		log("UPF -> S1GW: PFCP Session Deletion Response for E-RAB ID ", erabs[i].erab_id);
-		f_ConnHdlr_tx_session_delete_resp(erabs[i], pdu);
-		/* ask PFCPEM to *not* route PDUs with this SEID to us */
-		f_PFCPEM_unsubscribe_seid(erabs[i].pfcp_loc_seid);
+	var integer pending_erabs := lengthof(erabs);
+
+	while (pending_erabs > 0) {
+		var PDU_PFCP pdu := f_ConnHdlr_pfcp_expect(tr_PFCP_Session_Del_Req);
+		var integer idx := f_ERabList_find_by_pdu(erabs, pdu);
+
+		log("UPF <- S1GW: PFCP Session Deletion Request for E-RAB ID ", erabs[idx].erab_id);
+		/* make sure that an E-RAB is never released twice */
+		if (not ispresent(erabs[idx].pfcp_rem_seid)) {
+			setverdict(fail, __SCOPE__, "(): PFCP Session Deletion Request ",
+				   "was not expected for E-RAB ID ", erabs[idx].erab_id);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+		log("UPF -> S1GW: PFCP Session Deletion Response for E-RAB ID ", erabs[idx].erab_id);
+		f_ConnHdlr_tx_session_delete_resp(erabs[idx], pdu);
+		/* ask PFCPEM to *not* route PDUs with the local SEID to us */
+		f_PFCPEM_unsubscribe_seid(erabs[idx].pfcp_loc_seid);
 		/* peer's SEID is no longer valid, invalidate it */
-		erabs[i].pfcp_rem_seid := omit;
+		erabs[idx].pfcp_rem_seid := omit;
+
+		pending_erabs := pending_erabs - 1;
 	}
 }
 
