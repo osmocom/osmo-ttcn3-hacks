@@ -37,7 +37,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -g -p -l -U 8 -f $*
+ttcn3_makefilegen -g -p -l -U 8 -f -w $*
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
 sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan/' Makefile
@@ -71,3 +71,42 @@ if [ "x$USE_CCACHE" = "x1" ]; then
 	# inside comments in the generated C++ code which interfere with ccache.
 	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -D/' Makefile
 fi
+
+#COMPILER_FLAGS = -L  -w
+sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q -V 0/' Makefile
+sed -i 's/@echo Creating dependency file for '\''$<'\''; /@/' Makefile
+sed -i 's/if $(CXX) $(LDFLAGS)/@if $(CXX) $(LDFLAGS)/g' Makefile
+sed -i 's/-$(RM)/-@$(RM)/g' Makefile
+sed -i 's/$(CXX) -shared -o/@$(CXX) -shared -o/g' Makefile
+sed -i 's/$(CXX) -c/@$(CXX) -c/g' Makefile
+
+# Silence ttcn3_compiler output
+sed -i 's/\$(TTCN3_DIR)\/bin\/ttcn3_compiler/@\$(TTCN3_DIR)\/bin\/ttcn3_compiler/g' Makefile
+
+
+
+
+
+#sed -i 's/^$(CXX)/@$(CXX)/g' Makefile
+# sed -i '/^[[:space:]]*$(CXX)/ s/^/@/' Makefile
+# sed -i '/^[[:space:]]*\$(CXX)/ {s/^\([[:space:]]*\)@\?\(\$(CXX)\)/\1@\2/}' Makefile
+
+# This target rebuilds the project with bear to capture compilation commands for generating compile_commands.json
+cat >> Makefile << 'EOF'
+
+# Generate compile_commands.json using bear
+.PHONY: bear
+bear: clean
+	@echo "Generating compile_commands.json with bear..."
+	@if which bear >/dev/null 2>&1; then \
+		make clean && $(MAKE) compile && bear -- $(MAKE) -j10; \
+		echo "compile_commands.json generated successfully"; \
+	else \
+		echo "ERROR: bear is not installed. Install it with your package manager."; \
+		echo "  Debian/Ubuntu: sudo apt-get install bear"; \
+		echo "  Arch Linux: sudo pacman -S bear"; \
+		echo "  macOS: brew install bear"; \
+		exit 1; \
+	fi
+EOF
+
