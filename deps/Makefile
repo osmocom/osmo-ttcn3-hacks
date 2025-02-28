@@ -34,7 +34,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.LLC_v7.1.0 \
-			titan.ProtocolModules.M3UA \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
@@ -66,7 +65,8 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolEmulations.SCCP \
-			titan.ProtocolModules.BSSGP_v13.0.0
+			titan.ProtocolModules.BSSGP_v13.0.0 \
+			titan.ProtocolModules.M3UA
 
 OSMOGERRIT_REPOS=	osmo-uecups
 
@@ -104,7 +104,7 @@ titan.ProtocolModules.L2TP_commit=		17e76d3662bd0bb815158e8a9de1ec413f21b530
 titan.ProtocolModules.LLC_v7.1.0_commit=	09817f113255d7fb56f1d45d3dd629a093d9248d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d
 titan.ProtocolModules.M2PA_commit=		R.2.A-5-ga75b589
-titan.ProtocolModules.M3UA_commit=		c496d298876fed55c2b730278b7ee77982555563
+titan.ProtocolModules.M3UA_commit=		509fb5d3074d643024e691116d3df7ba42ef9587
 titan.ProtocolModules.MobileL3_v13.4.0_commit=	b6602eb357673f097ea1a1d22edd568ecd239da1
 titan.ProtocolModules.NAS_EPS_15.2.0.1_commit=	R.1.A-2-g2ba853c
 titan.ProtocolModules.NS_v7.3.0_commit=		R.2.A-6-gf73f195
