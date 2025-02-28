@@ -48,6 +48,7 @@ SUBDIRS= \
 	simtrace \
 	sip \
 	smlc \
+	smdpp \
 	stp \
 	sysinfo \
 	upf \
