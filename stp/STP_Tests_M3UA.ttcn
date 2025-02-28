@@ -564,8 +564,10 @@ testcase TC_tmt_override() runs on RAW_M3UA_CT {
 	/* verify traffic is routed from sender to [sole] receiver */
 	f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
 
-	/* activate the second 'receiver' side ASP (no NOTIFY as AS state doesn't change) */
-	f_M3UA_asp_up_act(2, c_M3UA_TMT_override, rctx_receiver, omit, omit);
+	/* activate the second 'receiver' side ASP:
+	 * Expect NOTIFY always after ASPUP (RFC4666 4.3.4.5), don't expect
+	 * NOTIFY after ACTIVE as AS state doesn't change) */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_override, rctx_receiver, c_M3UA_ST_I_AS_ACTIVE, omit);
 
 	/* we expect a NOTIFY to the *other* ASP Other/Alternat-ASP-Active */
 	f_M3UA_exp(1, tr_M3UA_NOTIFY(c_M3UA_ST_T_OTHER, c_M3UA_ST_I_ALTERNATE_ASP, *));
@@ -608,7 +610,7 @@ testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
 	}
 
 	/* activate the second 'receiver' side ASP (no NOTIFY) */
-	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, omit, omit, omit); // TODO: rctx
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, omit, c_M3UA_ST_I_AS_ACTIVE, omit); // TODO: rctx
 
 	/* verify traffic is routed from sender to new receiver */
 	const integer iter_per_asp := 5;
@@ -665,7 +667,7 @@ testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
 	}
 
 	/* activate the second 'receiver' side ASP */
-	f_M3UA_asp_up_act(2, c_M3UA_TMT_broadcast, omit, omit, omit); // TODO: rctx
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_broadcast, omit, c_M3UA_ST_I_AS_ACTIVE, omit); // TODO: rctx
 
 	/* verify traffic is routed from sender to new receiver */
 	for (i := 0; i < 10; i := i+1) {
@@ -685,11 +687,16 @@ testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
 }
 
 private function f_M3UA_rkm_register(integer idx, OCT4 local_id, OCT3 dpc, OCT4 rctx,
-				     template (present) OCT4 exp_status := c_M3UA_REGSTS_SUCCESS)
+				     template (present) OCT4 exp_status := c_M3UA_REGSTS_SUCCESS,
+				     template (omit) OCT2 ntfy_after_reg := c_M3UA_ST_I_AS_INACTIVE
+)
 runs on RAW_M3UA_CT
 {
 	f_M3UA_send(idx, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:=local_id, dpc:=dpc, rctx:=rctx)}));
 	f_M3UA_exp(idx, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:=local_id, status:=exp_status, rctx:=rctx)}));
+	if (not istemplatekind(ntfy_after_reg, "omit")) {
+		f_M3UA_exp(idx, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, ntfy_after_reg, *));
+	}
 }
 
 /* Send RKM registration; expect -EPERM as RCTX doesn't match config and dynamic not permitted */
@@ -759,7 +766,7 @@ testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 	f_init_m3ua();
 
 	/* first register the routing key */
-	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctx);
+	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctx, ntfy_after_reg := omit);
 
 	/* then try to de-register */
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
@@ -771,31 +778,37 @@ testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 
 /* try to de-register a routing key for an active ASP -> ERROR */
 testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
-	var OCT3 dpc := int2oct(123, 3);
-	var OCT4 rctx := int2oct(1234, 4);
-
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
 	f_init_m3ua();
 
-	/* first register the routing key */
-	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctx);
+	var OCT3 dpc := int2oct(123, 3);
+	var OCT4 rctxA := int2oct(1234, 4);
+	var OCT4 rctxB := int2oct(f_m3ua_cli_config(0).routing_ctx, 4); // must match config
 
-	/* then activate the ASP */
-	f_M3UA_asp_up_act(0);
-	f_M3UA_exp(0, tr_M3UA_DAVA({*}, rctx));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, *));
-	f_M3UA_exp(0, tr_M3UA_DAVA({*}, *));
+	/* first register the routing key */
+	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctxA, ntfy_after_reg := omit);
+
+	/* then activate the ASP, this turns the 2 AS (one for each rctx, 1234 and default 1023)
+	 * INACTIVE, handle the 2 NOTIFY manually afterwards: */
+	f_M3UA_asp_up(0, omit);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, (rctxA, rctxB)));
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, (rctxA, rctxB)));
+	f_M3UA_asp_act(0, omit, rctxB);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, rctxB));
+	f_M3UA_exp(0, tr_M3UA_DAVA({*}, rctxA));
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, rctxA));
+	f_M3UA_exp(0, tr_M3UA_DAVA({*}, rctxB));
 
 	/* then try to de-register -> ERR_ASP_ACTIVE */
-	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctxA)));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_ASP_ACTIVE)}));
 
 	/* deactivate ASP and properly de-register to clean up */
 	f_M3UA_asp_inact(0);
-	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, *));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, *));
+	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctxA)));
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, (rctxA, rctxB)));
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, (rctxA, rctxB)));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_SUCCESS)}));
 
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation static-only");
