@@ -585,24 +585,24 @@ runs on RAW_M3UA_CT {
 		}
 }
 
-/* test "traffic-mode load-share" behavior */
-testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
+/* Test "traffic-mode roundrobin" behavior (distributing within ASPs of a given AS in roundrobin fashion). */
+testcase TC_tmt_loadshare_roundrobin() runs on RAW_M3UA_CT {
 	var integer i;
 
 	f_init_m3ua();
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "traffic-mode roundrobin");
 
 	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
 	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
 	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
 	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
 
-	/* FIXME: configure the STP via VTY to set traffic-mode */
-
 	/* bring up the 'sender' side (single ASP in AS) */
 	f_M3UA_asp_up_act(0, omit, rctx_sender);
 
 	/* activate the first 'receiver' side ASP */
-	f_M3UA_asp_up_act(1, c_M3UA_TMT_loadshare, omit); // TODO: rctx
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_loadshare, rctx_receiver);
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	for (i := 0; i < 10; i := i+1) {
@@ -610,12 +610,12 @@ testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
 	}
 
 	/* activate the second 'receiver' side ASP (no NOTIFY) */
-	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, omit, c_M3UA_ST_I_AS_ACTIVE, omit); // TODO: rctx
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, rctx_receiver, c_M3UA_ST_I_AS_ACTIVE, omit);
 
 	/* verify traffic is routed from sender to new receiver */
 	const integer iter_per_asp := 5;
 	var Integers num_rx := {};
-	for (i := 0; i < g_m3ua_num_clients; i := i + 1) {
+	for (i := 0; i < 3; i := i + 1) {
 		num_rx := num_rx & {0};
 	}
 	for (i := 0; i < 2*iter_per_asp; i := i+1) {
@@ -640,6 +640,102 @@ testcase TC_tmt_loadshare() runs on RAW_M3UA_CT {
 	setverdict(pass);
 
 	f_clear_m3ua();
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "no traffic-mode");
+}
+
+private altstep as_count_rx_sls(integer idx, template (present) PDU_M3UA exp, inout Integers sls_counter, inout integer rx_counter)
+runs on RAW_M3UA_CT {
+	var M3UA_RecvFrom rx;
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(exp)) -> value rx {
+		var integer sls := oct2int(rx.msg.m3UA_DATA.messageParameters.protocol_Data.sLS);
+		sls_counter[sls] := sls_counter[sls] + 1;
+		rx_counter := rx_counter + 1;
+		}
+}
+
+/* Test "traffic-mode loadshare" behavior. Validates ASP Loadsharing scenario
+ * (distributing traffic within ASPs of one AS).
+ * NOTE: This test does not validate AS Loadsharing, (distributing traffic
+ * within linksets/ASs of a combined linkset). */
+testcase TC_tmt_loadshare_sls() runs on RAW_M3UA_CT {
+	var integer i;
+
+	f_init_m3ua();
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "traffic-mode loadshare");
+
+	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
+	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, rctx_sender);
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_loadshare, rctx_receiver);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+	}
+
+	/* activate the second 'receiver' side ASP (no NOTIFY) */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, rctx_receiver, c_M3UA_ST_I_AS_ACTIVE, omit);
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 20;
+	const integer NUM_SLS := 16; /* SLS in ITU is 4 bits. */
+	var integer num_rx_1 := 0;
+	var integer num_rx_2 := 0;
+	var Integers sls_num_rx_1 := {};
+	var Integers sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring_rnd_len(100);
+		var template (value) M3UA_Protocol_Data tx_pd;
+		var template (present) M3UA_Protocol_Data rx_pd;
+		/* Distribute traffic over ASPs based on SLS, since OPC is always the same.
+		 * SLS in ITU is 4 bits. */
+		var OCT1 sls := int2oct(i mod 16, 1);
+		tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, sls, data);
+		rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, sls, data);
+		f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+		alt {
+		[] as_count_rx_sls(1, tr_M3UA_DATA(rctx_receiver, rx_pd), sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(2, tr_M3UA_DATA(rctx_receiver, rx_pd), sls_num_rx_2, num_rx_2);
+		}
+	}
+
+	/* Make sure traffic was sent over both ASPs and that it was distributed: */
+	if (num_rx_1 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 1st ASP!");
+	}
+	if (num_rx_2 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 2nd ASP!");
+	}
+	if (num_rx_1 + num_rx_2 != 2*iter_per_asp) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx ", num_rx_1 + num_rx_2 ," packets in total vs exp ", 2*iter_per_asp));
+	}
+
+	/* Check that a given SLS is not forwarded to both ASPs: */
+	for (i := 0; i < NUM_SLS; i := i+1) {
+		if (sls_num_rx_1[i] > 0 and sls_num_rx_2[i] > 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx packets for SLS ", i, " in both ASPs!"));
+		}
+
+	}
+	setverdict(pass);
+
+	f_clear_m3ua();
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "no traffic-mode");
 }
 
 /* test "traffic-mode broadcast" behavior */
@@ -1414,7 +1510,8 @@ control {
 	execute( TC_asp_act_loadshare() );
 	execute( TC_asp_act_broadcast() );
 	execute( TC_tmt_override() );
-	execute( TC_tmt_loadshare() );
+	execute( TC_tmt_loadshare_roundrobin() );
+	execute( TC_tmt_loadshare_sls() );
 	execute( TC_tmt_broadcast() );
 	execute( TC_act_rctx_data_no_rctx() );
 
