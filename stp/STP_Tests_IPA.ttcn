@@ -15,6 +15,7 @@ friend module STP_Tests;
 import from General_Types all;
 import from Osmocom_Types all;
 import from IPL4asp_Types all;
+import from Misc_Helpers all;
 
 import from TELNETasp_PortType all;
 import from Osmocom_VTY_Functions all;
@@ -33,7 +34,7 @@ import from MTP3asp_PortType all;
 
 import from STP_Tests_Common all;
 
-private const integer NR_IPA := 7;
+private const integer NR_IPA := 8;
 
 type record of charstring AspNameArray;
 
@@ -43,6 +44,7 @@ modulepar {
 	integer mp_stp_ipa_port := 5000;
 	integer mp_local_ipa_port := 20000;
 	AspNameArray mp_ipa_as_names := {"ipa-as-loadshare-sender",
+					 "ipa-as-loadshare-sender",
 					 "ipa-as-loadshare-receiver",
 					 "ipa-as-loadshare-receiver",
 					 "ipa-as-dynamic-asp",
@@ -170,18 +172,18 @@ runs on IPA_CT {
 	f_init_ipa();
 
 	/* bring up the 'sender' side (single ASP in AS) */
-	f_connect_ipa(4, unknwon_dynamic_asp);
-	/* activate the first 'receiver' side ASP */
 	f_connect_ipa(5, unknwon_dynamic_asp);
-
-	/* verify traffic is routed from sender to [sole] receiver */
-	f_test_traffic(4, 5);
-
-	/* activate the second 'receiver' side ASP */
+	/* activate the first 'receiver' side ASP */
 	f_connect_ipa(6, unknwon_dynamic_asp);
 
+	/* verify traffic is routed from sender to [sole] receiver */
+	f_test_traffic(5, 6);
+
+	/* activate the second 'receiver' side ASP */
+	f_connect_ipa(7, unknwon_dynamic_asp);
+
 	/* verify traffic is routed from sender to new receiver */
-	f_test_traffic(4, 6);
+	f_test_traffic(5, 7);
 	setverdict(pass);
 }
 
@@ -202,54 +204,156 @@ runs on IPA_CT {
 		}
 }
 
-private function f_tc_tmt_loadshare(boolean unknwon_dynamic_asp)
+private function f_tc_tmt_loadshare_roundrobin(boolean unknwon_dynamic_asp)
 runs on IPA_CT {
 	var integer i;
 
 	f_init_ipa();
 
+	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "traffic-mode roundrobin");
+
 	/* bring up the 'sender' side (single ASP in AS) */
 	f_connect_ipa(0, unknwon_dynamic_asp);
 	/* activate the first 'receiver' side ASP */
-	f_connect_ipa(1, unknwon_dynamic_asp);
+	f_connect_ipa(2, unknwon_dynamic_asp);
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	for (i := 0; i < 10; i := i+1) {
-		f_test_traffic(0, 1);
+		f_test_traffic(0, 2);
 	}
 
 	/* activate the second 'receiver' side ASP */
-	f_connect_ipa(2, unknwon_dynamic_asp);
+	f_connect_ipa(3, unknwon_dynamic_asp);
 
 	/* verify traffic is routed from sender to new receiver */
 	const integer iter_per_asp := 5;
-	var integer num_rx[3] := { 0, 0, 0 };
+	var integer num_rx[2] := { 0, 0 };
 	for (i := 0; i < 2*iter_per_asp; i := i+1) {
 		var octetstring data := f_rnd_octstring(f_rnd_ipa_len());
 		f_IPA_send(0, data);
 		alt {
-		[] as_count_rx(1, data, num_rx[1]);
-		[] as_count_rx(2, data, num_rx[2]);
+		[] as_count_rx(2, data, num_rx[0]);
+		[] as_count_rx(3, data, num_rx[1]);
 		}
 	}
 	/* FIXME: check for extraneous messages? */
-	for (i := 1; i <= 2; i := i+1) {
+	for (i := 0; i < 2; i := i+1) {
 		if (num_rx[i] != iter_per_asp) {
 			setverdict(fail, "Received ", num_rx[i], " out of expected ", iter_per_asp,
 				   "DATA messages at IPA port ", i);
 		}
 	}
 	setverdict(pass);
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "no traffic-mode");
 }
 
 /* test "traffic-mode load-share" behavior */
-testcase TC_tmt_loadshare() runs on IPA_CT {
-	f_tc_tmt_loadshare(false);
+testcase TC_tmt_loadshare_roundrobin() runs on IPA_CT {
+	f_tc_tmt_loadshare_roundrobin(false);
 }
 
-/* test "traffic-mode override" behavior, with "accept-asp-connections dynamic-permitted" and clients from unknown ASPs */
+private altstep as_count_rx_sls(integer idx, template (present) octetstring exp, inout Integers sls_counter, inout integer rx_counter)
+runs on IPA_CT {
+	var ASP_MTP3_TRANSFERind rx;
+	[] IPA[idx].receive(t_ASP_MTP3_TRANSFERind(?, ?, ?, ?, exp)) -> value rx {
+		var integer sls := rx.sls; /* This should in general be 0 in IPA. */
+		sls_counter[sls] := sls_counter[sls] + 1;
+		rx_counter := rx_counter + 1;
+		}
+}
+
+private function f_tc_tmt_loadshare_sls(boolean unknwon_dynamic_asp)
+runs on IPA_CT {
+	var integer i;
+
+	f_init_ipa();
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "traffic-mode loadshare");
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_connect_ipa(0, unknwon_dynamic_asp);
+	/* activate the first 'receiver' side ASP */
+	f_connect_ipa(2, unknwon_dynamic_asp);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, 2);
+	}
+
+	/* activate the second 'receiver' side ASP */
+	f_connect_ipa(3, unknwon_dynamic_asp);
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 20;
+	const integer NUM_SLS := 16; /* SLS in ITU is 4 bits. */
+	var integer num_rx_1 := 0;
+	var integer num_rx_2 := 0;
+	var Integers sls_num_rx_1 := {};
+	var Integers sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring(f_rnd_ipa_len());
+		f_IPA_send(0, data);
+		alt {
+		[] as_count_rx_sls(2, data, sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(3, data, sls_num_rx_2, num_rx_2);
+		}
+	}
+
+	/* All traffic should have still be sent to the first receiver, since OPC+SLS cannot change in IPA ASPs. */
+	if (num_rx_1 != iter_per_asp and num_rx_2 != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected all traffic through 1st receiver!");
+	}
+
+
+	/* activate the second 'sender' side ASP */
+	f_connect_ipa(1, unknwon_dynamic_asp);
+
+
+	num_rx_1 := 0;
+	num_rx_2 := 0;
+	sls_num_rx_1 := {};
+	sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring(f_rnd_ipa_len());
+		f_IPA_send(i mod 2, data);
+		alt {
+		[] as_count_rx_sls(2, data, sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(3, data, sls_num_rx_2, num_rx_2);
+		}
+	}
+	/* Make sure traffic was sent over both ASPs and that it was distributed: */
+	if (num_rx_1 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 1st ASP!");
+	}
+	if (num_rx_2 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 2nd ASP!");
+	}
+	if (num_rx_1 + num_rx_2 != 2*iter_per_asp) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx ", num_rx_1 + num_rx_2 ," packets in total vs exp ", 2*iter_per_asp));
+	}
+	setverdict(pass);
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "no traffic-mode");
+}
+
+/* test "traffic-mode load-share" behavior */
+testcase TC_tmt_loadshare_sls() runs on IPA_CT {
+	f_tc_tmt_loadshare_sls(false);
+}
+
+/* test "traffic-mode loadshare" behavior, with "accept-asp-connections dynamic-permitted" and clients from unknown ASPs */
 testcase TC_unknown_client_dynamic_tmt_loadshare() runs on IPA_CT {
-	f_tc_tmt_override(true);
+	f_tc_tmt_loadshare_sls(true);
 }
 
 control {
@@ -258,7 +362,8 @@ control {
 	execute( TC_unknown_client_dynamic() );
 	execute( TC_tmt_override() );
 	execute( TC_unknown_client_dynamic_tmt_override() );
-	execute( TC_tmt_loadshare() );
+	execute( TC_tmt_loadshare_roundrobin() );
+	execute( TC_tmt_loadshare_sls() );
 	execute( TC_unknown_client_dynamic_tmt_loadshare() );
 }
 
