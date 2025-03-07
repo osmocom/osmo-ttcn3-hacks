@@ -44,6 +44,10 @@ def check_programs():
                 "lddtree",
                 "qemu-system-x86_64",
             ]
+        if not testenv.args.binary_repo:
+            programs += [
+                "rsync",
+            ]
 
     abort = False
     for program in programs:

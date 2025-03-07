@@ -73,14 +73,10 @@ def init():
             os.path.join(testenv.args.cache, "host/usr"),
         ]
 
-    if testenv.args.autoreconf_in_src_copy:
-        # Use a different make dir, so we don't have unexpected behavior when
-        # the user already ran autoreconf or ./configure through osmo-dev with
-        # the previous make dir, without --autoreconf-in-src-copy.
-        make_dir += "2"
-        extra_opts += [
-            "--autoreconf-in-src-copy",
-        ]
+    # Make dirs created without passing --autoreconf-in-src-copy to
+    # gen_makefile.py (as previous versions of testenv did) are incompatible.
+    # Add the "2" to avoid potential conflicts.
+    make_dir += "2"
 
     cmd = [
         "./gen_makefile.py",
@@ -103,6 +99,7 @@ def init():
         "no_systemd.opts",
         "werror.opts",
         os.path.join(testenv.data_dir, "osmo-dev/osmo-bts-trx.opts"),
+        "--autoreconf-in-src-copy",
     ] + extra_opts
 
     cwd = get_osmo_dev_dir()
