@@ -32,8 +32,10 @@ testsuite for reference.
 When using `-C`, testenv uses a `.linux` file in the `osmo-ttcn3-hacks` dir as
 kernel. You can download a pre-built kernel from jenkins:
 
+```
 $ wget -O .linux "https://jenkins.osmocom.org/jenkins/job/build-kernel-torvalds/lastSuccessfulBuild/artifact/output/linux"
 $ wget -O .linux "https://jenkins.osmocom.org/jenkins/job/build-kernel-net-next/lastSuccessfulBuild/artifact/output/linux"
+```
 
 Or build your own kernel, see:
 https://gitea.osmocom.org/osmocom/osmo-ci/src/branch/master/scripts/kernel
