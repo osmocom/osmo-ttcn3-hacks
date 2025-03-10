@@ -1,0 +1,327 @@
+module S1GW_UEMux {
+
+/* UE Multiplexer, runs on top of ConnHdlr component, dispatches S1AP PDUs
+ * to/from the UE components.  In order to receive S1AP PDUs, a UE component
+ * needs to subscribe for MME_UE_S1AP_ID and/or ENB_UE_S1AP_ID.
+ *
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
+ *
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from S1AP_IEs all;
+import from S1AP_Types all;
+import from S1AP_PDU_Contents all;
+import from S1AP_PDU_Descriptions all;
+import from S1AP_Functions all;
+import from S1GW_ConnHdlr all;
+
+private type enumerated S1AP_PDU_DIR {
+	S1AP_PDU_DIR_FROM_MME,
+	S1AP_PDU_DIR_FROM_ENB
+};
+
+private type record S1AP_dPDU {
+	S1AP_PDU_DIR dir,
+	S1AP_PDU pdu
+};
+
+private altstep as_s1ap_dpdu(out S1AP_PDU pdu,
+			     template (present) S1AP_PDU_DIR dir := ?,
+			     template (present) S1AP_PDU tr_pdu := ?)
+runs on UEMuxUE {
+	var S1AP_dPDU dpdu;
+
+	[] UEMUX_CONN.receive(S1AP_dPDU:{dir, tr_pdu}) -> value dpdu {
+		pdu := dpdu.pdu;
+	}
+}
+
+type port UEMUX_CONN_PT message {
+	inout S1AP_dPDU;
+} with { extension "internal" };
+
+type component UEMuxUE {
+	port UEMUX_CONN_PT UEMUX_CONN;
+	port UEMUX_PROC_PT UEMUX_PROC;
+};
+
+type component UEMux_CT extends ConnHdlr, UEMuxUE {
+	/* registered UE components */
+	var UE_ConnList g_uemux_list := { };
+};
+
+
+/* represents a single UE connection */
+private type record UE_ConnData {
+	UEMuxUE vc_conn,
+	MME_UE_S1AP_ID mme_ue_id optional,
+	ENB_UE_S1AP_ID enb_ue_id optional
+};
+private type record of UE_ConnData UE_ConnList;
+
+/***********************************************************************************
+ * UE connection management API
+ **********************************************************************************/
+
+/* find a UE connection [index] by an MME_UE_S1AP_ID */
+private function f_UEMux_find_ue_by_mme_ue_id(MME_UE_S1AP_ID mme_ue_id)
+runs on UEMux_CT return integer {
+	for (var integer i := 0; i < lengthof(g_uemux_list); i := i + 1) {
+		if (g_uemux_list[i].mme_ue_id == mme_ue_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* find a UE connection [index] by an ENB_UE_S1AP_ID */
+private function f_UEMux_find_ue_by_enb_ue_id(ENB_UE_S1AP_ID enb_ue_id)
+runs on UEMux_CT return integer {
+	for (var integer i := 0; i < lengthof(g_uemux_list); i := i + 1) {
+		if (g_uemux_list[i].enb_ue_id == enb_ue_id) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* find a UE connection [index] for the given S1AP PDU */
+private function f_UEMux_find_ue_for_pdu(in S1AP_PDU pdu)
+runs on UEMux_CT return integer {
+	var template (omit) MME_UE_S1AP_ID mme_ue_id;
+	var template (omit) ENB_UE_S1AP_ID enb_ue_id;
+	var integer idx;
+
+	mme_ue_id := f_S1AP_get_MME_UE_S1AP_ID(pdu);
+	if (isvalue(mme_ue_id)) {
+		idx := f_UEMux_find_ue_by_mme_ue_id(valueof(mme_ue_id));
+		if (idx != -1) {
+			return idx;
+		}
+	}
+
+	enb_ue_id := f_S1AP_get_ENB_UE_S1AP_ID(pdu);
+	if (isvalue(enb_ue_id)) {
+		idx := f_UEMux_find_ue_by_enb_ue_id(valueof(enb_ue_id));
+		if (idx != -1) {
+			return idx;
+		}
+	}
+
+	return -1;
+}
+
+/* find a UE connection [index] by component reference */
+private function f_UEMux_find_ue_by_vc_conn(UEMuxUE vc_conn)
+runs on UEMux_CT return integer {
+	for (var integer i := 0; i < lengthof(g_uemux_list); i := i + 1) {
+		if (g_uemux_list[i].vc_conn == vc_conn) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+private function f_UEMux_route_pdu(S1AP_dPDU dpdu)
+runs on UEMux_CT {
+	var integer idx;
+
+	idx := f_UEMux_find_ue_for_pdu(dpdu.pdu);
+	if (idx >= 0) {
+		UEMUX_CONN.send(dpdu) to g_uemux_list[idx].vc_conn;
+	} else {
+		log("S1AP PDU cannot be routed: ", dpdu.pdu);
+	}
+}
+
+/* add a new UE connection, return its index */
+private function f_UEMux_ue_add(UEMuxUE vc_conn)
+runs on UEMux_CT return integer {
+	var integer idx;
+
+	idx := f_UEMux_find_ue_by_vc_conn(vc_conn);
+	if (idx != -1) { /* already registered */
+		return idx;
+	}
+
+	idx := lengthof(g_uemux_list);
+	g_uemux_list[idx] := { vc_conn, omit, omit };
+	log("UE ", vc_conn, " is registered (idx=", idx, ")");
+
+	return idx;
+}
+
+/* subscribe a UE component for S1AP PDUs with the given MME-UE-ID */
+private function f_UEMux_subscribe_for_mme_ue_id(UEMuxUE vc_conn,
+						 MME_UE_S1AP_ID mme_ue_id)
+runs on UEMux_CT {
+	var integer idx;
+
+	if (f_UEMux_find_ue_by_mme_ue_id(mme_ue_id) != -1) {
+		setverdict(fail, "MME-UE-ID ", mme_ue_id," is already used");
+		mtc.stop;
+	}
+
+	idx := f_UEMux_ue_add(vc_conn);
+	g_uemux_list[idx].mme_ue_id := mme_ue_id;
+}
+
+/* subscribe a UE component for S1AP PDUs with the given ENB-UE-ID */
+private function f_UEMux_subscribe_for_enb_ue_id(UEMuxUE vc_conn,
+						 ENB_UE_S1AP_ID enb_ue_id)
+runs on UEMux_CT {
+	var integer idx;
+
+	if (f_UEMux_find_ue_by_enb_ue_id(enb_ue_id) != -1) {
+		setverdict(fail, "ENB-UE-ID ", enb_ue_id," is already used");
+		mtc.stop;
+	}
+
+	idx := f_UEMux_ue_add(vc_conn);
+	g_uemux_list[idx].enb_ue_id := enb_ue_id;
+}
+
+/* unsubscribe a UE component */
+private function f_UEMux_unsubscribe(UEMuxUE vc_conn)
+runs on UEMux_CT {
+	var UE_ConnList ue_list := { };
+
+	for (var integer i := 0; i < lengthof(g_uemux_list); i := i + 1) {
+		if (g_uemux_list[i].vc_conn != vc_conn) {
+			ue_list := ue_list & { g_uemux_list[i] };
+		}
+	}
+
+	if (lengthof(ue_list) == lengthof(g_uemux_list)) {
+		setverdict(fail, "UE ", vc_conn, " is not known");
+		mtc.stop;
+	}
+
+	g_uemux_list := ue_list;
+	log("UE ", vc_conn, " is unregistered");
+}
+
+signature UEMux_subscribe_for_mme_ue_id(in MME_UE_S1AP_ID mme_ue_id);
+signature UEMux_subscribe_for_enb_ue_id(in ENB_UE_S1AP_ID enb_ue_id);
+signature UEMux_unsubscribe();
+
+type port UEMUX_PROC_PT procedure {
+	inout UEMux_subscribe_for_mme_ue_id;
+	inout UEMux_subscribe_for_enb_ue_id;
+	inout UEMux_unsubscribe;
+} with { extension "internal" };
+
+/***********************************************************************************
+ * public API
+ **********************************************************************************/
+
+function f_UEMuxUE_subscribe_for_mme_ue_id(MME_UE_S1AP_ID mme_ue_id)
+runs on UEMuxUE {
+	UEMUX_PROC.call(UEMux_subscribe_for_mme_ue_id:{mme_ue_id}) {
+		[] UEMUX_PROC.getreply(UEMux_subscribe_for_mme_ue_id:{mme_ue_id});
+	}
+}
+
+function f_UEMuxUE_subscribe_for_enb_ue_id(ENB_UE_S1AP_ID enb_ue_id)
+runs on UEMuxUE {
+	UEMUX_PROC.call(UEMux_subscribe_for_enb_ue_id:{enb_ue_id}) {
+		[] UEMUX_PROC.getreply(UEMux_subscribe_for_enb_ue_id:{enb_ue_id});
+	}
+}
+
+function f_UEMuxUE_unsubscribe()
+runs on UEMuxUE {
+	UEMUX_PROC.call(UEMux_unsubscribe:{}) {
+		[] UEMUX_PROC.getreply(UEMux_unsubscribe:{});
+	}
+}
+
+function f_UEMuxUE_tx_s1ap_from_mme(template (value) S1AP_PDU pdu)
+runs on UEMuxUE {
+	var S1AP_dPDU dpdu := { S1AP_PDU_DIR_FROM_MME, valueof(pdu) };
+	UEMUX_CONN.send(dpdu);
+}
+
+function f_UEMuxUE_tx_s1ap_from_enb(template (value) S1AP_PDU pdu)
+runs on UEMuxUE {
+	var S1AP_dPDU dpdu := { S1AP_PDU_DIR_FROM_ENB, valueof(pdu) };
+	UEMUX_CONN.send(dpdu);
+}
+
+altstep as_UEMuxUE_s1ap_from_mme(out S1AP_PDU pdu,
+				 template (present) S1AP_PDU tr_pdu := ?)
+runs on UEMuxUE {
+	[] as_s1ap_dpdu(pdu, S1AP_PDU_DIR_FROM_MME, tr_pdu);
+}
+
+altstep as_UEMuxUE_s1ap_from_enb(out S1AP_PDU pdu,
+				 template (present) S1AP_PDU tr_pdu := ?)
+runs on UEMuxUE {
+	[] as_s1ap_dpdu(pdu, S1AP_PDU_DIR_FROM_ENB, tr_pdu);
+}
+
+type function void_fn2(charstring id) runs on UEMux_CT;
+
+function f_UEMux_init(void_fn2 fn, charstring id, ConnHdlrPars pars)
+runs on UEMux_CT {
+	g_pars := pars;
+	fn.apply(id);
+}
+
+function main() runs on UEMux_CT {
+	while (true) {
+		var MME_UE_S1AP_ID mme_ue_id;
+		var ENB_UE_S1AP_ID enb_ue_id;
+		var UEMuxUE vc_conn;
+		var S1AP_PDU pdu;
+
+		alt {
+		/* MME originated S1AP PDU to S1GW */
+		[] as_s1ap_dpdu(pdu, S1AP_PDU_DIR_FROM_MME) {
+			f_ConnHdlr_tx_s1ap_from_mme(pdu);
+			}
+		/* eNB originated S1AP PDU to S1GW */
+		[] as_s1ap_dpdu(pdu, S1AP_PDU_DIR_FROM_ENB) {
+			f_ConnHdlr_tx_s1ap_from_enb(pdu);
+			}
+
+		/* MME originated S1AP PDU from S1GW */
+		[] as_ConnHdlr_s1ap_from_mme(pdu) {
+			f_UEMux_route_pdu({S1AP_PDU_DIR_FROM_MME, pdu});
+			}
+		/* eNB originated S1AP PDU from S1GW */
+		[] as_ConnHdlr_s1ap_from_enb(pdu) {
+			f_UEMux_route_pdu({S1AP_PDU_DIR_FROM_ENB, pdu});
+			}
+
+		/* UE subsciption procedures */
+		[] UEMUX_PROC.getcall(UEMux_subscribe_for_mme_ue_id:{?}) -> param(mme_ue_id) sender vc_conn {
+			f_UEMux_subscribe_for_mme_ue_id(vc_conn, mme_ue_id);
+			UEMUX_PROC.reply(UEMux_subscribe_for_mme_ue_id:{mme_ue_id}) to vc_conn;
+			}
+		[] UEMUX_PROC.getcall(UEMux_subscribe_for_enb_ue_id:{?}) -> param(enb_ue_id) sender vc_conn {
+			f_UEMux_subscribe_for_enb_ue_id(vc_conn, enb_ue_id);
+			UEMUX_PROC.reply(UEMux_subscribe_for_enb_ue_id:{enb_ue_id}) to vc_conn;
+			}
+		[] UEMUX_PROC.getcall(UEMux_unsubscribe:{}) -> sender vc_conn {
+			f_UEMux_unsubscribe(vc_conn);
+			UEMUX_PROC.reply(UEMux_unsubscribe:{}) to vc_conn;
+			}
+		}
+	}
+}
+
+}
