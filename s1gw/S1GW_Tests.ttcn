@@ -43,6 +43,7 @@ import from StatsD_Checker all;
 
 import from S1AP_Server all;
 import from S1GW_ConnHdlr all;
+import from S1GW_UEMux all;
 
 modulepar {
 	charstring mp_s1gw_enb_ip := "127.0.1.1";	/* eNB facing address of the S1GW */
@@ -58,6 +59,7 @@ modulepar {
 	charstring mp_statsd_prefix := "s1gw.";
 
 	integer mp_multi_enb_num := 42;			/* number of eNBs in _multi TCs */
+	integer mp_multi_ue_num := 128;			/* number of UEs in _multi TCs */
 }
 
 type component test_CT extends StatsD_Checker_CT {
@@ -168,12 +170,8 @@ return ERabList {
 	return erabs;
 }
 
-function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
-runs on test_CT return ConnHdlr {
-	var ConnHdlr vc_conn;
-	var charstring id := "ConnHdlr-" & testcasename() & "-" & int2str(pars.idx);
-
-	vc_conn := ConnHdlr.create(id) alive;
+function f_ConnHdlr_connect(ConnHdlr vc_conn)
+runs on test_CT {
 	if (isbound(vc_STATSD) and vc_STATSD.running) {
 		connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
 	}
@@ -186,9 +184,79 @@ runs on test_CT return ConnHdlr {
 		connect(vc_conn:PFCP_PROC, vc_PFCP:CLIENT_PROC);
 	}
 	f_MutexDisp_connect(vc_mutex_disp, vc_conn);
+}
+
+function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
+runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := "ConnHdlr-" & testcasename() & "-" & int2str(pars.idx);
+
+	vc_conn := ConnHdlr.create(id) alive;
+	f_ConnHdlr_connect(vc_conn);
 	vc_conn.start(f_ConnHdlr_init(fn, id, pars));
 
 	return vc_conn;
+}
+
+function f_UEMux_spawn(void_fn2 fn, ConnHdlrPars pars)
+runs on test_CT return UEMux_CT {
+	var UEMux_CT vc_conn;
+	var charstring id := "UEMux-" & testcasename() & "-" & int2str(pars.idx);
+
+	vc_conn := UEMux_CT.create(id) alive;
+	f_ConnHdlr_connect(vc_conn);
+	vc_conn.start(f_UEMux_init(fn, id, pars));
+
+	return vc_conn;
+}
+
+function f_TC_UEMux_main(charstring id) runs on UEMux_CT {
+	f_ConnHdlr_s1ap_register(g_pars.genb_id);
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_s1ap_setup(g_pars.genb_id);
+
+	S1GW_UEMux.main();
+
+	f_ConnHdlr_s1ap_disconnect();
+	f_ConnHdlr_s1ap_unregister(g_pars.genb_id);
+}
+
+function f_UEMuxUE_create(in UEMux_CT vc_uemux,
+			  in ConnHdlrPars pars,
+			  MME_UE_S1AP_ID mme_ue_id,
+			  ENB_UE_S1AP_ID enb_ue_id)
+runs on test_CT return UEMuxUE {
+	var charstring id := "UEMuxUE-" & testcasename();
+	var UEMuxUE vc_ue;
+
+	vc_ue := UEMuxUE.create(id) alive;
+	connect(vc_ue:UEMUX_CONN, vc_uemux:UEMUX_CONN);
+	connect(vc_ue:UEMUX_PROC, vc_uemux:UEMUX_PROC);
+
+	/* pre-initialize the component */
+	vc_ue.start(f_UEMuxUE_init(pars, mme_ue_id, enb_ue_id));
+	vc_ue.done;
+
+	return vc_ue;
+}
+
+function f_UEMuxUE_init(in ConnHdlrPars pars,
+			MME_UE_S1AP_ID mme_ue_id,
+			ENB_UE_S1AP_ID enb_ue_id)
+runs on UEMuxUE {
+	g_mme_ue_id := mme_ue_id;
+	g_enb_ue_id := enb_ue_id;
+
+	g_ies.tai := {
+		pLMNidentity := pars.genb_id.pLMNidentity,
+		tAC := int2oct(12345, 2), /* XXX: hard-coded */
+		iE_Extensions := omit
+	};
+	g_ies.eutran_cgi := {
+		pLMNidentity := pars.genb_id.pLMNidentity,
+		cell_ID := int2bit(pars.idx, 28),
+		iE_Extensions := omit
+	};
 }
 
 /* wait for all ConnHdlr in the given list to be .done() */
@@ -196,6 +264,14 @@ function f_ConnHdlrList_all_done(in ConnHdlrList vc_conns)
 runs on test_CT {
 	for (var integer i := 0; i < lengthof(vc_conns); i := i + 1) {
 		vc_conns[i].done;
+	}
+}
+
+/* wait for all UEMux_CT in the given list to be .done() */
+function f_UEMuxUEList_all_done(in UEMuxUEList vc_ues)
+runs on test_CT {
+	for (var integer i := 0; i < lengthof(vc_ues); i := i + 1) {
+		vc_ues[i].done;
 	}
 }
 
@@ -577,6 +653,70 @@ testcase TC_ue_ctx_release_cmd_compl3() runs on test_CT {
 	f_TC_exec(refers(f_TC_ue_ctx_release_cmd_compl), num_erabs := 3);
 }
 
+/* Test multiple UEs concurrently doing the following:
+ *   eNB -> MME: INITIAL UE MESSAGE
+ *   eNB <- MME: DOWNLINK NAS TRANSPORT
+ *   eNB -> MME: UPLINK NAS TRANSPORT
+ *   eNB <- MME: DOWNLINK NAS TRANSPORT
+ *   eNB <- MME: UE CONTEXT RELEASE COMMAND
+ *   eNB -> MME: UE CONTEXT RELEASE COMPLETE
+ * All S1AP PDUs are expected to be forwarded as-is. */
+function f_TC_uemux_uldl_nas_release()
+runs on UEMuxUE {
+	var template (value) S1AP_PDU pdu;
+	var float Tval := 5.0;
+
+	f_UEMuxUE_subscribe_for_mme_ue_id(g_mme_ue_id);
+	f_UEMuxUE_subscribe_for_enb_ue_id(g_enb_ue_id);
+
+	/* eNB -> MME: INITIAL UE MESSAGE */
+	pdu := ts_S1AP_InitialUE(g_enb_ue_id, ''O, g_ies.tai, g_ies.eutran_cgi, mo_Signalling);
+	f_UEMuxUE_trx_s1ap_from_enb(pdu, pdu, Tval);
+	/* eNB <- MME: DOWNLINK NAS TRANSPORT */
+	pdu := ts_S1AP_DlNasTransport(g_mme_ue_id, g_enb_ue_id, ''O);
+	f_UEMuxUE_trx_s1ap_from_mme(pdu, pdu, Tval);
+	/* eNB -> MME: UPLINK NAS TRANSPORT */
+	pdu := ts_S1AP_UlNasTransport(g_mme_ue_id, g_enb_ue_id, ''O, g_ies.eutran_cgi, g_ies.tai);
+	f_UEMuxUE_trx_s1ap_from_enb(pdu, pdu, Tval);
+	/* eNB <- MME: DOWNLINK NAS TRANSPORT */
+	pdu := ts_S1AP_DlNasTransport(g_mme_ue_id, g_enb_ue_id, ''O);
+	f_UEMuxUE_trx_s1ap_from_mme(pdu, pdu, Tval);
+
+	var UE_S1AP_IDs ue_ids := {
+		uE_S1AP_ID_pair := {
+			mME_UE_S1AP_ID := g_mme_ue_id,
+			eNB_UE_S1AP_ID := g_enb_ue_id,
+			iE_Extensions := omit
+		}
+	};
+
+	/* eNB <- MME: UE CONTEXT RELEASE COMMAND */
+	pdu := ts_S1AP_UeContextReleaseCmd(mme_ids := ue_ids,
+					   cause := {nas := normal_release});
+	f_UEMuxUE_trx_s1ap_from_mme(pdu, pdu, Tval);
+	/* eNB -> MME: UE CONTEXT RELEASE COMPLETE */
+	pdu := ts_S1AP_UeContextReleaseCompl(g_mme_ue_id, g_enb_ue_id);
+	f_UEMuxUE_trx_s1ap_from_enb(pdu, pdu, Tval);
+
+	f_UEMuxUE_unsubscribe();
+}
+testcase TC_uemux_uldl_nas_release() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
+	var UEMuxUEList vc_ues;
+	var UEMux_CT vc_uemux;
+
+	f_init();
+
+	vc_uemux := f_UEMux_spawn(refers(f_TC_UEMux_main), pars);
+
+	for (var integer i := 0; i < mp_multi_ue_num; i := i + 1) {
+		vc_ues[i] := f_UEMuxUE_create(vc_uemux, pars, i, i);
+		vc_ues[i].start(f_TC_uemux_uldl_nas_release());
+	}
+
+	f_UEMuxUEList_all_done(vc_ues);
+}
+
 function f_TC_pfcp_heartbeat(charstring id) runs on ConnHdlr {
 	var integer rts := f_PFCPEM_get_recovery_timestamp();
 	var PDU_PFCP pfcp_pdu;
@@ -618,6 +758,7 @@ control {
 	execute( TC_ue_ctx_release_req3() );
 	execute( TC_ue_ctx_release_cmd_compl() );
 	execute( TC_ue_ctx_release_cmd_compl3() );
+	execute( TC_uemux_uldl_nas_release() );
 	execute( TC_pfcp_heartbeat() );
 }
 
