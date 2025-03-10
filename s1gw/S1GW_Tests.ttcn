@@ -43,6 +43,7 @@ import from StatsD_Checker all;
 
 import from S1AP_Server all;
 import from S1GW_ConnHdlr all;
+import from S1GW_UEMux all;
 
 modulepar {
 	charstring mp_s1gw_enb_ip := "127.0.1.1";	/* eNB facing address of the S1GW */
@@ -168,12 +169,8 @@ return ERabList {
 	return erabs;
 }
 
-function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
-runs on test_CT return ConnHdlr {
-	var ConnHdlr vc_conn;
-	var charstring id := "ConnHdlr-" & testcasename() & "-" & int2str(pars.idx);
-
-	vc_conn := ConnHdlr.create(id) alive;
+function f_ConnHdlr_connect(ConnHdlr vc_conn)
+runs on test_CT {
 	if (isbound(vc_STATSD) and vc_STATSD.running) {
 		connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
 	}
@@ -186,7 +183,28 @@ runs on test_CT return ConnHdlr {
 		connect(vc_conn:PFCP_PROC, vc_PFCP:CLIENT_PROC);
 	}
 	f_MutexDisp_connect(vc_mutex_disp, vc_conn);
+}
+
+function f_ConnHdlr_spawn(void_fn fn, ConnHdlrPars pars)
+runs on test_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := "ConnHdlr-" & testcasename() & "-" & int2str(pars.idx);
+
+	vc_conn := ConnHdlr.create(id) alive;
+	f_ConnHdlr_connect(vc_conn);
 	vc_conn.start(f_ConnHdlr_init(fn, id, pars));
+
+	return vc_conn;
+}
+
+function f_UEMux_spawn(void_fn2 fn, ConnHdlrPars pars)
+runs on test_CT return UEMux_CT {
+	var UEMux_CT vc_conn;
+	var charstring id := "UEMux-" & testcasename() & "-" & int2str(pars.idx);
+
+	vc_conn := UEMux_CT.create(id) alive;
+	f_ConnHdlr_connect(vc_conn);
+	vc_conn.start(f_UEMux_init(fn, id, pars));
 
 	return vc_conn;
 }
@@ -592,6 +610,52 @@ function f_TC_pfcp_heartbeat(charstring id) runs on ConnHdlr {
 }
 testcase TC_pfcp_heartbeat() runs on test_CT {
 	f_TC_exec(refers(f_TC_pfcp_heartbeat));
+}
+
+function f_TC_UEMux(charstring id) runs on UEMux_CT {
+	f_ConnHdlr_s1ap_register(g_pars.genb_id);
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_s1ap_setup(g_pars.genb_id);
+
+	S1GW_UEMux.main();
+
+	f_ConnHdlr_s1ap_disconnect();
+	f_ConnHdlr_s1ap_unregister(g_pars.genb_id);
+}
+function f_TC_test(MME_UE_S1AP_ID mme_ue_id,
+		   ENB_UE_S1AP_ID enb_ue_id)
+runs on UEMuxUE {
+	log("UEMuxUE started");
+	f_UEMuxUE_subscribe_for_mme_ue_id(mme_ue_id);
+	f_UEMuxUE_subscribe_for_enb_ue_id(enb_ue_id);
+	log("UEMuxUE subscribed");
+
+	f_UEMuxUE_tx_s1ap_from_enb(ts_S1AP_UeContextReleaseReq(mme_ue_id, enb_ue_id, { nas := normal_release }));
+	as_UEMuxUE_s1ap_from_enb(-, tr_S1AP_UeContextReleaseReq(mme_ue_id, enb_ue_id));
+
+	f_UEMuxUE_unsubscribe();
+}
+testcase TC_uemux() runs on test_CT {
+	var ConnHdlrPars pars := valueof(t_ConnHdlrPars);
+	var UEMuxUE vc_ues[512];
+	var UEMux_CT vc_uemux;
+
+	f_init();
+
+	vc_uemux := f_UEMux_spawn(refers(f_TC_UEMux), pars);
+
+	for (var integer i := 0; i < sizeof(vc_ues); i := i + 1) {
+		var charstring id := "UEMuxUE-" & testcasename();
+
+		vc_ues[i] := UEMuxUE.create(id) alive;
+		connect(vc_ues[i]:UEMUX_CONN, vc_uemux:UEMUX_CONN);
+		connect(vc_ues[i]:UEMUX_PROC, vc_uemux:UEMUX_PROC);
+		vc_ues[i].start(f_TC_test(i, i));
+	}
+
+	for (var integer i := 0; i < sizeof(vc_ues); i := i + 1) {
+		vc_ues[i].done;
+	}
 }
 
 control {
