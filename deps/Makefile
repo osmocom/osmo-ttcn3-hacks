@@ -34,6 +34,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.LLC_v7.1.0 \
+			titan.ProtocolModules.M3UA \
 			titan.ProtocolModules.MobileL3_v13.4.0 \
 			titan.ProtocolModules.SMPP \
 			titan.ProtocolModules.TCP \
@@ -65,8 +66,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
 			titan.ProtocolEmulations.SCCP \
-			titan.ProtocolModules.BSSGP_v13.0.0 \
-			titan.ProtocolModules.M3UA
+			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
 
