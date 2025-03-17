@@ -43,6 +43,8 @@ def parse_args():
         "  ./testenv.py run mgw\n"
         "  ./testenv.py run mgw --test TC_crcx\n"
         "  ./testenv.py run mgw --podman --binary-repo osmocom:latest\n"
+        "  ./testenv.py run mgw --podman --binary-repo osmocom:nightly\n"
+        "  ./testenv.py run mgw --podman --binary-repo osmocom:nightly:asan\n"
         "  ./testenv.py run mgw --io-uring\n"
         "  ./testenv.py run ggsn --config open5gs\n"
         "  ./testenv.py run ggsn --config 'osmo_ggsn_v4_only'\n"
