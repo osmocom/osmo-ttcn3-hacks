@@ -870,8 +870,7 @@ private function call_established_fn_wait_ims_coord_cmd_call_rejected(SIPConnHdl
 	IMS_COORD.receive(IMS_COORD_CMD_CALL_REJECTED);
 }
 
-private function f_TC_ims_call_mo(boolean close_tcp_after_registration := false,
-				  boolean use_precondition_ext := true,
+private function f_TC_ims_call_mo(boolean use_precondition_ext := true,
 				  boolean use_session_timer := false,
 				  call_established_fn call_established_cb := refers(call_established_fn_sleep1),
 				  void_fn sip_fn := refers(f_TC_internal_call_mo),
@@ -885,7 +884,6 @@ private function f_TC_ims_call_mo(boolean close_tcp_after_registration := false,
 
 	sip_pars := f_init_ConnHdlrPars(idx := 1);
 	ims_pars := f_init_IMS_ConnHdlrPars();
-	ims_pars.subscr.close_tcp_after_registration := close_tcp_after_registration;
 
 	f_ims_call_mo_configure(sip_pars, ims_pars);
 	ims_pars.subscr.cp.support_precondition_ext := use_precondition_ext;
@@ -946,13 +944,6 @@ testcase TC_ims_call_mo_noprecondition() runs on test_CT {
 testcase TC_ims_call_mo_holdresume_mo() runs on test_CT {
 	f_TC_ims_call_mo(sip_fn := refers(f_TC_internal_call_mo_with_holdresume),
 			 ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr_with_holdresume));
-}
-/* TC_ims_call_mo, but IMS server closes the TCP conn used during 2nd register after ACKing it.
- * Asterisk should consider it is still registered even if that TCP conn was closed,
- * and MO call should work the same.
- */
-testcase TC_ims_call_mo_after_tcp_conn_closed() runs on test_CT {
-	f_TC_ims_call_mo(close_tcp_after_registration := true);
 }
 
 /* Test a 2nd call initiated from a local SIP UA towards IMS after having HOLD the 1st one. */
@@ -1017,6 +1008,70 @@ testcase TC_ims_call_mo_2nd_mo_rejected() runs on test_CT {
 testcase TC_ims_call_mo_2nd_mt_rejected() runs on test_CT {
 	f_TC_ims_call_mo(call_established_cb := refers(call_established_fn_wait_ims_coord_cmd_call_rejected),
 			 ims_fn := refers(f_TC_ims_call_mo_IMS_ConnHdlr_2nd_mt_rejected));
+}
+
+/* TC_ims_call_mo, but IMS server closes the TCP conn used during 2nd register after ACKing it.
+ * Asterisk should then re-connect and re-register before placing a call towards IMS. */
+private function f_TC_ims_call_mo_after_tcp_conn_closed_IMS_ConnHdlr(charstring id) runs on IMS_ConnHdlr {
+	f_create_sip_expect(valueof(ts_SipUrl_from_Addr_Union(g_pars.subscr.registrar_sip_record.addr)));
+	/* First full register at the IMS: */
+	as_IMS_register();
+	f_sleep(1.0);
+	/* IMS closes TCP conn (TCP FIN/ACK): */
+	f_IMS_tcp_close();
+	/* Proceed similar to TC_ims_call_mo: expect new full register + MO call: */
+	f_TC_ims_call_mo_IMS_ConnHdlr(id);
+}
+testcase TC_ims_call_mo_after_tcp_conn_closed() runs on test_CT {
+	var SIPConnHdlrPars sip_pars;
+	var IMS_ConnHdlrPars ims_pars;
+	var SIPConnHdlr vc_conn_sip;
+	var IMS_ConnHdlr vc_conn_ims;
+
+	f_init();
+
+	sip_pars := f_init_ConnHdlrPars(idx := 1);
+	ims_pars := f_init_IMS_ConnHdlrPars();
+
+	f_ims_call_mo_configure(sip_pars, ims_pars);
+	ims_pars.subscr.cp.support_precondition_ext := true;
+	ims_pars.subscr.cp.require_precondition_ext := true;
+	ims_pars.subscr.cp.mo.tx_coord_cmd_invite_trying := true;
+	ims_pars.subscr.cp.mo.support_timer_enable := false;
+
+	vc_conn_ims := f_start_handler_IMS(refers(f_TC_ims_call_mo_after_tcp_conn_closed_IMS_ConnHdlr), ims_pars);
+	vc_conn_sip := f_start_handler(refers(f_TC_internal_call_mo), sip_pars);
+
+	COORD.receive(COORD_CMD_REGISTERED) from vc_conn_sip;
+
+	f_AMI_IMS_register(ims_pars);
+	/* Here IMS_ConnHdlr will have dropped the TCP conn from IMS. */
+	as_AMI_IMS_register_Auth(ims_pars);
+
+	f_ims_call_mo_establish(vc_conn_sip, vc_conn_ims);
+
+	/* Call on-going */
+	var call_established_fn call_established_cb := refers(call_established_fn_sleep1);
+	call_established_cb.apply(sip_pars, ims_pars);
+
+	COORD.send(COORD_CMD_HANGUP) to vc_conn_sip;
+	IMS_COORD.receive(IMS_COORD_CMD_CALL_FINISHED) from vc_conn_ims;
+
+	/* Notify network released dedicated bearer: */
+	AMI_CLIENT.clear;
+	f_ami_action_DedicatedBearerStatus(AMI_CLIENT,
+					   g_asterisk_chan_name,
+					   "Down", fail_others := false);
+
+	/* Trigger unregistration: */
+	f_sleep(1.0);
+	COORD.send(COORD_CMD_UNREGISTER) to vc_conn_sip;
+	AMI_CLIENT.clear;
+	f_AMI_IMS_unregister(ims_pars);
+
+	vc_conn_sip.done;
+	vc_conn_ims.done;
+	f_shutdown();
 }
 
 /* Test MT call initiated by IMS */
