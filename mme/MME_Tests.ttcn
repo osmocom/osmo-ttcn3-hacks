@@ -166,7 +166,9 @@ type record ConnHdlrPars {
 	/* copied over from MTC_CT on start of component */
 	UeParams ue_pars,
 	/* currently used MME (index into enb_pars, S1AP, ...) */
-	integer mme_idx
+	integer mme_idx,
+	/* Currently set KSI */
+	NAS_KeySetIdentifierV kset_id
 }
 
 modulepar {
@@ -399,7 +401,8 @@ runs on MTC_CT return ConnHdlrPars {
 	var ConnHdlrPars pars := {
 		enb_pars := g_enb_pars,
 		ue_pars := g_ue_pars[ue_idx],
-		mme_idx := 0
+		mme_idx := 0,
+		kset_id := valueof(ts_NAS_KeySetIdentifierV('000'B, c_NAS_TSC_NATIVE_SEC_CTX))
 	};
 	return pars;
 }
@@ -567,9 +570,21 @@ private const UENetworkCapabilityV c_NAS_defaultUeNetCap := {
 
 private const octetstring c_NAS_defaultAPN := '00'O;
 
+private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (present) NAS_KeySetIdentifierV {
+	/* KSI not yet set, expect whatever assignment from network: */
+	if (g_pars.kset_id.identifier == c_NAS_KEY_SET_ID_NO_KEY) {
+		return tr_NAS_KeySetIdentifierV(?, ?);
+	} else {
+		/* Expect specific kset_id. Upon transmitting it UE->Network, f_attach()
+		 * has updated it to the expected value. */
+		return g_pars.kset_id;
+	}
+}
 private altstep as_s1ap_handle_auth() runs on ConnHdlr {
 	var PDU_NAS_EPS rx_nas;
-	[] S1AP.receive(tr_NAS_AuthReq) -> value rx_nas {
+	var template (present) NAS_KeySetIdentifierV kset_id := f_tr_ConnHdlr_kset_id();
+	[] S1AP.receive(tr_NAS_AuthReq(kset_id := kset_id)) -> value rx_nas {
+		g_pars.kset_id := rx_nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_AuthenticationRequest.nasKeySetId;
 		/* static XRES result as we fixed the HSS RAND value and always have the following
 		RAND:   20080c3818183b522614162c07601d0d
 		AUTN:   f11b89a2a8be00001f9c526f3d75d44c
@@ -610,11 +625,7 @@ private altstep as_s1ap_handle_sec_mode() runs on ConnHdlr {
 		    typeOfCiphering := '000'B,
 		    spare2 := '0'B
 	};
-	var NAS_KeySetIdentifierV kset_id := {
-		identifier := '000'B,
-		tSC := '0'B
-	};
-	[] S1AP.receive(tr_NAS_SecModeCmd(alg, kset_id, ?)) {
+	[] S1AP.receive(tr_NAS_SecModeCmd(alg, f_tr_ConnHdlr_kset_id(), ?)) {
 		/* TODO: apply below integrity and ciphering based on
 		 * Security Mode Command field "NAS security algorithms - Selected NAS security algorithms"*/
 
@@ -1032,7 +1043,7 @@ private function f_attach() runs on ConnHdlr {
 
 	nas_esm := ts_NAS_PdnConnReq(bearer_id := '0000'B, proc_tid := int2bit(1,8),
 					pdn_type := NAS_PDN_T_IPv4, req_type := '001'B);
-	nas_emm := ts_NAS_AttachRequest(att_type := '000'B, kset_id := '000'B, mobile_id := mi,
+	nas_emm := ts_NAS_AttachRequest(att_type := '000'B, kset_id := g_pars.kset_id, mobile_id := mi,
 					ue_net_cap := c_NAS_defaultUeNetCap,
 					esm_enc := enc_PDU_NAS_EPS(valueof(nas_esm)));
 	var template (value) S1AP_PDU tx;
@@ -1041,6 +1052,16 @@ private function f_attach() runs on ConnHdlr {
 				p_eUTRAN_CGI := ts_enb_S1AP_CGI(g_pars.enb_pars[g_pars.mme_idx]),
 				p_rrcCause := mo_Signalling);
 	S1AP.send(tx);
+
+	/* Expect updated KSI from network following 5G Core standards
+	*(open5gs.git 70310979c58fe186e9eaa06bec9d9a31f24ff7a1): */
+	if (g_pars.kset_id.identifier != c_NAS_KEY_SET_ID_NO_KEY) {
+		if (g_pars.kset_id.identifier == '110'B) {
+			g_pars.kset_id.identifier := '000'B;
+		} else {
+			g_pars.kset_id.identifier := int2bit(bit2int(g_pars.kset_id.identifier) + 1, 3);
+		}
+	}
 
 	as_DIA_AuthInfo();
 	as_s1ap_handle_auth();
@@ -1407,7 +1428,7 @@ private function f_TC_tau_unknown_guti(ConnHdlrPars pars) runs on ConnHdlr {
 
 	var hexstring mcc_mnc := f_convert_plmn(g_pars.enb_pars[g_pars.mme_idx].global_enb_id.pLMNidentity);
 	var EPS_MobileIdentityLV old_guti := valueof(ts_EPS_MobileId_GUTI(mcc_mnc, '0001'O, '01'O, 'AABBCCDD'O));
-	nas_tau := ts_PDU_NAS_EPS_TrackingAreaUpdateRequest(old_guti);
+	nas_tau := ts_PDU_NAS_EPS_TrackingAreaUpdateRequest(old_guti, g_pars.kset_id);
 
 	tx := ts_S1AP_InitialUE(p_eNB_value := 0, p_nasPdu := enc_PDU_NAS_EPS(valueof(nas_tau)),
 				p_tAI := ts_enb_S1AP_TAI(g_pars.enb_pars[g_pars.mme_idx]),
@@ -1534,6 +1555,7 @@ private function f_TC_ue_cell_reselect_geran_to_eutran(ConnHdlrPars pars) runs o
 	old_guti := ts_EPS_MobileId_GUTI_(guti_val);
 
 	nas_tau := ts_PDU_NAS_EPS_TrackingAreaUpdateRequest(old_guti,
+							    g_pars.kset_id,
 							    ts_PTMSI_SignatureTV(ptmsi_sig),
 							    ts_GUTI_TypeTV(GUTI_TYPE_MAPPED),
 							    ts_NonceTV('12345678'O),
@@ -1588,6 +1610,8 @@ testcase TC_ue_cell_reselect_geran_to_eutran() runs on MTC_CT {
 
 	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
 	var ConnHdlr vc_conn;
+	pars.kset_id := valueof(ts_NAS_KeySetIdentifierV(identifier := c_NAS_KEY_SET_ID_NO_KEY,
+							 tSC := c_NAS_TSC_NATIVE_SEC_CTX));
 	vc_conn := f_start_handler_with_pars(refers(f_TC_ue_cell_reselect_geran_to_eutran), pars);
 	vc_conn.done;
 }
