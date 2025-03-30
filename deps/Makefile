@@ -65,7 +65,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 			titan.TestPorts.MTP3asp \
-			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
