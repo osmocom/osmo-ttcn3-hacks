@@ -28,9 +28,9 @@ def init():
 
     prefix = f"testenv-{testenv.args.testsuite}-"
     if testenv.args.config:
-        prefix += f"{'-'.join(testenv.args.config).replace('*','')}-"
+        prefix += f"{'-'.join(testenv.args.config).replace('*', '')}-"
     if testenv.args.binary_repo:
-        prefix += f"{testenv.args.binary_repo.replace(':','-')}-"
+        prefix += f"{testenv.args.binary_repo.replace(':', '-')}-"
     prefix += datetime.datetime.now().strftime("%Y%m%d-%H%M")
     prefix += f"-{str(uuid.uuid4()).split('-', 1)[0]}"
 
