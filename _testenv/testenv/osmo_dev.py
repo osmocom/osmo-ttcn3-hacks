@@ -98,7 +98,7 @@ def init():
         "no_man_pages.opts",
         "no_systemd.opts",
         "werror.opts",
-        os.path.join(testenv.data_dir, "osmo-dev/osmo-bts-trx.opts"),
+        os.path.join(testenv.data_dir, "osmo-dev/testenv.opts"),
         "--autoreconf-in-src-copy",
     ] + extra_opts
 
