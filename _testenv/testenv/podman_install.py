@@ -20,7 +20,12 @@ def init():
     global sccp_dir
     global jobs
 
-    git_dir = os.path.join(testenv.args.cache, "git")
+    # Make the git dir we clone into specific to the repository we build
+    # against. Replace ":" because the libtool scripts fail to escape it when
+    # setting LD_LIBRARY_PATH, leading to "cannot open shared object file"
+    # errors.
+    git_dir = os.path.join(testenv.args.cache, "git", f"build_against_{testenv.args.binary_repo}".replace(":", "_"))
+
     sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
     jobs = multiprocessing.cpu_count() + 1
 
@@ -97,6 +102,14 @@ def clone_libosmo_sigtran():
         logging.debug("libosmo-sigtran: already cloned")
         return
 
+    branch = "master"
+    if testenv.args.binary_repo.endswith(":latest"):
+        ls_remote = testenv.cmd.run(
+            ["git", "ls-remote", "--tags", "https://gerrit.osmocom.org/libosmo-sigtran"], capture_output=True, text=True
+        )
+        branch = ls_remote.stdout.split("\n")[-2].split("refs/tags/")[1].split("^")[0]
+
+    logging.info(f"libosmo-sigtran: cloning {branch}")
     testenv.cmd.run(
         [
             "git",
@@ -105,6 +118,8 @@ def clone_libosmo_sigtran():
             "clone",
             "--depth",
             "1",
+            "--branch",
+            branch,
             "https://gerrit.osmocom.org/libosmo-sigtran",
         ]
     )
@@ -126,7 +141,12 @@ def from_source_sccp_demo_user():
         clone_libosmo_sigtran()
         logging.info("Building sccp_demo_user")
         testenv.cmd.run(["autoreconf", "-fi"], cwd=sccp_dir)
-        testenv.cmd.run(["./configure"], cwd=sccp_dir)
+
+        configure_cmd = ["./configure"]
+        if testenv.args.binary_repo.endswith(":asan"):
+            configure_cmd += ["--enable-sanitize"]
+        testenv.cmd.run(configure_cmd, cwd=sccp_dir)
+
         testenv.cmd.run(
             ["make", "-j", f"{jobs}", "libosmo-sigtran.la"],
             cwd=os.path.join(sccp_dir, "src"),
