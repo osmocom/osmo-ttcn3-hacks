@@ -45,9 +45,9 @@ def init_env():
         env_extra["TESTENV_GIT_DIR"] = testenv.podman_install.git_dir
     else:
         if testenv.args.podman:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "podman", "make")
+            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "podman", "make2")
         else:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make")
+            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make2")
 
     if testenv.args.kernel == "debian":
         env_extra["TESTENV_QEMU_KERNEL"] = "debian"
