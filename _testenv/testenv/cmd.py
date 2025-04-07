@@ -41,9 +41,7 @@ def init_env():
 
     env_extra["TERM"] = os.environ.get("TERM", "dumb")
 
-    if testenv.args.binary_repo:
-        env_extra["TESTENV_GIT_DIR"] = testenv.podman_install.git_dir
-    else:
+    if not testenv.args.binary_repo:
         if testenv.args.podman:
             env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "podman", "make2")
         else:
