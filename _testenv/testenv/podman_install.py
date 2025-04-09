@@ -11,13 +11,11 @@ import testenv.cmd
 import testenv.podman
 
 git_dir = None
-sccp_dir = None
 jobs = None
 
 
 def init():
     global git_dir
-    global sccp_dir
     global jobs
 
     # Make the git dir we clone into specific to the repository we build
@@ -26,7 +24,6 @@ def init():
     # errors.
     git_dir = os.path.join(testenv.args.cache, "git", f"build_against_{testenv.args.binary_repo}".replace(":", "_"))
 
-    sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
     jobs = multiprocessing.cpu_count() + 1
 
     os.makedirs(git_dir, exist_ok=True)
@@ -97,19 +94,18 @@ def apt_install(pkgs):
     testenv.cmd.run(["apt-get", "-q", "install", "-y", "--no-install-recommends"] + pkgs)
 
 
-def clone_libosmo_sigtran():
-    if os.path.exists(sccp_dir):
-        logging.debug("libosmo-sigtran: already cloned")
+def clone_project(project):
+    if os.path.exists(os.path.join(git_dir, project)):
+        logging.debug(f"{project}: already cloned")
         return
 
     branch = "master"
+    url = f"https://gerrit.osmocom.org/{project}"
     if testenv.args.binary_repo.endswith(":latest"):
-        ls_remote = testenv.cmd.run(
-            ["git", "ls-remote", "--tags", "https://gerrit.osmocom.org/libosmo-sigtran"], capture_output=True, text=True
-        )
+        ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True)
         branch = ls_remote.stdout.split("\n")[-2].split("refs/tags/")[1].split("^")[0]
 
-    logging.info(f"libosmo-sigtran: cloning {branch}")
+    logging.info(f"{project}: cloning {branch}")
     testenv.cmd.run(
         [
             "git",
@@ -120,12 +116,13 @@ def clone_libosmo_sigtran():
             "1",
             "--branch",
             branch,
-            "https://gerrit.osmocom.org/libosmo-sigtran",
+            url,
         ]
     )
 
 
 def from_source_sccp_demo_user():
+    sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
     sccp_demo_user_path = os.path.join(sccp_dir, "examples/sccp_demo_user")
 
     # Install libraries even if not building sccp_demo_user, because it gets
@@ -138,7 +135,7 @@ def from_source_sccp_demo_user():
     )
 
     if not os.path.exists(sccp_demo_user_path):
-        clone_libosmo_sigtran()
+        clone_project("libosmo-sigtran")
         logging.info("Building sccp_demo_user")
         testenv.cmd.run(["autoreconf", "-fi"], cwd=sccp_dir)
 
