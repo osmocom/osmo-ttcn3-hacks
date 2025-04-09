@@ -3,6 +3,8 @@
 import logging
 import multiprocessing
 import os
+import packaging.version
+import re
 import shlex
 import string
 import subprocess
@@ -103,7 +105,15 @@ def clone_project(project):
     url = f"https://gerrit.osmocom.org/{project}"
     if testenv.args.binary_repo.endswith(":latest"):
         ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True)
-        branch = ls_remote.stdout.split("\n")[-2].split("refs/tags/")[1].split("^")[0]
+        tags = []
+        pattern = re.compile("^\d+\.\d+\.\d+$")
+        for line in ls_remote.stdout.split("\n"):
+            if "refs/tags/" in line:
+                tag = line.split("refs/tags/")[1].split("^")[0]
+                if pattern.match(tag):
+                    tags += [tag]
+        tags.sort(key=packaging.version.Version, reverse=True)
+        branch = tags[0]
 
     logging.info(f"{project}: cloning {branch}")
     testenv.cmd.run(
