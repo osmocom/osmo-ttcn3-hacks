@@ -75,7 +75,7 @@ def check_fftranscode():
         "-q",
         "fftranscode",
         os.path.join(
-            testenv.testsuite.ttcn3_hacks_dir_src,
+            testenv.testsuite.ttcn3_hacks_dir,
             testenv.args.testsuite,
             "regen_makefile.sh",
         ),
