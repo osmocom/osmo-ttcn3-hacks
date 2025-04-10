@@ -29,4 +29,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_RSL
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES

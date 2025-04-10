@@ -21,7 +21,7 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES
 
 # required for forkpty(3) used by PIPEasp
 sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile

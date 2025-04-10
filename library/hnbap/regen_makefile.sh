@@ -2,7 +2,7 @@
 
 FILES="*.asn *.ttcn HNBAP_EncDec.cc"
 
-../../regen-makefile.sh $FILES
+../../_buildsystem/regen-makefile.sh $FILES
 
 sed -i -e '/^CPPFLAGS/ s/$/ `pkg-config --cflags libfftranscode`/' Makefile
 sed -i -e '/^LDFLAGS/ s/$/ `pkg-config --libs libfftranscode`/' Makefile

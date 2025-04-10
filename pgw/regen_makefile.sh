@@ -28,4 +28,4 @@ FILES="
 export CPPFLAGS_TTCN3="
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES

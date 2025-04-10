@@ -21,4 +21,4 @@ export CPPFLAGS_TTCN3="
 	-DNS_EMULATION_FR
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES

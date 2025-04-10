@@ -2,7 +2,7 @@
 
 BASEDIR=../deps
 
-. ../gen_links.sh.inc
+. ../_buildsystem/gen_links.inc.sh
 
 #DIR=$BASEDIR/titan.TestPorts.UNIX_DOMAIN_SOCKETasp/src
 #FILES="UD_PT.cc  UD_PT.hh  UD_PortType.ttcn  UD_Types.ttcn"
