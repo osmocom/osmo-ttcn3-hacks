@@ -1,5 +1,3 @@
-#!/bin/sh
-
 # Copyright 2017-2019 Harald Welte
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
 #
@@ -25,6 +23,16 @@
 # See https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=884303 for details.
 #
 
+if [ -z "$NAME" ]; then
+	echo "ERROR: NAME is not set!"
+	exit 1
+fi
+
+if [ -z "$FILES" ]; then
+	echo "ERROR: FILES is not set!"
+	exit 1
+fi
+
 test -x "$(which ttcn3_makefilegen 2>/dev/null)" || { echo "ERROR: ttcn3_makefilegen not in PATH"; exit 1; }
 
 # Enable ccache if it can be found in path.
@@ -37,7 +45,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -g -p -l -U 8 -f $*
+ttcn3_makefilegen -g -p -l -U 8 -f -e "$NAME" $FILES
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
 sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan/' Makefile

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=MGCP_Test
 
@@ -23,9 +23,9 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DSTATSD_HAVE_VTY
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

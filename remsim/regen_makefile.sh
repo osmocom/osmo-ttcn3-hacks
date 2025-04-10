@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=REMSIM_Tests
 
@@ -22,12 +22,12 @@ FILES="
 	VPCD_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_RSPRO
 	-DIPA_EMULATION_CTRL
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 # required for forkpty(3) used by PIPEasp
 sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile

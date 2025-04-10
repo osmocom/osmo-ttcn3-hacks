@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=FR_Tests
 
@@ -17,8 +17,8 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DNS_EMULATION_FR
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

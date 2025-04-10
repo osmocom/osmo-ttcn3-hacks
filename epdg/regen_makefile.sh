@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=EPDG_Tests
 
@@ -23,9 +23,9 @@ FILES="
 	GTPv2_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DIPA_EMULATION_GSUP
 "
 
-../_buildsystem/regen-makefile.sh EPDG_Tests.ttcn $FILES
+. ../_buildsystem/regen_makefile.inc.sh

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=STP_Tests
 
@@ -18,10 +18,10 @@ FILES="
 	M3UA_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DIPA_EMULATION_SCCP
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

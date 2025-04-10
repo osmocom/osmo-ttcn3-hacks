@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=GGSN_Tests
 
@@ -24,7 +24,4 @@ FILES="
 	UDP_EncDec.cc
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

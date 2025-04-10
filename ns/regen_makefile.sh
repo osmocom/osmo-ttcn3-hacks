@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=NS_Tests
 
@@ -19,10 +19,10 @@ FILES="
 	UD_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DBSSGP_EM_L3
 	-DNS_EMULATION_FR
 	-DSTATSD_HAVE_VTY
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=MME_Tests
 
@@ -28,10 +28,6 @@ FILES="
 	UECUPS_CodecPort_CtrlFunctDef.cc
 "
 
-
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode -lgnutls/' Makefile

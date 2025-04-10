@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=CBC_Tests
 
@@ -24,9 +24,6 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 sed -i -e 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lfftranscode/' Makefile

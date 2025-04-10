@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=SIMTRACE_Tests
 
@@ -9,10 +9,7 @@ FILES="
 	USB_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 #sed -i -e 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lusb/' Makefile
 sed -i -e '/^LINUX_LIBS/ s/$/ `pkg-config --libs libusb-1.0`/' Makefile

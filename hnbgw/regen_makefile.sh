@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=HNBGW_Tests
 
@@ -30,13 +30,13 @@ FILES="
 	PFCP_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DRAN_EMULATION_RANAP
 	-DSTATSD_HAVE_VTY
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode/' Makefile

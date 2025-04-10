@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=SCCP_Testcases
 
@@ -7,7 +7,4 @@ FILES="
 	*.ttcnpp
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
