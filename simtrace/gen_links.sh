@@ -18,4 +18,4 @@ FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="SIMTRACE_Types.ttcn SIMTRACE_Templates.ttcn SIMTRACE_Emulation.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

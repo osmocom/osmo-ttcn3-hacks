@@ -72,4 +72,4 @@ FILES+="BSSAP_LE_CodecPort.ttcn BSSAP_LE_Emulation.ttcn BSSAP_LE_Adapter.ttcn BS
 
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

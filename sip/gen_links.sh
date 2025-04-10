@@ -49,4 +49,4 @@ FILES+="SDP_Templates.ttcn "
 FILES+="SIP_Emulation.ttcn SIP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

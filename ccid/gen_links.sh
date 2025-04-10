@@ -18,4 +18,4 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn "
 FILES+="Native_Functions.ttcn Native_FunctionDefs.cc "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

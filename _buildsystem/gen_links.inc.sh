@@ -35,7 +35,7 @@ gen_links() {
 	done
 }
 
-ignore_pp_results() {
+gen_links_finish() {
 	# Avoid using the pattern itself if no file is found in globbing below:
 	shopt -s nullglob
 	for pp in *.ttcnpp; do

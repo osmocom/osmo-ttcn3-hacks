@@ -60,4 +60,4 @@ FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_Ctr
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

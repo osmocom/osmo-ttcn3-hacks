@@ -68,4 +68,4 @@ FILES+="Osmocom_VTY_Functions.ttcn "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

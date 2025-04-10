@@ -44,4 +44,4 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.
 FILES+="HTTP_Server_Emulation.ttcn HTTP_Adapter.ttcn"
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

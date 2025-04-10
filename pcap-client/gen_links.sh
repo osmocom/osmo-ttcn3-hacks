@@ -28,4 +28,4 @@ FILES+="OPCAP_Types.ttcn OPCAP_Templates.ttcn "
 FILES+="OPCAP_CodecPort.ttcn OPCAP_CodecPort_CtrlFunct.ttcn OPCAP_CodecPort_CtrlFunctdef.cc OPCAP_Adapter.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish
