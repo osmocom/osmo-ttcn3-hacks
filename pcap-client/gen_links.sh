@@ -2,7 +2,7 @@
 
 BASEDIR=../deps
 
-. ../gen_links.sh.inc
+. ../_buildsystem/gen_links.inc.sh
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"

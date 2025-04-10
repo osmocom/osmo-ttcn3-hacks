@@ -31,6 +31,6 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES
 
 sed -i -i 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lsctp/' Makefile

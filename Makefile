@@ -105,7 +105,7 @@ define DIR_clean_template
 .PHONY: $(1)/clean
 $(1)/clean: $(1)/Makefile
 	$(MAKE) -C $(1) clean
-	(cd $(1) && ../rmlinks.sh && rm Makefile)
+	(cd $(1) && ../_buildsystem/rmlinks.sh && rm Makefile)
 endef
 
 define DIR_all_template

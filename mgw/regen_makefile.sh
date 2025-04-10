@@ -28,4 +28,4 @@ export CPPFLAGS_TTCN3="
 	-DSTATSD_HAVE_VTY
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES

@@ -36,6 +36,6 @@ export CPPFLAGS_TTCN3="
 	-DSTATSD_HAVE_VTY
 "
 
-../regen-makefile.sh -e $NAME $FILES
+../_buildsystem/regen-makefile.sh -e $NAME $FILES
 
 sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lfftranscode/' Makefile

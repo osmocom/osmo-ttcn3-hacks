@@ -28,4 +28,4 @@ export CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_GSUP
 "
 
-../regen-makefile.sh EPDG_Tests.ttcn $FILES
+../_buildsystem/regen-makefile.sh EPDG_Tests.ttcn $FILES
