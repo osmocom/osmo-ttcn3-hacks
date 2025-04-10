@@ -68,7 +68,7 @@ def generate_env(env={}, podman=False):
     ret = dict(env_extra)
     path = os.path.join(testenv.data_dir, "scripts")
     path += f":{os.path.join(testenv.data_dir, 'scripts/qemu')}"
-    if testenv.testsuite.ttcn3_hacks_dir:
+    if testenv.args.action == "run" and testenv.testsuite.ttcn3_hacks_dir:
         path += f":{os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)}"
 
     if usr_dir:
