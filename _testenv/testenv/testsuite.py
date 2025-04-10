@@ -1,6 +1,7 @@
 # Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
 import atexit
+import copy
 import glob
 import logging
 import os
@@ -12,8 +13,8 @@ import testenv
 import testenv.cmd
 import time
 
-ttcn3_hacks_dir = None
-ttcn3_hacks_dir_src = os.path.realpath(f"{__file__}/../../..")
+ttcn3_hacks_dir = os.path.realpath(f"{__file__}/../../..")
+builddir_env = {}
 testsuite_proc = None
 
 
@@ -23,82 +24,34 @@ def update_deps():
         return
 
     logging.info("Updating osmo-ttcn3-hacks/deps")
-    deps_dir = os.path.join(ttcn3_hacks_dir_src, "deps")
+    deps_dir = os.path.join(ttcn3_hacks_dir, "deps")
     testenv.cmd.run(["make", "-C", deps_dir])
     testenv.cmd.run(["touch", deps_marker])
-
-
-def copy_ttcn3_hacks_dir():
-    """Copy source files of osmo-ttcn3-hacks.git to the cache dir, so we don't
-    mix binary objects from host and inside podman that are very likely to
-    be incompatible"""
-    global ttcn3_hacks_dir
-
-    ttcn3_hacks_dir = os.path.join(testenv.args.cache, "podman", "osmo-ttcn3-hacks")
-
-    logging.info(f"Copying osmo-ttcn3-hacks sources to: {ttcn3_hacks_dir}")
-
-    # Rsync can't directly parse the .gitignore with ! rules, so create a list
-    # of files to be copied with git
-    copy_list = os.path.join(testenv.args.cache, "podman", "ttcn3-copy-list")
-    testenv.cmd.run(
-        f"git ls-files -o -c --exclude-standard > {shlex.quote(copy_list)}",
-        cwd=ttcn3_hacks_dir_src,
-        no_podman=True,
-    )
-
-    # Copy source files, excluding binary objects
-    testenv.cmd.run(
-        [
-            "rsync",
-            "--archive",
-            f"--files-from={copy_list}",
-            f"{ttcn3_hacks_dir_src}/",
-            f"{ttcn3_hacks_dir}/",
-        ],
-        no_podman=True,
-    )
-
-    # The "deps" dir is in gitignore, copy it separately
-    testenv.cmd.run(
-        [
-            "rsync",
-            "--links",
-            "--recursive",
-            "--exclude",
-            "/.git",
-            f"{ttcn3_hacks_dir_src}/deps/",
-            f"{ttcn3_hacks_dir}/deps/",
-        ],
-        no_podman=True,
-    )
 
 
 def prepare_testsuite_dir():
     testsuite_dir = f"{ttcn3_hacks_dir}/{testenv.args.testsuite}"
     logging.info(f"Generating links and Makefile for {testenv.args.testsuite}")
-    testenv.cmd.run(["./gen_links.sh"], cwd=testsuite_dir)
-    testenv.cmd.run("USE_CCACHE=1 ./regen_makefile.sh", cwd=testsuite_dir)
+    testenv.cmd.run(["./gen_links.sh"], cwd=testsuite_dir, env=builddir_env)
+    testenv.cmd.run("USE_CCACHE=1 ./regen_makefile.sh", cwd=testsuite_dir, env=builddir_env)
 
 
 def init():
-    global ttcn3_hacks_dir
+    global builddir_env
 
     atexit.register(stop)
-
     update_deps()
 
     if testenv.args.podman:
-        copy_ttcn3_hacks_dir()
-    else:
-        ttcn3_hacks_dir = ttcn3_hacks_dir_src
+        builddir = os.path.join(testenv.args.cache, "podman", "ttcn3")
+        builddir_env = {"BUILDDIR": builddir}
 
     prepare_testsuite_dir()
 
 
 def build():
     logging.info("Building testsuite")
-    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir)
+    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir, env=builddir_env)
 
 
 def is_running(pid):
@@ -170,9 +123,8 @@ def run(cfg):
     suite = os.path.join(ttcn3_hacks_dir, testenv.args.testsuite, section_data["program"])
     suite = os.path.relpath(suite, ttcn3_hacks_dir)
 
-    env = {
-        "TTCN3_PCAP_PATH": os.path.join(testenv.testdir.testdir, "testsuite"),
-    }
+    env = copy.copy(builddir_env)
+    env["TTCN3_PCAP_PATH"] = os.path.join(testenv.testdir.testdir, "testsuite")
 
     # Let ttcn3-tcpdump-stop.sh retrieve talloc reports
     host, port = testenv.testenv_cfg.get_vty_host_port(cfg)
