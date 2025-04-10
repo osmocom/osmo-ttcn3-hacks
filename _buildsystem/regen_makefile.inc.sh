@@ -18,6 +18,12 @@ if ! command -v ttcn3_makefilegen >/dev/null; then
 	exit 1
 fi
 
+TOPDIR="$(realpath "$(dirname "$0")/..")"
+BUILDDIR="${BUILDDIR:-$TOPDIR/_build}"
+PROJECTDIR=$(realpath . --relative-to "$TOPDIR")  # e.g. "msc", "library/rua"
+
+cd "$BUILDDIR/$PROJECTDIR"
+
 ttcn3_makefilegen -g -p -l -U 8 -f -e "$NAME" $FILES
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+BUILDDIR ?= _build
+
 SUBDIRS= \
 	asterisk \
 	bsc \
@@ -87,43 +89,46 @@ deps: .make.deps
 deps-update: .make.deps
 
 compile: $(foreach dir,$(SUBDIRS),$(dir)/compile)
-clean: $(foreach dir,$(SUBDIRS),$(dir)/clean)
+clean-old: $(foreach dir,$(SUBDIRS),$(dir)/clean-old)
+	@rm -rfv ~/.cache/osmo-ttcn3-testenv/podman/osmo-ttcn3-hacks
 all: $(foreach dir,$(SUBDIRS),$(dir)/all)
 
 define DIR_Makefile_template
-$(1)/Makefile: $(1)/gen_links.sh $(1)/regen_makefile.sh
+$(BUILDDIR)/$(1)/Makefile: $(1)/gen_links.sh $(1)/regen_makefile.sh
 	(cd $(1) && ./gen_links.sh && ./regen_makefile.sh)
 endef
 
 define DIR_compile_template
 .PHONY: $(1)/compile
-$(1)/compile: deps $(1)/Makefile
-	$(MAKE) -C $(1) compile
+$(1)/compile: deps $(BUILDDIR)/$(1)/Makefile
+	$(MAKE) -C $(BUILDDIR)/$(1) compile
 endef
 
-define DIR_clean_template
-.PHONY: $(1)/clean
-$(1)/clean: $(1)/Makefile
-	$(MAKE) -C $(1) clean
-	(cd $(1) && ../_buildsystem/rmlinks.sh && rm Makefile)
+# Remove left-over files from before the buildsystem was changed to do
+# out-of-tree builds. _buildsystem/gen_links.inc.sh tells the users to run this
+# if needed.
+define DIR_clean_old_template
+.PHONY: $(1)/clean-old
+$(1)/clean-old:
+	@git clean -fx "$(1)"
 endef
 
 define DIR_all_template
 $(1): $(1)/all
 .PHONY: $(1)/all
-$(1)/all: deps $(1)/Makefile
-	$(MAKE) -C $(1) compile
-	$(MAKE) $(PARALLEL_MAKE) -C $(1)
+$(1)/all: deps $(BUILDDIR)/$(1)/Makefile
+	$(MAKE) -C $(BUILDDIR)/$(1) compile
+	$(MAKE) $(PARALLEL_MAKE) -C $(BUILDDIR)/$(1)
 endef
 
 $(foreach dir,$(SUBDIRS), \
 	$(eval $(call DIR_Makefile_template,$(dir)))	\
 	$(eval $(call DIR_compile_template,$(dir)))	\
-	$(eval $(call DIR_clean_template,$(dir)))	\
+	$(eval $(call DIR_clean_old_template,$(dir)))	\
 	$(eval $(call DIR_all_template,$(dir)))		\
 	)
 
-.PHONY: tags regen-diameter-types-ttcn
+.PHONY: tags regen-diameter-types-ttcn clean
 tags:
 	find $(shell pwd) \
 		-type f -name "*.ttcn" -o \
@@ -132,3 +137,9 @@ tags:
 
 regen-diameter-types-ttcn:
 	(cd library/ && ./regen-DIAMETER_Types_ttcn.sh)
+
+# Intentionally not using $(BUILDDIR) here to avoid user errors leading to
+# unintentional removal of other files. If $(BUILDDIR) is changed, it is
+# trivial to clean up the builddir manually.
+clean:
+	rm -rf _build

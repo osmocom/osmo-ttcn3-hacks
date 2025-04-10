@@ -49,10 +49,17 @@ fi
 # https://gitlab.eclipse.org/eclipse/titan/titan.core/-/issues/690
 ulimit -n 100000
 
+TOPDIR="$(realpath "$(dirname "$0")")"
+BUILDDIR="${BUILDDIR:-$TOPDIR/_build}"
+
 # below is for the debian packages
 TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
-LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SUITE_DIR:$TITAN_LIBRARY_PATH" "$TTCN3_BIN_DIR/ttcn3_start" $SUITE $CFG $TEST
+LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$BUILDDIR/$SUITE_DIR:$TITAN_LIBRARY_PATH" \
+	"$TTCN3_BIN_DIR/ttcn3_start" \
+	"$BUILDDIR/$SUITE" \
+	"$CFG" \
+	"$TEST"
 
 expected="$SUITE_DIR/expected-results.xml"
 if [ ! -f "$expected" ]; then

@@ -3,7 +3,6 @@
 import atexit
 import glob
 import logging
-import multiprocessing
 import os
 import os.path
 import shlex
@@ -99,11 +98,7 @@ def init():
 
 def build():
     logging.info("Building testsuite")
-    testsuite_dir = f"{ttcn3_hacks_dir}/{testenv.args.testsuite}"
-    testenv.cmd.run(["make", "compile"], cwd=testsuite_dir)
-
-    jobs = multiprocessing.cpu_count() + 1
-    testenv.cmd.run(["make", "-j", f"{jobs}"], cwd=testsuite_dir)
+    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir)
 
 
 def is_running(pid):
@@ -173,6 +168,7 @@ def run(cfg):
     cwd = os.path.join(testenv.testdir.testdir, "testsuite")
     start_testsuite = os.path.join(ttcn3_hacks_dir, "start-testsuite.sh")
     suite = os.path.join(ttcn3_hacks_dir, testenv.args.testsuite, section_data["program"])
+    suite = os.path.relpath(suite, ttcn3_hacks_dir)
 
     env = {
         "TTCN3_PCAP_PATH": os.path.join(testenv.testdir.testdir, "testsuite"),
