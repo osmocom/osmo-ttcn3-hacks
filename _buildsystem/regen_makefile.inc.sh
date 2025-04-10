@@ -63,3 +63,57 @@ if command -v ccache >/dev/null; then
 	# with ccache.
 	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -D/' Makefile
 fi
+
+#
+# Make output more readable (skip with make V=1)
+#
+
+make_pretty_rule() {
+	local rule_name="$1"
+	local cmd_start="$2"
+	local cmd_msg="@echo '  $3'"
+
+	sed -i -z "s/$rule_name\\n\\t$cmd_start/$rule_name\\n\\t$cmd_msg\n\t@$cmd_start/" Makefile
+}
+
+make_pretty_rules() {
+	make_pretty_rule \
+		'$(EXECUTABLE): $(SHARED_OBJECTS)' \
+		'if' \
+		'CCLD     $@'
+
+	make_pretty_rule \
+		'$(LIBRARY): $(OBJECTS)' \
+		'$(CXX)' \
+		'CCLD     $@'
+
+	make_pretty_rule \
+		'.cc.o .c.o:' \
+		'$(CXX)' \
+		'CC       $@'
+
+	make_pretty_rule \
+		'%.so: %.o' \
+		'$(CXX)' \
+		'CCLD     $@'
+
+	make_pretty_rule \
+		'%.ttcn: %.ttcnpp $(TTCN3_INCLUDES)' \
+		'$(CPP)' \
+		'PP       $@'
+
+	make_pretty_rule \
+		'compile: $(TTCN3_MODULES)  $(PREPROCESSED_TTCN3_MODULES) $(ASN1_MODULES)' \
+		'$(TTCN3_DIR)' \
+		'TTCN     *.ttcn *.asn'
+
+	sed -i "s/@echo Creating dependency file for/@echo '  DEP      '/" Makefile
+
+	# TTCN3 compiler: Silence "Notify: Parsing..." output with -q, it still
+	# prints warnings and errors
+	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q/' Makefile
+}
+
+if [ "$V" != 1 ]; then
+	make_pretty_rules
+fi
