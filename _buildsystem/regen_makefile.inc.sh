@@ -14,14 +14,7 @@
 # limitations under the License.
 
 
-# Wrapper around the TITAN make file generator to work in Debian.
-#
-# TITAN has a makefile generator, but somehow Debian seems to install
-# the binaries to different paths without patching the make file
-# generator, leading in inconsistent non-working Makefiles.
-#
-# See https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=884303 for details.
-#
+# Wrapper around the TITAN make file generator
 
 if [ -z "$NAME" ]; then
 	echo "ERROR: NAME is not set!"
@@ -70,7 +63,6 @@ if cat /etc/issue | grep "Arch Linux" >/dev/null 2>&1; then
 else
         sed -i -e 's/TTCN3_DIR = $/TTCN3_DIR = \/usr/' Makefile
 fi
-sed -i -e 's/\/bin\/compiler/\/bin\/ttcn3_compiler/' Makefile
 
 if [ "x$USE_CCACHE" = "x1" ]; then
 	# enable ccache
