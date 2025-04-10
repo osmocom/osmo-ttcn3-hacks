@@ -66,4 +66,4 @@ FILES+="ICMP_Templates.ttcn "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

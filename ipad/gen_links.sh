@@ -40,4 +40,4 @@ FILES+="VPCD_Types.ttcn VPCD_CodecPort.ttcn VPCD_CodecPort_CtrlFunct.ttcn VPCD_C
 FILES+="VPCD_Adapter.ttcn HTTP_Server_Emulation.ttcn"
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

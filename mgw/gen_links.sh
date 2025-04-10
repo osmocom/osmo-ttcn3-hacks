@@ -52,4 +52,4 @@ FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter
 
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

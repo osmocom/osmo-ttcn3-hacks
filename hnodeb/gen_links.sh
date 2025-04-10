@@ -69,4 +69,4 @@ FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn GSM_Types.ttcn "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

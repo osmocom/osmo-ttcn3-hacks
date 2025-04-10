@@ -37,4 +37,4 @@ FILES+="SCTP_Templates.ttcn "
 FILES+="HTTP_Adapter.ttcn Prometheus_Checker.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

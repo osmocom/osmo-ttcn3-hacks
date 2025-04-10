@@ -55,4 +55,4 @@ FILES+="M3UA_Templates.ttcn M3UA_CodecPort.ttcn M3UA_CodecPort_CtrlFunct.ttcn M3
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

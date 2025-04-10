@@ -95,4 +95,4 @@ FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_C
 GTPv1C_Templates.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

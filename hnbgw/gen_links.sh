@@ -108,4 +108,4 @@ FILES+="SCTP_Templates.ttcn "
 FILES+="Mutex.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

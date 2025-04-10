@@ -35,4 +35,4 @@ FILES+="SCTP_Templates.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

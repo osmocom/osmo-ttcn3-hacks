@@ -45,4 +45,4 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn GSM_Types.ttcn Os
 Native_Functions.ttcn Native_FunctionDefs.cc SCCP_Templates.ttcn "
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

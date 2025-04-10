@@ -54,4 +54,4 @@ FILES+="MSLookup_mDNS_Types.ttcn MSLookup_mDNS_Emulation.ttcn MSLookup_mDNS_Temp
 
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish

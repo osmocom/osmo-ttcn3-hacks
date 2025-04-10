@@ -33,4 +33,4 @@ FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn 
 FILES+="PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn PFCP_Templates.ttcn"
 gen_links $DIR $FILES
 
-ignore_pp_results
+gen_links_finish
