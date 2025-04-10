@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=IPAd_Tests
 
@@ -19,7 +19,7 @@ FILES="
 	PKIX1Implicit88_EncDec.cc
 	VPCD_CodecPort_CtrlFunctDef.cc
 "
-../_buildsystem/regen-makefile.sh IPAd_Tests.ttcn $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 # required for forkpty(3) used by PIPEasp
 sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=BTS_Tests
 
@@ -22,11 +22,11 @@ FILES="
 	UD_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DIPA_EMULATION_OML
 	-DIPA_EMULATION_OSMO_PCU
 	-DIPA_EMULATION_RSL
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

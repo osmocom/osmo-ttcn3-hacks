@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=DIA2GSUP_Tests
 
@@ -17,9 +17,9 @@ FILES="
 	DIAMETER_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_GSUP
 	-DIPA_EMULATION_CTRL
 "
 
-../_buildsystem/regen-makefile.sh DIA2GSUP_Tests.ttcn $FILES
+. ../_buildsystem/regen_makefile.inc.sh

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=GBProxy_Tests
 
@@ -24,13 +24,13 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DBSSGP_EM_L3
 	-DIPA_EMULATION_CTRL
 	-DNS_EMULATION_FR
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
 
 sed -i -i 's/^LINUX_LIBS = -lxml2/LINUX_LIBS = -lxml2 -lsctp/' Makefile

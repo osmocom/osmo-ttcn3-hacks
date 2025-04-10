@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=PCRF_Tests
 
@@ -17,7 +17,4 @@ FILES="
 	TCCInterface.cc
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

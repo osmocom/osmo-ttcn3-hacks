@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh -e
 
 NAME=PGW_Tests
 
@@ -25,7 +25,4 @@ FILES="
 	UECUPS_CodecPort_CtrlFunctDef.cc
 "
 
-export CPPFLAGS_TTCN3="
-"
-
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh

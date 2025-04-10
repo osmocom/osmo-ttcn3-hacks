@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -e
 
 NAME=SMLC_Tests
 
@@ -21,7 +21,7 @@ FILES="
 	TELNETasp_PT.cc
 "
 
-export CPPFLAGS_TTCN3="
+CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_RSL
 	-DIPA_EMULATION_MGCP
 	-DIPA_EMULATION_CTRL
@@ -32,4 +32,4 @@ export CPPFLAGS_TTCN3="
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
-../_buildsystem/regen-makefile.sh -e $NAME $FILES
+. ../_buildsystem/regen_makefile.inc.sh
