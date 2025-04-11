@@ -107,7 +107,7 @@ make_pretty_rules() {
 		'$(TTCN3_DIR)' \
 		'TTCN     *.ttcn *.asn'
 
-	sed -i "s/@echo Creating dependency file for/@echo '  DEP      '/" Makefile
+	sed -i "s/@echo Creating dependency file for/@echo '  DEP     '/" Makefile
 
 	# TTCN3 compiler: Silence "Notify: Parsing..." output with -q, it still
 	# prints warnings and errors
