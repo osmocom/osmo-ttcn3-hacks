@@ -27,8 +27,11 @@ if [ $# -lt 1 ]; then
 	exit 1
 fi
 
+TOPDIR="$(realpath "$(dirname "$0")")"
+BUILDDIR="${BUILDDIR:-$TOPDIR/_build}"
+
 SUITE=$1
-SUITE_DIR="$(dirname "$SUITE")"
+SUITE_DIR="$(basename "$(dirname "$SUITE")")"
 SUITE_NAME="$(basename "$SUITE")"
 CFG="$SUITE_NAME.cfg"
 if [ $# -gt 1 ]; then
@@ -49,19 +52,16 @@ fi
 # https://gitlab.eclipse.org/eclipse/titan/titan.core/-/issues/690
 ulimit -n 100000
 
-TOPDIR="$(realpath "$(dirname "$0")")"
-BUILDDIR="${BUILDDIR:-$TOPDIR/_build}"
-
 # below is for the debian packages
 TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
 LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$BUILDDIR/$SUITE_DIR:$TITAN_LIBRARY_PATH" \
 	"$TTCN3_BIN_DIR/ttcn3_start" \
-	"$BUILDDIR/$SUITE" \
+	"$BUILDDIR/$SUITE_DIR/$SUITE_NAME" \
 	"$CFG" \
 	"$TEST"
 
-expected="$SUITE_DIR/expected-results.xml"
+expected="$TOPDIR/$SUITE_DIR/expected-results.xml"
 if [ ! -f "$expected" ]; then
   echo "No expected results found, not comparing outcome. ($expected)"
   exit 0
@@ -74,7 +74,7 @@ if [ ! -f "$last_log" ]; then
   exit 1
 fi
 
-compare="$SUITE_DIR/../compare-results.py"
+compare="$TOPDIR/compare-results.py"
 if [ ! -x "$compare" ]; then
   echo "ERROR: cannot find $compare"
   exit 1
