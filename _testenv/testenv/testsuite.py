@@ -104,13 +104,23 @@ def cat_junit_logs():
         testenv.cmd.run(cmd)
 
 
-def check_junit_logs_have(loop_count, match_str):
-    topdir = os.path.join(testenv.testdir.testdir_topdir, f"loop-{loop_count}")
+def check_testsuite_successful(loop_count=None):
+    topdir = testenv.testdir.testdir_topdir
+    if loop_count is not None:
+        topdir = os.path.join(topdir, f"loop-{loop_count}")
+
+    ret = True
+
     for path in get_junit_logs(topdir):
-        cmd = ["grep", "-q", match_str, path]
-        if testenv.cmd.run(cmd, check=False).returncode:
-            return False
-    return True
+        for match_str in ["failures='0'", "errors='0'"]:
+            cmd = ["grep", "-q", match_str, path]
+            if testenv.cmd.run(cmd, check=False).returncode:
+                ret = False
+                break
+        if not ret:
+            break
+
+    return ret
 
 
 def run(cfg):

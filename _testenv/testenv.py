@@ -19,16 +19,13 @@ import testenv.testsuite
 def loop_continue_cond(loop_count):
     if loop_count == 0:
         return True
-
-    if testenv.args.until_nok:
-        logging.info("Checking testsuite logs for failures and errors")
-        for match_str in ["failures='0'", "errors='0'"]:
-            if not testenv.testsuite.check_junit_logs_have(loop_count - 1, match_str):
-                logging.critical("Stopping the loop")
-                return False
-        return True
-    else:
+    if not testenv.args.until_nok:
         return False
+
+    if not testenv.testsuite.check_testsuite_successful(loop_count - 1):
+        logging.critical("Stopping the loop")
+        return False
+    return True
 
 
 def run():
