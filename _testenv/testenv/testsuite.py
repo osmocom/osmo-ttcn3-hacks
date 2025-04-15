@@ -177,6 +177,9 @@ def run(cfg):
     merge_log_files(cfg)
     format_log_files(cfg)
 
+    if testenv.args.bisect and not check_testsuite_successful():
+        raise testenv.NoTraceException("Testsuite failed!")
+
 
 def get_current_test():
     path = os.path.join(testenv.testdir.testdir, "testsuite/.current_test")

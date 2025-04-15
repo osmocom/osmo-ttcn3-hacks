@@ -95,7 +95,14 @@ def parse_args():
         help="use binary packages from this Osmocom OBS project instead (e.g. osmocom:nightly)",
     )
 
-    group = sub_run.add_argument_group("loop options", "Run the testsuite / a single test multiple times.")
+    group = sub_run.add_argument_group("exit options", "When and how testenv should exit when done.")
+    group = group.add_mutually_exclusive_group()
+    group.add_argument(
+        "-B",
+        "--bisect",
+        action="store_true",
+        help="exit with != 0 if at least one test failed (use with git bisect)",
+    )
     group.add_argument(
         "-u",
         "--until-nok",
