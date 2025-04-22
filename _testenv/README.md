@@ -215,6 +215,15 @@ For example:
   available but doesn't work in podman. QEMU runs a bit slower when this is
   set.
 
+* `TESTENV_COREDUMP_FROM_LXC_HOST`:
+  Instead of using coredumpctl to retrieve the coredump, assume testenv is
+  running inside an LXC and try to retrieve the coredump from the LXC host
+  (OS#6769). This is used in jenkins.
+
+* `TESTENV_COREDUMP_FROM_LXC_HOST_IP`:
+  Instead of attempting to automatically detect the LXC host IP, use this IP.
+  This can be set to 127.0.0.1 for testing.
+
 ## Troubleshooting
 
 ### Timeout waiting for RESET-ACK after sending RESET

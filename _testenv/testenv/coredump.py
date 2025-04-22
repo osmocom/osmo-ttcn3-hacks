@@ -11,8 +11,53 @@ import subprocess
 import testenv
 import testenv.daemons
 import testenv.testdir
+import urllib
+import urllib.request
 
 executable_path = None
+
+lxc_netdev = "eth0"
+lxc_ip_pattern = "10.0.*"
+lxc_port = 8042
+
+
+def find_lxc_host_ip():
+    cmd = ["ip", "-j", "-o", "-4", "addr", "show", "dev", lxc_netdev]
+    p = testenv.cmd.run(cmd, check=False, no_podman=True, capture_output=True, text=True)
+    ret = json.loads(p.stdout)[0]["addr_info"][0]["local"]
+    if fnmatch.fnmatch(ret, lxc_ip_pattern):
+        ret = ret.split(".")
+        ret = f"{ret[0]}.{ret[1]}.{ret[2]}.1"
+        return ret
+    return None
+
+
+def get_from_coredumpctl_lxc_host():
+    # Server implementation: osmo-ci, ansible/roles/testenv-coredump-helper
+    global executable_path
+
+    logging.info("Looking for a coredump on lxc host")
+
+    ip = os.environ.get("TESTENV_COREDUMP_FROM_LXC_HOST_IP") or find_lxc_host_ip()
+    if not ip:
+        logging.warning("Failed to get lxc host ip, can't look for coredump")
+        return
+
+    try:
+        with urllib.request.urlopen(f"http://{ip}:{lxc_port}/core") as response:
+            executable_path = dict(response.getheaders())["X-Executable-Path"]
+            with open(f"{testenv.testdir.testdir}/core", "wb") as h:
+                shutil.copyfileobj(response, h)
+            logging.debug("Coredump found and copied to log dir")
+    except urllib.error.HTTPError as e:
+        executable_path = None
+        if e.code == 404:
+            logging.debug("No coredump found")
+        else:
+            logging.error(f"Unexpected error while attempting to fetch the coredump: {e}")
+    except urllib.error.URLError as e:
+        executable_path = None
+        logging.error(f"Unexpected error while attempting to fetch the coredump: {e}")
 
 
 def executable_is_relevant(exe):
@@ -32,7 +77,7 @@ def executable_is_relevant(exe):
     return False
 
 
-def get_from_coredumpctl():
+def get_from_coredumpctl_local():
     global executable_path
 
     logging.info("Looking for a coredump")
@@ -66,6 +111,13 @@ def get_from_coredumpctl():
     )
 
     executable_path = coredump["exe"]
+
+
+def get_from_coredumpctl():
+    if os.environ.get("TESTENV_COREDUMP_FROM_LXC_HOST"):
+        get_from_coredumpctl_lxc_host()
+    else:
+        get_from_coredumpctl_local()
 
 
 def get_backtrace():
