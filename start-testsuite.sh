@@ -55,11 +55,16 @@ ulimit -n 100000
 # below is for the debian packages
 TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
 TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
+
+# Run ttcn3_start with LD_LIBRARY_PATH. Do not put $TEST in quotes as it can be
+# empty and must be omitted in that case. Otherwise ttcn3_start tries to stop
+# the MTC after the first test, which fails with "MTC cannot be terminated" and
+# then ttcn3_start keeps running even after the testsuite has stopped.
 LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$BUILDDIR/$SUITE_DIR:$TITAN_LIBRARY_PATH" \
 	"$TTCN3_BIN_DIR/ttcn3_start" \
 	"$BUILDDIR/$SUITE_DIR/$SUITE_NAME" \
 	"$CFG" \
-	"$TEST"
+	$TEST
 
 expected="$TOPDIR/$SUITE_DIR/expected-results.xml"
 if [ ! -f "$expected" ]; then
