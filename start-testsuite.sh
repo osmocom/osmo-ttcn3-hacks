@@ -42,19 +42,22 @@ if [ $# -gt 2 ]; then
 	TEST=$3
 fi
 
-# this is an example for using a non-installed custom (e.g. git master) TITAN
-#TTCN3_DIR="/home/laforge/projects/git/titan/titan.core/Install"
-#export TTCN3_DIR
-#TITAN_LIBRARY_PATH="$TTCN3_DIR/lib"
-#TTCN3_BIN_DIR="$TTCN3_DIR/bin"
-
 # Limit max num of open file descriptors to workaround titan.core bug:
 # https://gitlab.eclipse.org/eclipse/titan/titan.core/-/issues/690
 ulimit -n 100000
 
-# below is for the debian packages
-TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
-TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
+if [ -z "$TTCN3_DIR" ]; then
+	# below is for the debian packages
+	TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
+	TITAN_LIBRARY_PATH="${TITAN_LIBRARY_PATH:-/usr/lib/titan:/usr/ttcn3/lib}"
+else
+	# below is for Arch Linux packages
+	# https://aur.archlinux.org/packages/eclipse-titan
+	# https://aur.archlinux.org/packages/titan-git
+	# ... and non-installed custom (e.g. git master) builds
+	TTCN3_BIN_DIR="${TTCN3_DIR}/bin"
+	TITAN_LIBRARY_PATH="${TTCN3_DIR}/lib"
+fi
 
 # Run ttcn3_start with LD_LIBRARY_PATH. Do not put $TEST in quotes as it can be
 # empty and must be omitted in that case. Otherwise ttcn3_start tries to stop
