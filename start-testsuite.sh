@@ -42,10 +42,6 @@ if [ $# -gt 2 ]; then
 	TEST=$3
 fi
 
-# Limit max num of open file descriptors to workaround titan.core bug:
-# https://gitlab.eclipse.org/eclipse/titan/titan.core/-/issues/690
-ulimit -n 100000
-
 if [ -z "$TTCN3_DIR" ]; then
 	# below is for the debian packages
 	TTCN3_BIN_DIR="${TTCN3_BIN_DIR:-/usr/bin}"
