@@ -19,6 +19,26 @@ Use the `testenv.py` script to run the testsuites, e.g.:
 $ ./testenv.py run mgw
 ```
 
+This will build the mgw testsuite from source, as well as osmo-mgw and all its
+dependencies and then run the testsuite against it. The Osmocom sources will be
+cloned if they don't exist in a sibling directory to osmo-ttcn3-hacks. It is
+also possible to use the Osmocom binary packages with this and running
+everything inside a podman container. See `./testenv.py -h` and
+`_testenv/README.md` for more information.
+
+### Manually
+
+Alternatively you can build and run the testsuite yourself, e.g.:
+
+```
+$ make mgw
+$ cd mgw
+$ ../start-testsuite.sh ../_build/mgw/MGCP_Test MGCP_Test.cfg
+```
+
+Make sure that all components that the testsuite requires are running
+(`osmo-mgw` in this example).
+
 ## Continuous Integration
 
 The individual tests suites are executed against different versions of
