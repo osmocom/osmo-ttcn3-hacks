@@ -4,6 +4,8 @@
 # needed when we want to capture from interfaces of different link
 # types. It will also store the results as pcap-ng, not plain old pcap.
 
+. "$(dirname "$0")/_scripts/tcpdump-dumpcap.inc.sh"
+
 PIDFILE_PCAP=/tmp/pcap.pid
 DUMPCAP=/usr/bin/dumpcap
 
@@ -12,13 +14,6 @@ NETCAT=/bin/nc
 GSMTAP_PORT=4729
 
 TESTCASE=$1
-
-kill_rm_pidfile() {
-	if [ -e $1 ]; then
-		kill "$(cat "$1")"
-		rm $1
-	fi
-}
 
 echo "------ $TESTCASE ------"
 date

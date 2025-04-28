@@ -1,23 +1,11 @@
 #!/bin/sh
 
+. "$(dirname "$0")/_scripts/tcpdump-dumpcap.inc.sh"
+
 PIDFILE_PCAP=/tmp/pcap.pid
 PIDFILE_NETCAT=/tmp/netcat.pid
 TESTCASE=$1
 VERDICT="$2"
-
-kill_rm_pidfile() {
-if [ -e $1 ]; then
-        PSNAME="$(ps -q "$(cat "$1")" -o comm=)"
-	if [ "$PSNAME" != "sudo" ]; then
-		kill "$(cat "$1")"
-	else
-	# NOTE: This requires you to be root or something like
-	# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
-		sudo kill "$(cat "$1")"
-	fi
-	rm $1
-fi
-}
 
 date
 

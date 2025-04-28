@@ -1,5 +1,7 @@
 #!/bin/sh
 
+. "$(dirname "$0")/_scripts/tcpdump-dumpcap.inc.sh"
+
 PIDFILE_PCAP=/tmp/pcap.pid
 PIDFILE_NETCAT=/tmp/netcat.pid
 FIFO=/tmp/cmderr
@@ -12,17 +14,6 @@ if ! [ "$(id -u)" = "0" ]; then
 	# Otherwise, if sudo /usr/bin/kill, sudo /usr/bin/tcpdump cannot be run without a password prompt,
 	# and this script will hang indefinitely
 fi
-
-kill_rm_pidfile() {
-	# NOTE: This requires you to be root or something like
-	# "laforge ALL=NOPASSWD: /usr/sbin/tcpdump, /bin/kill" in your sudoers file
-	if [ -e "$1" ]; then
-		if [ -s "$1" ]; then
-			$SUDOSTR kill "$(cat "$1")" 2>&1 | grep -v "No such process"
-		fi
-		rm $1
-	fi
-}
 
 date
 
