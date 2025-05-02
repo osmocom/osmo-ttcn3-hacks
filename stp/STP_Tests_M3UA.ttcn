@@ -418,6 +418,17 @@ friend function f_init_m3ua_srv() runs on RAW_M3UA_CT {
 	}
 }
 
+private altstep as_M3UA_wait_sctp_conn_closed(integer idx) runs on RAW_M3UA_CT {
+	var PortEvent pev;
+
+	[] M3UA[idx].receive(PortEvent:{sctpEvent := ?}) -> value pev {
+		log("sctp event: ", pev)
+		repeat;
+	}
+	[] M3UA[idx].receive(PortEvent:{connClosed:=?}) -> value pev {
+		log("Peer closed conn: ", pev)
+	}
+}
 
 /***********************************************************************
  * Test the STP in M3UA SG role (we are ASP)
@@ -538,6 +549,38 @@ testcase TC_act_rctx_data_no_rctx() runs on RAW_M3UA_CT {
 
 	/* check if DATA is accepted without Routing Context IE */
 	f_test_traffic(0, omit, pc_sender, 1, rctx_receiver, pc_receiver);
+
+	f_clear_m3ua();
+}
+
+/* Test administrative state, VTY "[no] shutdown" */
+testcase TC_m3ua_sctp_srv_adm_shutdown() runs on RAW_M3UA_CT {
+	f_init_m3ua();
+
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit);
+	f_sleep(1.0);
+	f_vty_cs7_asp_cmd(f_m3ua_cli_config(0), "shutdown");
+	log("ASP should now be DOWN")
+	as_M3UA_wait_sctp_conn_closed(0);
+
+	f_sleep(1.0);
+	/* Make sure SCTP conn will be closed when we connect to it. */
+	log("Connecting to ASP (expect closed):");
+	f_M3UA_connect_sctp(0);
+	timer T := 5.0;
+	T.start;
+	alt {
+		[] as_M3UA_wait_sctp_conn_closed(0);
+		[] T.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected close from ASP SCTP server!");
+		}
+	}
+
+	/* Now let the ASP be active again, it should reconnect to us: */
+	f_vty_cs7_asp_cmd(f_m3ua_cli_config(0), "no shutdown");
+	log("Connecting to ASP (expect success):");
+	f_M3UA_connect_sctp(0);
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit, ntfy_after_up := c_M3UA_ST_I_AS_PENDING);
 
 	f_clear_m3ua();
 }
@@ -1450,6 +1493,8 @@ testcase TC_clnt_quirk_snm_inactive() runs on RAW_M3UA_CT {
 
 /* Test administrative state, VTY "[no] shutdown" */
 testcase TC_clnt_sctp_adm_shutdown() runs on RAW_M3UA_CT {
+	var PortEvent pev;
+
 	f_init_m3ua();
 	f_init_m3ua_srv();
 
@@ -1458,16 +1503,7 @@ testcase TC_clnt_sctp_adm_shutdown() runs on RAW_M3UA_CT {
 	f_sleep(1.0);
 	f_vty_cs7_asp_cmd(f_m3ua_srv_config(0), "shutdown");
 	log("ASP should now be DOWN")
-	var PortEvent pev;
-	alt {
-		[] M3UA[M3UA_SRV(0)].receive(PortEvent:{sctpEvent := ?}) -> value pev {
-			log("sctp event: ", pev)
-			repeat;
-		}
-		[] M3UA[M3UA_SRV(0)].receive(PortEvent:{connClosed:=?}) -> value pev {
-			log("Peer closed conn: ", pev)
-		}
-	}
+	as_M3UA_wait_sctp_conn_closed(M3UA_SRV(0));
 
 	/* Wait for a while to make sure ASP doesn't reconnect to us: */
 	timer T := 10.0;
@@ -1575,6 +1611,7 @@ control {
 	execute( TC_tmt_loadshare_sls() );
 	execute( TC_tmt_broadcast() );
 	execute( TC_act_rctx_data_no_rctx() );
+	execute( TC_m3ua_sctp_srv_adm_shutdown() );
 
 	execute( TC_m3ua_tcp_cli() );
 	execute( TC_m3ua_tcp_cli_srv() );
