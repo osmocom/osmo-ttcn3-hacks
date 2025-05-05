@@ -3,7 +3,7 @@
 # This script generates per-testcase merged logs.
 # In order to work, you need to set the following test config:
 #	[LOGGING]
-#	LogFile := "%e-%c-%h-%r.%s"
+#	LogFile := "%e-%c-%h-%r-%p.%s"
 #
 # the output files will be called "Module-Testcase.merged"
 
