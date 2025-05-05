@@ -23,6 +23,10 @@ TEST_CASES=$(ls -1 $LOG_FILES | awk 'BEGIN { FS = "-" } { print $2 }' | sort | u
 for t in $TEST_CASES; do
 	PREFIX="$BASE_NAME-$t"
 	OUTPUT="$BASE_NAME.$t.merged"
+	if [ -e "$OUTPUT" ]; then
+		>&2 echo "log_merge: ERROR: file already exists: $OUTPUT"
+		exit 1
+	fi
 	ttcn3_logmerge $PREFIX-*.log > "$OUTPUT"
 	echo "Generated $OUTPUT"
 done
