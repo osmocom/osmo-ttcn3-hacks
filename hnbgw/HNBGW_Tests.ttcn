@@ -264,6 +264,7 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr, PFCP_ConnHdlr {
 
 	var MGCP_Emulation_CT vc_MGCP;
 	port TELNETasp_PT HNBGWVTY;
+	port TELNETasp_PT STPVTY;
 	var StatsD_Checker_CT vc_STATSD;
 	var PFCP_Emulation_CT vc_PFCP;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
@@ -296,6 +297,16 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 	map(self:HNBGWVTY, system:HNBGWVTY);
 	f_vty_set_prompts(HNBGWVTY);
 	f_vty_transceive(HNBGWVTY, "enable");
+}
+
+private function f_init_vty_stp() runs on test_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
 }
 
 function f_init_mgcp(charstring id) runs on test_CT {
@@ -1797,7 +1808,7 @@ private function f_tc_cnpool_compl_l3(charstring id) runs on ConnHdlr {
 	f_perform_compl_l3(g_pars.nas_pdu, expect_success := g_pars.expect_compl_l3_success);
 }
 
-private function f_TC_cnpool_compl_l3(boolean ps_domain, octetstring nas_pdu, integer cn_nr,
+private function f_TC_cnpool_compl_l3(boolean ps_domain, octetstring nas_pdu, integer cn_nr := 0,
 				      template (omit) charstring inc_countername := omit,
 				      boolean expect_compl_l3_success := true) runs on test_CT {
 	var ConnHdlr vc_conn;
@@ -2490,7 +2501,69 @@ testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
 	f_shutdown_helper();
 }
 
-/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable, immediately mark the CN link as unusable. */
+private function f_vty_stp_1st_asp_cmd(boolean ps_domain, charstring cmd) runs on test_CT
+{
+	var charstring asp_node;
+	if (ps_domain) {
+		asp_node := "asp virt-sgsn0-0 23906 2905 m3ua";
+	} else {
+		asp_node := "asp virt-msc0-0 23905 2905 m3ua";
+	}
+	asp_node := "asp asp-dyn-0 2906 2905 m3ua";
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
+}
+
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the CN link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the HNBGW, which will close the SCTP assoc between
+ * itself and IUT (HNBGW), which should then generate an N-PCSTATE.ind.
+ */
+testcase TC_mscpool_sccp_n_pcstate_detaches_cnlink_sctp_down() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink_sctp_down(ps_domain := false);
+}
+testcase TC_sgsnpool_sccp_n_pcstate_detaches_cnlink_sctp_down() runs on test_CT {
+	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink_sctp_down(ps_domain := true);
+}
+function f_TC_cnpool_sccp_n_pcstate_detaches_cnlink_sctp_down(boolean ps_domain) runs on test_CT
+{
+
+	f_init(nr_msc := 2, nr_sgsn := 2);
+	f_init_vty_stp();
+	f_sleep(1.0);
+
+	/* Control which MSC gets chosen next by the round-robin, otherwise
+	 * would be randomly affected by which other tests ran before this. */
+	f_vty_set_roundrobin_next(HNBGWVTY, ps_domain, 0);
+
+	f_ctrs_cn_init(ps_domain := ps_domain);
+
+	var ro_octetstring compl3 := f_gen_compl3_by_domain(ps_domain, 3);
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[0], cn_nr := 0, inc_countername := "cnpool:subscr:new");
+	f_TC_cnpool_compl_l3(ps_domain, compl3[1], cn_nr := 1, inc_countername := "cnpool:subscr:new");
+
+	f_logp(HNBGWVTY, "Shutting down HNBGW ASP in STP");
+	f_vty_stp_1st_asp_cmd(ps_domain, "shutdown");
+
+	f_TC_cnpool_compl_l3(ps_domain, compl3[2], expect_compl_l3_success := false);
+
+	f_logp(HNBGWVTY, "Restarting HNBGW ASP in STP");
+	f_vty_stp_1st_asp_cmd(ps_domain, "no shutdown");
+
+	/* Now round-robin would wrap to the first MSC, but since the first MSC is disconnected, it wraps around to the
+	 * second. */
+	f_TC_cnpool_compl_l3(ps_domain, compl3[2], cn_nr := 1, inc_countername := "cnpool:subscr:new");
+	f_shutdown_helper();
+}
+
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the CN link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by locally dropping the
+ * SCTP assoc at the virtual MSC (TTCN3). When STP osmo-hnbgw finds out about
+ * the SCTP conn STP<->MSC going down, it will send an M3UA DUNA to the IUT
+ * (HNBGW) which should then generate an N-PCSTATE.ind.
+ */
 testcase TC_mscpool_sccp_n_pcstate_detaches_cnlink() runs on test_CT {
 	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink(ps_domain := false);
 }
