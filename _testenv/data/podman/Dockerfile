@@ -31,6 +31,7 @@ RUN	set -x && \
 		ccache \
 		cmake \
 		cpio \
+		erlang-dev \
 		erlang-nox \
 		flex \
 		gdb \
