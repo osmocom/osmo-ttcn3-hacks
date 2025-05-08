@@ -51,19 +51,27 @@ qemu_initrd_add_mod() {
 	done
 }
 
-# Add binaries with depending libraries
-# $@: paths to binaries
+# Add binaries/libraries with depending libraries
+# $@: paths to binaries/libraries
 qemu_initrd_add_bin() {
 	local bin
 	local bin_path
 	local file
 
 	for bin in "$@"; do
-		local bin_path="$(which "$bin")"
-		if [ -z "$bin_path" ]; then
-			echo "ERROR: file not found: $bin"
-			exit 1
-		fi
+		local bin_path
+		case "$bin" in
+			/*)
+				bin_path="$bin"
+				;;
+			*)
+				bin_path="$(which "$bin")"
+				if [ -z "$bin_path" ]; then
+					echo "ERROR: file not found: $bin"
+					exit 1
+				fi
+				;;
+		esac
 
 		lddtree_out="$(lddtree -l "$bin_path")"
 		if [ -z "$lddtree_out" ]; then
