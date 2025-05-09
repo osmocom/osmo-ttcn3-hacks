@@ -85,6 +85,7 @@ RUN	set -x && \
 		sqlite3 \
 		sudo \
 		tcpdump \
+		tree \
 		vim \
 		vsmartcard-vpcd \
 		wget \
