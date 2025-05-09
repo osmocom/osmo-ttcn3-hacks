@@ -146,6 +146,7 @@ qemu_initrd_exit_error() {
 	echo
 	echo "ERROR: failed to build the initrd!"
 	echo
+	touch build_initrd_failed
 	exit 1
 }
 
