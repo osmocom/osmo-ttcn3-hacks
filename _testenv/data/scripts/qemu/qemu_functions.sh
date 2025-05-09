@@ -8,14 +8,15 @@ CORE_DIR="$PWD/_coredump"
 # $@: path to files
 qemu_initrd_add_file() {
 	local i
+	local cp="cp --no-dereference --recursive --parents"
 
 	for i in "$@"; do
 		case "$i" in
 		/bin/*|/sbin/*|/lib/*|/lib64/*)
-			cp -a --parents "$i" "$INITRD_DIR"/usr
+			$cp "$i" "$INITRD_DIR"/usr
 			;;
 		*)
-			cp -a --parents "$i" "$INITRD_DIR"
+			$cp "$i" "$INITRD_DIR"
 			;;
 		esac
 	done
