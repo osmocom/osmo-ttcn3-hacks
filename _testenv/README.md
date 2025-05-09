@@ -122,10 +122,11 @@ vty_port=4243
 * `vty_host=`: optionally set the VTY host for the SUT component to be used
   when obtaining a talloc report. If this is not set, `127.0.0.1` is used.
 
-* `qemu=`: set to `optional` to allow running this test component in QEMU.
-  Additional logic must be added to build an initrd with the test component and
-  actually run it in QEMU, this is done by sourcing `qemu_functions.sh` and
-  using functions from there. See the `ggsn` testsuite for reference.
+* `qemu=`: set to `optional`/`required` to allow/require running this test
+  component in QEMU. Additional logic must be added to build an initrd with the
+  test component and actually run it in QEMU, this is done by sourcing
+  `qemu_functions.sh` and using functions from there. See the `ggsn` testsuite
+  for reference.
 
 ### Executables
 

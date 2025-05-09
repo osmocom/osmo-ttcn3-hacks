@@ -76,22 +76,28 @@ def get_vty_host_port(cfg, path=None):
 
 
 def verify_qemu_cfgs():
-    """Check if -C or -K is set, but any of the selected configs can't run with
-    QEMU."""
-    if not testenv.args.kernel:
-        return
+    """Check if passed -C or -K args make sense with the testenv configs."""
+    testsuite = testenv.args.testsuite
+    qemu_supported = False
+    qemu_required = False
 
     for basename, cfg in cfgs.items():
-        missing = True
-
         for section in cfg.keys():
             if "qemu" in cfg[section]:
-                missing = False
+                qemu_supported = True
+                if cfg[section]["qemu"] == "required":
+                    qemu_required = True
                 break
 
-        if missing:
-            testsuite = testenv.args.testsuite
+        if testenv.args.kernel and not qemu_supported:
             logging.critical(f"{testsuite}/{basename}: doesn't support running in QEMU")
+            exit_error_readme()
+
+        if not testenv.args.kernel and qemu_required:
+            logging.error(f"{testsuite}/{basename}: {section} must run in QEMU")
+            logging.error("Use one of:")
+            logging.error("  -D, --debian-kernel")
+            logging.error("  -C, --custom-kernel")
             exit_error_readme()
 
 
@@ -100,7 +106,7 @@ def verify_qemu_section(path, cfg, section):
     if "qemu" not in cfg[section]:
         return
 
-    valid = ["optional"]
+    valid = ["optional", "required"]
     value = cfg[section]["qemu"]
 
     if value not in valid:
