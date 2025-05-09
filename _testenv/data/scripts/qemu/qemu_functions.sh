@@ -136,15 +136,29 @@ qemu_initrd_finish() {
 		| gzip -1 > "$INITRD_DIR".gz )
 }
 
+# Trap for qemu_build_initrd_with_log_redirect
+# Building the initrd is quite verbose, therefore put it in a log file
+# and only output its contents on error (see e.g. osmo-ggsn/run.sh)
 qemu_initrd_exit_error() {
-	# Building the initrd is quite verbose, therefore put it in a log file
-	# and only output its contents on error (see e.g. osmo-ggsn/run.sh)
-	cat "$1"
+	trap - EXIT INT TERM 0
+	cat "build_initrd.log"
 	set +x
 	echo
 	echo "ERROR: failed to build the initrd!"
 	echo
 	exit 1
+}
+
+# Users of qemu_functions should define a build_initrd function that calls
+# qemu_initrd_init, qemu_initrd_add_* and qemu_initrd_finish. See ggsn's run.sh
+# as example. The function here redirects the very verbose output of building
+# the initrd to a separate log file, and aborts and display the log on error.
+qemu_build_initrd_with_log_redirect() {
+	# Use a trap instead of "if !build_initrd; then ..." logic as "set -e"
+	# gets otherwise: https://unix.stackexchange.com/a/65564
+	trap qemu_initrd_exit_error EXIT INT TERM 0
+	build_initrd >build_initrd.log 2>&1
+	trap - EXIT INT TERM 0
 }
 
 qemu_random_mac() {

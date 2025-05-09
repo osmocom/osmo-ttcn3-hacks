@@ -32,9 +32,5 @@ build_initrd() {
 }
 
 . qemu_functions.sh
-
-if ! build_initrd >build_initrd.log 2>&1; then
-	qemu_initrd_exit_error "build_initrd.log"
-fi
-
+qemu_build_initrd_with_log_redirect
 qemu_run
