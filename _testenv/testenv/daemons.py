@@ -75,7 +75,8 @@ def start(cfg):
         if "setup" in section_data:
             setup = section_data["setup"]
             logging.info(f"Running {section} setup script")
-            testenv.cmd.run(setup, cwd=cwd)
+            if testenv.cmd.run(setup, cwd=cwd, check=False).returncode:
+                raise testenv.NoTraceException(f"{section}: setup script failed")
 
 
 def kill_process_tree(pid, ppids):
