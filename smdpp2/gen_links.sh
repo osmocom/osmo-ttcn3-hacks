@@ -30,6 +30,10 @@ DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
 FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn "
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
+FILES="JSON_EncDec.cc JSON_Types.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library/euicc
 FILES="PEDefinitions.asn PKIX1Explicit88.asn PKIX1Implicit88.asn RSPDefinitions.asn SGP32Definitions.asn "
 FILES+="PKIX1Explicit88_Templates.ttcn PKIX1Explicit88_Types.ttcn PKIX1Implicit88_Templates.ttcn "

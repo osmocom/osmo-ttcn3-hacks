@@ -18,6 +18,7 @@ FILES="
 	PKIX1Explicit88_EncDec.cc
 	PKIX1Implicit88_EncDec.cc
 	PIPEasp_PT.cc
+	JSON_EncDec.cc
 "
 ../regen-makefile.sh smdpp2_Tests.ttcn $FILES
 
