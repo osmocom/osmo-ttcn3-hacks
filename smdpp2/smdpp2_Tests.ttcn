@@ -1,0 +1,885 @@
+module smdpp2_Tests {
+
+    // ----- IMPORTS -----
+    import from HTTPmsg_Types all;
+    import from TLS_Templates all;
+    import from JSON_Types all;
+    import from ES9Plus_Templates all;
+    import from CommonLibrary all;
+    import from TestSystem all;
+    import from CryptoLibrary all;
+    import from ASN1_Types all;
+    import from X509_Types all;
+    import from ASN1BER_Encoder all;
+    
+    // ----- CONSTANTS -----
+    const charstring c_SMDP_URL := "https://smdp.example.com:443";
+    const integer c_HTTP_OK := 200;
+    const integer c_HTTP_BAD_REQUEST := 400;
+    const integer c_HTTP_UNAUTHORIZED := 401;
+    const integer c_HTTP_FORBIDDEN := 403;
+    const integer c_HTTP_NOT_FOUND := 404;
+    const integer c_HTTP_SERVER_ERROR := 500;
+    
+    // Certificate Constants
+    const charstring c_CI_CERT_PATH := "/certs/ci-certificates.pem";
+    const charstring c_ROOT_CA_PATH := "/certs/root-ca.pem";
+    const charstring c_EUICC_CERT_PATH := "/certs/euicc-cert.pem";
+    
+    // Profile Management Constants
+    const charstring c_PROFILE_CLASS := "operational-network";
+    const charstring c_POL2_RULE_FORMAT := "1";
+    
+    // Authentication Constants
+    const octetstring c_OID_RSA_ENCRYPTION := 'FFFF'O; // Example value, should be actual OID
+    const octetstring c_OID_SHA256_WITH_RSA := 'FFFF'O; // Example value, should be actual OID
+    
+    // ----- TYPE DEFINITIONS -----
+    
+    // ES9+ Message Types
+    type record InitiateAuthentication_Request {
+        charstring euiccChallenge,
+        charstring euiccInfo1,
+        charstring smdpAddress optional,
+        charstring transactionId optional
+    }
+    
+    type record InitiateAuthentication_Response {
+        charstring transactionId,
+        charstring serverSigned1,
+        charstring serverSignature1,
+        charstring euiccCiPKIdToBeUsed,
+        charstring serverCertificate
+    }
+    
+    type record GetBoundProfilePackage_Request {
+        charstring transactionId,
+        charstring prepareDownloadResponse
+    }
+    
+    type record GetBoundProfilePackage_Response {
+        charstring transactionId,
+        charstring boundProfilePackage
+    }
+    
+    type record AuthenticateClient_Request {
+        charstring transactionId,
+        charstring authenticateServerResponse
+    }
+    
+    type record AuthenticateClient_Response {
+        charstring transactionId,
+        charstring profileMetadata,
+        charstring smdpSigned2,
+        charstring smdpSignature2,
+        charstring smdpCertificate,
+        charstring errorResult optional
+    }
+    
+    type record ProfileMetadata {
+        charstring iccid,
+        charstring serviceProviderName,
+        charstring profileName,
+        charstring profileClass,
+        charstring profileState,
+        charstring iconType optional,
+        octetstring icon optional,
+        charstring profileOwner optional,
+        record of PolicyRule pol2Rules optional,
+        boolean topLevelOperatorConnectivity optional
+    }
+    
+    type record PolicyRule {
+        charstring policyRuleId,
+        charstring ruleFormat,
+        charstring policyRuleContent
+    }
+    
+    type record Certificate {
+        charstring serialNumber,
+        charstring issuerName,
+        charstring subjectName,
+        charstring validFrom,
+        charstring validTo,
+        charstring publicKey,
+        charstring signatureAlgorithm,
+        charstring signaturex,
+        record of Extension extensions optional
+    }
+    
+    type record Extension {
+        charstring oid,
+        boolean critical,
+        octetstring valuex
+    }
+    
+    type record HandleNotification_Request {
+        charstring pendingNotification,
+        charstring euiccSignPNtoken
+    }
+    
+    type record HandleNotification_Response {
+        charstring notificationSentResult
+    }
+    
+    type record CancelSession_Request {
+        charstring transactionId,
+        charstring cancelSessionReason
+    }
+    
+    type record CancelSession_Response {
+        charstring transactionId,
+        charstring functionExecutionStatus
+    }
+    
+    // ----- PORTS -----
+    type port HTTPSPort message {
+        inout HTTPRequest;
+        inout HTTPResponse;
+    } with { extension "user HTTPSPortType" }
+    
+    // ----- COMPONENTS -----
+    type component LPA_Simulator {
+        port HTTPSPort p_https;
+        timer t_responseTimeout := 30.0;
+        timer t_sessionTimeout := 300.0;
+        
+        var charstring v_currentTransactionId := "";
+        var charstring v_euiccChallenge := "";
+        var charstring v_boundProfilePackage := "";
+        var Certificate v_euiccCert := {};
+        var Certificate v_ciCert := {};
+        var Certificate v_smdpCert := {};
+        var charstring v_euiccPrivateKey := "";
+        var boolean v_certChainValid := false;
+        var ProfileMetadata v_profileMetadata := {};
+    }
+    
+    type component SMDP_Server {
+        port HTTPSPort p_https;
+    }
+    
+    // ----- TEST CONFIGURATION -----
+    function f_setupTestConfiguration() runs on LPA_Simulator {
+        map(self:p_https, system:p_https);
+    }
+    
+    function f_teardownTestConfiguration() runs on LPA_Simulator {
+        unmap(self:p_https, system:p_https);
+    }
+    
+    // ----- UTILITY FUNCTIONS -----
+    
+    // Generate random EuiccChallenge
+    function f_generateEuiccChallenge() return charstring {
+        var octetstring randomBytes := f_rnd_octstring(16); // 16 byte random value
+        return hex2str(randomBytes);
+    }
+    
+    // Parse HTTP Response and extract JSON body
+    function f_extractJsonBody(in HTTPResponse response) return charstring {
+        if (response.statusLine.statusCode == c_HTTP_OK) {
+            return oct2char(response.messageBody);
+        } else {
+            log("Error: HTTP status code ", response.statusLine.statusCode);
+            return "";
+        }
+    }
+    
+    // Encode JSON for HTTP request
+    function f_encodeJson(in universal charstring jsonStr) return octetstring {
+        return char2oct(jsonStr, "UTF-8");
+    }
+    
+    // Create HTTP Request with proper headers
+    function f_createHttpRequest(
+        in charstring path,
+        in charstring method,
+        in charstring body
+    ) return HTTPRequest {
+        var HTTPRequest request := {
+            requestLine := {
+                method := method,
+                uri := path,
+                version := "HTTP/1.1"
+            },
+            headers := {
+                { "Host", c_SMDP_URL },
+                { "Content-Type", "application/json" },
+                { "X-Admin-Protocol", "gsma/rsp/v2.2.0" },
+                { "Content-Length", int2str(lengthof(char2oct(body))) },
+                { "User-Agent", "TTCN-3_ES9Plus_TestClient/1.0" },
+                { "Connection", "keep-alive" }
+            },
+            messageBody := char2oct(body)
+        };
+        return request;
+    }
+    
+    // Extract transaction ID from response
+    function f_extractTransactionId(in charstring jsonResponse) return charstring {
+        var JSON_Value jsonValue := f_decodeJsonBody(jsonResponse);
+        if (ischosen(jsonValue.object)) {
+            var integer idx := f_findJsonProperty(jsonValue.object, "transactionId");
+            if (idx >= 0 and idx < sizeof(jsonValue.object)) {
+                if (ischosen(jsonValue.object[idx].value.str)) {
+                    return jsonValue.object[idx].value.str;
+                }
+            }
+        }
+        return "";
+    }
+    
+    // Load and parse X.509 certificate from PEM file
+    function f_loadCertificate(in charstring certificatePath) return Certificate {
+        var Certificate cert := {};
+        
+        // Load certificate using external function (implemented in C/C++)
+        @try {
+            var octetstring certData := f_loadFile(certificatePath);
+            // Parse the certificate using ASN.1 BER decoder
+            cert := @CryptoLibrary.parseCertificate(certData);
+        }
+        @catch (e) {
+            log("Error loading certificate: ", e);
+        }
+        
+        return cert;
+    }
+    
+    // Verify certificate chain
+    function f_verifyCertificateChain(
+        in Certificate targetCert,
+        in Certificate intermediateCert,
+        in Certificate rootCert
+    ) return boolean {
+        // Call external library function for certificate chain validation
+        return @CryptoLibrary.verifyCertChain(targetCert, intermediateCert, rootCert);
+    }
+    
+    // Verify digital signature
+    function f_verifySignature(
+        in Certificate signerCert,
+        in octetstring signedData,
+        in octetstring signature,
+        in octetstring signatureAlgorithmOID
+    ) return boolean {
+        // Verify signature using external crypto library
+        return @CryptoLibrary.verifySignature(signerCert, signedData, signature, signatureAlgorithmOID);
+    }
+    
+    // Verify server signature 
+    function f_verifyServerSignature(
+        in charstring serverCertificate,
+        in charstring serverSigned,
+        in charstring serverSignature
+    ) return boolean {
+        var Certificate smdpCert := f_decodeCertificate(serverCertificate);
+        var octetstring signedData := hex2oct(serverSigned);
+        var octetstring signature := hex2oct(serverSignature);
+        
+        // Load CI certificate (intermediate cert in the chain)
+        var Certificate ciCert := f_loadCertificate(c_CI_CERT_PATH);
+        // Load root CA certificate
+        var Certificate rootCACert := f_loadCertificate(c_ROOT_CA_PATH);
+        
+        // First verify certificate chain
+        var boolean certChainValid := f_verifyCertificateChain(smdpCert, ciCert, rootCACert);
+        if (not certChainValid) {
+            log("Certificate chain validation failed for SM-DP+ certificate");
+            return false;
+        }
+        
+        // Then verify the signature
+        return f_verifySignature(smdpCert, signedData, signature, c_OID_SHA256_WITH_RSA);
+    }
+    
+    // Decode a PEM/DER certificate string into a Certificate record
+    function f_decodeCertificate(in charstring certificateStr) return Certificate {
+        var octetstring certDer;
+        
+        // Check if this is PEM or DER format
+        if (isbound(certificateStr) and 
+            substr(certificateStr, 0, lengthof("-----BEGIN CERTIFICATE-----")) == "-----BEGIN CERTIFICATE-----") {
+            // PEM format - decode Base64
+            certDer := @CryptoLibrary.pemToDer(certificateStr);
+        } else {
+            // Assuming it's hex-encoded DER
+            certDer := hex2oct(certificateStr);
+        }
+        
+        // Parse the DER encoded certificate
+        return @CryptoLibrary.parseCertificate(certDer);
+    }
+    
+    // Generate key pair for eUICC (if needed)
+    function f_generateKeyPair() returns record {
+        Certificate cert,
+        charstring privateKey
+    } {
+        // Call external function to generate key pair
+        return @CryptoLibrary.generateKeyPair("RSA", 2048);
+    }
+    
+    // Parse Profile Metadata
+    function f_parseProfileMetadata(in charstring metadataJson) return ProfileMetadata {
+        var ProfileMetadata metadata := {};
+        var JSON_Value jsonValue := f_decodeJsonBody(metadataJson);
+        
+        if (ischosen(jsonValue.object)) {
+            // Extract the profile metadata fields
+            metadata.iccid := f_getJsonStringProperty(jsonValue.object, "iccid");
+            metadata.serviceProviderName := f_getJsonStringProperty(jsonValue.object, "serviceProviderName");
+            metadata.profileName := f_getJsonStringProperty(jsonValue.object, "profileName");
+            metadata.profileClass := f_getJsonStringProperty(jsonValue.object, "profileClass");
+            metadata.profileState := f_getJsonStringProperty(jsonValue.object, "profileState");
+            
+            // Optional fields
+            metadata.iconType := f_getJsonStringProperty(jsonValue.object, "iconType");
+            
+            var charstring iconStr := f_getJsonStringProperty(jsonValue.object, "icon");
+            if (lengthof(iconStr) > 0) {
+                metadata.icon := hex2oct(iconStr);
+            }
+            
+            metadata.profileOwner := f_getJsonStringProperty(jsonValue.object, "profileOwner");
+            
+            // Parse POL2 rules if present
+            var integer pol2Index := f_findJsonProperty(jsonValue.object, "pol2Rules");
+            if (pol2Index >= 0 and pol2Index < sizeof(jsonValue.object)) {
+                if (ischosen(jsonValue.object[pol2Index].value.array)) {
+                    var integer rulesCount := sizeof(jsonValue.object[pol2Index].value.array);
+                    metadata.pol2Rules := {};
+                    
+                    for (var integer i := 0; i < rulesCount; i := i + 1) {
+                        if (ischosen(jsonValue.object[pol2Index].value.array[i].object)) {
+                            var PolicyRule rule := {
+                                policyRuleId := "",
+                                ruleFormat := "",
+                                policyRuleContent := ""
+                            };
+                            
+                            var JSON_Object ruleObj := jsonValue.object[pol2Index].value.array[i].object;
+                            rule.policyRuleId := f_getJsonStringPropertyFromObject(ruleObj, "policyRuleId");
+                            rule.ruleFormat := f_getJsonStringPropertyFromObject(ruleObj, "ruleFormat");
+                            rule.policyRuleContent := f_getJsonStringPropertyFromObject(ruleObj, "policyRuleContent");
+                            
+                            metadata.pol2Rules[sizeof(metadata.pol2Rules)] := rule;
+                        }
+                    }
+                }
+            }
+        }
+        
+        return metadata;
+    }
+    
+    // Helper function to extract string property from JSON object
+    function f_getJsonStringProperty(in JSON_Object obj, in charstring propertyName) return charstring {
+        var integer idx := f_findJsonProperty(obj, propertyName);
+        if (idx >= 0 and idx < sizeof(obj)) {
+            if (ischosen(obj[idx].value.str)) {
+                return obj[idx].value.str;
+            }
+        }
+        return "";
+    }
+    
+    // Helper function to extract string property from JSON object
+    function f_getJsonStringPropertyFromObject(in JSON_Object obj, in charstring propertyName) return charstring {
+        var integer idx := f_findJsonPropertyInObject(obj, propertyName);
+        if (idx >= 0 and idx < sizeof(obj)) {
+            if (ischosen(obj[idx].value.str)) {
+                return obj[idx].value.str;
+            }
+        }
+        return "";
+    }
+    
+    // Helper function to find property in JSON object
+    function f_findJsonPropertyInObject(in JSON_Object obj, in charstring propertyName) return integer {
+        for (var integer i := 0; i < sizeof(obj); i := i + 1) {
+            if (obj[i].name == propertyName) {
+                return i;
+            }
+        }
+        return -1;
+    }
+    
+    // Log certificate details for debugging
+    function f_logCertificateDetails(in Certificate cert) {
+        log("Certificate Details:");
+        log("  Serial Number: ", cert.serialNumber);
+        log("  Issuer: ", cert.issuerName);
+        log("  Subject: ", cert.subjectName);
+        log("  Valid From: ", cert.validFrom);
+        log("  Valid To: ", cert.validTo);
+        log("  Signature Algorithm: ", cert.signatureAlgorithm);
+    }
+    
+    // ----- MAIN PROCEDURES -----
+    
+    // Initiate Authentication procedure
+    function f_initiateAuthentication(
+        in charstring euiccInfo1,
+        in charstring smdpAddress optional
+    ) runs on LPA_Simulator return InitiateAuthentication_Response {
+        var HTTPRequest request;
+        var HTTPResponse response;
+        var InitiateAuthentication_Request req;
+        var InitiateAuthentication_Response resp := {};
+        var charstring jsonBody;
+        
+        // Generate eUICC challenge
+        v_euiccChallenge := f_generateEuiccChallenge();
+        
+        // Load eUICC certificate
+        v_euiccCert := f_loadCertificate(c_EUICC_CERT_PATH);
+        f_logCertificateDetails(v_euiccCert);
+        
+        // Create request body
+        req := {
+            euiccChallenge := v_euiccChallenge,
+            euiccInfo1 := euiccInfo1,
+            smdpAddress := smdpAddress,
+            transactionId := null
+        }
+        
+        // Convert to JSON
+        jsonBody := f_encodeInitiateAuthReq(req);
+        
+        // Create and send HTTP request
+        request := f_createHttpRequest(
+            "/gsma/rsp2/es9plus/initiateAuthentication",
+            "POST",
+            jsonBody
+        );
+        
+        log("Sending InitiateAuthentication request");
+        p_https.send(request);
+        t_responseTimeout.start;
+        
+        alt {
+            [] p_https.receive(HTTPResponse:?) -> value response {
+                t_responseTimeout.stop;
+                
+                log("Received InitiateAuthentication response, status: ", response.statusLine.statusCode);
+                
+                // Extract and parse response
+                var charstring responseBody := f_extractJsonBody(response);
+                resp := f_decodeInitiateAuthResp(responseBody);
+                
+                // Store transaction ID for future requests
+                v_currentTransactionId := resp.transactionId;
+                
+                // Validate server certificate
+                if (lengthof(resp.serverCertificate) > 0) {
+                    v_smdpCert := f_decodeCertificate(resp.serverCertificate);
+                    f_logCertificateDetails(v_smdpCert);
+                    
+                    // Load CI certificate
+                    v_ciCert := f_loadCertificate(c_CI_CERT_PATH);
+                    
+                    // Load root CA certificate
+                    var Certificate rootCACert := f_loadCertificate(c_ROOT_CA_PATH);
+                    
+                    // Verify certificate chain
+                    v_certChainValid := f_verifyCertificateChain(v_smdpCert, v_ciCert, rootCACert);
+                    
+                    if (not v_certChainValid) {
+                        log("Warning: SM-DP+ certificate chain validation failed");
+                    } else {
+                        log("SM-DP+ certificate chain validation successful");
+                        
+                        // Verify serverSignature1
+                        var boolean signatureValid := f_verifyServerSignature(
+                            resp.serverCertificate,
+                            resp.serverSigned1,
+                            resp.serverSignature1
+                        );
+                        
+                        if (not signatureValid) {
+                            log("Warning: Server signature validation failed");
+                        } else {
+                            log("Server signature validation successful");
+                        }
+                    }
+                }
+                
+                return resp;
+            }
+            [] t_responseTimeout.timeout {
+                log("Error: Response timeout for InitiateAuthentication");
+                return resp;
+            }
+        }
+    }
+    
+    // Authenticate Client procedure
+    function f_authenticateClient(
+        in charstring transactionId,
+        in charstring authenticateServerResponse
+    ) runs on LPA_Simulator return AuthenticateClient_Response {
+        var HTTPRequest request;
+        var HTTPResponse response;
+        var AuthenticateClient_Request req;
+        var AuthenticateClient_Response resp := {};
+        var charstring jsonBody;
+        
+        // Create request body
+        req := {
+            transactionId := transactionId,
+            authenticateServerResponse := authenticateServerResponse
+        }
+        
+        // Convert to JSON
+        jsonBody := f_encodeAuthClientReq(req);
+        
+        // Create and send HTTP request
+        request := f_createHttpRequest(
+            "/gsma/rsp2/es9plus/authenticateClient",
+            "POST",
+            jsonBody
+        );
+        
+        log("Sending AuthenticateClient request");
+        p_https.send(request);
+        t_responseTimeout.start;
+        
+        alt {
+            [] p_https.receive(HTTPResponse:?) -> value response {
+                t_responseTimeout.stop;
+                
+                log("Received AuthenticateClient response, status: ", response.statusLine.statusCode);
+                
+                // Extract and parse response
+                var charstring responseBody := f_extractJsonBody(response);
+                
+                // Check for error response first
+                if (response.statusLine.statusCode != c_HTTP_OK) {
+                    resp.errorResult := responseBody;
+                    return resp;
+                }
+                
+                resp := f_decodeAuthClientResp(responseBody);
+                
+                // Verify smdpSignature2
+                if (v_certChainValid and lengthof(resp.smdpSignature2) > 0) {
+                    var boolean signatureValid := f_verifyServerSignature(
+                        resp.smdpCertificate,
+                        resp.smdpSigned2,
+                        resp.smdpSignature2
+                    );
+                    
+                    if (not signatureValid) {
+                        log("Warning: SM-DP+ signature validation failed in AuthenticateClient");
+                    } else {
+                        log("SM-DP+ signature validation successful in AuthenticateClient");
+                    }
+                }
+                
+                // Parse profile metadata
+                if (lengthof(resp.profileMetadata) > 0) {
+                    v_profileMetadata := f_parseProfileMetadata(resp.profileMetadata);
+                    log("Profile ICCID: ", v_profileMetadata.iccid);
+                    log("Profile Name: ", v_profileMetadata.profileName);
+                    log("Service Provider: ", v_profileMetadata.serviceProviderName);
+                }
+                
+                return resp;
+            }
+            [] t_responseTimeout.timeout {
+                log("Error: Response timeout for AuthenticateClient");
+                return resp;
+            }
+        }
+    }
+    
+oundProfilePackage_Response {
+        var HTTPRequest request;
+        var HTTPResponse response;
+        var GetBoundProfilePackage_Request req;
+        var GetBoundProfilePackage_Response resp := {};
+        var charstring jsonBody;
+        
+        // Create request body
+        req := {
+            transactionId := transactionId,
+            prepareDownloadResponse := prepareDownloadResponse
+        }
+        
+        // Convert to JSON
+        jsonBody := f_encodeGetBPPReq(req);
+        
+        // Create and send HTTP request
+        request := f_createHttpRequest(
+            "/gsma/rsp2/es9plus/getBoundProfilePackage",
+            "POST",
+            jsonBody
+        );
+        
+        p_https.send(request);
+        t_responseTimeout.start;
+        
+        alt {
+            [] p_https.receive(HTTPResponse:?) -> value response {
+                t_responseTimeout.stop;
+                
+                // Extract and parse response
+                var charstring responseBody := f_extractJsonBody(response);
+                resp := f_decodeGetBPPResp(responseBody);
+                
+                // Store bound profile package for later use
+                v_boundProfilePackage := resp.boundProfilePackage;
+                
+                return resp;
+            }
+            [] t_responseTimeout.timeout {
+                log("Error: Response timeout");
+                return resp;
+            }
+        }
+    }
+    
+    // Handle Notification procedure
+    function f_handleNotification(
+        in charstring pendingNotification,
+        in charstring euiccSignPNtoken
+    ) runs on LPA_Simulator return HandleNotification_Response {
+        var HTTPRequest request;
+        var HTTPResponse response;
+        var HandleNotification_Request req;
+        var HandleNotification_Response resp := {};
+        var charstring jsonBody;
+        
+        // Create request body
+        req := {
+            pendingNotification := pendingNotification,
+            euiccSignPNtoken := euiccSignPNtoken
+        }
+        
+        // Convert to JSON
+        jsonBody := f_encodeHandleNotificationReq(req);
+        
+        // Create and send HTTP request
+        request := f_createHttpRequest(
+            "/gsma/rsp2/es9plus/handleNotification",
+            "POST",
+            jsonBody
+        );
+        
+        p_https.send(request);
+        t_responseTimeout.start;
+        
+        alt {
+            [] p_https.receive(HTTPResponse:?) -> value response {
+                t_responseTimeout.stop;
+                
+                // Extract and parse response
+                var charstring responseBody := f_extractJsonBody(response);
+                resp := f_decodeHandleNotificationResp(responseBody);
+                
+                return resp;
+            }
+            [] t_responseTimeout.timeout {
+                log("Error: Response timeout");
+                return resp;
+            }
+        }
+    }
+    
+    // Cancel Session procedure
+    function f_cancelSession(
+        in charstring transactionId,
+        in charstring cancelSessionReason
+    ) runs on LPA_Simulator return CancelSession_Response {
+        var HTTPRequest request;
+        var HTTPResponse response;
+        var CancelSession_Request req;
+        var CancelSession_Response resp := {};
+        var charstring jsonBody;
+        
+        // Create request body
+        req := {
+            transactionId := transactionId,
+            cancelSessionReason := cancelSessionReason
+        }
+        
+        // Convert to JSON
+        jsonBody := f_encodeCancelSessionReq(req);
+        
+        // Create and send HTTP request
+        request := f_createHttpRequest(
+            "/gsma/rsp2/es9plus/cancelSession",
+            "POST",
+            jsonBody
+        );
+        
+        p_https.send(request);
+        t_responseTimeout.start;
+        
+        alt {
+            [] p_https.receive(HTTPResponse:?) -> value response {
+                t_responseTimeout.stop;
+                
+                // Extract and parse response
+                var charstring responseBody := f_extractJsonBody(response);
+                resp := f_decodeCancelSessionResp(responseBody);
+                
+                return resp;
+            }
+            [] t_responseTimeout.timeout {
+                log("Error: Response timeout");
+                return resp;
+            }
+        }
+    }
+    
+    // ----- TEST CASES -----
+    
+    // Test Case: Successful Profile Download
+    testcase TC_ES9Plus_SuccessfulProfileDownload() runs on LPA_Simulator {
+        var InitiateAuthentication_Response initiateAuthResp;
+        var AuthenticateClient_Response authClientResp;
+        var GetBoundProfilePackage_Response getBPPResp;
+        
+        // Setup test configuration
+        f_setupTestConfiguration();
+        
+        // Generate test data
+        var charstring euiccInfo1 := "SAMPLE_EUICC_INFO1";
+        var charstring authenticateServerResponse := "SAMPLE_AUTH_SERVER_RESPONSE";
+        var charstring prepareDownloadResponse := "SAMPLE_PREPARE_DOWNLOAD_RESPONSE";
+        
+        // Step 1: Initiate Authentication
+        initiateAuthResp := f_initiateAuthentication(euiccInfo1, c_SMDP_URL);
+        if (lengthof(initiateAuthResp.transactionId) <= 0) {
+            setverdict(fail, "InitiateAuthentication failed");
+            return;
+        }
+        
+        // Step 2: Authenticate Client
+        authClientResp := f_authenticateClient(initiateAuthResp.transactionId, authenticateServerResponse);
+        if (lengthof(authClientResp.transactionId) <= 0) {
+            setverdict(fail, "AuthenticateClient failed");
+            return;
+        }
+        
+        // Step 3: Get Bound Profile Package
+        getBPPResp := f_getBoundProfilePackage(initiateAuthResp.transactionId, prepareDownloadResponse);
+        if (lengthof(getBPPResp.boundProfilePackage) <= 0) {
+            setverdict(fail, "GetBoundProfilePackage failed");
+            return;
+        }
+        
+        // Verify profile package was retrieved successfully
+        if (lengthof(v_boundProfilePackage) > 0) {
+            setverdict(pass, "Profile downloaded successfully");
+        } else {
+            setverdict(fail, "Profile download validation failed");
+        }
+        
+        // Teardown test configuration
+        f_teardownTestConfiguration();
+    }
+    
+    // Test Case: Authentication Failure
+    testcase TC_ES9Plus_AuthenticationFailure() runs on LPA_Simulator {
+        var InitiateAuthentication_Response initiateAuthResp;
+        var AuthenticateClient_Response authClientResp;
+        
+        // Setup test configuration
+        f_setupTestConfiguration();
+        
+        // Generate test data
+        var charstring euiccInfo1 := "SAMPLE_EUICC_INFO1";
+        var charstring invalidAuthServerResponse := "INVALID_AUTH_SERVER_RESPONSE";
+        
+        // Step 1: Initiate Authentication
+        initiateAuthResp := f_initiateAuthentication(euiccInfo1, c_SMDP_URL);
+        if (lengthof(initiateAuthResp.transactionId) <= 0) {
+            setverdict(fail, "InitiateAuthentication failed");
+            return;
+        }
+        
+        // Step 2: Authenticate Client with invalid response
+        authClientResp := f_authenticateClient(initiateAuthResp.transactionId, invalidAuthServerResponse);
+        
+        // Expect authentication to fail
+        // In real case, we would check for specific error codes or messages
+        if (lengthof(authClientResp.transactionId) <= 0) {
+            setverdict(pass, "Authentication correctly failed with invalid input");
+        } else {
+            setverdict(fail, "Authentication should have failed but succeeded");
+        }
+        
+        // Teardown test configuration
+        f_teardownTestConfiguration();
+    }
+    
+    // Test Case: Session Cancellation
+    testcase TC_ES9Plus_SessionCancellation() runs on LPA_Simulator {
+        var InitiateAuthentication_Response initiateAuthResp;
+        var CancelSession_Response cancelSessionResp;
+        
+        // Setup test configuration
+        f_setupTestConfiguration();
+        
+        // Generate test data
+        var charstring euiccInfo1 := "SAMPLE_EUICC_INFO1";
+        var charstring cancelReason := "USER_CANCELLED";
+        
+        // Step 1: Initiate Authentication
+        initiateAuthResp := f_initiateAuthentication(euiccInfo1, c_SMDP_URL);
+        if (lengthof(initiateAuthResp.transactionId) <= 0) {
+            setverdict(fail, "InitiateAuthentication failed");
+            return;
+        }
+        
+        // Step 2: Cancel Session
+        cancelSessionResp := f_cancelSession(initiateAuthResp.transactionId, cancelReason);
+        
+        // Verify cancellation was successful
+        if (cancelSessionResp.functionExecutionStatus == "Executed-Success") {
+            setverdict(pass, "Session cancelled successfully");
+        } else {
+            setverdict(fail, "Session cancellation failed");
+        }
+        
+        // Teardown test configuration
+        f_teardownTestConfiguration();
+    }
+    
+    // Test Case: Handle Notification
+    testcase TC_ES9Plus_HandleNotification() runs on LPA_Simulator {
+        var HandleNotification_Response handleNotificationResp;
+        
+        // Setup test configuration
+        f_setupTestConfiguration();
+        
+        // Generate test data
+        var charstring pendingNotification := "SAMPLE_PENDING_NOTIFICATION";
+        var charstring euiccSignPNtoken := "SAMPLE_SIGNED_TOKEN";
+        
+        // Step 1: Handle Notification
+        handleNotificationResp := f_handleNotification(pendingNotification, euiccSignPNtoken);
+        
+        // Verify notification handling was successful
+        if (handleNotificationResp.notificationSentResult == "Executed-Success") {
+            setverdict(pass, "Notification handled successfully");
+        } else {
+            setverdict(fail, "Notification handling failed");
+        }
+        
+        // Teardown test configuration
+        f_teardownTestConfiguration();
+    }
+    
+    // ----- TEST EXECUTION CONTROL -----
+    control {
+        execute(TC_ES9Plus_SuccessfulProfileDownload());
+        execute(TC_ES9Plus_AuthenticationFailure());
+        execute(TC_ES9Plus_SessionCancellation());
+        execute(TC_ES9Plus_HandleNotification());
+    }
+}
