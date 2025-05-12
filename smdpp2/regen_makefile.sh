@@ -20,7 +20,7 @@ FILES="
 	PIPEasp_PT.cc
 	JSON_EncDec.cc
 "
-../regen-makefile.sh smdpp2_Tests.ttcn $FILES
+../regen-makefile.sh smdpp2_Tests.ttcn smdpp2_json.ttcn3 smdpp2_es9p_types.ttcn3 $FILES
 
 # required for forkpty(3) used by PIPEasp
 sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile
