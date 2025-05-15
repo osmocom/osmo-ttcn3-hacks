@@ -96,9 +96,17 @@ def apt_install(pkgs):
     testenv.cmd.run(["apt-get", "-q", "install", "-y", "--no-install-recommends"] + pkgs)
 
 
+def show_commit(project, cwd):
+    cmd = ["git", "-P", "-C", cwd, "-c", "color.ui=always", "log", "-1", "--oneline"]
+    logging.info(f"{project}: showing current commit")
+    testenv.cmd.run(cmd, no_podman=True)
+
+
 def clone_project(project):
-    if os.path.exists(os.path.join(git_dir, project)):
+    git_dir_project = os.path.join(git_dir, project)
+    if os.path.exists(git_dir_project):
         logging.debug(f"{project}: already cloned")
+        show_commit(project, git_dir_project)
         return
 
     branch = "master"
@@ -129,6 +137,7 @@ def clone_project(project):
             url,
         ]
     )
+    show_commit(project, git_dir_project)
 
 
 def from_source_sccp_demo_user():
@@ -144,8 +153,8 @@ def from_source_sccp_demo_user():
         ]
     )
 
+    clone_project("libosmo-sigtran")
     if not os.path.exists(sccp_demo_user_path):
-        clone_project("libosmo-sigtran")
         logging.info("Building sccp_demo_user")
         testenv.cmd.run(["autoreconf", "-fi"], cwd=sccp_dir)
 
@@ -170,8 +179,8 @@ def from_source_osmo_ns_dummy():
     libosmocore_dir = os.path.join(git_dir, "libosmocore")
     osmo_ns_dummy_path = os.path.join(libosmocore_dir, "utils/osmo-ns-dummy")
 
+    clone_project("libosmocore")
     if not os.path.exists(osmo_ns_dummy_path):
-        clone_project("libosmocore")
         logging.info("Building osmo-ns-dummy")
         testenv.cmd.run(["autoreconf", "-fi"], cwd=libosmocore_dir)
 
