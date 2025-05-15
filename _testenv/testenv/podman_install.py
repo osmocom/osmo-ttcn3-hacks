@@ -112,7 +112,7 @@ def clone_project(project):
     branch = "master"
     url = f"https://gerrit.osmocom.org/{project}"
     if testenv.args.binary_repo.endswith(":latest"):
-        ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True)
+        ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True, no_podman=True)
         tags = []
         pattern = re.compile("^\d+\.\d+\.\d+$")
         for line in ls_remote.stdout.split("\n"):
@@ -127,6 +127,8 @@ def clone_project(project):
     testenv.cmd.run(
         [
             "git",
+            "-c",
+            "advice.detachedHead=false",
             "-C",
             git_dir,
             "clone",
@@ -135,7 +137,8 @@ def clone_project(project):
             "--branch",
             branch,
             url,
-        ]
+        ],
+        no_podman=True,
     )
     show_commit(project, git_dir_project)
 
