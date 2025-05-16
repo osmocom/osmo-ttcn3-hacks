@@ -42,9 +42,24 @@ modulepar {
 	charstring mp_stp_ipa_ip := "127.0.0.1";
 	charstring mp_local_ipa_ip := "127.0.0.1";
 	integer mp_stp_ipa_port := 5000;
-	integer mp_local_ipa_port := 20000;
-	AspNameArray mp_ipa_as_names := {};
+	//integer mp_local_ipa_port := 20000;
+	/* local ASPs. Set in .cfg file: */
+	IpaConfigs mp_ipa_configs := {}
 }
+
+type record IpaConfig {
+	/* Name of the ASP in the STP, (eg. to access it over VTY) */
+	charstring asp_name,
+	/* Name of the AS in the STP, (eg. to access it over VTY) */
+	charstring as_name,
+	/* Whether local side is a TCP/SCTP server */
+	boolean is_server,
+	/* STP-side SCTP (or TCP) port for M3UA */
+	integer remote_port,
+	/* local M3UA base port on TTCN3 side */
+	integer local_port
+};
+type record of IpaConfig IpaConfigs;
 
 type component IPA_CT extends Test_CT {
 	/* for IPA we use the IPA_Emulation and not directly IPA_CodecPort to avoid
@@ -53,6 +68,43 @@ type component IPA_CT extends Test_CT {
 	port IPA_SP_PT IPA_CTRL[MAX_NR_IPA];
 	var IPA_Emulation_CT vc_IPA[MAX_NR_IPA];
 	var IPA_CCM_Parameters g_ccm_pars[MAX_NR_IPA];
+	var IpaConfigs g_ipa_configs;
+}
+
+friend function ipa_build_configs(template (omit) Misc_Helpers.ro_charstring asps := omit)
+return IpaConfigs
+{
+	if (not isvalue(asps)) {
+		return mp_ipa_configs;
+	}
+
+	var IpaConfigs ipa_configs := {};
+	for (var integer i := 0; i < lengthof(asps); i := i + 1) {
+		var boolean found := false;
+		for (var integer j := 0; j < lengthof(mp_ipa_configs); j := j + 1) {
+			if (mp_ipa_configs[j].asp_name == valueof(asps[i])) {
+				found := true;
+				ipa_configs := ipa_configs & {mp_ipa_configs[j]};
+				break;
+			}
+		}
+		if (not found) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Could not find ASP ", asps[i], ", check your configuration"));
+		}
+	}
+	return ipa_configs;
+}
+
+private function f_vty_cs7_listen_ipa_cmd(charstring cmd, integer ipa_port := 5000) runs on IPA_CT
+{
+	f_vty_config2(VTY, {"cs7 instance 0", "listen ipa " & int2str(ipa_port)}, cmd);
+}
+
+friend function f_vty_cs7_ipa_as_cmd(charstring as_name, charstring cmd) runs on IPA_CT
+{
+	f_vty_config2(VTY, {"cs7 instance 0", "as " & as_name & " ipa"}, cmd);
+
 }
 
 friend function f_IPA_send(integer idx, octetstring data) runs on IPA_CT {
@@ -89,30 +141,33 @@ runs on IPA_CT {
 	f_IPA_exp(idx_rx, data);
 }
 
-friend function f_init_ipa() runs on IPA_CT {
+friend function f_init_ipa(template (omit) IpaConfigs ipa_configs := omit) runs on IPA_CT {
 	var integer i;
 
 	f_init_common();
 
-	for (i := 0; i < lengthof(mp_ipa_as_names); i:=i+1) {
+	if (not istemplatekind(ipa_configs, "omit")) {
+		g_ipa_configs := valueof(ipa_configs);
+	} else {
+		g_ipa_configs := mp_ipa_configs;
+	}
+
+	for (i := 0; i < lengthof(g_ipa_configs); i:=i+1) {
 		vc_IPA[i] := IPA_Emulation_CT.create("IPA" & int2str(i));
 		map(vc_IPA[i]:IPA_PORT, system:IPA_CODEC_PT);
 		connect(self:IPA[i], vc_IPA[i]:MTP3_SP_PORT);
 		connect(self:IPA_CTRL[i], vc_IPA[i]:IPA_SP_PORT);
 		g_ccm_pars[i] := c_IPA_default_ccm_pars;
-		g_ccm_pars[i].name := mp_ipa_as_names[i];
+		g_ccm_pars[i].name := g_ipa_configs[i].as_name;
 	}
 }
 
-friend function f_connect_ipa(integer idx, boolean use_unknown_asp_port := false, boolean exp_act := true) runs on IPA_CT {
-	var integer port_offset := 0;
-	if (use_unknown_asp_port) {
-		/* Add 100 to the port since we know that port is not configured in any
-		  ASP only up to MAX_NR_IPA are configured. */
-		port_offset := 100;
-	}
-	vc_IPA[idx].start(IPA_Emulation.main_client(mp_stp_ipa_ip, mp_stp_ipa_port, mp_local_ipa_ip,
-			mp_local_ipa_port + idx + port_offset, g_ccm_pars[idx]));
+friend function f_connect_ipa(integer idx, boolean exp_act := true) runs on IPA_CT {
+	vc_IPA[idx].start(IPA_Emulation.main_client(mp_stp_ipa_ip,
+						    g_ipa_configs[idx].remote_port,
+						    mp_local_ipa_ip,
+						    g_ipa_configs[idx].local_port,
+						    g_ccm_pars[idx]));
 	IPA_CTRL[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP));
 	alt {
 	[exp_act] IPA_CTRL[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_ID_ACK));
@@ -124,58 +179,87 @@ friend function f_connect_ipa(integer idx, boolean use_unknown_asp_port := false
 
 /* "accept-asp-connections pre-configured" and client from unknown source */
 testcase TC_unknown_client_nodynamic() runs on IPA_CT {
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-sender0" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	/* Build an ASP unknown (port) from osmo-stp: */
+	ipa_configs := {
+		{ asp_name := "ipa-asp-unknown",
+		  as_name := ipa_configs[0].as_name,
+		  is_server := false,
+		  remote_port := ipa_configs[0].remote_port,
+		  local_port := 3000 }
+	};
 	f_init_common();
-	f_vty_config2(VTY, {"cs7 instance 0", "listen ipa 5000"},
-		      "accept-asp-connections pre-configured");
-	f_init_ipa();
-	f_connect_ipa(0, true, false);
+	f_vty_cs7_listen_ipa_cmd("accept-asp-connections pre-configured", ipa_configs[0].remote_port);
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_connect_ipa(0, false);
 
 	/* switch back to default */
-	f_vty_config2(VTY, {"cs7 instance 0", "listen ipa 5000"},
-		      "accept-asp-connections dynamic-permitted");
+	f_vty_cs7_listen_ipa_cmd("accept-asp-connections dynamic-permitted", ipa_configs[0].remote_port);
 	setverdict(pass);
 }
 
 /* "accept-asp-connections pre-configured" and client from known source */
 testcase TC_known_client_nodynamic() runs on IPA_CT {
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-sender0" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+
 	f_init_common();
-	f_vty_config2(VTY, {"cs7 instance 0", "listen ipa 5000"},
-		      "accept-asp-connections pre-configured");
-	f_init_ipa();
-	f_connect_ipa(0, false);
+	f_vty_cs7_listen_ipa_cmd("accept-asp-connections pre-configured", ipa_configs[0].remote_port);
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_connect_ipa(0);
 
 	/* switch back to default */
-	f_vty_config2(VTY, {"cs7 instance 0", "listen ipa 5000"},
-		      "accept-asp-connections dynamic-permitted");
+	f_vty_cs7_listen_ipa_cmd("accept-asp-connections dynamic-permitted", ipa_configs[0].remote_port);
 	setverdict(pass);
 }
 
 
 /* "accept-asp-connections dynamic-permitted" and client from unknown source */
 testcase TC_unknown_client_dynamic() runs on IPA_CT {
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-sender0" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	/* Build an ASP unknown (port) from osmo-stp: */
+	ipa_configs := {
+		{ asp_name := "ipa-asp-unknown2",
+		  as_name := ipa_configs[0].as_name,
+		  is_server := false,
+		  remote_port := ipa_configs[0].remote_port,
+		  local_port := 3001 }
+	};
+
 	f_init_common();
-	f_init_ipa();
-	f_connect_ipa(0, true);
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_connect_ipa(0);
 	setverdict(pass);
 }
 
 private function f_tc_tmt_override(boolean unknwon_dynamic_asp)
 runs on IPA_CT {
-	f_init_ipa();
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-override-sender",
+						 "ipa-asp-override-receiver0",
+						 "ipa-asp-override-receiver1" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	if (unknwon_dynamic_asp) {
+		ipa_configs[0].local_port := 3002;
+		ipa_configs[1].local_port := 3003;
+		ipa_configs[2].local_port := 3004;
+	}
+	f_init_ipa(ipa_configs := ipa_configs);
 
 	/* bring up the 'sender' side (single ASP in AS) */
-	f_connect_ipa(5, unknwon_dynamic_asp);
+	f_connect_ipa(0);
 	/* activate the first 'receiver' side ASP */
-	f_connect_ipa(6, unknwon_dynamic_asp);
+	f_connect_ipa(1);
 
 	/* verify traffic is routed from sender to [sole] receiver */
-	f_test_traffic(5, 6);
+	f_test_traffic(0, 1);
 
 	/* activate the second 'receiver' side ASP */
-	f_connect_ipa(7, unknwon_dynamic_asp);
+	f_connect_ipa(2);
 
 	/* verify traffic is routed from sender to new receiver */
-	f_test_traffic(5, 7);
+	f_test_traffic(0, 2);
 	setverdict(pass);
 }
 
@@ -199,23 +283,32 @@ runs on IPA_CT {
 private function f_tc_tmt_loadshare_roundrobin(boolean unknwon_dynamic_asp)
 runs on IPA_CT {
 	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-sender0",
+						 "ipa-asp-loadshare-receiver0",
+						 "ipa-asp-loadshare-receiver1" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	if (unknwon_dynamic_asp) {
+		ipa_configs[0].local_port := 3005;
+		ipa_configs[1].local_port := 3006;
+		ipa_configs[2].local_port := 3007;
+	}
 
-	f_init_ipa();
+	f_init_ipa(ipa_configs := ipa_configs);
 
-	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "traffic-mode roundrobin");
+	f_vty_cs7_ipa_as_cmd(ipa_configs[1].as_name, "traffic-mode roundrobin");
 
 	/* bring up the 'sender' side (single ASP in AS) */
-	f_connect_ipa(0, unknwon_dynamic_asp);
+	f_connect_ipa(0);
 	/* activate the first 'receiver' side ASP */
-	f_connect_ipa(2, unknwon_dynamic_asp);
+	f_connect_ipa(1);
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	for (i := 0; i < 10; i := i+1) {
-		f_test_traffic(0, 2);
+		f_test_traffic(0, 1);
 	}
 
 	/* activate the second 'receiver' side ASP */
-	f_connect_ipa(3, unknwon_dynamic_asp);
+	f_connect_ipa(2);
 
 	/* verify traffic is routed from sender to new receiver */
 	const integer iter_per_asp := 5;
@@ -224,8 +317,8 @@ runs on IPA_CT {
 		var octetstring data := f_rnd_octstring(f_rnd_ipa_len());
 		f_IPA_send(0, data);
 		alt {
-		[] as_count_rx(2, data, num_rx[0]);
-		[] as_count_rx(3, data, num_rx[1]);
+		[] as_count_rx(1, data, num_rx[0]);
+		[] as_count_rx(2, data, num_rx[1]);
 		}
 	}
 	/* FIXME: check for extraneous messages? */
@@ -237,7 +330,7 @@ runs on IPA_CT {
 	}
 	setverdict(pass);
 
-	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "no traffic-mode");
+	f_vty_cs7_ipa_as_cmd(ipa_configs[1].as_name, "no traffic-mode");
 }
 
 /* test "traffic-mode load-share" behavior */
@@ -259,15 +352,25 @@ private function f_tc_tmt_loadshare_sls(boolean unknwon_dynamic_asp)
 runs on IPA_CT {
 	var integer i;
 
-	f_init_ipa();
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-sender0",
+						 "ipa-asp-loadshare-sender1",
+						 "ipa-asp-loadshare-receiver0",
+						 "ipa-asp-loadshare-receiver1" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	if (unknwon_dynamic_asp) {
+		ipa_configs[0].local_port := 3010;
+		ipa_configs[1].local_port := 3011;
+	}
 
-	f_vty_config3(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"},
+	f_init_ipa(ipa_configs := ipa_configs);
+
+	f_vty_config3(VTY, {"cs7 instance 0", "as " & ipa_configs[2].as_name & " ipa"},
 			   { "traffic-mode loadshare", "binding-table reset" });
 
 	/* bring up the 'sender' side (single ASP in AS) */
-	f_connect_ipa(0, unknwon_dynamic_asp);
+	f_connect_ipa(0);
 	/* activate the first 'receiver' side ASP */
-	f_connect_ipa(2, unknwon_dynamic_asp);
+	f_connect_ipa(2);
 
 	/* verify traffic is routed from sender to [sole] receiver */
 	for (i := 0; i < 10; i := i+1) {
@@ -275,11 +378,11 @@ runs on IPA_CT {
 	}
 
 	/* activate the second 'receiver' side ASP */
-	f_connect_ipa(3, unknwon_dynamic_asp);
+	f_connect_ipa(3);
 
 	/* Since we are using dynamic ASPs, they were unknown by STP until they got connected.
 	 * Hence, reset the binding-table so that load is now properly spread among them: */
-	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "binding-table reset" );
+	f_vty_cs7_ipa_as_cmd(ipa_configs[2].as_name, "binding-table reset");
 
 	/* verify traffic is routed from sender to new receiver */
 	const integer iter_per_asp := 20;
@@ -313,7 +416,7 @@ runs on IPA_CT {
 
 
 	/* activate the second 'sender' side ASP */
-	f_connect_ipa(1, unknwon_dynamic_asp);
+	f_connect_ipa(1);
 
 
 	num_rx_1 := 0;
@@ -345,7 +448,7 @@ runs on IPA_CT {
 	}
 	setverdict(pass);
 
-	f_vty_config2(VTY, {"cs7 instance 0", "as " & mp_ipa_as_names[2] & " ipa"}, "no traffic-mode");
+	f_vty_cs7_ipa_as_cmd(ipa_configs[2].as_name, "no traffic-mode");
 }
 
 /* test "traffic-mode load-share" behavior */
