@@ -139,6 +139,10 @@ def verify(cfg, path):
         "packages": "package",
         "programs": "program",
     }
+    keys_lists = [
+        "copy",
+        "package",
+    ]
 
     if "testsuite" not in cfg:
         logging.error(f"{path}: missing [testsuite] section")
@@ -178,6 +182,13 @@ def verify(cfg, path):
             logging.error(f"{path}: missing make= in section [{section}].")
             logging.error("If this is on purpose, set make=no.")
             exit_error_readme()
+
+        for key in keys_lists:
+            if key in cfg[section] and "  " in cfg[section][key]:
+                logging.error(f"{path}: {key}= in section [{section}] has multiple spaces:")
+                logging.error(f'  "{cfg[section][key]}"')
+                logging.error("Please separate elements with only one space.")
+                sys.exit(1)
 
     get_vty_host_port(cfg, path)
 
