@@ -1,4 +1,4 @@
-# STP_Tests.ttcn
+# STP_Tests_*.ttcn
 
 * external interfaces
     * M3UA/SCTP (can emulate both client and server side)
@@ -9,7 +9,7 @@
 digraph G {
   rankdir=LR;
   STP [label="IUT\nosmo-stp",shape="box"];
-  ATS [label="ATS\nSTP_Tests.ttcn"];
+  ATS [label="ATS\nSTP_Tests_*.ttcn"];
 
   ATS -> STP [label="M3UA", dir="both"];
   ATS -> STP [label="IPA", dir="both"];
