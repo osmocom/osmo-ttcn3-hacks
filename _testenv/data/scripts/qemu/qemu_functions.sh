@@ -41,7 +41,9 @@ qemu_initrd_add_mod() {
 		| sort -u \
 		| cut -d ' ' -f 2)"
 
-	qemu_initrd_add_file $files
+	qemu_initrd_add_file \
+		$files \
+		/usr/lib/modules/"$kernel"/modules.alias
 
 	# Save the list of modules
 	for i in $@; do
