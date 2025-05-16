@@ -45,12 +45,8 @@ modulepar {
 	HostList mp_stp_m3ua_ip := { "127.0.0.1", "::1" };
 	/* local IP addresses */
 	HostList mp_local_m3ua_ip := { "127.0.0.1", "::1" };
-	/* Clients first, servers afterwards, match mp_m3ua_num_{clients,servers} */
+	/* local ASPs. Set in .cfg file: */
 	M3uaConfigs mp_m3ua_configs := {};
-	/* number of M3UA clients in ATS */
-	integer mp_m3ua_num_clients := 0;
-	/* number of M3UA servers in ATS */
-	integer mp_m3ua_num_servers := 0;
 	integer mp_recovery_timeout_msec := 2000;
 	charstring mp_sccp_service_type := "mtp3_itu";
 }
@@ -58,6 +54,8 @@ modulepar {
 type record M3uaConfig {
 	/* Name of the ASP in the STP, (eg. to access it over VTY) */
 	charstring asp_name,
+	/* Whether local side is a TCP/SCTP server */
+	boolean is_server,
 	/* use TCP (true) or SCTP (false) */
 	boolean use_tcp,
 	/* STP-side SCTP (or TCP) port for M3UA */
@@ -67,34 +65,61 @@ type record M3uaConfig {
 	/* point code routed via this M3U */
 	integer point_code,
 	/* associated routing context */
-	integer routing_ctx
+	integer routing_ctx optional
 };
 type record of M3uaConfig M3uaConfigs;
-
-friend function M3UA_SRV(integer idx) runs on RAW_M3UA_CT return integer {
-	return g_m3ua_num_clients + idx;
-}
-
-friend function f_m3ua_cli_config(integer idx) runs on RAW_M3UA_CT return M3uaConfig {
-	if (idx < 0 or idx >= g_m3ua_num_clients) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_m3ua_cli_config(): unexpected idx");
-	}
-	return g_m3ua_configs[idx];
-}
-
-friend function f_m3ua_srv_config(integer idx) runs on RAW_M3UA_CT return M3uaConfig {
-	if (idx < 0 or idx >= g_m3ua_num_servers) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_m3ua_srv_config(): unexpected idx");
-	}
-	return g_m3ua_configs[M3UA_SRV(idx)];
-}
 
 type component RAW_M3UA_CT extends Test_CT {
 	port M3UA_CODEC_PT M3UA[MAX_NR_M3UA];
 	var M3uaConfigs g_m3ua_configs;
-	var integer g_m3ua_num_clients;
-	var integer g_m3ua_num_servers;
 	var integer g_m3ua_conn_id[MAX_NR_M3UA];
+}
+
+friend function f_m3ua_get_config_idx(charstring asp_name) runs on RAW_M3UA_CT return integer {
+	for (var integer i := 0; i < lengthof(g_m3ua_configs); i := i + 1) {
+		if (g_m3ua_configs[i].asp_name == asp_name) {
+			return i;
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("f_m3ua_get_config_idx(): unexpected asp_name not found: ", asp_name));
+	return -1;
+}
+
+friend function f_m3ua_get_config_by_idx(integer idx) runs on RAW_M3UA_CT return M3uaConfig {
+	if (idx < 0 or idx >= lengthof(g_m3ua_configs)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_m3ua_get_config(): unexpected idx");
+	}
+	return g_m3ua_configs[idx];
+}
+
+friend function f_m3ua_get_config_by_name(charstring asp_name) runs on RAW_M3UA_CT return M3uaConfig {
+	return f_m3ua_get_config_by_idx(f_m3ua_get_config_idx(asp_name));
+}
+
+friend function m3ua_build_configs(template (omit) Misc_Helpers.ro_charstring asps := omit)
+runs on RAW_M3UA_CT return M3uaConfigs
+{
+	if (not isvalue(asps)) {
+		return mp_m3ua_configs;
+	}
+
+	var M3uaConfigs m3ua_configs := {};
+	for (var integer i := 0; i < lengthof(asps); i := i + 1) {
+		var boolean found := false;
+		for (var integer j := 0; j < lengthof(mp_m3ua_configs); j := j + 1) {
+			if (mp_m3ua_configs[j].asp_name == valueof(asps[i])) {
+				found := true;
+				m3ua_configs := m3ua_configs & {mp_m3ua_configs[j]};
+				break;
+			}
+		}
+		if (not found) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Could not find ASP ", asps[i], ", check your configuration"));
+		}
+	}
+	return m3ua_configs;
 }
 
 private template PortEvent tr_ConnOpened := {
@@ -279,27 +304,34 @@ friend function f_M3UA_listen(integer i) runs on RAW_M3UA_CT {
 	}
 }
 
+private function m3ua_configs_mapped() runs on RAW_M3UA_CT return integer
+{
+	for (var integer i := 0; i < lengthof(g_m3ua_configs); i := i + 1) {
+		if (not M3UA[i].checkstate("Mapped")) {
+			return i;
+		}
+	}
+	return lengthof(g_m3ua_configs);
+}
+
 friend function f_init_m3ua(boolean ignore_ssnm := true,
-			    template (omit) M3uaConfigs m3ua_configs := omit,
-			    integer m3ua_num_clients := 0,
-			    integer m3ua_num_servers := 0) runs on RAW_M3UA_CT {
+			    template (omit) M3uaConfigs m3ua_configs := omit)
+
+runs on RAW_M3UA_CT {
 	var integer i;
 
 	f_init_common();
 
-	if (isvalue(m3ua_configs)) {
+	if (not istemplatekind(m3ua_configs, "omit")) {
 		g_m3ua_configs := valueof(m3ua_configs);
-		g_m3ua_num_clients := m3ua_num_clients;
-		g_m3ua_num_servers := m3ua_num_servers
 	} else {
 		g_m3ua_configs := mp_m3ua_configs;
-		g_m3ua_num_clients := mp_m3ua_num_clients;
-		g_m3ua_num_servers := mp_m3ua_num_servers;
 	}
 
-
-	for (i := 0; i < g_m3ua_num_clients; i:=i+1) {
-		map(self:M3UA[i], system:M3UA_CODEC_PT);
+	for (i := 0; i < lengthof(g_m3ua_configs); i:= i + 1) {
+		if (not g_m3ua_configs[i].is_server) {
+			map(self:M3UA[i], system:M3UA_CODEC_PT);
+		}
 	}
 
 	activate(as_m3ua_sctp());
@@ -307,11 +339,13 @@ friend function f_init_m3ua(boolean ignore_ssnm := true,
 		activate(as_m3ua_ssnm_ignore());
 	}
 
-	for (i := 0; i < g_m3ua_num_clients; i:=i+1) {
-		if (g_m3ua_configs[i].use_tcp) {
-			f_M3UA_connect_tcp(i);
-		} else {
-			f_M3UA_connect_sctp(i);
+	for (i := 0; i < lengthof(g_m3ua_configs); i:=i+1) {
+		if (not g_m3ua_configs[i].is_server) {
+			if (g_m3ua_configs[i].use_tcp) {
+				f_M3UA_connect_tcp(i);
+			} else {
+				f_M3UA_connect_sctp(i);
+			}
 		}
 	}
 }
@@ -321,8 +355,10 @@ friend function f_clear_m3ua() runs on RAW_M3UA_CT {
 
 	log("Clearing M3UA...");
 
-	for (i := 0; i < g_m3ua_num_clients; i:=i+1) {
-		f_M3UA_close(i);
+	for (i := 0; i < lengthof(g_m3ua_configs); i:=i+1) {
+		if (not g_m3ua_configs[i].is_server) {
+			f_M3UA_close(i);
+		}
 	}
 	/* Wait for recovery timer to trigger and shutdown all AS: */
 	f_sleep(int2float(mp_recovery_timeout_msec)/1000.0 + 0.5);
@@ -333,17 +369,25 @@ friend function f_init_m3ua_srv() runs on RAW_M3UA_CT {
 	var integer i;
 	var PortEvent port_evt;
 
-	for (i := g_m3ua_num_clients; i < lengthof(g_m3ua_configs); i:=i+1) {
-		map(self:M3UA[i], system:M3UA_CODEC_PT);
+	var integer start_idx := m3ua_configs_mapped();
+
+	for (i := start_idx; i < lengthof(g_m3ua_configs); i:=i+1) {
+		if (g_m3ua_configs[i].is_server) {
+			map(self:M3UA[i], system:M3UA_CODEC_PT);
+		}
 	}
-	for (i := g_m3ua_num_clients; i < lengthof(g_m3ua_configs); i:=i+1) {
-		/* bind + listen */
-		f_M3UA_listen(i);
+	for (i := start_idx; i < lengthof(g_m3ua_configs); i:=i+1) {
+		if (g_m3ua_configs[i].is_server) {
+			/* bind + listen */
+			f_M3UA_listen(i);
+		}
 	}
-	for (i := g_m3ua_num_clients; i < lengthof(g_m3ua_configs); i:=i+1) {
-		/* wait for accept() */
-		M3UA[i].receive(tr_ConnOpened) -> value port_evt {
-			g_m3ua_conn_id[i] := port_evt.connOpened.connId;
+	for (i := start_idx; i < lengthof(g_m3ua_configs); i:=i+1) {
+		if (g_m3ua_configs[i].is_server) {
+			/* wait for accept() */
+			M3UA[i].receive(tr_ConnOpened) -> value port_evt {
+				g_m3ua_conn_id[i] := port_evt.connOpened.connId;
+			}
 		}
 	}
 }
@@ -467,11 +511,15 @@ testcase TC_asp_act_broadcast() runs on RAW_M3UA_CT {
 
 /* test whether the STP accepts M3UA DATA without Routing Context IE */
 testcase TC_act_rctx_data_no_rctx() runs on RAW_M3UA_CT {
-	f_init_m3ua();
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
 	/* bring up the sender specifying a routing context */
 
 	f_M3UA_asp_up_act(0, rctx := rctx_sender);
@@ -485,11 +533,13 @@ testcase TC_act_rctx_data_no_rctx() runs on RAW_M3UA_CT {
 
 /* Test administrative state, VTY "[no] shutdown" */
 testcase TC_m3ua_sctp_srv_adm_shutdown() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit);
 	f_sleep(1.0);
-	f_vty_cs7_asp_cmd(f_m3ua_cli_config(0), "shutdown");
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "shutdown");
 	log("ASP should now be DOWN")
 	as_M3UA_wait_sctp_conn_closed(0);
 
@@ -507,7 +557,7 @@ testcase TC_m3ua_sctp_srv_adm_shutdown() runs on RAW_M3UA_CT {
 	}
 
 	/* Now let the ASP be active again, it should reconnect to us: */
-	f_vty_cs7_asp_cmd(f_m3ua_cli_config(0), "no shutdown");
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "no shutdown");
 	log("Connecting to ASP (expect success):");
 	f_M3UA_connect_sctp(0);
 	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit, ntfy_after_up := c_M3UA_ST_I_AS_PENDING);
@@ -530,13 +580,14 @@ runs on RAW_M3UA_CT {
 
 /* test "traffic-mode override" behavior */
 testcase TC_tmt_override() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0", "asp-receiver1" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
 
-	f_init_m3ua();
-
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* bring up the 'sender' side (single ASP in AS) */
 	f_M3UA_asp_up_act(0, omit, omit);
@@ -571,15 +622,16 @@ runs on RAW_M3UA_CT {
 /* Test "traffic-mode roundrobin" behavior (distributing within ASPs of a given AS in roundrobin fashion). */
 testcase TC_tmt_loadshare_roundrobin() runs on RAW_M3UA_CT {
 	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0", "asp-receiver1" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
 
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "traffic-mode roundrobin");
-
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
 
 	/* bring up the 'sender' side (single ASP in AS) */
 	f_M3UA_asp_up_act(0, omit, rctx_sender);
@@ -643,16 +695,17 @@ runs on RAW_M3UA_CT {
  * within linksets/ASs of a combined linkset). */
 testcase TC_tmt_loadshare_sls() runs on RAW_M3UA_CT {
 	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0", "asp-receiver1" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
 
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_vty_config3(VTY, {"cs7 instance 0", "as as-receiver m3ua"},
 			   { "traffic-mode loadshare", "binding-table reset" });
-
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
 
 	/* bring up the 'sender' side (single ASP in AS) */
 	f_M3UA_asp_up_act(0, omit, rctx_sender);
@@ -725,13 +778,14 @@ testcase TC_tmt_loadshare_sls() runs on RAW_M3UA_CT {
 /* test "traffic-mode broadcast" behavior */
 testcase TC_tmt_broadcast() runs on RAW_M3UA_CT {
 	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0", "asp-receiver1" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
 
-	f_init_m3ua();
-
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(1).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(1).point_code, 4);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* FIXME: configure the STP via VTY to set traffic-mode */
 
@@ -781,7 +835,9 @@ runs on RAW_M3UA_CT
 
 /* Send RKM registration; expect -EPERM as RCTX doesn't match config and dynamic not permitted */
 testcase TC_rkm_reg_static_notpermitted() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='00000099'O, dpc:='aabbcc'O)}));
 	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='00000099'O, status:=c_M3UA_REGSTS_ERR_EPERM,
@@ -792,10 +848,12 @@ testcase TC_rkm_reg_static_notpermitted() runs on RAW_M3UA_CT {
 
 /* Send RKM registration; expect OK as RCTX does match config */
 testcase TC_rkm_reg_static_permitted() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT3 dpc := int2oct(m3ua_configs[0].point_code, 3); // must match config
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);  // must match config
 
-	var OCT3 dpc := int2oct(f_m3ua_cli_config(0).point_code, 3); // must match config
-	var OCT4 rctx := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);  // must match config
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='10000099'O, dpc:=dpc, rctx:=rctx)}));
 	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='10000099'O, status:=c_M3UA_REGSTS_SUCCESS,
@@ -806,9 +864,11 @@ testcase TC_rkm_reg_static_permitted() runs on RAW_M3UA_CT {
 
 /* Send RKM registration; expect OK as dynamic not permitted */
 testcase TC_rkm_reg_dynamic_permitted() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	f_M3UA_send(0, ts_M3UA_REG_REQ({ts_M3UA_rkey(id:='20000099'O, dpc:='aabbcc'O)}));
 	f_M3UA_exp(0, tr_M3UA_REG_RSP({tr_M3UA_reg_res(id:='20000099'O, status:=c_M3UA_REGSTS_SUCCESS,
@@ -821,8 +881,11 @@ testcase TC_rkm_reg_dynamic_permitted() runs on RAW_M3UA_CT {
 
 /* try to de-register a routing key that was never registered -> error */
 testcase TC_rkm_unreg_never_registered() runs on RAW_M3UA_CT {
-	f_init_m3ua();
-	var octetstring rctx := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var octetstring rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctx)));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_NOT_REG)}));
 	f_clear_m3ua();
@@ -830,7 +893,10 @@ testcase TC_rkm_unreg_never_registered() runs on RAW_M3UA_CT {
 
 /* try to de-register a routing key that is invalid (non-existant) -> error */
 testcase TC_rkm_unreg_invalid() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(int2oct(1234,4))));
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_ERR_INVAL_RCTX)}));
 	f_clear_m3ua();
@@ -838,12 +904,14 @@ testcase TC_rkm_unreg_invalid() runs on RAW_M3UA_CT {
 
 /* try to de-register a routing key that was registered -> OK */
 testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
 	var OCT3 dpc := int2oct(123, 3);
 	var OCT4 rctx := int2oct(1234, 4);
 
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* first register the routing key */
 	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctx, ntfy_after_reg := omit);
@@ -858,13 +926,15 @@ testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 
 /* try to de-register a routing key for an active ASP -> ERROR */
 testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
-	f_init_common();
-	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
-	f_init_m3ua();
-
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
 	var OCT3 dpc := int2oct(123, 3);
 	var OCT4 rctxA := int2oct(1234, 4);
-	var OCT4 rctxB := int2oct(f_m3ua_cli_config(0).routing_ctx, 4); // must match config
+	var OCT4 rctxB := int2oct(m3ua_configs[0].routing_ctx, 4); // must match config
+
+	f_init_common();
+	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* first register the routing key */
 	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctxA, ntfy_after_reg := omit);
@@ -901,6 +971,7 @@ testcase TC_dyn_asp_as_rkm_permitted() runs on RAW_M3UA_CT {
 	var M3uaConfigs m3ua_configs := {
 		{
 			asp_name := "unknown",
+			is_server := false,
 			use_tcp := false,
 			remote_port := 2905,
 			local_port := 2222,
@@ -911,7 +982,7 @@ testcase TC_dyn_asp_as_rkm_permitted() runs on RAW_M3UA_CT {
 	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
-	f_init_m3ua(m3ua_configs := m3ua_configs, m3ua_num_clients := 1, m3ua_num_servers := 0);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* ASPUP + ACK */
 	f_M3UA_asp_up(0);
@@ -939,6 +1010,7 @@ testcase TC_dyn_2asp_as_rkm_permitted() runs on RAW_M3UA_CT {
 	var M3uaConfigs m3ua_configs := {
 		{
 			asp_name := "unknown0",
+			is_server := false,
 			use_tcp := false,
 			remote_port := 2905,
 			local_port := 2222,
@@ -946,6 +1018,7 @@ testcase TC_dyn_2asp_as_rkm_permitted() runs on RAW_M3UA_CT {
 			routing_ctx := 220
 		}, {
 			asp_name := "unknown1",
+			is_server := false,
 			use_tcp := false,
 			remote_port := 2905,
 			local_port := 2223,
@@ -957,7 +1030,7 @@ testcase TC_dyn_2asp_as_rkm_permitted() runs on RAW_M3UA_CT {
 	var OCT4 rctx1 := int2oct(m3ua_configs[0].routing_ctx, 4);
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
-	f_init_m3ua(m3ua_configs := m3ua_configs, m3ua_num_clients := 2, m3ua_num_servers := 0);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	///////// ASP 0 /////////////
 	/* ASPUP + ACK */
@@ -1040,34 +1113,41 @@ runs on RAW_M3UA_CT {
 
 /* Expect inbound connection from ASP/SCTP-client, followed by ASP-UP */
 testcase TC_clnt_connect_asp_up() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_init_m3ua_srv();
 
-	f_M3UA_CLNT_asp_up(M3UA_SRV(0));
+	f_M3UA_CLNT_asp_up(0);
 
 	f_clear_m3ua();
 }
 
 /* Expect inbound connection from ASP/SCTP-client, followed by ASP-UP + ASP-ACT */
 testcase TC_clnt_asp_act() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_init_m3ua_srv();
 
-	var OCT4 rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx);
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
 
 	f_clear_m3ua();
 }
 
 /* Expect inbound connection from ASP/SCTP-client, followed by ASP-UP + ASP-ACT */
 testcase TC_clnt_asp_act_tmt_loadshare() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0", "as as-client m3ua"}, "traffic-mode loadshare");
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_init_m3ua_srv();
 
-	var OCT4 rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), tmt := c_M3UA_TMT_loadshare, rctx := rctx);
+	f_M3UA_CLNT_asp_up_act(0, tmt := c_M3UA_TMT_loadshare, rctx := rctx);
 
 	f_clear_m3ua();
 }
@@ -1075,21 +1155,23 @@ testcase TC_clnt_asp_act_tmt_loadshare() runs on RAW_M3UA_CT {
 /* Test traffic being routed through "server" side STP (M3UA SG), coming back in "client"
  * side STP (M3UA ASP) */
 testcase TC_clnt_sg_to_asp() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_srv_config(0).point_code, 4);
-
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx_receiver);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctx_receiver);
 
 	f_sleep(1.0);
 
 	/* verify traffic is routed from sender to [sole] receiver */
-	f_test_traffic(0, rctx_sender, pc_sender, M3UA_SRV(0), rctx_receiver, pc_receiver);
+	f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
 
 	f_clear_m3ua();
 }
@@ -1097,47 +1179,51 @@ testcase TC_clnt_sg_to_asp() runs on RAW_M3UA_CT {
 /* Test traffic being routed through "client" side STP (M3UA ASP), coming back in "server"
  * side STP (M3UA SG) */
 testcase TC_clnt_asp_to_sg() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[1].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[0].point_code, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx_sender := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_srv_config(0).point_code, 4);
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(0).point_code, 4);
-
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx_sender);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctx_sender);
 
 	f_sleep(1.0);
 
 	/* verify traffic is routed from sender to [sole] receiver */
-	f_test_traffic(M3UA_SRV(0), rctx_sender, pc_sender, 0, rctx_receiver, pc_receiver);
+	f_test_traffic(1, rctx_sender, pc_sender, 0, rctx_receiver, pc_receiver);
 	f_clear_m3ua();
 }
 
 /* Test traffic being routed through "server" side STP (M3UA SG), coming back in "client"
  * side STP (M3UA ASP) which has no routing context set */
 testcase TC_clnt_sg_to_asp_norctx() runs on RAW_M3UA_CT {
-	/* activate the sender side (ATS is client to STP in SG role) */
-	f_init_m3ua();
-	f_M3UA_asp_up_act(0);
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client60-norctx0", "asp-client61-norctx0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
+	var OCT4 pc_receiver2 := int2oct(m3ua_configs[2].point_code, 4);
 
-	var OCT4 rctx_sender := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_srv_config(1).point_code, 4);
-	var OCT4 pc_receiver2 := int2oct(f_m3ua_srv_config(2).point_code, 4);
+	/* activate the sender side (ATS is client to STP in SG role) */
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+	f_M3UA_asp_up_act(0);
 
 	/* activate the receiver side (ATS is server to STP in ASP role) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(1), rctx := omit);
+	f_M3UA_CLNT_asp_up_act(1, rctx := omit);
 	/* activate another instance of STP in ASP role with no routing context */
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(2), rctx := omit);
+	f_M3UA_CLNT_asp_up_act(2, rctx := omit);
 
 	f_sleep(1.0);
 
 	/* verify traffic is routed from sender to [sole] receiver for each PC */
-	f_test_traffic(0, rctx_sender, pc_sender, M3UA_SRV(1), omit, pc_receiver);
-	f_test_traffic(0, rctx_sender, pc_sender, M3UA_SRV(2), omit, pc_receiver2);
+	f_test_traffic(0, rctx_sender, pc_sender, 1, omit, pc_receiver);
+	f_test_traffic(0, rctx_sender, pc_sender, 2, omit, pc_receiver2);
 
 	f_clear_m3ua();
 }
@@ -1145,38 +1231,43 @@ testcase TC_clnt_sg_to_asp_norctx() runs on RAW_M3UA_CT {
 /* Test traffic being routed through "server" side STP (M3UA SG), coming back in "client"
  * side STP (M3UA ASP) which has no routing context set */
 testcase TC_clnt_asp_to_sg_norctx() runs on RAW_M3UA_CT {
-	/* activate the sender side (ATS is client to STP in SG role) */
-	f_init_m3ua();
-	f_M3UA_asp_up_act(0);
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client60-norctx0", "asp-client61-norctx0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
 
-	var OCT4 rctx_receiver := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 pc_receiver := int2oct(f_m3ua_cli_config(0).point_code, 4);
-	var OCT4 pc_sender := int2oct(f_m3ua_srv_config(1).point_code, 4);
-	var OCT4 pc_sender2 := int2oct(f_m3ua_srv_config(2).point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[1].point_code, 4);
+	var OCT4 pc_sender2 := int2oct(m3ua_configs[2].point_code, 4);
+
+	/* activate the sender side (ATS is client to STP in SG role) */
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+	f_M3UA_asp_up_act(0);
 
 	/* activate the receiver side (ATS is server to STP in ASP role) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(1), rctx := omit);
+	f_M3UA_CLNT_asp_up_act(1, rctx := omit);
 	/* activate another instance of STP in ASP role with no routing context */
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(2), rctx := omit);
+	f_M3UA_CLNT_asp_up_act(2, rctx := omit);
 
 	f_sleep(1.0);
 
 	/* verify traffic is routed from sender to [sole] receiver for each PC */
-	f_test_traffic(M3UA_SRV(1), omit, pc_sender, 0, rctx_receiver, pc_receiver);
-	f_test_traffic(M3UA_SRV(2), omit, pc_sender2, 0, rctx_receiver, pc_receiver);
+	f_test_traffic(1, omit, pc_sender, 0, rctx_receiver, pc_receiver);
+	f_test_traffic(2, omit, pc_sender2, 0, rctx_receiver, pc_receiver);
 
 	f_clear_m3ua();
 }
 
 /* Test if ASPAC / ASPIA of one ASP generates DAVA / DUNA on other ASP */
 testcase TC_ssnm_aspac_dava_aspia_duna() runs on RAW_M3UA_CT {
-	f_init_m3ua(ignore_ssnm := false);
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var integer pc0 := m3ua_configs[1].point_code;
+
+	f_init_m3ua(ignore_ssnm := false, m3ua_configs := m3ua_configs);
 	/* activate the first ASP */
 	f_M3UA_asp_up_act(0);
-
-	var OCT4 rctx0 := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var integer pc0 := f_m3ua_cli_config(1).point_code;
 
 	/* activate the second ASP */
 	f_M3UA_asp_up_act(1, c_M3UA_TMT_override, omit);
@@ -1195,102 +1286,106 @@ testcase TC_ssnm_aspac_dava_aspia_duna() runs on RAW_M3UA_CT {
 
 /* Test if DAVA/DUNA sent from SG to ASP-role STP gets forwarded to other ASP */
 testcase TC_ssnm_distribution_dava_duna() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 rctxS0 := int2oct(m3ua_configs[1].routing_ctx, 4);
 	/* some random point code whose availability we advertise */
 	var template (value) M3UA_Point_Code adv_pc := ts_M3UA_PC(1234, 0);
 
-	f_init_m3ua(ignore_ssnm := false);
+	f_init_m3ua(ignore_ssnm := false, m3ua_configs := m3ua_configs);
 
 	/* activate the first ASP */
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx0 := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 rctxS0 := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-
 	/* activate SG-role ASP (ASP on STP) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctxS0);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctxS0);
 
 	/* transmit a DAVA to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAVA({adv_pc}, rctxS0));
+	f_M3UA_send(1, ts_M3UA_DAVA({adv_pc}, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_DAVA({adv_pc}, rctx0));
 
 	/* transmit a DUNA to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DUNA({adv_pc}, rctxS0));
+	f_M3UA_send(1, ts_M3UA_DUNA({adv_pc}, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_DUNA({adv_pc}, rctx0));
 }
 
 /* Test if DAVA/DUNA sent from SG to ASP-role STP gets forwarded to other ASP */
 testcase TC_ssnm_distribution_dava_duna_multipc() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 rctxS0 := int2oct(m3ua_configs[1].routing_ctx, 4);
 	/* some random point code whose availability we advertise */
 	var template (value) M3UA_Point_Codes adv_pcs := { ts_M3UA_PC(1234, 0), ts_M3UA_PC(5678, 0) };
 
-	f_init_m3ua(ignore_ssnm := false);
+	f_init_m3ua(ignore_ssnm := false, m3ua_configs := m3ua_configs);
 
 	/* activate the first ASP */
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx0 := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 rctxS0 := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-
 	/* activate SG-role ASP (ASP on STP) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctxS0);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctxS0);
 
 	/* transmit a DAVA to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAVA(adv_pcs, rctxS0));
+	f_M3UA_send(1, ts_M3UA_DAVA(adv_pcs, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_DAVA(adv_pcs, rctx0));
 
 	/* transmit a DUNA to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DUNA(adv_pcs, rctxS0));
+	f_M3UA_send(1, ts_M3UA_DUNA(adv_pcs, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_DUNA(adv_pcs, rctx0));
 }
 
 /* Test if DUPU sent from SG to ASP-role STP gets forwarded to other ASP */
 testcase TC_ssnm_distribution_dupu() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 rctxS0 := int2oct(m3ua_configs[1].routing_ctx, 4);
 	/* some random point code whose availability we advertise */
 	var template (value) M3UA_Point_Code adv_pc := ts_M3UA_PC(1234, 0);
 
-	f_init_m3ua(ignore_ssnm := false);
+	f_init_m3ua(ignore_ssnm := false, m3ua_configs := m3ua_configs);
 
 	/* activate the first ASP */
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx0 := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 rctxS0 := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-
 	/* activate SG-role ASP (ASP on STP) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctxS0);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctxS0);
 
 	/* transmit a DUPU to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DUPU({adv_pc}, '0102'O, 'ABCD'O, rctxS0));
+	f_M3UA_send(1, ts_M3UA_DUPU({adv_pc}, '0102'O, 'ABCD'O, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_DUPU({adv_pc}, '0102'O, 'ABCD'O, rctx0));
 }
 
 /* Test if SCON sent from SG to ASP-role STP gets forwarded to other ASP */
 testcase TC_ssnm_distribution_scon() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx0 := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 rctxS0 := int2oct(m3ua_configs[1].routing_ctx, 4);
 	/* some random point code whose availability we advertise */
 	var template (value) M3UA_Point_Code adv_pc := ts_M3UA_PC(1234, 0);
 
-	f_init_m3ua(ignore_ssnm := false);
+	f_init_m3ua(ignore_ssnm := false, m3ua_configs := m3ua_configs);
 
 	/* activate the first ASP */
 	f_M3UA_asp_up_act(0);
 
-	var OCT4 rctx0 := int2oct(f_m3ua_cli_config(0).routing_ctx, 4);
-	var OCT4 rctxS0 := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-
 	/* activate SG-role ASP (ASP on STP) */
 	f_init_m3ua_srv();
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctxS0);
+	f_M3UA_CLNT_asp_up_act(1, rctx := rctxS0);
 
 	/* transmit a SCON to the remote ASP */
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_SCON({adv_pc}, rctxS0));
+	f_M3UA_send(1, ts_M3UA_SCON({adv_pc}, rctxS0));
 	/* expect that to show up on other ASP */
 	f_M3UA_exp(0, tr_M3UA_SCON({adv_pc}, rctx0));
 }
@@ -1317,21 +1412,24 @@ private function f_vty_cs7_asp_cmd(in M3uaConfig cfg, charstring cmd) runs on RA
 	f_vty_config2(VTY, {"cs7 instance 0", asp_cfg_str}, cmd);
 }
 
-private function f_quirk(charstring quirk) runs on RAW_M3UA_CT {
-	f_vty_cs7_asp_cmd(f_m3ua_srv_config(0), "quirk " & quirk)
+private function f_quirk(charstring quirk, integer m3ua_idx := 0) runs on RAW_M3UA_CT {
+	f_vty_cs7_asp_cmd(g_m3ua_configs[m3ua_idx], "quirk " & quirk)
 }
 
-private function f_no_quirk(charstring quirk) runs on RAW_M3UA_CT {
-	f_vty_cs7_asp_cmd(f_m3ua_srv_config(0), "no quirk " & quirk)
+private function f_no_quirk(charstring quirk, integer m3ua_idx := 0) runs on RAW_M3UA_CT {
+	f_vty_cs7_asp_cmd(g_m3ua_configs[m3ua_idx], "no quirk " & quirk)
 }
 
 /* quirk 'no_notify': Expect inbound connection from ASP/SCTP-client, followed by ASP-UP + ASP-ACT */
 testcase TC_clnt_quirk_no_notify_asp_act() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_quirk("no_notify");
 	f_init_m3ua_srv();
 
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4),
+	f_M3UA_CLNT_asp_up_act(0, rctx := int2oct(g_m3ua_configs[0].routing_ctx, 4),
 			       ntfy_after_up := omit, ntfy_after_act := omit);
 	f_no_quirk("no_notify");
 	f_clear_m3ua();
@@ -1339,18 +1437,20 @@ testcase TC_clnt_quirk_no_notify_asp_act() runs on RAW_M3UA_CT {
 
 /* ensure that DAUD is not supported in ASP role, as required by RFC */
 testcase TC_clnt_no_daud_in_asp() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var integer pc := m3ua_configs[0].point_code;
+	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(pc) };
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_no_quirk("daud_in_asp");
 	f_init_m3ua_srv();
 
-	var OCT4 rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	var integer pc := f_m3ua_srv_config(0).point_code;
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
 
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx);
-
-	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(pc) };
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAUD(aff_pcs));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_ERR('00000004'O, omit));
+	f_M3UA_send(0, ts_M3UA_DAUD(aff_pcs));
+	f_M3UA_exp(0, tr_M3UA_ERR('00000004'O, omit));
 	setverdict(pass);
 
 	f_clear_m3ua();
@@ -1358,18 +1458,20 @@ testcase TC_clnt_no_daud_in_asp() runs on RAW_M3UA_CT {
 
 /* quirk 'daud_in_asp': allowing inbound DAUD from SG in ASP role */
 testcase TC_clnt_quirk_daud_in_asp() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var integer pc := m3ua_configs[0].point_code;
+	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(pc) };
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_quirk("daud_in_asp");
 	f_init_m3ua_srv();
 
-	var OCT4 rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	var integer pc := f_m3ua_srv_config(0).point_code;
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
 
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx);
-
-	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(pc) };
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAUD(aff_pcs));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_DAVA(aff_pcs));
+	f_M3UA_send(0, ts_M3UA_DAUD(aff_pcs));
+	f_M3UA_exp(0, tr_M3UA_DAVA(aff_pcs));
 	setverdict(pass);
 
 	f_no_quirk("daud_in_asp");
@@ -1378,19 +1480,22 @@ testcase TC_clnt_quirk_daud_in_asp() runs on RAW_M3UA_CT {
 
 /* Expect a normal ASP to reject any [S]SNM messages in ASP-INACTIVE state */
 testcase TC_clnt_no_snm_inactive() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(m3ua_configs[0].point_code) };
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_quirk("no_notify");
 	f_quirk("daud_in_asp");
 	f_no_quirk("snm_inactive");
 	f_init_m3ua_srv();
 
 	/* bring ASP only UP (into INACTIVE state), but not ACTIVE! */
-	f_M3UA_CLNT_asp_up(M3UA_SRV(0));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_ASPAC(*, *));
+	f_M3UA_CLNT_asp_up(0);
+	f_M3UA_exp(0, tr_M3UA_ASPAC(*, *));
 
-	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(f_m3ua_srv_config(0).point_code) };
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAUD(aff_pcs));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_ERR('00000006'O, omit));
+	f_M3UA_send(0, ts_M3UA_DAUD(aff_pcs));
+	f_M3UA_exp(0, tr_M3UA_ERR('00000006'O, omit));
 	setverdict(pass);
 
 	f_no_quirk("no_notify");
@@ -1400,19 +1505,22 @@ testcase TC_clnt_no_snm_inactive() runs on RAW_M3UA_CT {
 
 /* quirk 'snm_inactive': Process [S]SNM in ASP-INACTIVE state */
 testcase TC_clnt_quirk_snm_inactive() runs on RAW_M3UA_CT {
-	f_init_m3ua();
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(m3ua_configs[0].point_code) };
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_quirk("no_notify");
 	f_quirk("daud_in_asp");
 	f_quirk("snm_inactive");
 	f_init_m3ua_srv();
 
 	/* bring ASP only UP (into INACTIVE state), but not ACTIVE! */
-	f_M3UA_CLNT_asp_up(M3UA_SRV(0));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_ASPAC(*, *));
+	f_M3UA_CLNT_asp_up(0);
+	f_M3UA_exp(0, tr_M3UA_ASPAC(*, *));
 
-	var template (value) M3UA_Point_Codes aff_pcs := { ts_M3UA_PC(f_m3ua_srv_config(0).point_code) };
-	f_M3UA_send(M3UA_SRV(0), ts_M3UA_DAUD(aff_pcs));
-	f_M3UA_exp(M3UA_SRV(0), tr_M3UA_DUNA(aff_pcs));
+	f_M3UA_send(0, ts_M3UA_DAUD(aff_pcs));
+	f_M3UA_exp(0, tr_M3UA_DUNA(aff_pcs));
 	setverdict(pass);
 
 	f_no_quirk("no_notify");
@@ -1424,22 +1532,24 @@ testcase TC_clnt_quirk_snm_inactive() runs on RAW_M3UA_CT {
 /* Test administrative state, VTY "[no] shutdown" */
 testcase TC_clnt_sctp_adm_shutdown() runs on RAW_M3UA_CT {
 	var PortEvent pev;
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
 
-	f_init_m3ua();
+	f_init_m3ua(m3ua_configs := m3ua_configs);
 	f_init_m3ua_srv();
 
-	var OCT4 rctx := int2oct(f_m3ua_srv_config(0).routing_ctx, 4);
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx);
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
 	f_sleep(1.0);
-	f_vty_cs7_asp_cmd(f_m3ua_srv_config(0), "shutdown");
+	f_vty_cs7_asp_cmd(m3ua_configs[0], "shutdown");
 	log("ASP should now be DOWN")
-	as_M3UA_wait_sctp_conn_closed(M3UA_SRV(0));
+	as_M3UA_wait_sctp_conn_closed(0);
 
 	/* Wait for a while to make sure ASP doesn't reconnect to us: */
 	timer T := 10.0;
 	T.start;
 	alt {
-	[] M3UA[M3UA_SRV(0)].receive(tr_ConnOpened) {
+	[] M3UA[0].receive(tr_ConnOpened) {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					"Unexpected reconnect from ASP client!");
 	}
@@ -1447,12 +1557,12 @@ testcase TC_clnt_sctp_adm_shutdown() runs on RAW_M3UA_CT {
 	}
 
 	/* Now let the ASP be active again, it should reconnect to us: */
-	f_vty_cs7_asp_cmd(f_m3ua_srv_config(0), "no shutdown");
+	f_vty_cs7_asp_cmd(m3ua_configs[0], "no shutdown");
 	log("Waiting for client ASP to reconnect to us");
-	M3UA[M3UA_SRV(0)].receive(tr_ConnOpened) -> value pev {
-			g_m3ua_conn_id[M3UA_SRV(0)] := pev.connOpened.connId;
+	M3UA[0].receive(tr_ConnOpened) -> value pev {
+			g_m3ua_conn_id[0] := pev.connOpened.connId;
 	}
-	f_M3UA_CLNT_asp_up_act(M3UA_SRV(0), rctx := rctx);
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
 
 	f_clear_m3ua();
 }
