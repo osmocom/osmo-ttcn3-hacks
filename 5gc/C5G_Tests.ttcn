@@ -1,0 +1,291 @@
+/* 5GC (55G Core) test suite in TTCN-3
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module C5G_Tests {
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+
+import from NGAP_PDU_Descriptions all;
+import from NGAP_IEs all;
+import from NGAP_PDU_Contents all;
+import from NGAP_Constants all;
+
+import from NGAP_Types all;
+import from NGAP_Pixits all;
+import from NGAP_Templates all;
+import from NGAP_Functions all;
+import from NGAP_Emulation all;
+
+/* (maximum) number of emulated eNBs */
+const integer NUM_NGRAN := 1;
+
+/* (maximum) number of emulated UEs */
+const integer NUM_UE := 1;
+
+
+modulepar {
+	/* NG-C interface */
+	charstring mp_5gc_ngap_ip := "127.0.0.1";
+	integer mp_5gc_ngap_port := 38412;
+	charstring mp_local_ngap_ip := "127.0.0.1";
+	integer mp_local_ngap_port := 50000;
+	PLMNIdentity mp_plmn_id := '99f907'O;
+	uint24_t mp_tac := 1;
+}
+
+/* parameters of emulated gNB / ng-eNB */
+type record NGRANParams {
+	GlobalRANNodeID global_ngran_id,
+	NGRAN_CGI cell_identity,
+	SupportedTAList supported_ta_list
+}
+
+/* parameters of emulated UE */
+type record UeParams {
+	hexstring imsi,
+	charstring ue_ip,
+	//NAS_EPS_Types.GUTI guti optional,
+	octetstring kasme optional,
+
+	/* TEI (Control) local side, S11 (SGW) */
+	OCT4 	s11_teic_local,
+	/* TEI (Control) remote side, S11 (SGW) */
+	OCT4	s11_teic_remote optional,
+	/* TEI (Control) local side, S5c (PGW) */
+	OCT4 	s5c_teic_local,
+	/* TEI (Control) remote side, S5c (PGW) */
+	OCT4	s5c_teic_remote optional//,
+}
+
+type component MTC_CT {
+	/* S1 intreface of emulated ENBs */
+	var NGRANParams g_ngran_pars[NUM_NGRAN];
+	var NGAP_Emulation_CT vc_NGAP[NUM_NGRAN];
+	port NGAP_PT NGAP_UNIT[NUM_NGRAN];
+	port NGAPEM_PROC_PT NGAP_PROC[NUM_NGRAN];
+
+	var UeParams g_ue_pars[NUM_UE];
+}
+
+type component ConnHdlr /* extends GTP2_ConnHdlr  */ {
+	var ConnHdlrPars g_pars;
+	timer g_Tguard := 30.0;
+
+	//var Gtp1cPeer g_gn_iface_peer := { connId := 1, remName := mp_gn_remote_ip, remPort := mp_gn_remote_port };
+}
+
+type record ConnHdlrPars {
+	/* copied over from MTC_CT on start of component */
+	NGRANParams ngran_pars[NUM_NGRAN],
+	/* copied over from MTC_CT on start of component */
+	UeParams ue_pars,
+	/* currently used 5GC (index into ngran_pars, NGAP, ...) */
+	integer c5g_idx//,
+	/* Currently set KSI */
+	//NAS_KeySetIdentifierV kset_id
+}
+
+/* send incoming unit data messages (like reset) to global NGAP_UNIT port */
+friend function NGapForwardUnitdataCallback(NGAP_PDU msg)
+runs on NGAP_Emulation_CT return template NGAP_PDU {
+	NGAP_UNIT.send(msg);
+	return omit;
+}
+
+friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
+	var charstring id := testcasename() & "-NGAP" & int2str(num);
+	var NGAPOps ops := {
+		create_cb := refers(NGAP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(NGapForwardUnitdataCallback)
+	};
+	var NGAP_conn_parameters pars := {
+		remote_ip := mp_5gc_ngap_ip,
+		remote_sctp_port := mp_5gc_ngap_port,
+		local_ip := mp_local_ngap_ip,
+		local_sctp_port := mp_local_ngap_port + num //,
+		//role := NAS_ROLE_UE
+	};
+	var NGRANParams ngran_pars := {
+		global_ngran_id := valueof(m_globalRANNodeID_globalGNB_ID(m_ie_globalGnbId(mp_plmn_id, int2bit(num, 22)))),
+		cell_identity := { nR_CGI := valueof(m_nR_CGI(mp_plmn_id, int2bit(num, 36))) },
+		supported_ta_list := {
+			{
+				tAC := int2oct(mp_tac, 3),
+				broadcastPLMNList := {
+					valueof(m_ie_broadcastPLMNItem(mp_plmn_id, { m_sliceSupportItem(m_s_NSSAI('01'O)) }))
+				},
+				iE_Extensions := omit
+			}
+		}
+	};
+
+	g_ngran_pars[num] := ngran_pars;
+	vc_NGAP[num] := NGAP_Emulation_CT.create(id);
+	map(vc_NGAP[num]:NGAP, system:NGAP_CODEC_PT);
+	connect(vc_NGAP[num]:NGAP_PROC, self:NGAP_PROC[num]);
+	connect(vc_NGAP[num]:NGAP_UNIT, self:NGAP_UNIT[num]);
+	vc_NGAP[num].start(NGAP_Emulation.main(ops, pars, id));
+	NGAP_UNIT[num].receive(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP});
+}
+friend function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
+/*
+	uep := {
+		imsi := f_gen_imsi(imsi_suffix),
+		ue_ip := "192.168.123.50",
+		guti := omit,
+		kasme := omit,
+		s11_teic_local := '00000000'O,
+		s11_teic_remote := omit,
+		s5c_teic_local := '00000000'O,
+		s5c_teic_remote := omit,
+		bearer := {
+			ebi := omit,
+			s11_teid_local := omit,
+			s11_teid_remote := omit,
+			s5c_teid_local := omit,
+			s5c_teid_remote := omit
+		}
+	}
+*/
+}
+friend function f_init_ngap(integer imsi_suffix) runs on MTC_CT {
+	var integer i;
+	for (i := 0; i < NUM_NGRAN; i := i+1) {
+		f_init_one_ngran(i);
+	}
+	for (i := 0; i < NUM_UE; i := i+1) {
+		f_init_one_ue(g_ue_pars[i], i*1000 + imsi_suffix);
+	}
+}
+
+/* generate parameters for a connection handler */
+friend function f_init_pars(integer ue_idx := 0)
+runs on MTC_CT return ConnHdlrPars {
+	var ConnHdlrPars pars := {
+		ngran_pars := g_ngran_pars,
+		ue_pars := g_ue_pars[ue_idx],
+		c5g_idx := 0//,
+		//kset_id := valueof(ts_NAS_KeySetIdentifierV('000'B, c_NAS_TSC_NATIVE_SEC_CTX))
+	};
+	return pars;
+}
+
+type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+
+/* start a connection handler with given parameters */
+friend function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer ngap_idx := 0)
+runs on MTC_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename() & int2str(ngap_idx);
+
+	vc_conn := ConnHdlr.create(id);
+	/* NGAP part */
+//	connect(vc_conn:NGAP, vc_NGAP[ngap_idx]:NGAP_CLIENT);
+//	connect(vc_conn:NGAP_PROC, vc_NGAP[ngap_idx]:NGAP_PROC);
+
+	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
+	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
+	vc_conn.start(derefers(fn)(pars));
+	return vc_conn;
+}
+
+/* altstep for the global guard timer */
+private altstep as_Tguard()runs on ConnHdlr {
+	[] g_Tguard.timeout {
+		setverdict(fail, "Tguard timeout");
+		mtc.stop;
+	}
+}
+
+friend function f_init_handler(ConnHdlrPars pars, float t_guard := 30.0) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+	/* start guard timre and activate it as default */
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+}
+
+
+
+friend function f_ngap_setup(integer idx := 0, template NGAP_IEs.Cause cause := omit) runs on MTC_CT {
+	var template (present) NGAP_IEs.Cause exp_cause := ?;
+	var boolean exp_fail := false;
+	timer T := 5.0;
+	var template (value) NGAP_PDU tx_pdu;
+	var template (present) NGAP_PDU exp_pdu;
+	var NGAP_PDU rx_pdu;
+
+	tx_pdu := m_ngap_initMsg(m_n2_NGSetupRequest(g_ngran_pars[idx].global_ngran_id,
+						     g_ngran_pars[idx].supported_ta_list,
+						     v32));
+
+	if (not istemplatekind(cause, "omit")) {
+		exp_fail := true;
+		exp_cause := cause;
+	}
+
+	if (exp_fail) {
+		exp_pdu := mw_ngap_unsuccMsg((mw_n2_NGSetupFailure(exp_cause),
+					      mw_n2_NGSetupFailure_TimeToWait(exp_cause)));
+	} else {
+		exp_pdu := mw_ngap_succMsg(mw_n2_NGSetupResponse);
+	}
+
+	NGAP_UNIT[idx].send(tx_pdu);
+	T.start;
+	alt {
+	[] NGAP_UNIT[idx].receive(exp_pdu) {
+		setverdict(pass);
+		}
+	[] NGAP_UNIT[idx].receive(NGAP_PDU:?) -> value rx_pdu {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected NGAP ", rx_pdu, " vs exp ", exp_pdu));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for NGAP Setup result");
+		}
+	}
+}
+/* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
+ * Related: https://github.com/open5gs/open5gs/issues/3544 */
+testcase TC_ng_setup_unknown_global_gnb_id_plmn() runs on MTC_CT {
+	f_init_ngap(1);
+	g_ngran_pars[0].global_ngran_id.globalGNB_ID.pLMNIdentity := '62F224'O;
+	f_ngap_setup(0);
+}
+
+/* Unsuccessful NG Setup procedure to AMF (wrong PLMN) */
+testcase TC_ng_setup_wrong_tac() runs on MTC_CT {
+	f_init_ngap(2);
+	g_ngran_pars[0].supported_ta_list[0].broadcastPLMNList[0].pLMNIdentity := '62F224'O;
+	f_ngap_setup(0, {misc:=unknown_PLMN_or_SNPN});
+}
+
+/* NG Setup procedure to 5GC using a correct Global gNB ID. */
+testcase TC_ng_setup() runs on MTC_CT {
+	f_init_ngap(3);
+	f_ngap_setup(0);
+}
+
+
+control {
+	execute( TC_ng_setup() );
+	execute( TC_ng_setup_unknown_global_gnb_id_plmn() );
+	execute( TC_ng_setup_wrong_tac() );
+}
+
+
+}
