@@ -16,6 +16,7 @@
 BUILDDIR ?= _build
 
 SUBDIRS= \
+	5gc \
 	asterisk \
 	bsc \
 	bsc-nat \
@@ -59,7 +60,7 @@ NPROC=$(shell nproc 2>/dev/null)
 ifeq ($(NPROC),)
 NPROC=1
 endif
-PARALLEL_MAKE ?= -j$(NPROC)
+PARALLEL_MAKE ?= -j4
 
 # This master makefile allows you to do things like
 # 	make clean	(remove all generated binary, c++ and symlinks)
