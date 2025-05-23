@@ -1,0 +1,615 @@
+module NGAP_Emulation {
+
+/* NGAP Emulation, runs on top of NGAP_CodecPort. It multiplexes/demultiplexes
+ * the individual subscribers by their UE association (AMF_UE_NGAP_ID/
+ * RAN_UE_NGAP_ID identifiers), so there can be separate TTCN-3 components
+ * handling each of them.
+ *
+ * The NGAP_Emulation.main() function processes NGAP primitives from the NGAP
+ * socket via the NGAP_CodecPort, and dispatches them to the per-subscriber
+ * components.
+ *
+ * For each new subscriber, the NGapOps.create_cb() is called. It can create
+ * or resolve a TTCN-3 component, and returns a component reference to which
+ * that subscriber traffic is routed/dispatched.
+ *
+ * If a pre-existing component wants to register to handle a future inbound UE
+ * association, it can do so by registering an "expect" with the expected
+ * AMF_UE_NGAP_ID/RAN_UE_NGAP_ID identifiers. It is also possible to register
+ * an expect for a specific procedureCode, in case the expected message is non
+ * UE related (unit-data).
+ *
+ * Inbound non-UE related NGAP messages (such as RESET, SETUP, OVERLOAD) are
+ * dispatched to the NGapOps.unitdata_cb() callback, which is registered with
+ * an argument to the main() function below.
+ *
+ * (C) 2019 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from NGAP_CodecPort all;
+import from NGAP_CodecPort_CtrlFunct all;
+import from NGAP_Types all;
+import from NGAP_Constants all;
+import from NGAP_PDU_Contents all;
+import from NGAP_PDU_Descriptions all;
+import from NGAP_IEs all;
+import from NGAP_Templates all;
+import from NGAP_Functions all;
+import from SCTP_Templates all;
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from DNS_Helpers all;
+
+
+type component NGAP_ConnHdlr {
+	port NGAP_Conn_PT NGAP;
+	/* procedure based port to register for incoming connections */
+	port NGAPEM_PROC_PT NGAP_PROC;
+}
+
+/* port between individual per-connection components and this dispatcher */
+type port NGAP_Conn_PT message {
+	inout NGAP_PDU;
+} with { extension "internal" };
+
+
+type enumerated NGAPEM_EventUpDown {
+	NGAPEM_EVENT_DOWN,
+	NGAPEM_EVENT_UP
+}
+
+/* an event indicating us whether or not a connection is physically up or down,
+ * and whether we have received an ID_ACK */
+type union NGAPEM_Event {
+	NGAPEM_EventUpDown	up_down
+}
+
+/* global test port e.g. for non-imsi/conn specific messages */
+type port NGAP_PT message {
+	inout NGAP_PDU, NGAPEM_Event;
+} with { extension "internal" };
+
+/* "Expect" Handling */
+
+type record ExpectData {
+	AMF_UE_NGAP_ID amf_id optional,
+	RAN_UE_NGAP_ID ran_id optional,
+	NGAP_ConnHdlr vc_conn
+}
+
+/* represents a single NGAP PDU that we expect. When a matching PDU is seen, it is forwarded to the registered
+ * component */
+type record ExpectDataProc {
+	integer procedureCode optional,
+	NGAP_ConnHdlr vc_conn				/* component handling this UE connection */
+};
+
+signature NGAPEM_register(in AMF_UE_NGAP_ID amf_id, in RAN_UE_NGAP_ID ran_id, in NGAP_ConnHdlr hdlr);
+signature NGAPEM_register_proc(in integer procedureCode, in NGAP_ConnHdlr hdlr);
+//signature NGAPEM_derive_nas_token(in octetstring kasme, in NGAP_ConnHdlr hdlr, out OCT32 nas_token);
+
+type port NGAPEM_PROC_PT procedure {
+	inout NGAPEM_register;
+	inout NGAPEM_register_proc;
+	//inout NGAPEM_derive_nas_token;
+} with { extension "internal" };
+
+/* Function that can be used as create_cb and will use the expect table */
+function ExpectedCreateCallback(NGAP_PDU msg,
+				template (omit) AMF_UE_NGAP_ID amf_id,
+				template (omit) RAN_UE_NGAP_ID ran_id,
+				charstring id)
+runs on NGAP_Emulation_CT return NGAP_ConnHdlr {
+	var NGAP_ConnHdlr ret := null;
+	var integer i;
+
+	for (i := 0; i < sizeof(NGapExpectTable); i := i+1) {
+		if (not ispresent(NGapExpectTable[i].amf_id) and not ispresent(NGapExpectTable[i].ran_id)) {
+			continue;
+		}
+
+		if (valueof(amf_id) == NGapExpectTable[i].amf_id and valueof(ran_id) == NGapExpectTable[i].ran_id) {
+			ret := NGapExpectTable[i].vc_conn;
+			/* Release this entry */
+			NGapExpectTable[i].amf_id := omit;
+			NGapExpectTable[i].ran_id := omit;
+			NGapExpectTable[i].vc_conn := null;
+			log("Found Expect[", i, "] for ", msg, " handled at ", ret);
+			return ret;
+		}
+	}
+	setverdict(fail, "Couldn't find Expect for ", msg);
+	mtc.stop;
+}
+
+/* represents a single NGAP Association */
+type record AssociationData {
+	NGAP_ConnHdlr	comp_ref,			/* component handling this UE connection */
+	uint32_t	ran_ue_ngap_id optional,	/* eNB side NGAP ID */
+	uint40_t	amf_ue_ngap_id optional//,	/* MME side NGAP ID */
+	//EUTRAN_CGI	cgi optional,
+	//TAI		tai optional,
+	//NAS_UE_State	nus
+};
+
+type component NGAP_Emulation_CT {
+	/* Port facing to the UDP SUT */
+	port NGAP_CODEC_PT NGAP;
+	/* All NGAP_ConnHdlr NGAP ports connect here
+	 * NGAP_Emulation_CT.main needs to figure out what messages
+	 * to send where with CLIENT.send() to vc_conn */
+	port NGAP_Conn_PT NGAP_CLIENT;
+	/* currently tracked connections */
+	var AssociationData NGapAssociationTable[16];
+	/* pending expected NGAP Association (UE oriented) */
+	var ExpectData NGapExpectTable[8];
+	/* pending expected NGAP PDU */
+	var ExpectDataProc NGapExpectTableProc[8];
+	/* procedure based port to register for incoming connections */
+	port NGAPEM_PROC_PT NGAP_PROC;
+	/* test port for unit data messages */
+	port NGAP_PT NGAP_UNIT;
+
+	var NGAP_conn_parameters g_pars;
+	var charstring g_ngap_id;
+	var integer g_ngap_conn_id := -1;
+}
+
+type function NGAPCreateCallback(NGAP_PDU msg,
+				template (omit) AMF_UE_NGAP_ID amf_id,
+				template (omit) RAN_UE_NGAP_ID ran_id,
+				charstring id)
+runs on NGAP_Emulation_CT return NGAP_ConnHdlr;
+
+type function NGAPUnitdataCallback(NGAP_PDU msg)
+runs on NGAP_Emulation_CT return template NGAP_PDU;
+
+type record NGAPOps {
+	NGAPCreateCallback create_cb,
+	NGAPUnitdataCallback unitdata_cb
+}
+
+type record NGAP_conn_parameters {
+	HostName remote_ip,
+	IPL4asp_Types.PortNumber remote_sctp_port,
+	HostName local_ip,
+	IPL4asp_Types.PortNumber local_sctp_port//,
+	//NAS_Role role
+}
+
+function tr_NGAP_RecvFrom_R(template NGAP_PDU msg)
+runs on NGAP_Emulation_CT return template NGAP_RecvFrom {
+	var template NGAP_RecvFrom mrf := {
+		connId := g_ngap_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+private function f_ngap_ids_known(template (omit) AMF_UE_NGAP_ID amf_id,
+				  template (omit) RAN_UE_NGAP_ID ran_id)
+runs on NGAP_Emulation_CT return boolean {
+	var integer i;
+	log("f_ngap_ids_known(",amf_id,", ",ran_id,")");
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		log("tbl[",i,"]: mme=", NGapAssociationTable[i].amf_ue_ngap_id,
+		    ", enb=", NGapAssociationTable[i].ran_ue_ngap_id);
+		/* skip empty records */
+		if (NGapAssociationTable[i].amf_ue_ngap_id == omit and
+		    NGapAssociationTable[i].ran_ue_ngap_id == omit) {
+			log("skipping empty ", i);
+			continue;
+		}
+		if (NGapAssociationTable[i].amf_ue_ngap_id == omit) {
+			log("entry ", i, " has no MME ID yet (enb=", NGapAssociationTable[i].ran_ue_ngap_id);
+			/* Table doesn't yet know the MME side ID, let's look-up only
+			 * based on the eNB side ID */
+			if (match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id)) {
+				/* update table with MME side ID */
+				NGapAssociationTable[i].amf_ue_ngap_id := valueof(amf_id);
+				return true;
+			}
+		} else if (match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id) and
+			match(NGapAssociationTable[i].amf_ue_ngap_id, amf_id)) {
+			return true;
+		}
+	}
+	return false;
+}
+private function f_comp_known(NGAP_ConnHdlr client)
+runs on NGAP_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		if (NGapAssociationTable[i].comp_ref == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_assoc_id_by_ngap_ids(template (omit) AMF_UE_NGAP_ID amf_id,
+				    template (omit) RAN_UE_NGAP_ID ran_id)
+runs on NGAP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		if (istemplatekind(ran_id, "omit") or
+		    match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id)) {
+			if (istemplatekind(amf_id, "omit")) {
+				return i;
+			} else {
+				if (match(NGapAssociationTable[i].amf_ue_ngap_id, amf_id)) {
+					return i;
+				}
+			}
+		}
+	}
+	setverdict(fail, "NGAP Association Table not found by ENB-ID=", ran_id, " MME-ID=", amf_id);
+	mtc.stop;
+}
+
+private function f_assoc_id_by_comp(NGAP_ConnHdlr client)
+runs on NGAP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		if (NGapAssociationTable[i].comp_ref == client) {
+			return i;
+		}
+	}
+	setverdict(fail, "NGAP Association Table not found by component ", client);
+	mtc.stop;
+}
+
+private function f_assoc_by_comp(NGAP_ConnHdlr client)
+runs on NGAP_Emulation_CT return AssociationData {
+	var integer i := f_assoc_id_by_comp(client);
+	return NGapAssociationTable[i];
+}
+
+private function f_ngap_id_table_add(NGAP_ConnHdlr comp_ref,
+				     template (omit) AMF_UE_NGAP_ID amf_id, RAN_UE_NGAP_ID ran_id)
+runs on NGAP_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		if (not isvalue(NGapAssociationTable[i].ran_ue_ngap_id)) {
+			NGapAssociationTable[i].ran_ue_ngap_id := ran_id;
+			if (istemplatekind(amf_id, "omit")) {
+				NGapAssociationTable[i].amf_ue_ngap_id := omit;
+			} else {
+				NGapAssociationTable[i].amf_ue_ngap_id := valueof(amf_id);
+			}
+			NGapAssociationTable[i].comp_ref := comp_ref;
+			return i;
+		}
+	}
+	testcase.stop("NGAP Association Table full!");
+	return -1;
+}
+
+private function f_ngap_id_table_del(NGAP_ConnHdlr comp_ref, RAN_UE_NGAP_ID ran_id)
+runs on NGAP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		if (NGapAssociationTable[i].comp_ref == comp_ref and
+		    NGapAssociationTable[i].ran_ue_ngap_id == ran_id) {
+			NGapAssociationTable[i].ran_ue_ngap_id := omit;
+			NGapAssociationTable[i].amf_ue_ngap_id := omit;
+			NGapAssociationTable[i].comp_ref := null;
+			return;
+		}
+	}
+	setverdict(fail, "NGAP Association Table: Couldn't find to-be-deleted entry!");
+	mtc.stop;
+}
+
+
+private function f_ngap_id_table_init()
+runs on NGAP_Emulation_CT {
+	for (var integer i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
+		NGapAssociationTable[i].amf_ue_ngap_id := omit;
+		NGapAssociationTable[i].ran_ue_ngap_id := omit;
+		//NGapAssociationTable[i].cgi := omit;
+		//NGapAssociationTable[i].tai := omit;
+		//NGapAssociationTable[i].nus := valueof(t_NAS_UE_State(g_pars.role));
+		NGapAssociationTable[i].comp_ref := null;
+	}
+}
+
+private function f_ngap_xceive(template (value) NGAP_PDU tx,
+				template NGAP_PDU rx_t := ?)
+runs on NGAP_Emulation_CT  return NGAP_PDU {
+	timer T := 10.0;
+	var NGAP_RecvFrom mrf;
+
+	NGAP.send(t_NGAP_Send(g_ngap_conn_id, tx));
+	alt {
+	[] NGAP.receive(tr_NGAP_RecvFrom_R(rx_t)) -> value mrf { }
+	[] NGAP.receive(tr_SctpAssocChange) { repeat; }
+	[] NGAP.receive(tr_SctpPeerAddrChange)  { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", rx_t);
+		mtc.stop;
+		}
+	}
+	return mrf.msg;
+}
+
+//function handle_NGAP_UeContextReleaseCmd(template (present) NGAP_PDU rel_cmd) runs on NGAP_Emulation_CT {
+//	if (ispresent(rel_cmd.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_NGAP_IDs.uE_NGAP_ID_pair)) {
+//		var template AMF_UE_NGAP_ID mme_ue_id;
+//		var template RAN_UE_NGAP_ID enb_ue_id;
+//		var integer assoc_id;
+//		var NGAP_ConnHdlr vc_conn
+//
+//		mme_ue_id := rel_cmd.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_NGAP_IDs.uE_NGAP_ID_pair.mME_UE_NGAP_ID;
+//		enb_ue_id := rel_cmd.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_NGAP_IDs.uE_NGAP_ID_pair.eNB_UE_NGAP_ID;
+//
+//		assoc_id := f_assoc_id_by_ngap_ids(mme_ue_id, enb_ue_id);
+//		vc_conn := NGapAssociationTable[assoc_id].comp_ref;
+//
+//		f_ngap_id_table_del(vc_conn, valueof(enb_ue_id));
+//	} else {
+//		/* TODO: The UE CONTEXT RELEASE COMMAND (see also: 3GPP TS 36.413, section 9.1.4.6), may identify the
+//		 * context by either an uE_NGAP_ID_pair (AMF_UE_NGAP_ID and RAN_UE_NGAP_ID) or an AMF_UE_NGAP_ID alone.
+//		 * The latter case is not implemented here yet. */
+//		setverdict(fail, "complete implementation of UeContextReleaseCmd handling");
+//		mtc.stop;
+//	}
+//}
+
+private function SendToNGapExpectTableProc(NGAP_PDU msg) runs on NGAP_Emulation_CT {
+	var integer procedureCode;
+	var NGAP_ConnHdlr vc_conn;
+
+	if (ispresent(msg.initiatingMessage.procedureCode)) {
+		procedureCode := msg.initiatingMessage.procedureCode;
+	} else if (ispresent(msg.unsuccessfulOutcome.procedureCode)) {
+		procedureCode := msg.unsuccessfulOutcome.procedureCode;
+	} else if (ispresent(msg.successfulOutcome.procedureCode)) {
+		procedureCode := msg.successfulOutcome.procedureCode;
+	} else {
+		return;
+	}
+
+	for (var integer i := 0; i < sizeof(NGapExpectTableProc); i := i+1) {
+		if (NGapExpectTableProc[i].procedureCode == procedureCode) {
+			vc_conn := NGapExpectTableProc[i].vc_conn;
+			if (vc_conn != null) {
+				NGAP_CLIENT.send(msg) to vc_conn;
+			}
+		}
+	}
+
+	return;
+}
+
+function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_Emulation_CT {
+	var Result res;
+	g_pars := p;
+	g_ngap_id := id;
+	f_ngap_id_table_init();
+	f_expect_table_init();
+
+	map(self:NGAP, system:NGAP_CODEC_PT);
+	if (p.remote_sctp_port == -1) {
+		res := NGAP_CodecPort_CtrlFunct.f_IPL4_listen(NGAP, p.local_ip, p.local_sctp_port,
+							      { sctp := valueof(ts_SctpTuple(60)) });
+	} else {
+		res := NGAP_CodecPort_CtrlFunct.f_IPL4_connect(NGAP, p.remote_ip, p.remote_sctp_port,
+							       p.local_ip, p.local_sctp_port, -1,
+							       { sctp := valueof(ts_SctpTuple(60)) });
+	}
+	if (not ispresent(res.connId)) {
+		setverdict(fail, "Could not connect NGAP socket, check your configuration");
+		mtc.stop;
+	}
+	g_ngap_conn_id := res.connId;
+
+	/* notify user about SCTP establishment */
+	if (p.remote_sctp_port != -1) {
+		NGAP_UNIT.send(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP})
+	}
+
+	while (true) {
+		var NGAP_ConnHdlr vc_conn;
+		//var PDU_NAS_EPS nas;
+		var AMF_UE_NGAP_ID amf_id;
+		var RAN_UE_NGAP_ID ran_id;
+		var integer procedureCode;
+		var NGAP_RecvFrom mrf;
+		var NGAP_PDU msg;
+		var charstring vlr_name, mme_name;
+		var integer ai;
+		var octetstring kasme;
+
+		alt {
+		/* NGAP from client: InitialUE */
+		[] NGAP_CLIENT.receive(mw_ngap_initMsg(mw_n2_initialUeMessage)) -> value msg sender vc_conn {
+			/* create a table entry about this connection */
+			ai := f_ngap_id_table_add(vc_conn, omit, valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg)));
+			/* Store CGI + TAI so we can use it for generating UlNasTransport from NAS */
+//			NGapAssociationTable[ai].tai := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[2].value_.TAI;
+//			NGapAssociationTable[ai].cgi := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[3].value_.EUTRAN_CGI;
+//			/* Pass message through */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
+		/* NGAP from client: pass on transparently */
+		[] NGAP_CLIENT.receive(NGAP_PDU:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			/* FIXME: validate NGAP_IDs ? */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
+
+		/* non-UE related NGAP: pass through unmodified/unverified */
+		[] NGAP_UNIT.receive(NGAP_PDU:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
+
+		/* NGAP received from peer (MME) */
+		[] NGAP.receive(tr_NGAP_RecvFrom_R(?)) -> value mrf {
+//			if (match(mrf.msg, tr_NGAP_nonUErelated)) {
+				/* non-UE-related NGAP message */
+				SendToNGapExpectTableProc(mrf.msg);
+				var template NGAP_PDU resp := ops.unitdata_cb.apply(mrf.msg);
+				if (isvalue(resp)) {
+					NGAP.send(t_NGAP_Send(g_ngap_conn_id, valueof(resp)));
+				}
+//			} else {
+//				/* Ue-related NGAP message */
+//				/* obtain MME + ENB UE NGAP ID */
+//				var template (omit) AMF_UE_NGAP_ID mme_ue_id := f_NGAP_get_AMF_UE_NGAP_ID(mrf.msg);
+//				var template (omit) RAN_UE_NGAP_ID enb_ue_id := f_NGAP_get_RAN_UE_NGAP_ID(mrf.msg);
+//				/* check if those IDs are known in our table */
+//				if (f_ngap_ids_known(mme_ue_id, enb_ue_id)) {
+//					/* if yes, dispatch to the ConnHdlr for this Ue-Connection */
+//					var template (omit) octetstring nas_enc;
+//					var integer assoc_id := f_assoc_id_by_ngap_ids(mme_ue_id, enb_ue_id);
+//					vc_conn := NGapAssociationTable[assoc_id].comp_ref;
+//					nas_enc := f_NGAP_get_NAS_PDU(mrf.msg);
+//					if (isvalue(nas_enc)) {
+//						nas := dec_PDU_NAS_EPS(valueof(nas_enc));
+//						if (match(nas, tr_NAS_EMM_SecurityProtected)) {
+//							nas := f_nas_try_decaps(NGapAssociationTable[assoc_id].nus, nas);
+//						}
+//						/* DL/UlNasTransport are not interesting, don't send them */
+//						if (not match(mrf.msg, (tr_NGAP_DlNasTransport, tr_NGAP_UlNasTransport))) {
+//							/* send raw NGAP */
+//							NGAP_CLIENT.send(mrf.msg) to vc_conn;
+//						}
+//						/* send decoded NAS */
+//						NGAP_CLIENT.send(nas) to vc_conn;
+//					} else {
+//						/* send raw NGAP */
+//						NGAP_CLIENT.send(mrf.msg) to vc_conn;
+//					}
+//				} else {
+//					/* if not, call create_cb so it can create new ConnHdlr */
+//					vc_conn := ops.create_cb.apply(mrf.msg, mme_ue_id, enb_ue_id, id);
+//					f_ngap_id_table_add(vc_conn, mme_ue_id, valueof(enb_ue_id));
+//					NGAP_CLIENT.send(mrf.msg) to vc_conn;
+//				}
+//				if (match(mrf.msg, tr_NGAP_UeContextReleaseCmd)) {
+//					handle_NGAP_UeContextReleaseCmd(mrf.msg);
+//				}
+//			}
+			}
+		[] NGAP.receive(tr_SctpAssocChange) { }
+		[] NGAP.receive(tr_SctpPeerAddrChange)  { }
+		[] NGAP_PROC.getcall(NGAPEM_register:{?,?,?}) -> param(amf_id, ran_id, vc_conn) {
+			f_create_expect(amf_id, ran_id, vc_conn);
+			NGAP_PROC.reply(NGAPEM_register:{amf_id, ran_id, vc_conn}) to vc_conn;
+			}
+		[] NGAP_PROC.getcall(NGAPEM_register_proc:{?,?}) -> param(procedureCode, vc_conn) {
+			f_create_expect_proc(procedureCode, vc_conn);
+			NGAP_PROC.reply(NGAPEM_register_proc:{procedureCode, vc_conn}) to vc_conn;
+			}
+//		[] NGAP_PROC.getcall(NGAPEM_derive_nas_token:{?, ?, -}) -> param(kasme, vc_conn) {
+//			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+//			var OCT32 nas_token := f_kdf_nas_token(kasme, NGapAssociationTable[assoc_id].nus.tx_count)
+//			NGapAssociationTable[assoc_id].nus.tx_count := NGapAssociationTable[assoc_id].nus.tx_count + 1;
+//			NGAP_PROC.reply(NGAPEM_derive_nas_token:{kasme, vc_conn, nas_token}) to vc_conn;
+//			}
+		}
+	}
+}
+
+
+private function f_create_expect(template (omit) AMF_UE_NGAP_ID amf_id,
+				 template (omit) RAN_UE_NGAP_ID ran_id,
+				 NGAP_ConnHdlr hdlr)
+runs on NGAP_Emulation_CT {
+	var integer i;
+
+	/* Check an entry like this is not already presnt */
+	for (i := 0; i < sizeof(NGapExpectTable); i := i+1) {
+		if (not ispresent(NGapExpectTable[i].amf_id) and not ispresent(NGapExpectTable[i].ran_id)) {
+			continue;
+		}
+		if (valueof(amf_id) == NGapExpectTable[i].amf_id and valueof(ran_id) == NGapExpectTable[i].ran_id) {
+			setverdict(fail, "UE AMF id / UE RAN id pair already present", amf_id, ran_id);
+			mtc.stop;
+		}
+	}
+	for (i := 0; i < sizeof(NGapExpectTable); i := i+1) {
+		if (not ispresent(NGapExpectTable[i].amf_id) and not ispresent(NGapExpectTable[i].ran_id)) {
+			NGapExpectTable[i].amf_id := valueof(amf_id);
+			NGapExpectTable[i].ran_id := valueof(ran_id);
+			NGapExpectTable[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for UE AMF id:", amf_id, ", UE RAN id:", ran_id, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	testcase.stop("No space left in NGapExpectTable")
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect in emulation */
+function f_create_s1ap_expect(template (omit) AMF_UE_NGAP_ID amf_id,
+			      template (omit) RAN_UE_NGAP_ID ran_id) runs on NGAP_ConnHdlr {
+	NGAP_PROC.call(NGAPEM_register:{amf_id, ran_id, self}) {
+		[] NGAP_PROC.getreply(NGAPEM_register:{?,?,?}) {};
+	}
+}
+
+private function f_create_expect_proc(integer procedureCode,NGAP_ConnHdlr hdlr) runs on NGAP_Emulation_CT {
+	var integer i;
+
+	/* Check an entry like this is not already presnt */
+	for (i := 0; i < sizeof(NGapExpectTableProc); i := i+1) {
+		if (NGapExpectTableProc[i].vc_conn == null) {
+			continue;
+		}
+		if (NGapExpectTableProc[i].procedureCode == procedureCode) {
+			setverdict(fail, "procedureCode ", procedureCode, " already present");
+			mtc.stop;
+		}
+	}
+	for (i := 0; i < sizeof(NGapExpectTableProc); i := i+1) {
+		if (NGapExpectTableProc[i].vc_conn == null) {
+			NGapExpectTableProc[i].procedureCode := procedureCode;
+			NGapExpectTableProc[i].vc_conn := hdlr;
+			log("Created Expect[", i, "] for PDU:", procedureCode, " to be handled at ", hdlr);
+			return;
+		}
+	}
+	testcase.stop("No space left in NGapExpectTableProc")
+}
+
+/* client/conn_hdlr side function to use procedure port to create expect (PDU) in emulation */
+function f_create_ngap_expect_proc(integer procedureCode, NGAP_ConnHdlr hdlr) runs on NGAP_ConnHdlr
+{
+	NGAP_PROC.call(NGAPEM_register_proc:{procedureCode, self}) {
+		[] NGAP_PROC.getreply(NGAPEM_register_proc:{?,?}) {};
+	}
+
+	log(procedureCode);
+}
+
+private function f_expect_table_init()
+runs on NGAP_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(NGapExpectTable); i := i + 1) {
+		NGapExpectTable[i].amf_id := omit;
+		NGapExpectTable[i].ran_id := omit;
+		NGapExpectTable[i].vc_conn := null;
+	}
+
+	for (i := 0; i < sizeof(NGapExpectTableProc); i := i + 1) {
+		NGapExpectTableProc[i].procedureCode := omit;
+		NGapExpectTableProc[i].vc_conn := null;
+	}
+}
+
+}
