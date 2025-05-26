@@ -12,6 +12,8 @@ install_dir = None
 
 
 def init_env():
+    """Adjust "Environment variables set by testenv" in README.md when making
+    changes here."""
     global env_extra
     global install_dir
 

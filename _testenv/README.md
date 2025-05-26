@@ -128,34 +128,6 @@ vty_port=4243
   `qemu_functions.sh` and using functions from there. See the `ggsn` testsuite
   for reference.
 
-### Executables
-
-#### $PATH
-
-Executables mentioned in `program=`, `prepare=`, `setup=` and `clean=` run
-with a `PATH` environment variable containing:
-
-* The directory of the testsuite
-* The directory for binaries built from source
-* The directory `_testenv/data/scripts` (which has e.g. `respawn.sh`)
-* The directory `_testenv/data/scripts/qemu`
-
-#### $PWD (current working dir)
-
-The executables run inside a directory with the component name, inside the log
-dir. For example:
-
-```
-/tmp/logs
-├── ggsn                   # Executables from [ggsn] section run in this dir
-│   ├── ggsn.log
-│   └── osmo-ggsn.cfg
-└── testsuite              # Executables from [testsuite] run in this dir
-    ├── Common.cfg
-    ├── GGSN_Tests.cfg
-    └── GGSN_Tests.default
-```
-
 ### Latest configs
 
 Sometimes we need to run test components and/or testsuites with different
@@ -185,6 +157,10 @@ For example:
 * `bts/testenv_oml.cfg`
 
 ## Environment variables
+
+### Environment variables read by testenv
+
+You can set the following environment variables to change testenv behaviour.
 
 * `TESTENV_SRC_DIR`:
   Set the directory for sources of Osmocom components. The default is the
@@ -224,6 +200,76 @@ For example:
 * `TESTENV_COREDUMP_FROM_LXC_HOST_IP`:
   Instead of attempting to automatically detect the LXC host IP, use this IP.
   This can be set to 127.0.0.1 for testing.
+
+### Environment variables set by testenv
+
+Testenv sets the following variables while running shell commands from
+`program=`, `prepare=`, `setup=` and `clean=`. The variables are set in
+`testenv/cmd.py:init_env()`.
+
+* `PATH`:
+  The user's `PATH` environment variable is prefixed with the following paths:
+  * The directory of the testsuite.
+  * The directory for binaries built from source.
+  * The directory `_testenv/data/scripts` (which has e.g. `respawn.sh`).
+  * The directory `_testenv/data/scripts/qemu`.
+
+* `PWD`:
+  The executables run inside a directory with the component name, inside the
+  log dir. For example:
+
+```
+/tmp/logs
+├── ggsn                   # Executables from [ggsn] section run in this dir
+│   ├── ggsn.log
+│   └── osmo-ggsn.cfg
+└── testsuite              # Executables from [testsuite] run in this dir
+    ├── Common.cfg
+    ├── GGSN_Tests.cfg
+    └── GGSN_Tests.default
+```
+
+* `TESTENV_INSTALL_DIR`:
+  The directory into which the SUT binaries and other files are installed. It
+  is set to `/` for `--podman --binary-repo`,
+  `~/.cache/osmo-ttcn3-testenv/podman` for `--podman` and
+  `~/.cache/osmo-ttcn3-testenv/host` otherwise. The
+  `~/.cache/osmo-ttcn3-testenv` part can be changed with the `--cache`
+  argument. Different cache directories for podman and for the host are used
+  as it is very likely that the binary objects from both are incompatible.
+
+* `TESTENV_SRC_DIR`:
+  Is set to the directory for sources of Osmocom components. The default is the
+  directory above the osmo-ttcn3-hacks.git clone. This can be changed by the
+  user by having `TESTENV_USR_DIR` set while running `testenv.py`.
+
+* `OSMO_DEV_MAKE_DIR`:
+  This variable is unset if `--binary-repo` is used as argument. Otherwise it
+  is set to `~/.cache/osmo-ttcn3-testenv/host/make2` or
+  `~/.cache/osmo-ttcn3-testenv/podman/make2` (with `--podman`) by default. The
+  `~/.cache/osmo-ttcn3-testenv` part can be changed with the `--cache`
+  argument.
+
+* `TESTENV_QEMU_KERNEL`:
+  Is only set if `-C`/`--custom-kernel` or `-D`/`--debian-kernel` parameters
+  are set. With `-C` it is set to `<path to osmo-ttcn3-hacks>/.linux`. With
+  `-D` it is set to `debian`.
+
+* `TESTENV_QEMU_SCRIPTS`:
+  Is set to `<path to osmo-ttcn3-hacks>/_testenv/data/scripts/qemu`.
+
+* `CCACHE_DIR`:
+  Is set to the value of the `--ccache` parameter, which is
+  `~/.cache/osmo-ttcn3-testenv/ccache` by default.
+
+* `PKG_CONFIG_PATH`:
+  Is prefixed with `$TESTENV_INSTALL_DIR/usr/lib/pkgconfig:`.
+
+* `LD_LIBRARY_PATH`:
+  Is prefixed with `$TESTENV_INSTALL_DIR/usr/lib:`.
+
+* `TERM`:
+  Is set to the same `TERM` passed to testenv with fallback to `dumb`.
 
 ## Troubleshooting
 
