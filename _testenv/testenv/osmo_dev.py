@@ -73,6 +73,9 @@ def init():
             os.path.join(testenv.args.cache, "host/usr"),
         ]
 
+    if testenv.args.jobs:
+        extra_opts += [f"-j{testenv.args.jobs}"]
+
     # Make dirs created without passing --autoreconf-in-src-copy to
     # gen_makefile.py (as previous versions of testenv did) are incompatible.
     # Add the "2" to avoid potential conflicts.

@@ -26,7 +26,10 @@ def init():
     # errors.
     git_dir = os.path.join(testenv.args.cache, "git", f"build_against_{testenv.args.binary_repo}".replace(":", "_"))
 
-    jobs = multiprocessing.cpu_count() + 1
+    if testenv.args.jobs:
+        jobs = testenv.args.jobs
+    else:
+        jobs = multiprocessing.cpu_count()
 
     os.makedirs(git_dir, exist_ok=True)
 

@@ -94,6 +94,12 @@ def parse_args():
         metavar="OBS_PROJECT",
         help="use binary packages from this Osmocom OBS project instead (e.g. osmocom:nightly)",
     )
+    group.add_argument(
+        "-j",
+        "--jobs",
+        help="number of jobs to run simultaneously (default: nproc)",
+        type=int,
+    )
 
     group = sub_run.add_argument_group("exit options", "When and how testenv should exit when done.")
     group = group.add_mutually_exclusive_group()

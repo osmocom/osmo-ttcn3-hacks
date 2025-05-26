@@ -51,7 +51,12 @@ def init():
 
 def build():
     logging.info("Building testsuite")
-    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir, env=builddir_env)
+
+    env = copy.copy(builddir_env)
+    if testenv.args.jobs:
+        env["PARALLEL_MAKE"] = f"-j{testenv.args.jobs}"
+
+    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir, env=env)
 
 
 def is_running(pid):
