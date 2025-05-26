@@ -8,26 +8,28 @@ import testenv
 import testenv.testsuite
 
 env_extra = {}
-usr_dir = None
+install_dir = None
 
 
 def init_env():
     global env_extra
-    global usr_dir
+    global install_dir
 
     if testenv.args.podman:
-        if not testenv.args.binary_repo:
-            usr_dir = os.path.join(testenv.args.cache, "podman", "usr")
+        if testenv.args.binary_repo:
+            install_dir = "/"
+        else:
+            install_dir = os.path.join(testenv.args.cache, "podman")
     else:
-        usr_dir = os.path.join(testenv.args.cache, "host", "usr")
+        install_dir = os.path.join(testenv.args.cache, "host")
 
-    if usr_dir:
-        pkg_config_path = os.path.join(usr_dir, "lib/pkgconfig")
+    if not testenv.args.binary_repo:
+        pkg_config_path = os.path.join(install_dir, "usr/lib/pkgconfig")
         if "PKG_CONFIG_PATH" in os.environ:
             pkg_config_path += f":{os.environ.get('PKG_CONFIG_PATH')}"
         pkg_config_path += ":/usr/lib/pkgconfig"
 
-        ld_library_path = os.path.join(usr_dir, "lib")
+        ld_library_path = os.path.join(install_dir, "usr/lib")
         if "LD_LIBRARY_PATH" in os.environ:
             ld_library_path += f":{os.environ.get('LD_LIBRARY_PATH')}"
         ld_library_path += ":/usr/lib"
@@ -38,6 +40,7 @@ def init_env():
     env_extra["CCACHE_DIR"] = testenv.args.ccache
     env_extra["TESTENV_CACHE_DIR"] = testenv.args.cache
     env_extra["TESTENV_SRC_DIR"] = testenv.src_dir
+    env_extra["TESTENV_INSTALL_DIR"] = install_dir
 
     env_extra["TERM"] = os.environ.get("TERM", "dumb")
 
@@ -71,8 +74,8 @@ def generate_env(env={}, podman=False):
     if testenv.args.action == "run" and testenv.testsuite.ttcn3_hacks_dir:
         path += f":{os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)}"
 
-    if usr_dir:
-        path += f":{os.path.join(usr_dir, 'bin')}"
+    if install_dir and install_dir != "/":
+        path += f":{os.path.join(install_dir, 'usr/bin')}"
 
     if podman:
         path += ":/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
