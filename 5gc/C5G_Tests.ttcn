@@ -56,18 +56,7 @@ type record NGRANParams {
 /* parameters of emulated UE */
 type record UeParams {
 	hexstring imsi,
-	charstring ue_ip,
-	//NAS_EPS_Types.GUTI guti optional,
-	octetstring kasme optional,
-
-	/* TEI (Control) local side, S11 (SGW) */
-	OCT4 	s11_teic_local,
-	/* TEI (Control) remote side, S11 (SGW) */
-	OCT4	s11_teic_remote optional,
-	/* TEI (Control) local side, S5c (PGW) */
-	OCT4 	s5c_teic_local,
-	/* TEI (Control) remote side, S5c (PGW) */
-	OCT4	s5c_teic_remote optional//,
+	charstring ue_ip
 }
 
 type component MTC_CT {
@@ -80,11 +69,9 @@ type component MTC_CT {
 	var UeParams g_ue_pars[NUM_UE];
 }
 
-type component ConnHdlr /* extends GTP2_ConnHdlr  */ {
+type component ConnHdlr extends NGAP_ConnHdlr {
 	var ConnHdlrPars g_pars;
 	timer g_Tguard := 30.0;
-
-	//var Gtp1cPeer g_gn_iface_peer := { connId := 1, remName := mp_gn_remote_ip, remPort := mp_gn_remote_port };
 }
 
 type record ConnHdlrPars {
@@ -141,25 +128,11 @@ friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
 	NGAP_UNIT[num].receive(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP});
 }
 friend function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
-/*
+
 	uep := {
 		imsi := f_gen_imsi(imsi_suffix),
-		ue_ip := "192.168.123.50",
-		guti := omit,
-		kasme := omit,
-		s11_teic_local := '00000000'O,
-		s11_teic_remote := omit,
-		s5c_teic_local := '00000000'O,
-		s5c_teic_remote := omit,
-		bearer := {
-			ebi := omit,
-			s11_teid_local := omit,
-			s11_teid_remote := omit,
-			s5c_teid_local := omit,
-			s5c_teid_remote := omit
-		}
+		ue_ip := "192.168.123.50"
 	}
-*/
 }
 friend function f_init_ngap(integer imsi_suffix) runs on MTC_CT {
 	var integer i;
@@ -193,8 +166,8 @@ runs on MTC_CT return ConnHdlr {
 
 	vc_conn := ConnHdlr.create(id);
 	/* NGAP part */
-//	connect(vc_conn:NGAP, vc_NGAP[ngap_idx]:NGAP_CLIENT);
-//	connect(vc_conn:NGAP_PROC, vc_NGAP[ngap_idx]:NGAP_PROC);
+	connect(vc_conn:NGAP, vc_NGAP[ngap_idx]:NGAP_CLIENT);
+	connect(vc_conn:NGAP_PROC, vc_NGAP[ngap_idx]:NGAP_PROC);
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
@@ -218,9 +191,13 @@ friend function f_init_handler(ConnHdlrPars pars, float t_guard := 30.0) runs on
 	activate(as_Tguard());
 }
 
+private template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
+	pLMNIdentity := ngran_pars.global_ngran_id.globalGNB_ID.pLMNIdentity,
+	tAC := ngran_pars.supported_ta_list[0].tAC,
+	iE_Extensions := omit
+}
 
-
-friend function f_ngap_setup(integer idx := 0, template NGAP_IEs.Cause cause := omit) runs on MTC_CT {
+friend function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
 	var template (present) NGAP_IEs.Cause exp_cause := ?;
 	var boolean exp_fail := false;
 	timer T := 5.0;
@@ -259,6 +236,30 @@ friend function f_ngap_setup(integer idx := 0, template NGAP_IEs.Cause cause := 
 		}
 	}
 }
+
+private function f_register() runs on ConnHdlr {
+	var template (value) UserLocationInformation p_ueLocInf;
+	var template (value) NGAP_PDU tx_pdu;
+
+	p_ueLocInf := m_uPTransportLayerInformation_userLocationInformationNR(
+			m_userLocationInformationNR(
+				g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI,
+				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
+
+	));
+
+
+	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.c5g_idx,
+						       '7e004179000d0109f1500000000079890040642e02f070'O, /* Registration request */
+						       p_ueLocInf,
+						       mo_Signalling));
+
+	NGAP.send(tx_pdu);
+	f_sleep(5.0);
+
+	/* TODO: handle Auth, SecurityModeCommand, InitialContextSetup, PDUSessionresource, */
+}
+
 /* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
  * Related: https://github.com/open5gs/open5gs/issues/3544 */
 testcase TC_ng_setup_unknown_global_gnb_id_plmn() runs on MTC_CT {
@@ -280,11 +281,25 @@ testcase TC_ng_setup() runs on MTC_CT {
 	f_ngap_setup(0);
 }
 
+private function f_TC_register(ConnHdlrPars pars) runs on ConnHdlr {
+	f_init_handler(pars);
+	f_register();
+}
+testcase TC_ng_register() runs on MTC_CT {
+	f_init_ngap(4);
+	f_ngap_setup(0);
+
+	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_with_pars(refers(f_TC_register), pars);
+	vc_conn.done;
+}
 
 control {
 	execute( TC_ng_setup() );
 	execute( TC_ng_setup_unknown_global_gnb_id_plmn() );
 	execute( TC_ng_setup_wrong_tac() );
+	execute( TC_ng_register() );
 }
 
 
