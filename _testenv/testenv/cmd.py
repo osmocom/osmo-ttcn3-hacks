@@ -9,6 +9,9 @@ import testenv.testsuite
 
 env_extra = {}
 install_dir = None
+make_dir = None
+# osmo-dev make dir version, bump when making incompatible changes
+make_dir_version = 2
 
 
 def init_env():
@@ -16,6 +19,7 @@ def init_env():
     changes here."""
     global env_extra
     global install_dir
+    global make_dir
 
     if testenv.args.podman:
         if testenv.args.binary_repo:
@@ -48,9 +52,11 @@ def init_env():
 
     if not testenv.args.binary_repo:
         if testenv.args.podman:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "podman", "make2")
+            make_dir = os.path.join(testenv.args.cache, "podman", "make")
         else:
-            env_extra["OSMO_DEV_MAKE_DIR"] = os.path.join(testenv.args.cache, "host", "make2")
+            make_dir = os.path.join(testenv.args.cache, "host", "make")
+        make_dir += str(make_dir_version)
+        env_extra["OSMO_DEV_MAKE_DIR"] = make_dir
 
     if testenv.args.kernel == "debian":
         env_extra["TESTENV_QEMU_KERNEL"] = "debian"

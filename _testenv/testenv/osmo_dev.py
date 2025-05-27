@@ -7,7 +7,6 @@ import sys
 import testenv
 import testenv.cmd
 
-make_dir = None
 init_done = False
 
 
@@ -54,20 +53,17 @@ def check_init_needed():
 
 def init():
     global init_done
-    global make_dir
 
     if init_done:
         return
 
     extra_opts = []
     if testenv.args.podman:
-        make_dir = os.path.join(testenv.args.cache, "podman", "make")
         extra_opts = [
             "--install-prefix",
             os.path.join(testenv.args.cache, "podman/usr"),
         ]
     else:
-        make_dir = os.path.join(testenv.args.cache, "host", "make")
         extra_opts = [
             "--install-prefix",
             os.path.join(testenv.args.cache, "host/usr"),
@@ -76,17 +72,13 @@ def init():
     if testenv.args.jobs:
         extra_opts += [f"-j{testenv.args.jobs}"]
 
-    # Make dirs created without passing --autoreconf-in-src-copy to
-    # gen_makefile.py (as previous versions of testenv did) are incompatible.
-    # Add the "2" to avoid potential conflicts.
-    make_dir += "2"
-
+    # Bump testenv.cmd.make_dir_version when making incompatible changes
     cmd = [
         "./gen_makefile.py",
         "--build-debug",
         "--no-make-check",
         "--make-dir",
-        make_dir,
+        testenv.cmd.make_dir,
         "--no-ldconfig",
         "--src-dir",
         testenv.src_dir,
@@ -135,7 +127,7 @@ def make(cfg, limit_section=None):
         logging.debug("No osmo-dev make targets found in testenv.cfg")
         return
 
-    makefile_path = os.path.join(make_dir, "Makefile")
+    makefile_path = os.path.join(testenv.cmd.make_dir, "Makefile")
     with open(makefile_path) as f:
         makefile = f.read()
 
@@ -152,4 +144,4 @@ def make(cfg, limit_section=None):
         sys.exit(1)
 
     logging.info("Building test components")
-    testenv.cmd.run(["make"] + targets, cwd=make_dir)
+    testenv.cmd.run(["make"] + targets, cwd=testenv.cmd.make_dir)
