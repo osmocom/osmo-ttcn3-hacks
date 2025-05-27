@@ -232,8 +232,8 @@ Testenv sets the following variables while running shell commands from
 * `TESTENV_INSTALL_DIR`:
   The directory into which the SUT binaries and other files are installed. It
   is set to `/` for `--podman --binary-repo`,
-  `~/.cache/osmo-ttcn3-testenv/podman` for `--podman` and
-  `~/.cache/osmo-ttcn3-testenv/host` otherwise. The
+  `~/.cache/osmo-ttcn3-testenv/podman/install` for `--podman` and
+  `~/.cache/osmo-ttcn3-testenv/host/install` otherwise. The
   `~/.cache/osmo-ttcn3-testenv` part can be changed with the `--cache`
   argument. Different cache directories for podman and for the host are used
   as it is very likely that the binary objects from both are incompatible.
@@ -245,10 +245,10 @@ Testenv sets the following variables while running shell commands from
 
 * `OSMO_DEV_MAKE_DIR`:
   This variable is unset if `--binary-repo` is used as argument. Otherwise it
-  is set to `~/.cache/osmo-ttcn3-testenv/host/make2` or
-  `~/.cache/osmo-ttcn3-testenv/podman/make2` (with `--podman`) by default. The
-  `~/.cache/osmo-ttcn3-testenv` part can be changed with the `--cache`
-  argument.
+  is set to `~/.cache/osmo-ttcn3-testenv/host/make<version>` or
+  `~/.cache/osmo-ttcn3-testenv/podman/make<version>` (with `--podman`) by
+  default. The `~/.cache/osmo-ttcn3-testenv` part can be changed with the
+  `--cache` argument.
 
 * `TESTENV_QEMU_KERNEL`:
   Is only set if `-C`/`--custom-kernel` or `-D`/`--debian-kernel` parameters

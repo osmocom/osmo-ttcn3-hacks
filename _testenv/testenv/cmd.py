@@ -11,7 +11,7 @@ env_extra = {}
 install_dir = None
 make_dir = None
 # osmo-dev make dir version, bump when making incompatible changes
-make_dir_version = 2
+make_dir_version = 3
 
 
 def init_env():
@@ -25,17 +25,17 @@ def init_env():
         if testenv.args.binary_repo:
             install_dir = "/"
         else:
-            install_dir = os.path.join(testenv.args.cache, "podman")
+            install_dir = os.path.join(testenv.args.cache, "podman/install")
     else:
-        install_dir = os.path.join(testenv.args.cache, "host")
+        install_dir = os.path.join(testenv.args.cache, "host/install")
 
     if not testenv.args.binary_repo:
-        pkg_config_path = os.path.join(install_dir, "usr/lib/pkgconfig")
+        pkg_config_path = os.path.join(install_dir, "lib/pkgconfig")
         if "PKG_CONFIG_PATH" in os.environ:
             pkg_config_path += f":{os.environ.get('PKG_CONFIG_PATH')}"
         pkg_config_path += ":/usr/lib/pkgconfig"
 
-        ld_library_path = os.path.join(install_dir, "usr/lib")
+        ld_library_path = os.path.join(install_dir, "lib")
         if "LD_LIBRARY_PATH" in os.environ:
             ld_library_path += f":{os.environ.get('LD_LIBRARY_PATH')}"
         ld_library_path += ":/usr/lib"
@@ -83,7 +83,7 @@ def generate_env(env={}, podman=False):
         path += f":{os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)}"
 
     if install_dir and install_dir != "/":
-        path += f":{os.path.join(install_dir, 'usr/bin')}"
+        path += f":{os.path.join(install_dir, 'bin')}"
 
     if podman:
         path += ":/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

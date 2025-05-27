@@ -58,17 +58,6 @@ def init():
         return
 
     extra_opts = []
-    if testenv.args.podman:
-        extra_opts = [
-            "--install-prefix",
-            os.path.join(testenv.args.cache, "podman/usr"),
-        ]
-    else:
-        extra_opts = [
-            "--install-prefix",
-            os.path.join(testenv.args.cache, "host/usr"),
-        ]
-
     if testenv.args.jobs:
         extra_opts += [f"-j{testenv.args.jobs}"]
 
@@ -77,6 +66,8 @@ def init():
         "./gen_makefile.py",
         "--build-debug",
         "--no-make-check",
+        "--install-prefix",
+        testenv.cmd.install_dir,
         "--make-dir",
         testenv.cmd.make_dir,
         "--no-ldconfig",
