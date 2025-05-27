@@ -51,16 +51,21 @@ LOG_FILES="$BASE_NAME*.log"
 
 TEST_CASES=$(ls -1 $LOG_FILES | awk 'BEGIN { FS = "-" } { print $2 }' | sort | uniq)
 
-for t in $TEST_CASES; do
-	PREFIX="$BASE_NAME-$t"
-	OUTPUT="$(get_new_prefix "$PREFIX").merged"
-	if [ -e "$OUTPUT" ]; then
-		>&2 echo "log_merge: ERROR: file already exists: $OUTPUT"
-		exit 1
-	fi
-	ttcn3_logmerge $PREFIX-*.log > "$OUTPUT"
-	echo "Generated $OUTPUT"
-done
+if [ -n "$TEST_CASES" ]; then
+	for t in $TEST_CASES; do
+		PREFIX="$BASE_NAME-$t"
+		OUTPUT="$(get_new_prefix "$PREFIX").merged"
+		if [ -e "$OUTPUT" ]; then
+			>&2 echo "log_merge: ERROR: file already exists: $OUTPUT"
+			exit 1
+		fi
+		ttcn3_logmerge $PREFIX-*.log > "$OUTPUT"
+		echo "Generated $OUTPUT"
+	done
+else
+	>&2 echo "log_merge: WARNING: Couldn't find logs for test cases! Merging everything"
+	ttcn3_logmerge $LOG_FILES > "$BASE_NAME.merged"
+fi
 
 if [ "$2" = "--rm" ]; then
 	echo "Removing Input log files !!!"
