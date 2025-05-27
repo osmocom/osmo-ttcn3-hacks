@@ -4,7 +4,7 @@ FROM	${REGISTRY}/${DISTRO}
 
 # Arguments used after FROM must be specified again
 ARG	OSMOCOM_REPO_TESTSUITE_MIRROR="https://downloads.osmocom.org"
-ARG	OSMOCOM_REPO="$OSMOCOM_REPO_TESTSUITE_MIRROR/packages/osmocom:/latest/Debian_12/"
+ARG	OSMOCOM_REPO="$OSMOCOM_REPO_TESTSUITE_MIRROR/packages/osmocom:/nightly/Debian_12/"
 
 # Copy from common dir
 COPY	obs.key /obs.key
@@ -140,9 +140,9 @@ RUN	set -x && \
 	pip3 install ./osmo-python-tests --break-system-packages && \
 	rm -rf osmo-python-tests
 
-# Add eclipse-titan from osmocom:latest, invalidate cache when :latest changes
+# Add eclipse-titan from osmocom:nightly, invalidate cache when :nightly changes
 RUN	echo "deb [signed-by=/obs.key] $OSMOCOM_REPO ./" \
-		> /etc/apt/sources.list.d/osmocom-latest.list
+		> /etc/apt/sources.list.d/osmocom-nightly.list
 ADD	$OSMOCOM_REPO/Release /tmp/Release
 RUN	set -x && \
 	apt-get update && \
@@ -150,7 +150,7 @@ RUN	set -x && \
 		eclipse-titan \
 		&& \
 	apt-get clean && \
-	rm /etc/apt/sources.list.d/osmocom-latest.list
+	rm /etc/apt/sources.list.d/osmocom-nightly.list
 
 # Add mongodb for open5gs-hss. Using the package from bullseye since bookworm
 # mongodb-org package is not available. Furthermore, manually install required
