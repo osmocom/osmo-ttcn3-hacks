@@ -8,6 +8,7 @@ FILES="
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
+	common_ext.cc
 	NGAP_CodecPort_CtrlFunctDef.cc
 	NGAP_EncDec.cc
 	TCCConversion.cc
