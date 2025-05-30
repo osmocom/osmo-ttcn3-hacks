@@ -93,6 +93,25 @@ RUN	set -x && \
 		&& \
 	apt-get clean
 
+# Install newer libcurl4 from bookworm-backports, libcurl4 7.88.1-10+deb12u12
+# shipped with debian12 is buggy and generates wrong HTTP2 for open5gs.
+ENV	BACKPORTS_SOURCES_LIST="/etc/apt/sources.list.d/debian-backports.sources"
+RUN	set -x && \
+	echo "Types: deb deb-src" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "URIs: http://deb.debian.org/debian" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "Suites: stable-backports" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "Components: main" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "Enabled: yes" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" >>"$BACKPORTS_SOURCES_LIST" && \
+	apt-get update && \
+	apt-get -t bookworm-backports install \
+		-y \
+		--no-install-recommends \
+		-o Dpkg::Options::="--force-confold" \
+		libcurl4 \
+		&& \
+	apt-get clean
+
 # Install rebar3 as described in https://rebar3.org/docs/getting-started/
 # instead of using the Debian package, as the latter pulls in ~600 MB of GUI
 # dependencies that we don't need:
