@@ -56,7 +56,7 @@ extern "C" {
 #include <vector>
 
 extern "C" {
-#include "cJSON.h"
+#include <cJSON.h>
 #include "rsp_ossl_imp.h"
 }
 
@@ -1084,6 +1084,7 @@ class CertificateUtil {
 				if (ext == ".pem" || ext == ".crt") {
 					auto fileCerts = loadCertificateChain(entry);
 					for (auto &cert : fileCerts) {
+						printCertificateDetails(cert.get());
 						certificates.push_back(std::move(cert));
 					}
 				}
@@ -1115,6 +1116,7 @@ class CertificateUtil {
 						certificates.push_back(std::unique_ptr<X509, X509Deleter>(cert));
 						Logger::info("Loaded certificate: " + getSubjectName(cert) + " from " +
 							     fpath);
+						printCertificateDetails(cert);
 					}
 				}
 			} catch (const std::exception &e) {
@@ -1377,7 +1379,7 @@ class CertificateUtil {
 	static std::vector<uint8_t> convertBSI_TR03111_to_DER(const std::vector<uint8_t> &bsi_signature)
 	{
 		if (bsi_signature.size() != 64) {
-			std::cerr << "Invalid BSI TR-03111 signature size" << std::endl;
+			std::cerr << "Invalid BSI TR-03111 signature size: " << bsi_signature.size() << std::endl;
 			return {};
 		}
 
@@ -2377,7 +2379,7 @@ class RSPClient {
 		return prepareDownloadResponseOk;
 	}
 
-  void debugASN1Structure(const std::vector<uint8_t>& derData) {
+  	void debugASN1Structure(const std::vector<uint8_t>& derData) {
     Logger::debug("=== ASN.1 Structure Analysis ===");
     Logger::debug("Total length: " + std::to_string(derData.size()) + " bytes");
     Logger::debug("Hex: " + HexUtil::bytesToHex(derData));
@@ -2440,7 +2442,7 @@ class RSPClient {
         ERR_print_errors_fp(stderr);
     }
     Logger::debug("=== End ASN.1 Analysis ===");
-}
+	}
 
 	// Fixed createGetBoundProfilePackageRequest method
 	std::string createGetBoundProfilePackageRequest()
@@ -3106,7 +3108,13 @@ class RSPClient {
 		}
 	}
 
-    private:
+	bool verifyServerSignature(const std::vector<uint8_t> &serverSigned1, const std::vector<uint8_t> &serverSignature1, const std::vector<uint8_t> &derDataServerCert)
+	{
+		auto serverCert = CertificateUtil::loadCertFromDER(derDataServerCert);
+		return verifyServerSignature(serverSigned1, serverSignature1, serverCert.get());
+	}
+
+private:
 	// Verify server certificate against root CA
 	bool verifyServerCertificate()
 	{
@@ -3186,8 +3194,7 @@ class RSPClient {
 	}
 
 	// Verify server signature
-	bool verifyServerSignature(const std::vector<uint8_t> &serverSigned1,
-				   const std::vector<uint8_t> &serverSignature1)
+	bool verifyServerSignature(const std::vector<uint8_t> &serverSigned1, const std::vector<uint8_t> &serverSignature1, X509* scertdata)
 	{
 		try {
 			// Handle special prefix in serverSignature1 based on SGP.22 spec
@@ -3202,14 +3209,20 @@ class RSPClient {
 				signatureLen -= 3;
 			}
 
+		for (int i = 0; i < serverSignature1.size(); i++) {
+			printf("%02x", serverSignature1[i]);
+		}
+		printf("\n");
+
+
 			// Extract public key from server certificate
-			std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubkey(X509_get_pubkey(m_serverCert.get()));
+			std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubkey(X509_get_pubkey(scertdata));
 			if (!pubkey) {
 				throw OpenSSLError("Failed to extract public key from certificate");
 			}
 
 			Logger::info("----------- using this cert to verify sig: -----------");
-			CertificateUtil::printCertificateDetails(m_serverCert.get());
+			CertificateUtil::printCertificateDetails(scertdata);
 
 			auto verifyResult = CertificateUtil::verify_TR031111(
 				serverSigned1, std::vector<unsigned char>(signatureData, signatureData + signatureLen),
@@ -3226,6 +3239,11 @@ class RSPClient {
 			LOG_ERROR("Error verifying signature: " + std::string(e.what()));
 			return false;
 		}
+	}
+
+	bool verifyServerSignature(const std::vector<uint8_t> &serverSigned1, const std::vector<uint8_t> &serverSignature1)
+	{
+		return verifyServerSignature(serverSigned1, serverSignature1, m_serverCert.get());
 	}
 
 	std::string simulateSendRequest(const std::string &request)
@@ -3562,6 +3580,7 @@ std::string operator+(const std::vector<std::string> &vec, const std::string &st
 	return to_string(vec) + str;
 }
 
+#ifdef STANDALONE_SMDPCC
 // Main function
 int main(int argc, char *argv[])
 {
@@ -3679,6 +3698,7 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 }
+#endif
 
 // find Variants\ A_B_C/Variant\ C/ -iname "*CERT*" -exec cp {} cert_c \;
 // find Variants\ A_B_C/CI -iname "*CERT*" -exec cp {} cert_c \;
