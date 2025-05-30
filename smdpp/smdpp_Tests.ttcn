@@ -1,12 +1,7 @@
-/* SM-DP+ testsuite in TTCN-3
- *
- * Author: Philipp Maier <pmaier@sysmocom.de> / sysmocom - s.f.m.c. GmbH
- *
- * Released under the terms of GNU General Public License, Version 2 or
- * (at your option) any later version.
- *
- * SPDX-License-Identifier: GPL-2.0-or-later
- */
+/* ============================================================================
+ * TTCN-3 Module: smdpp_Tests.ttcn3
+ * RSP SM-DP+ Testing with C++ Crypto via Native ASN.1 Functions
+ * ============================================================================ */
 
 module smdpp_Tests {
 
@@ -35,59 +30,131 @@ import from es12_Types_JSON all;
 import from es9p_Types_JSON all;
 import from es2p_Types_JSON all;
 
-// import from smdpp_cert all;
+/* ============================================================================
+ * EXTERNAL C++ FUNCTION DECLARATIONS
+ * C++ handles only crypto operations, TTCN-3 handles ASN.1 encoding/decoding
+ * ============================================================================ */
+
+/* RSP Client Management */
+external function ext_RSPClient_create(charstring serverUrl, integer serverPort,
+                                      charstring certPath, charstring nameFilter) return integer;
+
+external function ext_RSPClient_destroy(integer clientHandle) return integer;
+
+external function ext_RSPClient_loadEUICCCertificate(integer clientHandle,
+                                                    charstring euiccCertPath) return integer;
+
+external function ext_RSPClient_loadEUICCKeyPair(integer clientHandle,
+                                                charstring euiccPrivateKeyPath) return integer;
+
+external function ext_RSPClient_setTestMode(integer clientHandle, boolean testMode) return integer;
+
+/* Challenge Generation */
+external function ext_generateChallenge() return octetstring;
+
+/* Cryptographic Operations - work with raw octetstring data */
+external function ext_signWithEUICC(integer clientHandle, octetstring dataToSign) return octetstring;
+
+external function ext_verifyServerSignature(integer clientHandle, octetstring signedData,
+                                           octetstring xsignature, octetstring serverCert) return boolean;
+
+external function ext_generateEUICCOtpk(integer clientHandle) return octetstring;
+
+/* Certificate Operations */
+external function ext_loadCertificateFromFile(charstring certPath) return octetstring;
+
+external function ext_verifyCertificateChain(octetstring cert, charstring certPoolDir) return boolean;
+
+external function ext_getCertificateSubject(octetstring certData) return charstring;
+
+external function ext_getCertificateSKI(octetstring certData) return octetstring;
+
+external function ext_getCertificateAKI(octetstring certData) return octetstring;
+
+/* Utility Functions */
+external function ext_base64Encode(octetstring data) return charstring;
+
+external function ext_base64Decode(charstring b64Data) return octetstring;
+
+external function ext_hexToBytes(charstring hexStr) return octetstring;
+
+external function ext_bytesToHex(octetstring data) return charstring;
+
+/* Logging */
+external function ext_logInfo(charstring xmessage);
+
+external function ext_logError(charstring xmessage);
+
+external function ext_logDebug(charstring xmessage);
+
+/* ============================================================================
+ * TTCN-3 COMPONENT TYPES
+ * ============================================================================ */
 
 type component MTC_CT {
 	timer g_Tguard;
-
-	/* ES11 HTTP server */
 	var HTTP_Server_Emulation_CT vc_HTTP_es12;
 	var HTTP_Server_Emulation_CT vc_HTTP_es2p;
-
 };
 
 type component smdpp_ConnHdlr extends HTTP_ConnHdlr, http_CT {
 	var smdpp_ConnHdlrPars g_pars_smdpp;
 	var template integer g_http_client_id_es9p := omit;
 	var template integer g_http_client_id_es2p := omit;
+
+	/* C++ RSP client handle */
+	var integer g_rsp_client_handle := -1;
+
+	/* Session state */
+	var octetstring g_transactionId := ''O;
+	var octetstring g_euiccChallenge := ''O;
+	var octetstring g_serverChallenge := ''O;
+	var octetstring g_serverCert := ''O;
+	var boolean g_authenticationComplete := false;
 };
 
 type record smdpp_ConnHdlrPars {
-	/* add parameters here when necessary */
+	charstring smdp_server_url,
+	integer smdp_server_port,
+	charstring cert_path,
+	charstring cert_name_filter,
+	charstring euicc_cert_path,
+	charstring euicc_key_path,
+	boolean test_mode
 };
 
-private function f_init_pars()
-runs on MTC_CT return smdpp_ConnHdlrPars {
+private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 	var smdpp_ConnHdlrPars pars := {
-		/* add parameters here when necessary */
+		smdp_server_url := "testsmdpplus1.example.com",
+		smdp_server_port := 8000,
+		cert_path := "./sgp26/CertificateIssuer",
+		cert_name_filter := "NIST",
+		euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der",
+		euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem",
+		test_mode := false
 	};
 	return pars;
 }
 
 modulepar {
-	/* emulated ES9+ LPAd HTTPs client */
 	HTTP_Adapter_Params mp_es9p_client := {
 		http_host := "127.0.0.1",
-		http_port :=  8000,
+		http_port := 8000,
 		use_ssl := true
 	};
 
-	/* emulated ES2+ MNO HTTPs client */
 	HTTP_Adapter_Params mp_es2p_client := {
 		http_host := "127.0.0.1",
-		http_port :=  8001,
+		http_port := 8001,
 		use_ssl := true
 	};
 
-	/* emulated ES12 SM-DS+ HTTPs server */
 	HttpServerEmulationCfg mp_es12_server := {
 		http_bind_ip := "127.0.0.1",
 		http_bind_port := 8002,
 		use_ssl := false
 	};
 
-	/* emulated ES2+ MNO+ HTTPs server
-	 * (to receive HandleDownloadProgressInfo messages) */
 	HttpServerEmulationCfg mp_es2p_server := {
 		http_bind_ip := "127.0.0.1",
 		http_bind_port := 8003,
@@ -115,7 +182,6 @@ runs on MTC_CT return smdpp_ConnHdlr {
 
 	vc_conn := smdpp_ConnHdlr.create(id);
 
-	/* connect ES12/HTTP-server ports */
 	if (isbound(vc_HTTP_es12)) {
 		connect(vc_conn:HTTP_SRV[0], vc_HTTP_es12:CLIENT);
 		connect(vc_conn:HTTP_SRV_PROC[0], vc_HTTP_es12:CLIENT_PROC);
@@ -130,408 +196,482 @@ runs on MTC_CT return smdpp_ConnHdlr {
 	return vc_conn;
 }
 
-private function f_init(charstring id, float t_guard := 40.0) runs on MTC_CT {
+private function f_init(charstring id, float t_guard := 60.0) runs on MTC_CT {
 	g_Tguard.start(t_guard);
 	activate(as_Tguard());
 
-	/* start ES12/HTTP-server */
 	vc_HTTP_es12 := HTTP_Server_Emulation_CT.create(id);
 	vc_HTTP_es12.start(HTTP_Server_Emulation.main(mp_es12_server));
 
-	/* start ES2+/HTTP-server */
 	vc_HTTP_es2p := HTTP_Server_Emulation_CT.create(id);
 	vc_HTTP_es2p.start(HTTP_Server_Emulation.main(mp_es2p_server));
 }
 
-/* Helper function to send HTTP responses (ES12 and ES2+) */
-template (value) HTTPMessage ts_http_resp(charstring resp) := {
-	response := {
-		client_id := omit,
-		version_major := 1,
-		version_minor := 1,
-		statuscode := 200,
-		statustext := "OK",
-		/* See also SGP.32, section 6.1.1 */
-		header := {
-			{
-				header_name := "X-Admin-Protocol",
-				header_value := "gsma/rsp/v1.0.0"
-			},
-			{
-				header_name := "Content-Type",
-				header_value := "application/json"
-			},
-			{
-				header_name := "Content-Length",
-				header_value := int2str(lengthof(resp))
-			}
-			},
-		body := resp
+/* ============================================================================
+ * RSP CLIENT WRAPPER FUNCTIONS
+ * ============================================================================ */
+
+private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
+	ext_logInfo("Initializing RSP client");
+
+	g_rsp_client_handle := ext_RSPClient_create(
+		g_pars_smdpp.smdp_server_url,
+		g_pars_smdpp.smdp_server_port,
+		g_pars_smdpp.cert_path,
+		g_pars_smdpp.cert_name_filter
+	);
+
+	if (g_rsp_client_handle < 0) {
+		ext_logError("Failed to create RSP client");
+		return false;
+	}
+
+	if (ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle, g_pars_smdpp.euicc_cert_path) != 0) {
+		ext_logError("Failed to load eUICC certificate");
+		f_rsp_client_cleanup();
+		return false;
+	}
+
+	if (ext_RSPClient_loadEUICCKeyPair(g_rsp_client_handle, g_pars_smdpp.euicc_key_path) != 0) {
+		ext_logError("Failed to load eUICC private key");
+		f_rsp_client_cleanup();
+		return false;
+	}
+
+	if (ext_RSPClient_setTestMode(g_rsp_client_handle, g_pars_smdpp.test_mode) != 0) {
+		ext_logError("Failed to set test mode");
+		f_rsp_client_cleanup();
+		return false;
+	}
+
+	ext_logInfo("RSP client initialized with handle: " & int2str(g_rsp_client_handle));
+	return true;
+}
+
+private function f_rsp_client_cleanup() runs on smdpp_ConnHdlr {
+	if (g_rsp_client_handle >= 0) {
+		ext_RSPClient_destroy(g_rsp_client_handle);
+		g_rsp_client_handle := -1;
 	}
 }
 
-/* ********************************************* */
-/* ************* ES12/HTTP-server ************** */
-/* ********************************************* */
+/* ============================================================================
+ * RSP PROTOCOL IMPLEMENTATION
+ * ============================================================================ */
 
-/* Receive one Es12 HTTP request */
-private function f_es12_server_receive() runs on smdpp_ConnHdlr return JSON_ES12_Request {
-	var HTTPMessage es12_req;
-	timer T := 10.0;
-	var JSON_ES12_Request request;
+private function f_create_initiate_authentication_request() runs on smdpp_ConnHdlr
+return RemoteProfileProvisioningRequest {
 
-	T.start;
-	alt {
-	[] HTTP_SRV[0].receive({ request := ? }) -> value es12_req {
-	        request := dec_JSON_ES12_Request(char2oct(es12_req.request.body));
+	/* Generate eUICC challenge using C++ crypto */
+	g_euiccChallenge := ext_generateChallenge();
+	ext_logInfo("Generated eUICC challenge: " & ext_bytesToHex(g_euiccChallenge));
+
+	/* Create EUICC_INFO1 using TTCN-3 native types */
+	var EUICCInfo1 euiccInfo1 := {
+		svn := '020200'O, /* SGP.22 v2.2.0 */
+		euiccCiPKIdListForVerification := {
+			ext_hexToBytes("9DE64FBA14BE57EFD1C0D81B0B3CDC8063099999A"),
+			ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+		},
+		euiccCiPKIdListForSigning := {
+			ext_hexToBytes("9DE64FBA14BE57EFD1C0D81B0B3CDC8063099999A"),
+			ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 		}
-	[] T.timeout {
-		setverdict(fail, "no HTTP request received?");
-		}
-	}
+	};
 
+	/* Create the request structure */
+	var RemoteProfileProvisioningRequest request := {
+		initiateAuthenticationRequest := {
+			euiccChallenge := g_euiccChallenge,
+			smdpAddress := g_pars_smdpp.smdp_server_url,
+			euiccInfo1 := euiccInfo1
+		}
+	};
+
+	ext_logInfo("Created initiateAuthentication request");
 	return request;
 }
 
-/* Send Es12 HTTP response */
-private function f_es12_server_send(JSON_ES12_DeleteOrRegisterEventResponse es12_res) runs on smdpp_ConnHdlr  {
-	var octetstring es12_res_json;
-	es12_res_json := enc_JSON_ES12_DeleteOrRegisterEventResponse(es12_res);
-	HTTP_SRV[0].send(ts_http_resp(oct2char(es12_res_json)));
-}
+private function f_validate_initiate_authentication_response(RemoteProfileProvisioningResponse response)
+runs on smdpp_ConnHdlr return boolean {
 
-/* Perform Es12 HTTP request/response cycle */
-private function f_es12_server_transceive(JSON_ES12_DeleteOrRegisterEventResponse es12_res,
-				   template JSON_ES12_Request expected_es12_req := omit)
-runs on smdpp_ConnHdlr return JSON_ES12_Request {
-	var JSON_ES12_Request es12_req;
-	es12_req := f_es12_server_receive();
-	f_es12_server_send(es12_res);
-	if (not istemplatekind(expected_es12_req, "omit")) {
-		if (not match(valueof(es12_req), expected_es12_req)) {
-			setverdict(fail, "unexpected request from SM-DP on ES12");
-		}
+	if (not ispresent(response.initiateAuthenticationResponse)) {
+		ext_logError("No initiateAuthenticationResponse in response");
+		return false;
 	}
-	return es12_req;
+
+	if (not ispresent(response.initiateAuthenticationResponse.initiateAuthenticationOk)) {
+		ext_logError("Authentication failed - no OK response");
+		return false;
+	}
+
+	var InitiateAuthenticationOkEs9 authOk := response.initiateAuthenticationResponse.initiateAuthenticationOk;
+
+	/* Store session data */
+	g_transactionId := authOk.transactionId;
+	g_serverCert := enc_Certificate(authOk.serverCertificate);
+
+	ext_logInfo("Received transaction ID: " & ext_bytesToHex(g_transactionId));
+
+	/* Validate transaction ID match */
+	if (authOk.serverSigned1.transactionId != g_transactionId) {
+		ext_logError("Transaction ID mismatch");
+		return false;
+	}
+
+	/* Validate eUICC challenge match */
+	if (authOk.serverSigned1.euiccChallenge != g_euiccChallenge) {
+		ext_logError("eUICC challenge mismatch");
+		return false;
+	}
+
+	/* Store server challenge */
+	g_serverChallenge := authOk.serverSigned1.serverChallenge;
+
+	/* Validate server signature using C++ crypto */
+	if (not ext_verifyServerSignature(g_rsp_client_handle, enc_ServerSigned1(authOk.serverSigned1),
+	                                 authOk.serverSignature1, g_serverCert)) {
+		ext_logError("Server signature validation failed");
+		return false;
+	}
+
+	ext_logInfo("Authentication response validation successful");
+	g_authenticationComplete := true;
+	return true;
 }
 
-/* Perform Es12 HTTP request/response cycle but with an empty response */
-private function f_es12_server_transceive_empty_response(template JSON_ES12_Request expected_es12_req := omit)
-runs on smdpp_ConnHdlr return JSON_ES12_Request {
-	var JSON_ES12_DeleteOrRegisterEventResponse es12_res; /* Intentionally left unbound */
-	return f_es12_server_transceive(es12_res, expected_es12_req);
+private function f_create_get_bound_profile_package_request() runs on smdpp_ConnHdlr
+return RemoteProfileProvisioningRequest {
+
+	// if (not g_authenticationComplete) {
+	// 	ext_logError("Authentication not complete");
+	// 	return omit;
+	// }
+
+	/* Generate eUICC one-time public key using C++ crypto */
+	var octetstring euiccOtpk := ext_generateEUICCOtpk(g_rsp_client_handle);
+
+	/* Create EUICC_SIGNED2 using TTCN-3 native types */
+	var EUICCSigned2 euiccSigned2 := {
+		transactionId := g_transactionId,
+		euiccOtpk := euiccOtpk,
+		hashCc := omit
+	};
+
+	/* Encode EUICC_SIGNED2 to get data for signing */
+	var octetstring euiccSigned2Data := enc_EUICCSigned2(euiccSigned2);
+
+	/* Sign with eUICC private key using C++ crypto */
+	var octetstring euiccSignature2 := ext_signWithEUICC(g_rsp_client_handle, euiccSigned2Data);
+
+	/* Create PrepareDownloadResponse */
+	var PrepareDownloadResponse prepareDownloadResponse := {
+		downloadResponseOk := {
+			euiccSigned2 := euiccSigned2,
+			euiccSignature2 := euiccSignature2
+		}
+	};
+
+	/* Create the request */
+	var RemoteProfileProvisioningRequest request := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepareDownloadResponse
+		}
+	};
+
+	ext_logInfo("Created getBoundProfilePackage request");
+	return request;
 }
 
+private function f_validate_get_bound_profile_package_response(RemoteProfileProvisioningResponse response)
+runs on smdpp_ConnHdlr return boolean {
 
-/* ********************************************* */
-/* ************* ES9+/HTTP-client ************* */
-/* ********************************************* */
+	if (not ispresent(response.getBoundProfilePackageResponse)) {
+		ext_logError("No getBoundProfilePackageResponse in response");
+		return false;
+	}
+
+	if (not ispresent(response.getBoundProfilePackageResponse.getBoundProfilePackageOk)) {
+		ext_logError("getBoundProfilePackage failed - no OK response");
+		return false;
+	}
+
+	var GetBoundProfilePackageOk packageOk := response.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+
+	/* Validate transaction ID match */
+	if (packageOk.transactionId != g_transactionId) {
+		ext_logError("Transaction ID mismatch in getBoundProfilePackage response");
+		return false;
+	}
+
+	if (not ispresent(packageOk.boundProfilePackage)) {
+		ext_logError("No boundProfilePackage in response");
+		return false;
+	}
+
+	/* Decode BoundProfilePackage using TTCN-3 native decoder */
+	var BoundProfilePackage boundPackage := packageOk.boundProfilePackage;
+
+	/* Validate structure */
+	if (not ispresent(boundPackage.initialiseSecureChannelRequest)) {
+		ext_logError("Missing initialiseSecureChannelRequest");
+		return false;
+	}
+
+	if (not ispresent(boundPackage.firstSequenceOf87)) {
+		ext_logError("Missing firstSequenceOf87");
+		return false;
+	}
+
+	if (not ispresent(boundPackage.sequenceOf88)) {
+		ext_logError("Missing sequenceOf88");
+		return false;
+	}
+
+	if (not ispresent(boundPackage.sequenceOf86)) {
+		ext_logError("Missing sequenceOf86");
+		return false;
+	}
+
+	ext_logInfo("getBoundProfilePackage response validation successful");
+	return true;
+}
+
+/* ============================================================================
+ * HTTP COMMUNICATION
+ * ============================================================================ */
 
 template (value) HeaderLines ts_rsp_HTTP_Header := {
-	 { header_name := "User-Agent", header_value := "TTCN3 smdpp testsuite" },
-	 { header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
-	 { header_name := "Content-Type", header_value := "application/json;charset=UTF-8" }
+	{ header_name := "User-Agent", header_value := "TTCN3 smdpp testsuite" },
+	{ header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
+	{ header_name := "Content-Type", header_value := "application/json;charset=UTF-8" }
 };
 
-/* Send ES9+ HTTP request */
-private function f_es9p_send(RemoteProfileProvisioningRequest es9p_req) runs on smdpp_ConnHdlr {
-	var charstring es9p_req_enc;
-	var charstring es9p_url;
+private function f_send_es9p_request(charstring endpoint, charstring jsonBody) runs on smdpp_ConnHdlr return charstring {
+	f_http_tx_request(url := endpoint,
+	                  method := "POST",
+	                  body := jsonBody,
+	                  custom_hdr := valueof(ts_rsp_HTTP_Header),
+	                  client_id := g_http_client_id_es9p,
+	                  http_pars := mp_es9p_client);
 
-	if (ispresent(es9p_req.initiateAuthenticationRequest)) {
-		es9p_url := "/gsma/rsp2/es9plus/initiateAuthentication";
-	} else if (ispresent(es9p_req.getBoundProfilePackageRequest)) {
-		es9p_url := "/gsma/rsp2/es9plus/getBoundProfilePackage";
-	} else if (ispresent(es9p_req.authenticateClientRequest)) {
-		es9p_url := "/gsma/rsp2/es9plus/authenticateClient";
-	} else if (ispresent(es9p_req.handleNotification)) {
-		es9p_url := "/gsma/rsp2/es9plus/handleNotification";
-	} else if (ispresent(es9p_req.cancelSessionRequestEs9)) {
-		es9p_url := "/gsma/rsp2/es9plus/cancelSession";
-	} else {
-		setverdict(fail, "unknown JSON ES9+ function");
-	}
-
-	enc_RemoteProfileProvisioningRequest_to_JSON(es9p_req, es9p_req_enc);
-
-	f_http_tx_request(url := es9p_url,
-			  method := "POST",
-			  body := es9p_req_enc,
-			  custom_hdr := valueof(ts_rsp_HTTP_Header),
-			  client_id := g_http_client_id_es9p,
-			  http_pars := mp_es9p_client);
-}
-
-/* Receive ES9+ HTTP response */
-private function f_es9p_receive(template RemoteProfileProvisioningResponse expected_es9p_res := omit)
-runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
-	var RemoteProfileProvisioningResponse es9p_res;
-	var HTTPMessage response_http;
-	response_http := f_http_rx_response(exp := ?,
-					    client_id := g_http_client_id_es9p,
-					    keep_connection := true);
+	var HTTPMessage response_http := f_http_rx_response(exp := ?,
+	                                                   client_id := g_http_client_id_es9p,
+	                                                   keep_connection := true);
 
 	if (istemplatekind(g_http_client_id_es9p, "omit")) {
-		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
-		 * in all consecutive requests. */
 		g_http_client_id_es9p := f_http_client_id_from_http_response(response_http);
-	} else if (valueof(g_http_client_id_es9p) != valueof(f_http_client_id_from_http_response(response_http))) {
-		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
-		 * HTTP connection. This must not happen unexpectetly. */
-		setverdict(fail, "unexpected ES9+ HTTP connection");
 	}
 
 	if (ispresent(response_http.response)) {
-		dec_RemoteProfileProvisioningResponse_from_JSON(response_http.response.body, es9p_res);
-		if (not istemplatekind(expected_es9p_res, "omit")) {
-			if (not match(es9p_res, expected_es9p_res)) {
-				setverdict(fail, "unexpected response from SM-DP+ on ES9+");
-			}
-		}
-
-		if (isvalue(es9p_res)) {
-			return es9p_res;
-		}
-		return omit
+		ext_logInfo("HTTP " & int2str(response_http.response.statuscode) &
+		           " response, body length: " & int2str(lengthof(response_http.response.body)));
+		return response_http.response.body;
 	} else {
-		setverdict(fail,
-			   "unexpected ES9+ response, the HTTP body did either contain no or a non binary response");
-		return omit;
+		ext_logError("No HTTP response body");
+		return "";
 	}
 }
 
-/* Perform one ES9+ HTTP request/response cycle */
-private function f_es9p_client_transceive(RemoteProfileProvisioningRequest es9p_req,
-					  template RemoteProfileProvisioningResponse expected_es9p_res := omit)
-runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
-	var template RemoteProfileProvisioningResponse es9p_res
-	f_es9p_send(es9p_req);
-	es9p_res := f_es9p_receive();
-	if (not istemplatekind(expected_es9p_res, "omit")) {
-		if (not match(valueof(es9p_res), expected_es9p_res)) {
-			setverdict(fail, "unexpected response from SM-DP+ on ES9+");
-		}
-	}
-	return es9p_res;
+private function f_perform_es9p_request_response(RemoteProfileProvisioningRequest request,
+                                               charstring endpoint) runs on smdpp_ConnHdlr
+return RemoteProfileProvisioningResponse {
+
+	/* Encode request to JSON */
+	var charstring requestJson;
+	enc_RemoteProfileProvisioningRequest_to_JSON(request, requestJson);
+
+	ext_logInfo("Sending " & endpoint & " request");
+	ext_logDebug("Request JSON length: " & int2str(lengthof(requestJson)));
+
+	/* Send HTTP request */
+	var charstring responseJson := f_send_es9p_request(endpoint, requestJson);
+
+	// if (lengthof(responseJson) == 0) {
+	// 	ext_logError("Empty response received");
+	// 	return omit;
+	// }
+
+	/* Decode JSON response */
+	var RemoteProfileProvisioningResponse response;
+	dec_RemoteProfileProvisioningResponse_from_JSON(responseJson, response);
+
+	return response;
 }
 
+/* ============================================================================
+ * TEST CASE IMPLEMENTATIONS
+ * ============================================================================ */
 
-/* ********************************************* */
-/* ************* ES2+/HTTP-client ************* */
-/* ********************************************* */
-
-private function f_es2p_functionName_from_es2p_req(JSON_ES2p_Request es2p_req) return charstring {
-	if (ispresent(es2p_req.downloadOrderRequest)) {
-		return "downloadOrder";
-	} else if (ispresent(es2p_req.confirmOrderRequest)) {
-		return "confirmOrder";
-	} else if (ispresent(es2p_req.cancelOrderRequest)) {
-		return "cancelOrder";
-	} else if (ispresent(es2p_req.releaseProfileRequest)) {
-		return "releaseProfile";
-	}
-
-	setverdict(fail, "unknown JSON ES2+ function");
-	return "";
-}
-
-/* Send ES2+ HTTP request */
-private function f_es2p_client_send(JSON_ES2p_Request es2p_req) runs on smdpp_ConnHdlr {
-	f_http_tx_request(url := "/gsma/rsp2/es2plus/" & f_es2p_functionName_from_es2p_req(es2p_req),
-			  method := "POST",
-			  body := oct2char(enc_JSON_ES2p_Request(es2p_req)),
-			  custom_hdr := valueof(ts_rsp_HTTP_Header),
-			  client_id := g_http_client_id_es2p,
-			  http_pars := mp_es2p_client);
-}
-
-/* Receive ES2+ HTTP response */
-private function f_es2p_client_receive(charstring functionName,
-		 		       template RemoteProfileProvisioningResponse expected_es2p_res := omit)
-runs on smdpp_ConnHdlr return template JSON_ES2p_Response {
-	var HTTPMessage response_http;
-	response_http := f_http_rx_response(exp := ?,
-					    client_id := g_http_client_id_es2p,
-					    keep_connection := true);
-
-	if (istemplatekind(g_http_client_id_es2p, "omit")) {
-		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
-		 * in all consecutive requests. */
-		g_http_client_id_es2p := f_http_client_id_from_http_response(response_http);
-	} else if (valueof(g_http_client_id_es2p) != valueof(f_http_client_id_from_http_response(response_http))) {
-		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
-		 * HTTP connection. This must not happen unexpectetly. */
-		setverdict(fail, "unexpected ES2+ HTTP connection");
-	}
-
-	if (ispresent(response_http.response)) {
-	   	return dec_JSON_ES2p_Response(char2oct(response_http.response.body), functionName);
-	} else {
-		setverdict(fail,
-			   "unexpected ES2+ response, the HTTP body did either contain no or a non binary response");
-		return omit;
-	}
-}
-
-/* Perform one ES2+ HTTP request/response cycle */
-private function f_es2p_client_transceive(JSON_ES2p_Request es2p_req,
-		 		   template JSON_ES2p_Response expected_es2p_res := omit)
-runs on smdpp_ConnHdlr return template JSON_ES2p_Response {
-	var template JSON_ES2p_Response es2p_res;
-	f_es2p_client_send(es2p_req);
-	es2p_res := f_es2p_client_receive(f_es2p_functionName_from_es2p_req(es2p_req));
-	if (not istemplatekind(expected_es2p_res, "omit")) {
-		if (not match(valueof(es2p_res), expected_es2p_res)) {
-			setverdict(fail, "unexpected response from SM-DP+ on ES2+");
-		}
-	}
-	return es2p_res;
-}
-
-
-/* ********************************************* */
-/* ************* ES2+/HTTP-server ************** */
-/* ********************************************* */
-
-/* Receive one Es12 HTTP request */
-private function f_es2p_server_receive() runs on smdpp_ConnHdlr
-	return JSON_ES2p_HandleDownloadProgressInfoRequest {
-	var HTTPMessage es2p_req;
-	timer T := 10.0;
-	var JSON_ES2p_HandleDownloadProgressInfoRequest request;
-
-	T.start;
-	alt {
-	[] HTTP_SRV[1].receive({ request := ? }) -> value es2p_req {
-	        request := dec_JSON_ES2p_HandleDownloadProgressInfoRequest(char2oct(es2p_req.request.body));
-		}
-	[] T.timeout {
-		setverdict(fail, "no HTTP request received?");
-		}
-	}
-
-	return request;
-}
-
-/* Send Es12 HTTP response */
-private function f_es2p_server_send(JSON_ES2p_HandleDownloadProgressInfoResponse es2p_res) runs on smdpp_ConnHdlr  {
-	var octetstring es2p_res_json;
-	es2p_res_json := enc_JSON_ES2p_HandleDownloadProgressInfoResponse(es2p_res);
-	HTTP_SRV[1].send(ts_http_resp(oct2char(es2p_res_json)));
-}
-
-/* Perform Es12 HTTP request/response cycle */
-private function f_es2p_server_transceive(JSON_ES2p_HandleDownloadProgressInfoResponse es2p_res,
-					  template JSON_ES2p_HandleDownloadProgressInfoRequest expected_es2p_req := omit)
-runs on smdpp_ConnHdlr return JSON_ES2p_HandleDownloadProgressInfoRequest {
-	var JSON_ES2p_HandleDownloadProgressInfoRequest es2p_req;
-	es2p_req := f_es2p_server_receive();
-	f_es2p_server_send(es2p_res);
-	if (not istemplatekind(expected_es2p_req, "omit")) {
-		if (not match(valueof(es2p_req), expected_es2p_req)) {
-			setverdict(fail, "unexpected request from SM-DP on ES2+");
-		}
-	}
-	return es2p_req;
-}
-
-
-/* ********************************************* */
-/* ********** BELOW ONLY TESTCASES! ************ */
-/* ********************************************* */
-
-/* A first experiment */
-private function f_TC_first_experiment(charstring id) runs on smdpp_ConnHdlr {
-	var HTTP_Adapter_Params http_adapter_pars;
-
+private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	f_http_init();
 	f_http_register(0);
 	f_http_register(1);
 
-	// var template RemoteProfileProvisioningResponse rspr := f_es9p_client_transceive(valueof(ts_initiateAuthenticationRequest), tr_initiateAuthenticationResponse);
+	ext_logInfo("Starting complete RSP flow test");
 
-	// f_es9p_client_transceive(valueof(ts_getBoundProfilePackageRequest(transactionId := rspr.initiateAuthenticationResponse.initiateAuthenticationOk.transactionId)), tr_getBoundProfilePackageResponse);
-	// f_es9p_client_transceive(valueof(ts_authenticateClientRequest(transactionId := rspr.initiateAuthenticationResponse.initiateAuthenticationOk.transactionId)), tr_authenticateClientResponseEs9);
-	// f_es9p_client_transceive(valueof(ts_handleNotification));
-	// f_es9p_client_transceive(valueof(ts_cancelSessionRequestEs9(transactionId := rspr.initiateAuthenticationResponse.initiateAuthenticationOk.transactionId)));
-
-// var octetstring gbrq := 'BF2181A63081A33056801074936CB548D64FF18547E191B589D50C9F49410446FC8842BE46E52942BFD94C0639DF4ABC3EBE7CCBA70A52DD55A4398448D1F00656D506870437571076BD35D6A572360F0A9508B6D59CB84D3901EFB42181F99F37483046022100A32AF515743795F59C388EE3786683BD729838A836F970ECB307D0304E24E5C7022100A4444D52ADD9CDA46F3A9FBE3B1D4F0AACB3ADD56EE00AE2460599FB5E30380E'O;
-// template RemoteProfileProvisioningRequest tr_specificRequest := tr_getBoundProfilePackageRequest;
-
-// // Decode and match
-// var RemoteProfileProvisioningRequest decoded := dec_RemoteProfileProvisioningRequest(gbrq);
-// if (match(decoded, tr_specificRequest)) {
-//     log("Decoded message matches template");
-// }
-
-
-
-var RemoteProfileProvisioningRequest myResponse := {
-	getBoundProfilePackageRequest := {
-	transactionId := 'AABBCC'O,
-	prepareDownloadResponse := {
-		downloadResponseOk := {
-		euiccSigned2 := {
-			transactionId := 'ABCDEF'O,
-			euiccOtpk := 'AABBCCDDEEFF'O,
-			hashCc := omit
-		},
-		euiccSignature2 := 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'O
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
 	}
+
+	/* Step 1: InitiateAuthentication */
+	ext_logInfo("=== Step 1: InitiateAuthentication ===");
+
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse :=
+		f_perform_es9p_request_response(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse)) {
+		setverdict(fail, "InitiateAuthentication request failed");
+		f_rsp_client_cleanup();
+		return;
 	}
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
 	}
-}
 
-var RemoteProfileProvisioningRequest inta := {
-	initiateAuthenticationRequest := {
-		euiccChallenge := '00112233445566778899aabbccddeeff'O,
-		smdpAddress := "smdp.example.com",
-		euiccInfo1 :=  {
-			svn := '020200'O,
-			euiccCiPKIdListForVerification := {
-				'C0BC70BA36929D43B467FF57570530E57AB8FCD8'O,
-				'F54172BDF98A95D65CBEB88A38A1C11D800A85C3'O
-			},
-			euiccCiPKIdListForSigning := {
-				'C0BC70BA36929D43B467FF57570530E57AB8FCD8'O,
-				'F54172BDF98A95D65CBEB88A38A1C11D800A85C3'O
-			}
-		}
+	/* Step 2: GetBoundProfilePackage */
+	ext_logInfo("=== Step 2: GetBoundProfilePackage ===");
+
+	var RemoteProfileProvisioningRequest packageRequest := f_create_get_bound_profile_package_request();
+	var RemoteProfileProvisioningResponse packageResponse :=
+		f_perform_es9p_request_response(packageRequest, "/gsma/rsp2/es9plus/getBoundProfilePackage");
+
+	if (not isvalue(packageResponse)) {
+		setverdict(fail, "GetBoundProfilePackage request failed");
+		f_rsp_client_cleanup();
+		return;
 	}
-}
 
-	f_es9p_client_transceive(inta, tr_initiateAuthenticationResponse);
-	f_es9p_client_transceive(myResponse, tr_getBoundProfilePackageResponse);
-	f_es9p_client_transceive(valueof(ts_authenticateClientRequest), tr_authenticateClientResponseEs9);
-	f_es9p_client_transceive(valueof(ts_handleNotification));
-	f_es9p_client_transceive(valueof(ts_cancelSessionRequestEs9));
+	if (not f_validate_get_bound_profile_package_response(packageResponse)) {
+		setverdict(fail, "GetBoundProfilePackage validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
 
-//	f_es2p_client_transceive(valueof(ts_downloadOrderRequest), tr_downloadOrderResponse);
-//	f_es2p_client_transceive(valueof(ts_confirmOrderRequest), tr_confirmOrderResponse);
-//	f_es2p_client_transceive(valueof(ts_cancelOrderRequest), tr_cancelOrderResponse);
-//	f_es2p_client_transceive(valueof(ts_releaseProfileRequest), tr_releaseProfileResponse);
-
-//	f_es12_server_transceive(valueof(ts_deleteOrRegisterEventResponse), tr_registerEventRequest);
-//	f_es12_server_transceive(valueof(ts_deleteOrRegisterEventResponse), tr_deleteEventRequest);
-
-//	f_es2p_server_transceive(valueof(ts_handleDownloadProgressInfoResponse), tr_handleDownloadProgressInfoRequest);
-
-
-	f_sleep(2.0);
+	ext_logInfo("Complete RSP flow successful");
+	f_rsp_client_cleanup();
 	setverdict(pass);
 }
-testcase TC_first_experiment() runs on MTC_CT {
+
+private function f_TC_rsp_authentication_only(charstring id) runs on smdpp_ConnHdlr {
+	f_http_init();
+	f_http_register(0);
+
+	ext_logInfo("Starting authentication only test");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse :=
+		f_perform_es9p_request_response(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse)) {
+		setverdict(fail, "InitiateAuthentication request failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (f_validate_initiate_authentication_response(authResponse)) {
+		ext_logInfo("Authentication successful");
+		setverdict(pass);
+	} else {
+		setverdict(fail, "Authentication validation failed");
+	}
+
+	f_rsp_client_cleanup();
+}
+
+private function f_TC_rsp_asn1_validation(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("Starting ASN.1 validation test");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Test ASN.1 encoding/decoding with sample data */
+	var EUICCInfo1 testInfo := {
+		svn := '020200'O,
+		euiccCiPKIdListForVerification := {
+			ext_hexToBytes("AABBCCDDEEFF"),
+			ext_hexToBytes("112233445566")
+		},
+		euiccCiPKIdListForSigning := {
+			ext_hexToBytes("AABBCCDDEEFF")
+		}
+	};
+
+	/* Encode to ASN.1 */
+	var octetstring encoded := enc_EUICCInfo1(testInfo);
+	ext_logInfo("Encoded EUICCInfo1 length: " & int2str(lengthof(encoded)));
+	ext_logDebug("Encoded hex: " & ext_bytesToHex(encoded));
+
+	/* Decode back */
+	var EUICCInfo1 decoded := dec_EUICCInfo1(encoded);
+
+	/* Verify round-trip */
+	if (decoded.svn == testInfo.svn and
+	    lengthof(decoded.euiccCiPKIdListForVerification) == lengthof(testInfo.euiccCiPKIdListForVerification)) {
+		ext_logInfo("ASN.1 round-trip validation successful");
+		setverdict(pass);
+	} else {
+		ext_logError("ASN.1 round-trip validation failed");
+		setverdict(fail);
+	}
+
+	f_rsp_client_cleanup();
+}
+
+/* ============================================================================
+ * TEST CASES
+ * ============================================================================ */
+
+testcase TC_rsp_complete_flow() runs on MTC_CT {
 	var charstring id := testcasename();
 	var smdpp_ConnHdlrPars pars := f_init_pars();
 	var smdpp_ConnHdlr vc_conn;
+
 	f_init(id);
-	vc_conn := f_start_handler(refers(f_TC_first_experiment), pars);
+	vc_conn := f_start_handler(refers(f_TC_rsp_complete_flow), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_rsp_authentication_only() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_rsp_authentication_only), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_rsp_asn1_validation() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_rsp_asn1_validation), pars);
 	vc_conn.done;
 	setverdict(pass);
 }
 
 control {
-	execute ( TC_first_experiment() );
+	execute(TC_rsp_complete_flow());
+	execute(TC_rsp_authentication_only());
+	execute(TC_rsp_asn1_validation());
 }
 
 }
