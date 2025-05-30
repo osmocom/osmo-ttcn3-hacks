@@ -114,6 +114,12 @@ $(1)/clean-old:
 	@git clean -fx "$(1)"
 endef
 
+define DIR_clean_template
+.PHONY: $(1)/clean
+$(1)/clean:
+	$(MAKE) -C $(BUILDDIR)/$(1) clean
+endef
+
 define DIR_all_template
 $(1): $(1)/all
 .PHONY: $(1)/all
@@ -126,6 +132,7 @@ $(foreach dir,$(SUBDIRS), \
 	$(eval $(call DIR_Makefile_template,$(dir)))	\
 	$(eval $(call DIR_compile_template,$(dir)))	\
 	$(eval $(call DIR_clean_old_template,$(dir)))	\
+	$(eval $(call DIR_clean_template,$(dir)))	\
 	$(eval $(call DIR_all_template,$(dir)))		\
 	)
 
