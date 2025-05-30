@@ -3972,6 +3972,66 @@ testcase TC_lu_and_mt_ussd_during_mt_call() runs on MTC_CT {
 	vc_conn.done;
 }
 
+friend function f_TC_lu_and_ussd_notify_during_mt_call(charstring id, BSC_ConnHdlrPars pars)
+runs on BSC_ConnHdlr {
+	var CallParameters cpars := valueof(t_CallParams);
+
+	f_init_handler(pars);
+
+	/* Perform location update */
+	f_perform_lu();
+	/* Initiate a MT call */
+	f_mt_call_establish(cpars);
+
+	/* Facility IE with network-originated USSD notification */
+	var OCTN facility_req := f_USSD_FACILITY_IE_INVOKE(op_code := SS_OP_CODE_USS_NOTIFY,
+							   ussd_string := "Knock knock");
+	/* Facility IE with acknowledgment to the USSD notification */
+	var OCTN facility_rsp := enc_SS_FacilityInformation(
+		valueof(ts_SS_USSD_FACILITY_RETURN_RESULT_EMPTY())
+	);
+
+	/* HLR sends a USSD notification */
+	GSUP.send(ts_GSUP_PROC_SS_REQ(imsi := g_pars.imsi,
+				      sid := g_pars.gsup_sid,
+				      state := OSMO_GSUP_SESSION_STATE_BEGIN,
+				      ss := facility_req));
+	/* ... and immediately terminates the session */
+	GSUP.send(ts_GSUP_PROC_SS_REQ(imsi := g_pars.imsi,
+				      sid := g_pars.gsup_sid,
+				      state := OSMO_GSUP_SESSION_STATE_END));
+
+	/* MSC forwards USSD notification to the MS */
+	f_expect_mt_dtap_msg(tr_ML3_MT_SS_REGISTER(tid := 0,
+						   ti_flag := c_TIF_ORIG,
+						   facility := facility_req));
+	/* ... immediately followed by the RELEASE COMPLETE message */
+	f_expect_mt_dtap_msg(tr_ML3_MT_SS_RELEASE_COMPLETE(tid := 0,
+							   ti_flag := c_TIF_ORIG,
+							   facility := omit));
+
+	/* MS didn't receive the RELEASE COMPLETE yet, so it responds */
+	BSSAP.send(ts_PDU_DTAP_MO(ts_ML3_MO_SS_FACILITY(tid := 0,
+							ti_flag := c_TIF_REPL,
+							facility := facility_rsp)));
+	/* this response is rejected because the SS transaction is gone */
+	f_expect_mt_dtap_msg(tr_ML3_MT_SS_RELEASE_COMPLETE(tid := 0,
+							   ti_flag := c_TIF_ORIG,
+							   facility := omit));
+
+	/* ... old osmo-msc crashes here (OS#6756) ...
+	 * fixed in osmo-msc.git I724f0f0c9ef8611d3c3653e9370361b252127f72 */
+
+	/* Release the call (does Clear Complete itself) */
+	f_call_hangup(cpars, true);
+}
+testcase TC_lu_and_ussd_notify_during_mt_call() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_lu_and_ussd_notify_during_mt_call), 111);
+	vc_conn.done;
+}
+
 
 /* LU followed by MO USSD request and MO Release during transaction */
 friend function f_tc_lu_and_mo_ussd_mo_release(charstring id, BSC_ConnHdlrPars pars)
@@ -4395,7 +4455,8 @@ testcase TC_proc_ss_abort() runs on MTC_CT {
 
 /* MO (mobile-originated) SS/USSD FACILITY for an unknown transaction,
  * and CM SERVICE REQUEST with wrong establishment cause prior to that.
- * This is an "evil MS" scenario that can be used to reproduce OS#6756. */
+ * This is an "evil MS" scenario that can be used to reproduce OS#6756.
+ * More realistic scenario for this bug: TC_lu_and_ussd_notify_during_mt_call. */
 friend function f_TC_mo_ussd_evil_ms(charstring id, BSC_ConnHdlrPars pars)
 runs on BSC_ConnHdlr {
 	f_init_handler(pars);
@@ -7613,6 +7674,7 @@ control {
 	execute( TC_proc_ss_abort() );
 
 	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_lu_and_ussd_notify_during_mt_call() ); /* XXX: crashes osmo-msc */
 		execute( TC_mo_ussd_evil_ms() ); /* XXX: crashes osmo-msc */
 	}
 
