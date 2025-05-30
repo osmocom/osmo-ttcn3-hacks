@@ -18,8 +18,13 @@ FILES="
 	PKIX1Explicit88_EncDec.cc
 	PKIX1Implicit88_EncDec.cc
 	PIPEasp_PT.cc
+	smdpp_Tests_Functions.cc
 "
 ../regen-makefile.sh smdpp_Tests.ttcn $FILES
 
 # required for forkpty(3) used by PIPEasp
-sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile
+#sed -i -e '/^LINUX_LIBS/ s/$/ -lcjson -lutil -lssl -lcrypto -lcurl/' Makefile
+
+sed -i -e '/^CPPFLAGS/ s/$/ `pkg-config --cflags openssl libcjson jansson libcurl`/' Makefile
+sed -i -e '/^LDFLAGS/ s/$/ `pkg-config --libs openssl libcjson jansson libcurl`/' Makefile
+sed -i -e '/^LINUX_LIBS/ s/$/ `pkg-config --libs openssl libcjson jansson libcurl`/' Makefile
