@@ -19,6 +19,8 @@ import from Misc_Helpers all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 
+import from Milenage_Functions all;
+
 import from NGAP_PDU_Descriptions all;
 import from NGAP_IEs all;
 import from NGAP_PDU_Contents all;
@@ -31,14 +33,14 @@ import from NGAP_Functions all;
 import from NGAP_Emulation all;
 
 import from NAS_CommonTypeDefs all;
-
+import from NAS_CommonTemplates all;
 import from NG_NAS_Common all;
 import from NG_NAS_MsgContainers all;
-import from NAS_CommonTemplates all;
 import from NG_NAS_Templates all;
 
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
+import from NG_CryptoFunctions all;
 
 /* (maximum) number of emulated eNBs */
 const integer NUM_NGRAN := 1;
@@ -56,6 +58,8 @@ modulepar {
 	GsmMcc mp_mcc := '999'H;
 	GsmMnc mp_mnc := '70'H;
 	hexstring mp_imsi := '999700000000000'H;
+	octetstring mp_usim_key := '762a2206fe0b4151ace403c86a11e479'O;
+	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
 	uint24_t mp_tac := 1;
 }
 
@@ -69,6 +73,8 @@ type record NGRANParams {
 /* parameters of emulated UE */
 type record UeParams {
 	hexstring imsi,
+	octetstring usim_key,
+	octetstring usim_opc,
 	charstring ue_ip
 }
 
@@ -145,6 +151,8 @@ friend function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
 
 	uep := {
 		imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), imsi_suffix),
+		usim_key := mp_usim_key,
+		usim_opc := mp_usim_opc,
 		ue_ip := "192.168.123.50"
 	}
 }
@@ -211,12 +219,18 @@ private template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) 
 	iE_Extensions := omit
 }
 
-private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
+private function f_imsi_plmn_id()  runs on ConnHdlr return PLMNIdentity {
 	var hexstring imsi := g_pars.ue_pars.imsi;
 	var GsmMcc mcc := substr(imsi, 0, 3);
 	var GsmMnc mnc := substr(imsi, 3, 2);
-	var octetstring imsi_suffix := imsi_hex2oct(substr(imsi, lengthof(imsi)-10, 10));
-	return f_enc_mcc_mnc(mcc, mnc) & '21430001'O & imsi_suffix;
+	return f_enc_mcc_mnc(mcc, mnc);
+}
+
+private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
+	var hexstring imsi := g_pars.ue_pars.imsi;
+	var PLMNIdentity plmn_id := f_imsi_plmn_id();
+	var octetstring imsi_suffix := imsi_hex2oct(substr(imsi, lengthof(imsi) - 10, 10));
+	return plmn_id & '21430001'O & imsi_suffix;
 }
 
 friend function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
@@ -270,17 +284,60 @@ private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (prese
 	}
 }
 
-private altstep as_ngap_handle_auth() runs on ConnHdlr {
+/* 3GPP TS 24.501 5.4.1.3.2, 3GPP TS 33.501 6.1.3.2 */
+private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHdlr {
 	var NG_NAS_DL_Message_Type rx_nas;
 	var template (present) NAS_KeySetIdentifier kset_id := f_tr_ConnHdlr_kset_id();
 	[] NGAP.receive(cr_NG_AUTHENTICATION_REQUEST) -> value rx_nas {
 		log("Rx NAS message: ", rx_nas);
+		var integer ret;
+		var integer my_sqn := 0; /* TODO: move to a ConnHdlr state attribute? */
+		var OCT16 rand := bit2oct(rx_nas.authentication_Request.rand.randValue);
+		var OCT16 autn := bit2oct(rx_nas.authentication_Request.autn.aUTN);
+		var OCT16 ik;
+		var OCT16 ck;
+		var OCT8 res;
+		var OCT14 auts;
 
 		g_pars.kset_id := rx_nas.authentication_Request.ngNasKeySetId;
 
-		/* TODO: generate proper RES, 3GPP TS 33.501 A.4 */
-		const OCT8 res := '6a91970e838fd079'O;
-		NGAP.send(cs_NG_AUTHENTICATION_RESPONSE(cs_AuthenticationResponseParameter(oct2bit(res))));
+		ret := f_milenage_check(g_pars.ue_pars.usim_key,
+					g_pars.ue_pars.usim_opc,
+					int2oct(my_sqn, 8),
+					rand, autn, ik, ck, res, auts);
+		if (ret == -1) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("fx_milenage_check() failed! -1"));
+		}
+		if (ret == -2) {
+			if (not allow_resync) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("fx_milenage_check() unexpected Resync!"));
+			}
+			log("Milenage: RX-SQN differs from SIM SQN: Re-Sync! AUTS=", auts);
+			/* 3GPP TS 24.501 5.4.1.3.6 d) */
+			NGAP.send(cs_NG_AUTHENTICATION_FAILURE(cs_GMM_GSM_Cause(omit, int2bit(21, 8)),
+							       cs_AuthFailParam(oct2bit(auts))));
+			as_ngap_handle_auth(allow_resync := false);
+			return;
+		}
+
+		/* Derive (X)RES* from (X)RES, 3GPP TS 33.501 A.4  */
+		var octetstring ssn := f_NG_NAS_ServingNetworkName_OCT(f_imsi_plmn_id(), omit);
+		var OCT16 res_star := f_kdf_xres_star(ssn, ck, ik, rand, res);
+		log("Auth Response: RES=", res, ", SSN=", ssn, " / ", oct2char(ssn), ", RES*=", res_star);
+
+		NGAP.send(cs_NG_AUTHENTICATION_RESPONSE(cs_AuthenticationResponseParameter(oct2bit(res_star))));
+	}
+}
+
+private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	[] NGAP.receive(cr_NG_SECURITY_PROTECTED_NAS_MESSAGE) -> value rx_nas {
+		var NG_NAS_DL_Message_Type in_nas := dec_NG_NAS_DL_Message_Type(rx_nas.security_Protected_Nas_Message.plainNASMessage);
+		log("PESPIN: Rx inner NAS: ", in_nas);
+		/* TODO: apply below integrity and ciphering based on Security Mode Command */
 	}
 }
 
@@ -320,6 +377,7 @@ private function f_register() runs on ConnHdlr {
 	}
 
 	as_ngap_handle_auth();
+	as_ngap_handle_sec_mode();
 
 	/* TODO: handle Auth, SecurityModeCommand, InitialContextSetup, PDUSessionresource, */
 	f_sleep(5.0);

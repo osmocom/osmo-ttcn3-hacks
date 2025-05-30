@@ -61,12 +61,21 @@ FILES="NGAP_CommonDataTypes.asn  NGAP_Constants.asn  NGAP_Containers.asn  NGAP_I
 FILES+="NGAP_EncDec.cc NGAP_Types.ttcn NGAP_Pixits.ttcn NGAP_Templates.ttcn "
 gen_links $DIR $FILES
 
+DIR=../library/milenage
+FILES="milenage.c milenage.h Milenage_FunctionDefs.cc Milenage_Functions.ttcn "
+gen_links $DIR $FILES
+
+DIR=../library/ng_crypto
+FILES="key_derivation.c key_derivation.h "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn IPCP_Templates.ttcn "
 FILES+="SCTP_Templates.ttcn "
 FILES+="DNS_Helpers.ttcn "
 FILES+="NGAP_CodecPort.ttcn NGAP_CodecPort_CtrlFunctDef.cc NGAP_CodecPort_CtrlFunct.ttcn NGAP_Functions.ttcn NGAP_Emulation.ttcn "
 FILES+="NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
+FILES+="NG_CryptoFunctionDefs.cc NG_CryptoFunctions.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
