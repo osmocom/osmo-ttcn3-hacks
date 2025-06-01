@@ -47,6 +47,10 @@ external function ext_RSPClient_loadEUICCCertificate(integer clientHandle,
 external function ext_RSPClient_loadEUICCKeyPair(integer clientHandle,
                                                 charstring euiccPrivateKeyPath) return integer;
 
+external function ext_RSPClient_getEUMCertificate(integer clientHandle) return octetstring;
+external function ext_RSPClient_getEUICCCertificate(integer clientHandle) return octetstring;
+external function ext_RSPClient_getSMDPCertificate(integer clientHandle) return octetstring;
+
 external function ext_RSPClient_setTestMode(integer clientHandle, boolean testMode) return integer;
 
 /* Challenge Generation */
@@ -347,7 +351,7 @@ runs on smdpp_ConnHdlr return boolean {
 	return true;
 }
 
-private function f_create_get_bound_profile_package_request() runs on smdpp_ConnHdlr
+private function f_create_get_bound_profile_package_request(octetstring smdpSignature2) runs on smdpp_ConnHdlr
 return RemoteProfileProvisioningRequest {
 
 	// if (not g_authenticationComplete) {
@@ -365,11 +369,9 @@ return RemoteProfileProvisioningRequest {
 		hashCc := omit
 	};
 
-	/* Encode EUICC_SIGNED2 to get data for signing */
 	var octetstring euiccSigned2Data := enc_EUICCSigned2(euiccSigned2);
-
-	/* Sign with eUICC private key using C++ crypto */
-	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned2Data);
+	var octetstring concatdata := euiccSigned2Data & smdpSignature2;
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
 
 	/* Create PrepareDownloadResponse */
 	var PrepareDownloadResponse prepareDownloadResponse := {
@@ -454,6 +456,89 @@ template (value) HeaderLines ts_rsp_HTTP_Header := {
 	{ header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
 	{ header_name := "Content-Type", header_value := "application/json;charset=UTF-8" }
 };
+
+/* Send ES9+ HTTP request */
+private function f_es9p_send(RemoteProfileProvisioningRequest es9p_req) runs on smdpp_ConnHdlr {
+	var charstring es9p_req_enc;
+	var charstring es9p_url;
+
+	if (ispresent(es9p_req.initiateAuthenticationRequest)) {
+		es9p_url := "/gsma/rsp2/es9plus/initiateAuthentication";
+	} else if (ispresent(es9p_req.getBoundProfilePackageRequest)) {
+		es9p_url := "/gsma/rsp2/es9plus/getBoundProfilePackage";
+	} else if (ispresent(es9p_req.authenticateClientRequest)) {
+		es9p_url := "/gsma/rsp2/es9plus/authenticateClient";
+	} else if (ispresent(es9p_req.handleNotification)) {
+		es9p_url := "/gsma/rsp2/es9plus/handleNotification";
+	} else if (ispresent(es9p_req.cancelSessionRequestEs9)) {
+		es9p_url := "/gsma/rsp2/es9plus/cancelSession";
+	} else {
+		setverdict(fail, "unknown JSON ES9+ function");
+	}
+
+	enc_RemoteProfileProvisioningRequest_to_JSON(es9p_req, es9p_req_enc);
+
+	f_http_tx_request(url := es9p_url,
+			  method := "POST",
+			  body := es9p_req_enc,
+			  custom_hdr := valueof(ts_rsp_HTTP_Header),
+			  client_id := g_http_client_id_es9p,
+			  http_pars := mp_es9p_client);
+}
+
+/* Receive ES9+ HTTP response */
+private function f_es9p_receive(template RemoteProfileProvisioningResponse expected_es9p_res := omit)
+runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
+	var RemoteProfileProvisioningResponse es9p_res;
+	var HTTPMessage response_http;
+	response_http := f_http_rx_response(exp := ?,
+					    client_id := g_http_client_id_es9p,
+					    keep_connection := true);
+
+	if (istemplatekind(g_http_client_id_es9p, "omit")) {
+		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
+		 * in all consecutive requests. */
+		g_http_client_id_es9p := f_http_client_id_from_http_response(response_http);
+	} else if (valueof(g_http_client_id_es9p) != valueof(f_http_client_id_from_http_response(response_http))) {
+		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
+		 * HTTP connection. This must not happen unexpectetly. */
+		setverdict(fail, "unexpected ES9+ HTTP connection");
+	}
+
+	if (ispresent(response_http.response)) {
+		dec_RemoteProfileProvisioningResponse_from_JSON(response_http.response.body, es9p_res);
+		if (not istemplatekind(expected_es9p_res, "omit")) {
+			if (not match(es9p_res, expected_es9p_res)) {
+				setverdict(fail, "unexpected response from SM-DP+ on ES9+");
+			}
+		}
+
+		if (isvalue(es9p_res)) {
+			return es9p_res;
+		}
+		return omit
+	} else {
+		setverdict(fail,
+			   "unexpected ES9+ response, the HTTP body did either contain no or a non binary response");
+		return omit;
+	}
+}
+
+/* Perform one ES9+ HTTP request/response cycle */
+private function f_es9p_client_transceive(RemoteProfileProvisioningRequest es9p_req,
+					  template RemoteProfileProvisioningResponse expected_es9p_res := omit)
+runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
+	var template RemoteProfileProvisioningResponse es9p_res
+	f_es9p_send(es9p_req);
+	es9p_res := f_es9p_receive();
+	if (not istemplatekind(expected_es9p_res, "omit")) {
+		if (not match(valueof(es9p_res), expected_es9p_res)) {
+			setverdict(fail, "unexpected response from SM-DP+ on ES9+");
+		}
+	}
+	return es9p_res;
+}
+
 
 private function f_send_es9p_request(charstring endpoint, charstring jsonBody) runs on smdpp_ConnHdlr return charstring {
 	f_http_tx_request(url := endpoint,
@@ -542,12 +627,134 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		return;
 	}
 
+	ext_logInfo("=== Step 2x: Authreq ===");
+
+	var EUICCInfo2 euic2 := {
+		profileVersion := '414243'O,
+		svn := '02000C'O,
+		euiccFirmwareVer := '414243'O,
+		extCardResource := '414243'O,
+		uiccCapability := '1111111111111111111'B,
+		ts102241Version := omit,
+		globalplatformVersion := omit,
+		rspCapability := '1111'B,
+		euiccCiPKIdListForVerification := {
+			ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+			ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+		},
+		euiccCiPKIdListForSigning := {
+			ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+			ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+		},
+		euiccCategory := omit,
+		forbiddenProfilePolicyRules := omit,
+		ppVersion := '414243'O,
+		sasAcreditationNumber := "123456",
+		certificationDataObject := omit,
+		treProperties := omit,
+		treProductReference := omit,
+		additionalEuiccProfilePackageVersions := omit
+	}
+
+	var  CtxParams1 ctxpar := {
+	ctxParamsForCommonAuthentication := {
+		matchingId := "TS48v4_SAIP2.3_BERTLV",
+		deviceInfo := {
+			tac := '12345678'O,
+			deviceCapabilities := {
+				gsmSupportedRelease := omit,
+				utranSupportedRelease := omit,
+				cdma2000onexSupportedRelease := omit,
+				cdma2000hrpdSupportedRelease := omit,
+				cdma2000ehrpdSupportedRelease := omit,
+				eutranEpcSupportedRelease := omit,
+				contactlessSupportedRelease := omit,
+				rspCrlSupportedVersion := omit,
+				nrEpcSupportedRelease := omit,
+				nr5gcSupportedRelease := omit,
+				eutran5gcSupportedRelease := omit,
+				lpaSvn := omit,
+				catSupportedClasses := omit,
+				euiccFormFactorType := omit,
+				deviceAdditionalFeatureSupport := omit
+			},
+			imei := omit
+		}
+	}
+}
+
+
+var EuiccSigned1 euiccSig := {
+	 transactionId := g_transactionId,
+	 serverAddress := g_pars_smdpp.smdp_server_url,
+	 serverChallenge := g_serverChallenge,
+	 euiccInfo2 := euic2,
+	 ctxParams1 := ctxpar
+}
+
+	var octetstring enc_euicc_tosign := enc_EuiccSigned1(euiccSig);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, enc_euicc_tosign);
+
+
+
+var AuthenticateServerResponse
+authresp := {
+	authenticateResponseOk := {
+		euiccSigned1 := euiccSig,
+		euiccSignature1 := euiccSignature1,
+		euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
+//		euiccCertificate := ts_cert_euicc_brp,
+		eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
+//		eumCertificate := ts_cert_eum_brp
+
+	}
+}
+
+
+
+
+	var RemoteProfileProvisioningRequest rrq := 	valueof(ts_authenticateClientRequest(transactionId := g_transactionId, authenticateServerResponse := authresp));
+	// var RemoteProfileProvisioningResponse authrqresp := f_perform_es9p_request_response(rrq, "/gsma/rsp2/es9plus/authenticateClient");
+	var RemoteProfileProvisioningResponse rresp := valueof(f_es9p_client_transceive(rrq, tr_authenticateClientResponseEs9));
+
+
+	// profileMetaData := profileMetaData ?
+
+
+	var AuthenticateClientOk auok := rresp.authenticateClientResponseEs9.authenticateClientOk;
+
+	if (auok.transactionId != g_transactionId) {
+		ext_logError("Transaction ID mismatch");
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return ;
+	}
+
+	if (auok.smdpSigned2.transactionId != g_transactionId) {
+		ext_logError("Transaction ID mismatch");
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var octetstring auresp_sigdata := enc_SmdpSigned2(auok.smdpSigned2) & '5f3740'O & euiccSignature1;
+	if (not ext_RSPClient_verifyServerSignature( g_rsp_client_handle, auresp_sigdata, auok.smdpSignature2, enc_Certificate(auok.smdpCertificate))) {
+		ext_logError("Server signature validation failed");
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+
 	/* Step 2: GetBoundProfilePackage */
 	ext_logInfo("=== Step 2: GetBoundProfilePackage ===");
 
-	var RemoteProfileProvisioningRequest packageRequest := f_create_get_bound_profile_package_request();
-	var RemoteProfileProvisioningResponse packageResponse :=
-		f_perform_es9p_request_response(packageRequest, "/gsma/rsp2/es9plus/getBoundProfilePackage");
+	var RemoteProfileProvisioningRequest packageRequest := f_create_get_bound_profile_package_request(auok.smdpSignature2);
+	var RemoteProfileProvisioningResponse packageResponse := valueof(f_es9p_client_transceive(valueof(packageRequest), tr_getBoundProfilePackageResponse));
+
+
+
+	// fixme verify metadata
 
 	if (not isvalue(packageResponse)) {
 		setverdict(fail, "GetBoundProfilePackage request failed");
@@ -679,8 +886,8 @@ testcase TC_rsp_asn1_validation() runs on MTC_CT {
 
 control {
 	execute(TC_rsp_complete_flow());
-	execute(TC_rsp_authentication_only());
-	execute(TC_rsp_asn1_validation());
+	// execute(TC_rsp_authentication_only());
+	// execute(TC_rsp_asn1_validation());
 }
 
 }

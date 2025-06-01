@@ -36,6 +36,21 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
 
         auto client = std::make_unique<RSPClient>(serverUrl, serverPort, certPaths, nameFilters);
 
+    std::string euiccCertPath = "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der";
+	std::string euiccprivkeyPath = "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem";
+
+	std::string eumCertPath = "./sgp26/EUM/CERT_EUM_ECDSA_NIST.der";
+	std::string eumprivkeyPath = "./sgp26/EUM/SK_EUM_ECDSA_NIST.pem";
+
+	std::string caCertPath = "/etc/ssl/certs/ca-certificates.crt"; // Default CA certs on many Linux
+
+		client->loadEUICCCertificate(euiccCertPath);
+		client->loadEUICCKeyPair(euiccprivkeyPath);
+		client->loadEUMCertificate(eumCertPath);
+		client->loadEUMKeyPair(eumprivkeyPath);
+		client->setCACertPath(caCertPath);
+		client->setTestMode(false);
+
         int handle = m_nextHandle++;
         m_clients[handle] = std::move(client);
 
@@ -128,6 +143,51 @@ INTEGER ext__RSPClient__destroy(const INTEGER& clientHandle) {
         return INTEGER(-1);
     }
 }
+
+OCTETSTRING ext__RSPClient__getEUMCertificate(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        std::vector<uint8_t> cert = client->getEUMCertificate();
+
+        return bytes_to_octetstring(cert);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
+OCTETSTRING ext__RSPClient__getEUICCCertificate(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        std::vector<uint8_t> cert = client->getEUICCCertificate();
+
+        return bytes_to_octetstring(cert);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
+
+
+OCTETSTRING ext__RSPClient__getSMDPCertificate(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        std::vector<uint8_t> cert = client->getSMDPCertificate();
+
+        return bytes_to_octetstring(cert);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
 
 INTEGER ext__RSPClient__loadEUICCCertificate(const INTEGER& clientHandle,
                                             const CHARSTRING& euiccCertPath) {
@@ -486,8 +546,8 @@ OCTETSTRING ext__RSPClient__generateEUICCOtpk(const INTEGER& clientHandle) {
         }
 
         client->generateEUICCOtpk();
-        // Return empty for now - would need getter for the OtPK
-        return OCTETSTRING(0, nullptr);
+        std::vector<uint8_t> data = client->getEUICCOtpk();
+        return bytes_to_octetstring(data);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__generateEUICCOtpk failed: " + std::string(e.what()));
         return OCTETSTRING(0, nullptr);
