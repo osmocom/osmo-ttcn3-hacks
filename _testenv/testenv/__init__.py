@@ -87,7 +87,6 @@ def parse_args():
     group.add_argument("-i", "--io-uring", action="store_true", help="set LIBOSMO_IO_BACKEND=IO_URING")
 
     group = sub_run.add_argument_group("source/binary options", "All components are built from source by default.")
-    group = group.add_mutually_exclusive_group()
     group.add_argument(
         "-b",
         "--binary-repo",
