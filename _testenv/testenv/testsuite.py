@@ -19,14 +19,8 @@ testsuite_proc = None
 
 
 def update_deps():
-    deps_marker = os.path.join(testenv.args.cache, "ttcn3-deps-updated")
-    if os.path.exists(deps_marker):
-        return
-
     logging.info("Updating osmo-ttcn3-hacks/deps")
-    deps_dir = os.path.join(ttcn3_hacks_dir, "deps")
-    testenv.cmd.run(["make", "-C", deps_dir])
-    testenv.cmd.run(["touch", deps_marker])
+    testenv.cmd.run(["make", "deps"], cwd=ttcn3_hacks_dir)
 
 
 def prepare_testsuite_dir():
