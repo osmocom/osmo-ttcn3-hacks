@@ -69,12 +69,21 @@ S1AP_PDU_Descriptions.asn "
 FILES+="S1AP_EncDec.cc  S1AP_Types.ttcn  S1AP_Templates.ttcn "
 gen_links $DIR $FILES
 
+DIR=../library/snow_3g
+FILES="snow-3g.c snow-3g.h Snow3G_FunctionDefs.cc  Snow3G_Functions.ttcn "
+gen_links $DIR $FILES
+
+DIR=../library/lte_crypto
+FILES="key_derivation.c key_derivation.h "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn IPCP_Templates.ttcn "
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="L3_Templates.ttcn RLCMAC_CSN1_Templates.ttcn RLCMAC_CSN1_Types.ttcn "
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Functions.ttcn S1AP_Emulation.ttcn "
-FILES+="NAS_EPS_Templates.ttcn GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
+FILES+="NAS_EPS_Templates.ttcn LTE_CryptoFunctionDefs.cc  LTE_CryptoFunctions.ttcn "
+FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
 FILES+="DIAMETER_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTP_Emulation.ttcn GTPv1C_Templates.ttcn Osmocom_Gb_Types.ttcn "

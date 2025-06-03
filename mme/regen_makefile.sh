@@ -21,6 +21,7 @@ FILES="
 	S1AP_CodecPort_CtrlFunctDef.cc
 	S1AP_EncDec.cc
 	SGsAP_CodecPort_CtrlFunctDef.cc
+	Snow3G_FunctionDefs.cc
 	TCCConversion.cc
 	TCCEncoding.cc
 	TCCInterface.cc
