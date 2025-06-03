@@ -35,11 +35,13 @@ import from NGAP_Emulation all;
 import from NAS_CommonTypeDefs all;
 import from NAS_CommonTemplates all;
 import from NG_NAS_Common all;
+import from NG_NAS_TypeDefs all;
 import from NG_NAS_MsgContainers all;
 import from NG_NAS_Templates all;
 
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
+import from NG_NAS_Osmo_Templates all;
 import from NG_CryptoFunctions all;
 
 /* (maximum) number of emulated eNBs */
@@ -75,7 +77,21 @@ type record UeParams {
 	hexstring imsi,
 	octetstring usim_key,
 	octetstring usim_opc,
-	charstring ue_ip
+	charstring ue_ip,
+	OCT32 kausf optional,
+	OCT32 kseaf optional,
+	OCT32 kamf optional
+}
+
+template (value) UeParams ts_UeParams(integer imsi_suffix) :=
+{
+	imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), imsi_suffix),
+	usim_key := mp_usim_key,
+	usim_opc := mp_usim_opc,
+	ue_ip := "192.168.123.50",
+	kausf := omit,
+	kseaf := omit,
+	kamf := omit
 }
 
 type component MTC_CT {
@@ -122,7 +138,7 @@ friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
 		remote_sctp_port := mp_5gc_ngap_port,
 		local_ip := mp_local_ngap_ip,
 		local_sctp_port := mp_local_ngap_port + num,
-		role := NGAP_NAS_ROLE_UE
+		role := NG_NAS_ROLE_UE
 	};
 	var PLMNIdentity plmn_id := f_enc_mcc_mnc(mp_mcc, mp_mnc);
 	var NGRANParams ngran_pars := {
@@ -147,15 +163,12 @@ friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
 	vc_NGAP[num].start(NGAP_Emulation.main(ops, pars, id));
 	NGAP_UNIT[num].receive(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP});
 }
+
 friend function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
 
-	uep := {
-		imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), imsi_suffix),
-		usim_key := mp_usim_key,
-		usim_opc := mp_usim_opc,
-		ue_ip := "192.168.123.50"
-	}
+	uep := valueof(ts_UeParams(imsi_suffix));
 }
+
 friend function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
 	var integer i;
 	for (i := 0; i < NUM_NGRAN; i := i+1) {
@@ -294,6 +307,7 @@ private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHd
 		var integer my_sqn := 0; /* TODO: move to a ConnHdlr state attribute? */
 		var OCT16 rand := bit2oct(rx_nas.authentication_Request.rand.randValue);
 		var OCT16 autn := bit2oct(rx_nas.authentication_Request.autn.aUTN);
+		var OCT2 abba := rx_nas.authentication_Request.abba.abbaValue;
 		var OCT16 ik;
 		var OCT16 ck;
 		var OCT8 res;
@@ -322,27 +336,53 @@ private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHd
 			return;
 		}
 
-		/* Derive (X)RES* from (X)RES, 3GPP TS 33.501 A.4  */
 		var octetstring ssn := f_NG_NAS_ServingNetworkName_OCT(f_imsi_plmn_id(), omit);
-		var OCT16 res_star := f_kdf_xres_star(ssn, ck, ik, rand, res);
-		log("Auth Response: RES=", res, ", SSN=", ssn, " / ", oct2char(ssn), ", RES*=", res_star);
+		g_pars.ue_pars.kausf := f_kdf_kausf(ck, ik, ssn, autn);
+		g_pars.ue_pars.kseaf := f_kdf_kseaf(g_pars.ue_pars.kausf, ssn);
+		g_pars.ue_pars.kamf := f_kdf_kamf(g_pars.ue_pars.kseaf, char2oct(hex2str(g_pars.ue_pars.imsi)), abba);
 
+		var NGAPEM_Config cfg := {
+			set_nas_keys := {
+				k_nas_int := f_kdf_ng_nas_int(g_pars.ue_pars.kamf, NG_NAS_ALG_IP_NIA1),
+				k_nas_enc := f_kdf_ng_nas_enc(g_pars.ue_pars.kamf, NG_NAS_ALG_ENC_NEA0)
+			}
+		};
+		NGAP.send(cfg);
+
+		/* Derive (X)RES* from (X)RES, 3GPP TS 33.501 A.4  */
+		var OCT16 res_star := f_kdf_xres_star(ssn, ck, ik, rand, res);
 		NGAP.send(cs_NG_AUTHENTICATION_RESPONSE(cs_AuthenticationResponseParameter(oct2bit(res_star))));
 	}
 }
 
 private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
+	var NGAPEM_Config cfg;
 	var NG_NAS_DL_Message_Type rx_nas;
+	/* Make sure network selected specific algos we requested: */
+	var template (present) NG_UE_SecurityCapability ue_sec_cap :=
+		cr_NG_UE_SecurityCapabilityLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
+					      ngiaCap := '40'O /* ONLY NIA1 supported */);
 
-	[] NGAP.receive(cr_NG_SECURITY_PROTECTED_NAS_MESSAGE) -> value rx_nas {
-		var NG_NAS_DL_Message_Type in_nas := dec_NG_NAS_DL_Message_Type(rx_nas.security_Protected_Nas_Message.plainNASMessage);
-		log("PESPIN: Rx inner NAS: ", in_nas);
-		/* TODO: apply below integrity and ciphering based on Security Mode Command */
+	[] NGAP.receive(cr_NG_SECURITY_MODE_COMMAND(p_UECap := ue_sec_cap)) -> value rx_nas {
+		log("Rx inner NAS: ", rx_nas);
+		/* Configure integrity protection: */
+		cfg := {
+			set_nas_alg_int := NG_NAS_ALG_IP_NIA1
+		};
+		NGAP.send(cfg);
+		/* Configure Ciphering: */
+		cfg := {
+			set_nas_alg_enc := NG_NAS_ALG_ENC_NEA0
+		};
+		NGAP.send(cfg);
+
+		/* TODO: Tx Security Mode Complete */
 	}
 }
 
 private function f_register() runs on ConnHdlr {
 	var template (value) UserLocationInformation p_ueLocInf;
+	var template (value) NG_UE_SecurityCapability ue_sec_cap;
 	var template (value) NGAP_PDU tx_pdu;
 	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
 	var NAS_PDU nas_pdu;
@@ -353,12 +393,14 @@ private function f_register() runs on ConnHdlr {
 				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
 
 	));
+	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
+						     ngiaCap := '40'O /* ONLY NIA1 supported */);
 	nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
 						 g_pars.kset_id.nasKeySetId,
 						 g_pars.kset_id.tsc,
 						 cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
 									  f_SUCI_IMSI()),
-						 p_UESecurityCap := cs_NG_UE_SecurityCapability);
+						 p_UESecurityCap := ue_sec_cap);
 	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
 	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.c5g_idx,
 						       nas_pdu, /* Registration request */

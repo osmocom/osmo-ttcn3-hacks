@@ -54,10 +54,8 @@ import from NGAP_Functions all;
 import from NG_NAS_MsgContainers all;
 import from NG_NAS_Functions all;
 
-type enumerated NGAP_NAS_Role {
-	NGAP_NAS_ROLE_UE,	/* ATS implements/emulates UE */
-	NGAP_NAS_ROLE_AMF	/* ATS implements/emulates AMF */
-};
+import from NG_NAS_Osmo_Templates all;
+import from NG_CryptoFunctions all;
 
 type component NGAP_ConnHdlr {
 	port NGAP_Conn_PT NGAP;
@@ -67,9 +65,22 @@ type component NGAP_ConnHdlr {
 
 /* port between individual per-connection components and this dispatcher */
 type port NGAP_Conn_PT message {
-	inout NGAP_PDU, NG_NAS_UL_Message_Type, NG_NAS_DL_Message_Type;
+	inout NGAP_PDU, NG_NAS_UL_Message_Type, NG_NAS_DL_Message_Type, NGAPEM_Config;
 } with { extension "internal" };
 
+type record NG_NAS_Keys {
+	OCT32 k_nas_int,
+	OCT32 k_nas_enc
+};
+type record NG_ResetNAScounts {
+/* empty */
+};
+type union NGAPEM_Config {
+	NG_NAS_Keys set_nas_keys,
+	NG_ResetNAScounts reset_nas_counts,
+	NG_NAS_ALG_INT set_nas_alg_int,
+	NG_NAS_ALG_ENC set_nas_alg_enc
+};
 
 type enumerated NGAPEM_EventUpDown {
 	NGAPEM_EVENT_DOWN,
@@ -145,8 +156,8 @@ type record AssociationData {
 	NGAP_ConnHdlr	comp_ref,			/* component handling this UE connection */
 	uint32_t	ran_ue_ngap_id optional,	/* eNB side NGAP ID */
 	uint40_t	amf_ue_ngap_id optional,	/* AMF side NGAP ID */
-	UserLocationInformation	uli optional
-	//NAS_UE_State	nus
+	UserLocationInformation	uli optional,
+	NG_NAS_UE_State	nus
 };
 
 type component NGAP_Emulation_CT {
@@ -191,7 +202,7 @@ type record NGAP_conn_parameters {
 	IPL4asp_Types.PortNumber remote_sctp_port,
 	HostName local_ip,
 	IPL4asp_Types.PortNumber local_sctp_port,
-	NGAP_NAS_Role role
+	NG_NAS_Role role
 }
 
 function tr_NGAP_RecvFrom_R(template NGAP_PDU msg)
@@ -329,7 +340,7 @@ runs on NGAP_Emulation_CT {
 		NGapAssociationTable[i].amf_ue_ngap_id := omit;
 		NGapAssociationTable[i].ran_ue_ngap_id := omit;
 		NGapAssociationTable[i].uli := omit;
-		//NGapAssociationTable[i].nus := valueof(t_NAS_UE_State(g_pars.role));
+		NGapAssociationTable[i].nus := valueof(t_NG_NAS_UE_State(g_pars.role));
 		NGapAssociationTable[i].comp_ref := null;
 	}
 }
@@ -451,18 +462,45 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 		var integer procedureCode;
 		var NGAP_RecvFrom mrf;
 		var NGAP_PDU msg;
+		var NGAPEM_Config ngcfg;
 		var charstring vlr_name, amf_name;
 		var integer ai;
 		var octetstring kasme;
 
 		alt {
+		/* Configuration primitive from client */
+		[] NGAP_CLIENT.receive(NGAPEM_Config:{set_nas_keys:=?}) -> value ngcfg sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			NGapAssociationTable[assoc_id].nus.k_nas_int := ngcfg.set_nas_keys.k_nas_int;
+			NGapAssociationTable[assoc_id].nus.k_nas_enc := ngcfg.set_nas_keys.k_nas_enc;
+			}
+		/* Configuration primitive from client */
+		[] NGAP_CLIENT.receive(NGAPEM_Config:{reset_nas_counts:=?}) -> value ngcfg sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			NGapAssociationTable[assoc_id].nus.rx_count := 0;
+			NGapAssociationTable[assoc_id].nus.tx_count := 0;
+			}
+		/* Configuration primitive from client */
+		[] NGAP_CLIENT.receive(NGAPEM_Config:{set_nas_alg_int:=?}) -> value ngcfg sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			NGapAssociationTable[assoc_id].nus.alg_int := ngcfg.set_nas_alg_int;
+			/* Mark ciphering even if using NIA0: */
+			NGapAssociationTable[assoc_id].nus.use_int := true;
+			}
+		/* Configuration primitive from client */
+		[] NGAP_CLIENT.receive(NGAPEM_Config:{set_nas_alg_enc:=?}) -> value ngcfg sender vc_conn {
+			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
+			NGapAssociationTable[assoc_id].nus.alg_enc := ngcfg.set_nas_alg_enc;
+			/* Mark ciphering even if using NEA0: */
+			NGapAssociationTable[assoc_id].nus.use_enc := true;
+			}
 		/* NGAP from client: InitialUE */
 		[] NGAP_CLIENT.receive(mw_ngap_initMsg(mw_n2_initialUeMessage)) -> value msg sender vc_conn {
 			/* create a table entry about this connection */
 			ai := f_ngap_id_table_add(vc_conn, omit, valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg)));
 			/* Store ULI so we can use it for generating UlNasTransport from NAS */
 			NGapAssociationTable[ai].uli := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[2].value_.userLocationInformation;
-//			/* Pass message through */
+			/* Pass message through */
 			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
 			}
 		/* NAS from client: Wrap in NGAP Uplink NAS Transport */
@@ -513,11 +551,11 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 					vc_conn := NGapAssociationTable[assoc_id].comp_ref;
 					nas_enc := f_NGAP_get_NAS_PDU(mrf.msg);
 					if (isvalue(nas_enc)) {
-						if (g_pars.role == NGAP_NAS_ROLE_UE) {
+						if (g_pars.role == NG_NAS_ROLE_UE) {
 							var NG_NAS_DL_Message_Type dl_nas := dec_NG_NAS_DL_Message_Type(valueof(nas_enc));
-//							if (match(dl_nas, tr_NAS_EMM_SecurityProtected)) {
-//								dl_nas := f_nas_try_decaps(NGapAssociationTable[assoc_id].nus, dl_nas);
-//							}
+							if (match(dl_nas, cr_NG_SECURITY_PROTECTED_NAS_MESSAGE)) {
+								dl_nas := f_NG_NAS_try_decaps_dl(NGapAssociationTable[assoc_id].nus, dl_nas);
+							}
 							/* DL/UlNasTransport are not interesting, don't send them */
 							if (not match(mrf.msg, mw_ngap_initMsg(mw_n2_DownlinkNASTransport))) {
 								/* send raw NGAP */
@@ -594,7 +632,7 @@ runs on NGAP_Emulation_CT {
 }
 
 /* client/conn_hdlr side function to use procedure port to create expect in emulation */
-function f_create_s1ap_expect(template (omit) AMF_UE_NGAP_ID amf_id,
+function f_create_ngap_expect(template (omit) AMF_UE_NGAP_ID amf_id,
 			      template (omit) RAN_UE_NGAP_ID ran_id) runs on NGAP_ConnHdlr {
 	NGAP_PROC.call(NGAPEM_register:{amf_id, ran_id, self}) {
 		[] NGAP_PROC.getreply(NGAPEM_register:{?,?,?}) {};

@@ -15,13 +15,43 @@ module NG_CryptoFunctions {
 import from General_Types all;
 import from Misc_Helpers all;
 
+import from Snow3G_Functions all;
+
 import from NAS_CommonTypeDefs all;
+import from NG_NAS_Common all;
+import from NG_NAS_TypeDefs all;
+import from NG_NAS_MsgContainers all;
+import from NG_NAS_Osmo_Templates all;
+import from NG_NAS_Functions all;
 
 /*********************************************************************************
  * low-level API (external C/C++ code)
  *********************************************************************************/
 
-/* 3GPP TS 33.102 Figure 9, 3GPP TS 35.206 Annex 3 */
+/* 3GPP TS 33.501 Annex A.2 */
+external function f_kdf_kausf(in OCT16 ck, in OCT16 ik, octetstring ssn,
+			      in OCT16 autn) return OCT32;
+
+/* 3GPP TS 33.501 Annex A.6 */
+external function f_kdf_kseaf(in OCT32 kausf, octetstring ssn) return OCT32;
+
+/* 3GPP TS 33.501 Annex A.7 */
+external function f_kdf_kamf(in OCT32 kseaf, octetstring p0, OCT2 abba) return OCT32;
+
+/* 3GPP TS 33.501 Annex A.8 */
+const OCT1 KDF_ALGO_TYPE_NAS_ENC := '01'O;
+const OCT1 KDF_ALGO_TYPE_NAS_INT := '02'O;
+external function f_kdf_ng_nas_algo(in OCT32 kamf, in OCT1 algo_type, in OCT1 algo_id) return OCT32;
+function f_kdf_ng_nas_enc(in OCT32 kamf, in NG_NAS_ALG_ENC algo_id) return OCT32
+{
+	return f_kdf_ng_nas_algo(kamf, KDF_ALGO_TYPE_NAS_ENC, int2oct(enum2int(algo_id), 1));
+}
+function f_kdf_ng_nas_int(in OCT32 kamf, in NG_NAS_ALG_INT algo_id) return OCT32
+{
+	return f_kdf_ng_nas_algo(kamf, KDF_ALGO_TYPE_NAS_INT, int2oct(enum2int(algo_id), 1));
+}
+
+/* 3GPP TS 33.102 Figure 9, 3GPP TS 35.206 Annex 3, 3GPP TS 33.501 Annex A.4 */
 external function f_kdf_xres_star(octetstring ssn, OCT16 ck, OCT16 ik, OCT16 rand,
 				  octetstring xres) return OCT16;
 
@@ -73,6 +103,167 @@ function f_NG_NAS_ServingNetworkName(NAS_PlmnId plmn_id, template (omit) hexstri
 function f_NG_NAS_ServingNetworkName_OCT(NAS_PlmnId plmn_id, template (omit) hexstring NID := omit) return octetstring
 {
 	return char2oct(f_NG_NAS_ServingNetworkName(plmn_id, NID));
+}
+
+function f_NG_NAS_mac_calc(NG_NAS_ALG_INT alg, OCT32 k_nas_int, integer seq_nr,
+			integer bearer, boolean is_downlink, octetstring data) return OCT4 {
+	select (alg) {
+	case (NG_NAS_ALG_IP_NIA0) {
+		return '00000000'O;
+		}
+	case (NG_NAS_ALG_IP_NIA1) {
+		return f_snow_3g_f9(substr(k_nas_int, 16, 16), seq_nr, bit2int(int2bit(bearer, 32) << 27), is_downlink, data);
+		}
+	case else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unsupported EIA: ", alg));
+		return '00000000'O; /* never reached */
+		}
+	}
+}
+
+/*********************************************************************************
+ * high-level API (full NAS encapsulation/decapsulation)
+ *********************************************************************************/
+
+ type enumerated NG_NAS_Role {
+	NG_NAS_ROLE_UE,	/* ATS implements/emulates UE */
+	NG_NAS_ROLE_AMF	/* ATS implements/emulates AMF */
+};
+
+type enumerated NG_NAS_ALG_INT {
+	NG_NAS_ALG_IP_NIA0,	/* no integrity protection */
+	NG_NAS_ALG_IP_NIA1,	/* SNOW-3G F9 based */
+	NG_NAS_ALG_IP_NIA2,	/* AES based */
+	NG_NAS_ALG_IP_NIA3	/* ZUC */
+};
+type enumerated NG_NAS_ALG_ENC {
+	NG_NAS_ALG_ENC_NEA0,	/* no encryption */
+	NG_NAS_ALG_ENC_NEA1,	/* SNOW-3G F8 based */
+	NG_NAS_ALG_ENC_NEA2,	/* AES based */
+	NG_NAS_ALG_ENC_NEA3	/* ZUC */
+};
+
+type record NG_NAS_UE_State {
+	NG_NAS_Role role, /* ATS implements UE or AMR role? */
+	NG_NAS_ALG_INT alg_int,	/* NAS Integrity Protection Algorithm */
+	OCT32 k_nas_int,	/* NAS Integrity Protection Key */
+	NG_NAS_ALG_ENC alg_enc,	/* NAS Encryption Algorithm */
+	OCT32 k_nas_enc,	/* NAS Encryption Key */
+	integer rx_count,	/* frame counter (ATS rx side) */
+	integer tx_count,	/* frame counter (ATS tx side) */
+	boolean new_ctx,	/* Use "New EPS Security Context" when building next sec_hdr_t */
+	boolean use_int,	/* Whether to use "Integrity" in sec_hdr_t */
+	boolean use_enc		/* Whether to use "Ciphering" in sec_hdr_t */
+};
+
+template (value) NG_NAS_UE_State t_NG_NAS_UE_State(NG_NAS_Role role) := {
+	role := role,
+	alg_int := NG_NAS_ALG_IP_NIA0,
+	k_nas_int := '0000000000000000000000000000000000000000000000000000000000000000'O,
+	alg_enc := NG_NAS_ALG_ENC_NEA0,
+	k_nas_enc := '0000000000000000000000000000000000000000000000000000000000000000'O,
+	rx_count := 0,
+	tx_count := 0,
+	new_ctx := false,
+	use_int := false,
+	use_enc := false
+};
+
+/* determine if a received (from the IUT) message is downlink or not */
+private function f_rx_is_downlink(in NG_NAS_UE_State nus) return boolean
+{
+	if (nus.role == NG_NAS_ROLE_UE) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+/* determine if a message transmitted to the IUT message is downlink or not */
+private function f_tx_is_downlink(in NG_NAS_UE_State nus) return boolean
+{
+	return not f_rx_is_downlink(nus);
+}
+
+private function f_NG_NAS_check_ip(inout NG_NAS_UE_State nus,
+				   in NG_SECURITY_PROTECTED_NAS_MESSAGE secp_nas) return boolean
+{
+	var octetstring data_with_seq := secp_nas.sequenceNumber & secp_nas.plainNASMessage;
+	var OCT4 exp_mac := f_NG_NAS_mac_calc(nus.alg_int, nus.k_nas_int, nus.rx_count, bit2int(tsc_NG_RegResult_3GPP),
+					   f_rx_is_downlink(nus), data_with_seq);
+
+	if (nus.rx_count != oct2int(secp_nas.sequenceNumber)) {
+		setverdict(fail, "Received NAS SeqNr ", secp_nas.sequenceNumber,
+			   " doesn't match expected SeqNr ", nus.rx_count, ": ", secp_nas, " | nus: ", nus);
+		return false;
+	}
+	if (exp_mac != secp_nas.messageAuthenticationCode) {
+		setverdict(fail, "Received NAS MAC ", secp_nas.messageAuthenticationCode,
+			   " doesn't match expected MAC ", exp_mac, ": ", secp_nas, " | nus: ", nus);
+		return false;
+	}
+	return true;
+}
+
+/* try to decapsulate (MAC verify, decrypt) NAS message */
+function f_NG_NAS_try_decaps_dl(inout NG_NAS_UE_State nus, NG_NAS_DL_Message_Type nas) return NG_NAS_DL_Message_Type
+{
+	var NG_SECURITY_PROTECTED_NAS_MESSAGE secp_nas;
+
+	/* transparently pass through any non-protected NAS */
+	if (not match(nas, cr_NG_SECURITY_PROTECTED_NAS_MESSAGE)) {
+		return nas;
+	}
+
+	/* process any security-protected NAS */
+	secp_nas := nas.security_Protected_Nas_Message;
+	select (secp_nas.securityHeaderType) {
+	case ('0011'B) { /* IP with new 5GS security context */
+		nus.new_ctx := true;
+		nus.rx_count := 0;
+		nus.alg_int := NG_NAS_ALG_IP_NIA1; /* FIXME: from decoded inner message! */
+		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+		}
+		nus.rx_count := nus.rx_count + 1;
+		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+		}
+	case ('0001'B) { /* IP only */
+		nus.new_ctx := false;
+		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+		}
+		nus.rx_count := nus.rx_count + 1;
+		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+		}
+//	case ('0010'B) { /* IP + ciphered */
+//		nus.new_ctx := false;
+//		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+//			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+//		}
+//		nus.rx_count := nus.rx_count + 1;
+//		f_nas_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count, 0,
+//			      f_rx_is_downlink(nus), secp_nas.nAS_Message);
+//		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+//		}
+//	case ('0100'B) { /* IP + ciphered; new EPS security context */
+//		nus.new_ctx := true;
+//		nus.rx_count := 0;
+//		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+//			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+//		}
+//		f_nas_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count, 0,
+//			      f_rx_is_downlink(nus), secp_nas.nAS_Message);
+//		nus.rx_count := nus.rx_count + 1;
+//		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+//		}
+	//case ('0101'B) { /* IP + partially ciphered */ }
+	//case ('1100'B) { /* Service Request Message */ }
+	case else  {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Implement SecHdrType for ", secp_nas));
+		mtc.stop; /* make compiler happy about not returning. */
+		}
+	}
 }
 
 }
