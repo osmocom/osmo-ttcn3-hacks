@@ -14,6 +14,7 @@ FILES="
 	NGAP_CodecPort_CtrlFunctDef.cc
 	NGAP_EncDec.cc
 	NG_CryptoFunctionDefs.cc
+	Snow3G_FunctionDefs.cc
 	TCCConversion.cc
 	TCCEncoding.cc
 	TCCInterface.cc

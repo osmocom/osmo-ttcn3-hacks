@@ -61,6 +61,10 @@ FILES="NGAP_CommonDataTypes.asn  NGAP_Constants.asn  NGAP_Containers.asn  NGAP_I
 FILES+="NGAP_EncDec.cc NGAP_Types.ttcn NGAP_Pixits.ttcn NGAP_Templates.ttcn "
 gen_links $DIR $FILES
 
+DIR=../library/snow_3g
+FILES="snow-3g.c snow-3g.h Snow3G_FunctionDefs.cc Snow3G_Functions.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library/milenage
 FILES="milenage.c milenage.h Milenage_FunctionDefs.cc Milenage_Functions.ttcn "
 gen_links $DIR $FILES
