@@ -187,6 +187,25 @@ OCTETSTRING ext__RSPClient__getSMDPCertificate(const INTEGER& clientHandle) {
     }
 }
 
+OCTETSTRING ext__RSPClient__getCICertificate(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return OCTETSTRING(0, nullptr);
+        }
+
+        std::vector<uint8_t> cert = client->getCICertificate();
+
+        return bytes_to_octetstring(cert);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__getCICertificate failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
 
 INTEGER ext__RSPClient__loadEUICCCertificate(const INTEGER& clientHandle,
                                             const CHARSTRING& euiccCertPath) {
@@ -1263,6 +1282,31 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& c
         return BOOLEAN(result);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__CertificateUtil__verifyCertificateChainDynamic failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTETSTRING& cert,
+                                                                   const OCTETSTRING& intermediateCert,
+                                                                   const OCTETSTRING& rootCA) {
+    try {
+        std::vector<uint8_t> certDer = octetstring_to_bytes(cert);
+        std::vector<uint8_t> intermediateDer = octetstring_to_bytes(intermediateCert);
+        std::vector<uint8_t> rootDer = octetstring_to_bytes(rootCA);
+
+        auto certObj = CertificateUtil::loadCertFromDER(certDer);
+        auto intermediateObj = CertificateUtil::loadCertFromDER(intermediateDer);
+        auto rootObj = CertificateUtil::loadCertFromDER(rootDer);
+
+        // Create a certificate pool containing just the intermediate certificate
+        std::vector<X509*> certPool = { intermediateObj.get() };
+
+        bool result = CertificateUtil::verifyCertificateChainDynamic(
+            certObj.get(), certPool, rootObj.get());
+
+        return BOOLEAN(result);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__verifyCertificateChainWithIntermediate failed: " + std::string(e.what()));
         return BOOLEAN(false);
     }
 }

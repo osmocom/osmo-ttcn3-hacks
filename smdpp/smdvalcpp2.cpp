@@ -3471,6 +3471,12 @@ class RSPClient {
 	std::vector<uint8_t> getSMDPCertificate(){
 		return CertificateUtil::certToDER(m_smdpCertificate.get());
 	}
+	std::vector<uint8_t> getCICertificate(){
+		if (m_rootCA) {
+			return CertificateUtil::certToDER(m_rootCA.get());
+		}
+		return std::vector<uint8_t>();
+	}
 	std::vector<uint8_t> getEUICCOtpk(){
 		return m_euiccOtpk;
 	}
