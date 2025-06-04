@@ -508,45 +508,6 @@ class CertificateUtil {
 		return chain;
 	}
 
-	// Dynamic chain verification
-	static bool verifyDynamicChain(X509 *cert, const std::vector<X509 *> &certPool, X509 *rootCA)
-	{
-		// Create a store with the root CA
-		std::unique_ptr<X509_STORE, X509_STORE_Deleter> store(X509_STORE_new());
-		if (!store) {
-			throw OpenSSLError("Failed to create X509_STORE");
-		}
-
-		if (X509_STORE_add_cert(store.get(), rootCA) != 1) {
-			throw OpenSSLError("Failed to add root CA to store");
-		}
-
-		// Build the chain dynamically
-		std::unique_ptr<STACK_OF(X509), STACK_OF_X509_Deleter> chain(buildCertificateChain(cert, certPool));
-
-		// Create verification context
-		std::unique_ptr<X509_STORE_CTX, X509_STORE_CTX_Deleter> ctx(X509_STORE_CTX_new());
-		if (!ctx) {
-			throw OpenSSLError("Failed to create X509_STORE_CTX");
-		}
-
-		// Initialize verification context
-		if (X509_STORE_CTX_init(ctx.get(), store.get(), cert, chain.get()) != 1) {
-			throw OpenSSLError("Failed to initialize X509_STORE_CTX");
-		}
-
-		// Perform verification
-		int result = X509_verify_cert(ctx.get());
-
-		if (result != 1) {
-			int error = X509_STORE_CTX_get_error(ctx.get());
-			LOG_ERROR("Certificate verification failed: " +
-				  std::string(X509_verify_cert_error_string(error)));
-			return false;
-		}
-
-		return true;
-	}
 
 	// Find all certificates required for a chain using AKI/SKI matching
 	static std::vector<std::unique_ptr<X509, X509Deleter>> findCertificateChain(X509 *targetCert,
@@ -640,66 +601,7 @@ class CertificateUtil {
 		return stack;
 	}
 
-	// Verify a certificate with a dynamically discovered chain
-	static bool verifyWithDiscoveredChain(X509 *cert, const std::vector<X509 *> &certPool,
-					      bool requireValidPath = true)
-	{
-		// Find the chain automatically
-		auto chain = findCertificateChain(cert, certPool);
 
-		if (chain.size() <= 1 && requireValidPath) {
-			LOG_ERROR("Could not build a complete certificate chain");
-			return false;
-		}
-
-		// Display the chain
-		LOG_INFO("Certificate chain discovered:");
-		for (size_t i = 0; i < chain.size(); i++) {
-			LOG_INFO("  " + std::to_string(i) + ": " + getSubjectName(chain[i].get()));
-		}
-
-		// The last certificate should be trusted (typically a root)
-		X509 *trustedCert = chain.back().get();
-
-		// Verify the chain
-		std::unique_ptr<X509_STORE, X509_STORE_Deleter> store(X509_STORE_new());
-		if (!store) {
-			throw OpenSSLError("Failed to create X509_STORE");
-		}
-
-		// Add the trusted certificate (typically a root CA)
-		if (X509_STORE_add_cert(store.get(), trustedCert) != 1) {
-			throw OpenSSLError("Failed to add trusted certificate to store");
-		}
-
-		// Create a certificate stack for the intermediate chain
-		std::unique_ptr<STACK_OF(X509), STACK_OF_X509_Deleter> intermediates(
-			createCertificateStack(chain, true));
-
-		// Create a verification context
-		std::unique_ptr<X509_STORE_CTX, X509_STORE_CTX_Deleter> ctx(X509_STORE_CTX_new());
-		if (!ctx) {
-			throw OpenSSLError("Failed to create X509_STORE_CTX");
-		}
-
-		// Initialize the verification context
-		if (X509_STORE_CTX_init(ctx.get(), store.get(), cert, intermediates.get()) != 1) {
-			throw OpenSSLError("Failed to initialize X509_STORE_CTX");
-		}
-
-		// Perform verification
-		int result = X509_verify_cert(ctx.get());
-
-		if (result != 1) {
-			int error = X509_STORE_CTX_get_error(ctx.get());
-			LOG_ERROR("Certificate verification failed: " +
-				  std::string(X509_verify_cert_error_string(error)));
-			return false;
-		}
-
-		LOG_INFO("Certificate chain verification succeeded");
-		return true;
-	}
 
 	// ###
 	//  Add these methods to your CertificateUtil class

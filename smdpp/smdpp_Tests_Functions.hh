@@ -56,15 +56,6 @@ OCTETSTRING ext__RSPClient__getEuiccChallenge(const INTEGER& clientHandle);
 
 BOOLEAN ext__RSPClient__isAuthenticationComplete(const INTEGER& clientHandle);
 
-/* Authentication Flow */
-CHARSTRING ext__RSPClient__createInitiateAuthenticationRequest(const INTEGER& clientHandle,
-                                                              const OCTETSTRING& euiccChallenge,
-                                                              const CHARSTRING& smdpAddress);
-
-INTEGER ext__RSPClient__processInitiateAuthenticationResponse(const INTEGER& clientHandle,
-                                                            const CHARSTRING& responseJson);
-
-BOOLEAN ext__RSPClient__initiateAuthentication(const INTEGER& clientHandle);
 
 /* Cryptographic Operations */
 OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
