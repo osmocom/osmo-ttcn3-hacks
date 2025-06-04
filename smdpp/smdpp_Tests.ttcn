@@ -8,6 +8,7 @@ module smdpp_Tests {
 import from Misc_Helpers all;
 import from General_Types all;
 import from Osmocom_Types all;
+import from Native_Functions all;
 
 import from RSPDefinitions all;
 import from RSPDefinitions_Types all;
@@ -75,6 +76,43 @@ external function ext_CertificateUtil_getSubjectKeyIdentifier(octetstring certDa
 
 external function ext_CertificateUtil_getAuthorityKeyIdentifier(octetstring certData) return octetstring;
 
+external function ext_CertificateUtil_getEID(octetstring certData)return charstring;
+
+external function ext_CertificateUtil_validateEIDRange(charstring eid, octetstring eumCertData)return boolean;
+
+external function ext_CertificateUtil_hasPolicyOID(octetstring certData, charstring oidStr)return boolean;
+
+external function ext_CertificateUtil_hasRSPRole(octetstring certData, charstring roleOid) return boolean;
+
+external function ext_CertificateUtil_getPermittedEINs(octetstring eumCertData) return charstring;
+
+external function ext_CertificateUtil_verifyECDHCompatible(octetstring pubKey1, octetstring pubKey2) return boolean;
+
+external function ext_CertificateUtil_verifyCertificateChainDynamic(octetstring cert,
+                                                        charstring certPoolDir,
+                                                         octetstring rootCA) return boolean;
+
+external function ext_RSPClient_getEUICCOtpk(integer clientHandle) return octetstring;
+
+external function ext_RSPClient_computeSharedSecret(integer clientHandle, octetstring otherPublicKey) return octetstring;
+external function ext_Crypto_deriveSessionKeys(octetstring sharedSecret, octetstring hostId,
+                                              out octetstring sEnc, out octetstring sMac, out octetstring sDek) return boolean;
+external function ext_Crypto_verifyEncryptedProfileData(octetstring encData, octetstring sEnc, octetstring sMac) return boolean;
+external function ext_CertificateUtil_getCurveOID(octetstring certData) return charstring;
+
+// external function ext_RSPClient_verifyInitialiseSecureChannelRequest(integer clientHandle,
+//                                                                     octetstring iscReqData,
+//                                                                     octetstring xsignature,
+//                                                                     octetstring dpPbCert) return boolean;
+
+external function  ext_RSPClient_verifyInitialiseSecureChannelRequest(integer clientHandle,
+                                                            octetstring transactionId,
+                                                            octetstring controlRefTemplate,
+                                                            octetstring smdpOtpk,
+                                                            octetstring xsignature,
+                                                            octetstring dpPbCert) return boolean;
+
+
 /* Utility Functions */
 // external function ext_base64Encode(octetstring data) return charstring;
 // external function ext_base64Decode(charstring b64Data) return octetstring;
@@ -92,11 +130,15 @@ function ext_bytesToHex(octetstring data) return charstring  {return hex2str(oct
 
 
 /* Logging */
-external function ext_logInfo(charstring xmessage) return integer;
+external function ext_logInfo(charstring xmessage);
 
-external function ext_logError(charstring xmessage) return integer;
+external function ext_logError(charstring xmessage);
 
-external function ext_logDebug(charstring xmessage) return integer;
+external function ext_logDebug(charstring xmessage);
+
+
+const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
+const charstring c_oid_rspRole_dp_pb := "2.23.146.1.2.1.5";
 
 /* ============================================================================
  * TTCN-3 COMPONENT TYPES
@@ -409,7 +451,7 @@ runs on smdpp_ConnHdlr return boolean {
 	var GetBoundProfilePackageOk packageOk := response.getBoundProfilePackageResponse.getBoundProfilePackageOk;
 
 	/* Validate transaction ID match */
-	if (packageOk.transactionId != g_transactionId) {
+	if (packageOk.transactionId != g_transactionId or packageOk.boundProfilePackage.initialiseSecureChannelRequest.transactionId != g_transactionId) {
 		ext_logError("Transaction ID mismatch in getBoundProfilePackage response");
 		return false;
 	}
@@ -596,6 +638,212 @@ return RemoteProfileProvisioningResponse {
  * TEST CASE IMPLEMENTATIONS
  * ============================================================================ */
 
+function to_upper(in charstring str) return charstring {
+    return f_str_toupper(str);
+}
+
+
+private function enc_InitialiseSecureChannelRequest(InitialiseSecureChannelRequest req) return octetstring {
+    // This is a simplified encoding - real implementation needs proper BER-TLV
+    var octetstring result := 'BF23'O; // Tag [35]
+
+    // Encode content
+    var octetstring content := ''O;
+
+    // remoteOpId [2]
+    content := content & '8201'O & int2oct(req.remoteOpId, 1);
+
+    // transactionId [0]
+    content := content & '80'O & int2oct(lengthof(req.transactionId), 1) & req.transactionId;
+
+    // controlRefTemplate [6] IMPLICIT
+    var octetstring crt := req.controlRefTemplate.keyType &
+                          req.controlRefTemplate.keyLen &
+                          '84'O & int2oct(lengthof(req.controlRefTemplate.hostId), 1) &
+                          req.controlRefTemplate.hostId;
+    content := content & 'A6'O & int2oct(lengthof(crt), 1) & crt;
+
+    // smdpOtpk [APPLICATION 73]
+    content := content & '5F49'O & int2oct(lengthof(req.smdpOtpk), 1) & req.smdpOtpk;
+
+    // Length encoding
+    if (lengthof(content) < 128) {
+        result := result & int2oct(lengthof(content), 1) & content;
+    } else {
+        // Long form
+        var integer len := lengthof(content);
+        var octetstring lenOct := int2oct(len, 2);
+        result := result & '82'O & lenOct & content;
+    }
+
+    return result;
+}
+
+private function f_validate_session_keys(octetstring sharedSecret,
+                                       octetstring hostId) runs on smdpp_ConnHdlr
+return boolean {
+    var octetstring sEnc, sMac, sDek;
+
+    if (not ext_Crypto_deriveSessionKeys(sharedSecret, hostId, sEnc, sMac, sDek)) {
+        ext_logError("Failed to derive session keys");
+        return false;
+    }
+
+    // Verify all keys are 16 bytes (AES-128)
+    if (lengthof(sEnc) != 16 or lengthof(sMac) != 16 or lengthof(sDek) != 16) {
+        ext_logError("Invalid session key lengths");
+        return false;
+    }
+
+    ext_logInfo("Session keys derived successfully");
+    ext_logDebug("S-ENC: " & oct2str(sEnc));
+    ext_logDebug("S-MAC: " & oct2str(sMac));
+    ext_logDebug("S-DEK: " & oct2str(sDek));
+
+    return true;
+}
+
+private function f_validate_profile_segments(BoundProfilePackage bpp,
+                                           octetstring sEnc,
+                                           octetstring sMac) runs on smdpp_ConnHdlr
+return boolean {
+    // Validate firstSequenceOf87 (ConfigureISDP)
+    for (var integer i := 0; i < lengthof(bpp.firstSequenceOf87); i := i + 1) {
+        var octetstring segment := bpp.firstSequenceOf87[i];
+        if (lengthof(segment) < 16 or lengthof(segment) mod 16 != 0) {
+            ext_logError("Invalid ConfigureISDP segment size");
+            return false;
+        }
+
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("ConfigureISDP segment validation failed");
+            return false;
+        }
+    }
+
+    // Validate sequenceOf88 (StoreMetadata)
+    for (var integer i := 0; i < lengthof(bpp.sequenceOf88); i := i + 1) {
+        var octetstring segment := bpp.sequenceOf88[i];
+        if (lengthof(segment) < 16 or lengthof(segment) mod 16 != 0) {
+            ext_logError("Invalid StoreMetadata segment size");
+            return false;
+        }
+
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("StoreMetadata segment validation failed");
+            return false;
+        }
+    }
+
+    // Validate sequenceOf86 (LoadProfileElements)
+    for (var integer i := 0; i < lengthof(bpp.sequenceOf86); i := i + 1) {
+        var octetstring segment := bpp.sequenceOf86[i];
+        if (lengthof(segment) < 16 or lengthof(segment) mod 16 != 0) {
+            ext_logError("Invalid LoadProfileElements segment size");
+            return false;
+        }
+
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("LoadProfileElements segment validation failed");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+external function encode_DER_InitialiseSecureChannelRequest_ver(
+  in InitialiseSecureChannelRequest_ver pdu
+) return octetstring
+with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
+
+
+
+// type record InitialiseSecureChannelRequest_ForVerification {
+//   RemoteOpId remoteOpId,
+//   TransactionId transactionId,
+//   ControlRefTemplate controlRefTemplate,
+//   octetstring smdpPk
+// } with {
+//   encode "RAW";
+//   variant "FIELDORDER(msb)";
+// }
+
+// external function encode_DER_RemoteOpId(
+//   in RemoteOpId pdu
+// ) return octetstring
+// with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
+
+// external function encode_DER_TransactionId(
+//   in TransactionId pdu
+// ) return octetstring
+// with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
+
+// external function encode_DER_ControlRefTemplate(
+//   in ControlRefTemplate pdu
+// ) return octetstring
+// with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
+
+
+// type record InitialiseSecureChannelRequest_ForVerification {
+//   RemoteOpId remoteOpId,
+//   TransactionId transactionId,
+//   ControlRefTemplate controlRefTemplate,
+//   octetstring smdpPk
+// } with {
+//   encode "DER:1997";
+//   variant (smdpPk) "TAG(application, primitive, 73)";
+// }
+
+
+// // Manual DER encoding function
+// function encode_DER_ISCR_ForVerification(
+//   InitialiseSecureChannelRequest_ForVerification msg
+// ) return octetstring {
+//   var octetstring result := ''O;
+
+//   // Manual DER encoding following ASN.1 DER rules
+//   // [PRIVATE 35] tag = 0xBF23
+//   var octetstring tag := 'BF23'O;
+
+//   // Encode each field according to DER rules
+//   var octetstring encoded_content :=
+//     encode_DER_RemoteOpId(msg.remoteOpId) &
+//     encode_DER_TransactionId(msg.transactionId) &
+//     encode_DER_ControlRefTemplate(msg.controlRefTemplate) &
+//     encode_DER_ApplicationTag73(msg.smdpPk);
+
+//   // Calculate length and build final DER structure
+//   var octetstring length_octets := encode_DER_Length(lengthof(encoded_content));
+//   result := tag & length_octets & encoded_content;
+
+//   return result;
+// }
+
+
+// type record SmdpPkField {
+//   octetstring data
+// } with {
+//   encode "RAW";  // Use RAW instead of DER
+//   variant "FIELDLENGTH(0)" // Variable length
+//   variant "TAG(73, APPLICATION)" // Custom tag handling
+// }
+
+// type record InitialiseSecureChannelRequest_Raw {
+//   RemoteOpId remoteOpId,
+//   TransactionId transactionId,
+//   ControlRefTemplate controlRefTemplate,
+//   SmdpPkField smdpPk
+// } with {
+// encode "DER:1997";
+//   variant "FIELDORDER(msb)"
+//   variant "TAG(35, PRIVATE, CONSTRUCTED)"
+// }
+
+// InitialiseSecureChannelRequest
+
+
 private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	f_http_init();
 	f_http_register(0);
@@ -626,6 +874,19 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		f_rsp_client_cleanup();
 		return;
 	}
+
+
+	var boolean pkid_found := false;
+	for (var integer i := 0; i < lengthof(authRequest.initiateAuthenticationRequest.euiccInfo1.euiccCiPKIdListForSigning); i := i + 1) {
+		if ( authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.euiccCiPKIdToBeUsed == authRequest.initiateAuthenticationRequest.euiccInfo1.euiccCiPKIdListForSigning[i]) {
+			pkid_found := true;
+		}
+	}
+	if (not pkid_found) {
+		setverdict(fail, "euiccCiPKIdToBeUsed not in requested list");
+		return;
+	}
+
 
 	ext_logInfo("=== Step 2x: Authreq ===");
 
@@ -716,25 +977,13 @@ authresp := {
 	var RemoteProfileProvisioningRequest rrq := 	valueof(ts_authenticateClientRequest(transactionId := g_transactionId, authenticateServerResponse := authresp));
 	// var RemoteProfileProvisioningResponse authrqresp := f_perform_es9p_request_response(rrq, "/gsma/rsp2/es9plus/authenticateClient");
 	var RemoteProfileProvisioningResponse rresp := valueof(f_es9p_client_transceive(rrq, tr_authenticateClientResponseEs9));
-
-
-	// profileMetaData := profileMetaData ?
-
-
 	var AuthenticateClientOk auok := rresp.authenticateClientResponseEs9.authenticateClientOk;
 
-	if (auok.transactionId != g_transactionId) {
+	if (auok.transactionId != g_transactionId or auok.smdpSigned2.transactionId != g_transactionId) {
 		ext_logError("Transaction ID mismatch");
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return ;
-	}
-
-	if (auok.smdpSigned2.transactionId != g_transactionId) {
-		ext_logError("Transaction ID mismatch");
-		setverdict(fail, "InitiateAuthentication validation failed");
-		f_rsp_client_cleanup();
-		return;
 	}
 
 	var octetstring auresp_sigdata := enc_SmdpSigned2(auok.smdpSigned2) & '5f3740'O & euiccSignature1;
@@ -745,6 +994,15 @@ authresp := {
 		return;
 	}
 
+    var charstring eid := ext_CertificateUtil_getEID(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+    var octetstring eumCert := ext_RSPClient_getEUMCertificate(g_rsp_client_handle);
+
+    if (not ext_CertificateUtil_validateEIDRange(eid, eumCert)) {
+        setverdict(fail, "EID is not within permitted range of EUM certificate");
+        f_rsp_client_cleanup();
+        return;
+    }
+
 
 	/* Step 2: GetBoundProfilePackage */
 	ext_logInfo("=== Step 2: GetBoundProfilePackage ===");
@@ -753,20 +1011,309 @@ authresp := {
 	var RemoteProfileProvisioningResponse packageResponse := valueof(f_es9p_client_transceive(valueof(packageRequest), tr_getBoundProfilePackageResponse));
 
 
-
-	// fixme verify metadata
-
-	if (not isvalue(packageResponse)) {
-		setverdict(fail, "GetBoundProfilePackage request failed");
-		f_rsp_client_cleanup();
-		return;
-	}
+    var GetBoundProfilePackageOk packageOk := packageResponse.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+    var BoundProfilePackage bpp := packageOk.boundProfilePackage;
+	var InitialiseSecureChannelRequest iscReq := bpp.initialiseSecureChannelRequest;
 
 	if (not f_validate_get_bound_profile_package_response(packageResponse)) {
 		setverdict(fail, "GetBoundProfilePackage validation failed");
 		f_rsp_client_cleanup();
 		return;
 	}
+
+	/* Comprehensive BoundProfilePackage validation */
+	ext_logInfo("=== Validating BoundProfilePackage structure ===");
+
+	// 1. Validate InitialiseSecureChannelRequest
+
+	// 1b. RemoteOpId must be installBoundProfilePackage (1)
+	if (iscReq.remoteOpId != 1) {
+		setverdict(fail, "Invalid remoteOpId, expected installBoundProfilePackage(1)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 1c. Validate ControlRefTemplate
+	if (iscReq.controlRefTemplate.keyType != '88'O) { // AES
+		setverdict(fail, "Invalid key type, expected AES (0x88)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (iscReq.controlRefTemplate.keyLen != '10'O) { // 16 bytes
+		setverdict(fail, "Invalid key length, expected 16 bytes (0x10)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (lengthof(iscReq.controlRefTemplate.hostId) < 4 or
+		lengthof(iscReq.controlRefTemplate.hostId) > 16) {
+		setverdict(fail, "Invalid hostId length");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 1d. Verify smdpOtpk is present and valid EC public key
+	if (not ispresent(iscReq.smdpOtpk) or lengthof(iscReq.smdpOtpk) == 0) {
+		setverdict(fail, "Missing or empty smdpOtpk");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// Check it's an uncompressed EC point
+	if (iscReq.smdpOtpk[0] != '04'O) {
+		setverdict(fail, "smdpOtpk is not an uncompressed EC point");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 1e. Verify ECDH compatibility between eUICC and SM-DP+ public keys
+	var octetstring euiccOtpk := ext_RSPClient_getEUICCOtpk(g_rsp_client_handle);
+	if (not ext_CertificateUtil_verifyECDHCompatible(euiccOtpk, iscReq.smdpOtpk)) {
+		setverdict(fail, "eUICC and SM-DP+ public keys are not ECDH compatible");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+
+	// if (not auok.smdpSigned2.bppEuiccOtpk == iscReq.smdpOtpk) {
+	// 	setverdict(fail, "Server ecdh mismatch!");
+	// 	return;
+	// }
+
+
+	// 1f. Verify InitialiseSecureChannelRequest signature
+	// Build the data that was signed (without the signature field)
+	// var InitialiseSecureChannelRequest iscReqForSigning := iscReq;
+	// iscReqForSigning.smdpSign := ''O; // Clear signature field
+	// var octetstring iscReqData := enc_InitialiseSecureChannelRequest(iscReqForSigning);
+
+	// // The signature should be verified with DPpb certificate
+	// if (not ext_RSPClient_verifyInitialiseSecureChannelRequest(g_rsp_client_handle,
+	// 														iscReqData,
+	// 														iscReq.smdpSign,
+	// 														enc_Certificate(auok.smdpCertificate))) {
+	// 	setverdict(fail, "InitialiseSecureChannelRequest signature verification failed");
+	// 	f_rsp_client_cleanup();
+	// 	return;
+	// }
+	var InitialiseSecureChannelRequest_ver toencsec := {
+		remoteOpId := 1,
+		transactionId := g_transactionId,
+		controlRefTemplate := iscReq.controlRefTemplate,
+		smdpOtpk := iscReq.smdpOtpk,
+		euiccOtpk := packageRequest.getBoundProfilePackageRequest.prepareDownloadResponse.downloadResponseOk.euiccSigned2.euiccOtpk
+	}
+	var octetstring encsecr := encode_DER_InitialiseSecureChannelRequest_ver(toencsec);
+	var octetstring trunc_initsec := substr(encsecr, 4, lengthof(encsecr)-4);
+	// log(trunc_initsec);
+
+	// BF23 81AF
+	// 820101
+	// 8010 1C3C833FB84A4DBE8E88 CD894F1C58D5
+	// A610 800188 810110 84086D61686C7A656974
+	// 5F49410 4D810BFA5BCB6BF2652A862CC5D780CC48472722345F241A2416D27CDBE95F008E3B96D124B6EC5918EC36CDD744323361D7CEC9875E62FA33645E6B4E21B5188
+	// 5F49410 4A1779334FA2786E51B445536B0EC4D2310D268B75891EEA452EEFCC3076BB1EC948EF4ABF14D6BEC8AA7389470D8BD439DA7C5299B90BD5F593BFC5499353603
+
+	if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle, trunc_initsec, iscReq.smdpSign, enc_Certificate(auok.smdpCertificate))) {
+		setverdict(fail, "Server 11 signature validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+
+
+	// var ControlRefTemplate crt := {
+	// 	keyType := iscReq.controlRefTemplate.keyType,
+	// 	keyLen := iscReq.controlRefTemplate.keyLen,
+	// 	hostId := iscReq.controlRefTemplate.hostId
+	// };
+	// var octetstring crtEncoded := enc_ControlRefTemplate(crt);
+
+
+	// // Verify InitialiseSecureChannelRequest signature
+	// if (not ext_RSPClient_verifyInitialiseSecureChannelRequest(g_rsp_client_handle,
+	// 														iscReq.transactionId,
+	// 														crtEncoded,
+	// 														iscReq.smdpOtpk,
+	// 														iscReq.smdpSign,
+	// 														enc_Certificate(auok.smdpCertificate))) {
+	// 	setverdict(fail, "InitialiseSecureChannelRequest signature verification failed");
+	// 	f_rsp_client_cleanup();
+	// 	return;
+	// }
+
+	// 2. Validate profile elements structure
+	if (not ispresent(bpp.firstSequenceOf87) or lengthof(bpp.firstSequenceOf87) == 0) {
+		setverdict(fail, "Missing or empty firstSequenceOf87 (ConfigureISDP)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (not ispresent(bpp.sequenceOf88) or lengthof(bpp.sequenceOf88) == 0) {
+		setverdict(fail, "Missing or empty sequenceOf88 (StoreMetadata)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (not ispresent(bpp.sequenceOf86) or lengthof(bpp.sequenceOf86) == 0) {
+		setverdict(fail, "Missing or empty sequenceOf86 (LoadProfileElements)");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 3. Certificate role validation
+	ext_logInfo("=== Validating certificate roles ===");
+
+	// DPauth certificate should have authentication role OID
+	var octetstring dpAuthCert := enc_Certificate(authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.serverCertificate);
+	if (not ext_CertificateUtil_hasRSPRole(dpAuthCert, c_oid_rspRole_dp_auth)) {
+		setverdict(fail, "DPauth certificate missing authentication role OID");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// DPpb certificate should have profile binding role OID
+	var octetstring dpPbCert := enc_Certificate(auok.smdpCertificate);
+	if (not ext_CertificateUtil_hasRSPRole(dpPbCert, c_oid_rspRole_dp_pb)) {
+		setverdict(fail, "DPpb certificate missing profile binding role OID");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 4. EUM certificate validation
+	ext_logInfo("=== Validating EUM certificate permissions ===");
+
+	// Get permitted EINs from EUM certificate
+	var charstring permittedEINs := ext_CertificateUtil_getPermittedEINs(eumCert);
+	if (permittedEINs == "") {
+		setverdict(fail, "No permitted EINs found in EUM certificate");
+		f_rsp_client_cleanup();
+		return;
+	}
+	ext_logInfo("EUM permitted EINs: " & permittedEINs);
+
+	// Verify our EID starts with one of the permitted EINs
+	var boolean ein_match := false;
+	var charstring eid_upper := to_upper(eid);
+
+	// Split comma-separated EINs
+	var integer ein_start := 0;
+	for (var integer i := 0; i <= lengthof(permittedEINs); i := i + 1) {
+		if (i == lengthof(permittedEINs) or permittedEINs[i] == ",") {
+			var charstring ein := substr(permittedEINs, ein_start, i - ein_start);
+			if (substr(eid_upper, 0, lengthof(ein)) == to_upper(ein)) {
+				ein_match := true;
+				ext_logInfo("EID matches permitted EIN: " & ein);
+				break;
+			}
+			ein_start := i + 1;
+		}
+	}
+
+	if (not ein_match) {
+		setverdict(fail, "EID does not match any permitted EIN");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 5. Verify all certificates chain to the same CI
+	ext_logInfo("=== Validating certificate chains ===");
+
+	// All certificates should chain to the same root CI
+	var octetstring ciPkid := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.euiccCiPKIdToBeUsed; //substr(authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.euiccCiPKIdToBeUsed, 2, 20); // Skip tag
+
+	log(ciPkid);
+
+	// Verify eUICC cert chains to CI
+	var octetstring euiccCertDer := ext_RSPClient_getEUICCCertificate(g_rsp_client_handle);
+	if (not ext_CertificateUtil_verifyCertificateChainDynamic(euiccCertDer,
+															g_pars_smdpp.cert_path,
+															ciPkid)) {
+		setverdict(fail, "eUICC certificate chain validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// Verify DPpb cert chains to CI
+	if (not ext_CertificateUtil_verifyCertificateChainDynamic(dpPbCert,
+															g_pars_smdpp.cert_path,
+															ciPkid)) {
+		setverdict(fail, "DPpb certificate chain validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+
+	// 6. ECDH and session key validation
+	ext_logInfo("=== Validating ECDH key agreement and session keys ===");
+
+	// Verify both certificates use same curve
+	var charstring euiccCurve := ext_CertificateUtil_getCurveOID(euiccCertDer);
+	var charstring smdpCurve := ext_CertificateUtil_getCurveOID(dpPbCert);
+
+	if (euiccCurve != smdpCurve) {
+		setverdict(fail, "eUICC and SM-DP+ certificates use different curves");
+		f_rsp_client_cleanup();
+		return;
+	}
+	ext_logInfo("Both certificates use curve: " & euiccCurve);
+
+	// Compute shared secret
+	var octetstring sharedSecret := ext_RSPClient_computeSharedSecret(g_rsp_client_handle,
+																	iscReq.smdpOtpk);
+	if (lengthof(sharedSecret) == 0) {
+		setverdict(fail, "Failed to compute ECDH shared secret");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// Derive and validate session keys
+	if (not f_validate_session_keys(sharedSecret, iscReq.controlRefTemplate.hostId)) {
+		setverdict(fail, "Session key derivation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 7. Validate encrypted profile segments
+	ext_logInfo("=== Validating encrypted profile segments ===");
+
+	var octetstring sEnc, sMac, sDek;
+	ext_Crypto_deriveSessionKeys(sharedSecret, iscReq.controlRefTemplate.hostId,
+							sEnc, sMac, sDek);
+
+	if (not f_validate_profile_segments(bpp, sEnc, sMac)) {
+		setverdict(fail, "Encrypted profile segment validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	// 8. Verify complete certificate path for all certificates
+	ext_logInfo("=== Final certificate path validation ===");
+
+	// Verify complete paths including intermediate certificates
+	var boolean all_certs_valid := true;
+
+	// Check eUICC -> EUM -> CI chain
+	all_certs_valid := all_certs_valid and
+		ext_CertificateUtil_verifyCertificateChainDynamic(euiccCertDer, g_pars_smdpp.cert_path, ciPkid);
+
+	// Check DPauth -> CI chain
+	all_certs_valid := all_certs_valid and
+		ext_CertificateUtil_verifyCertificateChainDynamic(dpAuthCert, g_pars_smdpp.cert_path, ciPkid);
+
+	// Check DPpb -> CI chain
+	all_certs_valid := all_certs_valid and
+		ext_CertificateUtil_verifyCertificateChainDynamic(dpPbCert, g_pars_smdpp.cert_path, ciPkid);
+
+	if (not all_certs_valid) {
+		setverdict(fail, "Complete certificate chain validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	ext_logInfo("All BoundProfilePackage validations passed successfully");
+
 
 	ext_logInfo("Complete RSP flow successful");
 	f_rsp_client_cleanup();

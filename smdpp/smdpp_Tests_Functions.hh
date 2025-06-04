@@ -84,6 +84,8 @@ OCTETSTRING ext__RSPClient__signDataWithSMDP(const INTEGER& clientHandle,
                                             const OCTETSTRING& dataToSign);
 
 OCTETSTRING ext__RSPClient__generateEUICCOtpk(const INTEGER& clientHandle);
+OCTETSTRING ext__RSPClient__getEUICCOtpk(const INTEGER& clientHandle);
+
 
 INTEGER ext__RSPClient__setConfirmationCodeHash(const INTEGER& clientHandle,
                                                const OCTETSTRING& hash);
@@ -112,6 +114,24 @@ CHARSTRING ext__CertificateUtil__getIssuerName(const OCTETSTRING& certData);
 BOOLEAN ext__CertificateUtil__isExpired(const OCTETSTRING& certData);
 
 OCTETSTRING ext__CertificateUtil__getSubjectKeyIdentifier(const OCTETSTRING& certData);
+
+CHARSTRING ext__CertificateUtil__getEID(const OCTETSTRING& certData);
+
+// BOOLEAN ext__CertificateUtil__validateEIDRange(const CHARSTRING& eid, const OCTETSTRING& eumCertData);
+
+BOOLEAN ext__CertificateUtil__hasPolicyOID(const OCTETSTRING& certData, const CHARSTRING& oidStr);
+
+BOOLEAN ext__CertificateUtil__hasRSPRole(const OCTETSTRING& certData, const CHARSTRING& roleOid);
+
+BOOLEAN ext__RSPClient__verifyInitialiseSecureChannelRequest(const INTEGER& clientHandle,
+                                                            const OCTETSTRING& iscReqData,
+                                                            const OCTETSTRING& signature,
+                                                            const OCTETSTRING& dpPbCert);
+
+CHARSTRING ext__CertificateUtil__getPermittedEINs(const OCTETSTRING& eumCertData);
+
+BOOLEAN ext__CertificateUtil__verifyECDHCompatible(const OCTETSTRING& pubKey1,
+                                                   const OCTETSTRING& pubKey2);
 
 OCTETSTRING ext__CertificateUtil__getAuthorityKeyIdentifier(const OCTETSTRING& certData);
 
@@ -148,11 +168,11 @@ INTEGER ext__Logger__warning(const CHARSTRING& message, const CHARSTRING& filena
 
 INTEGER ext__Logger__error(const CHARSTRING& message, const CHARSTRING& filename, const INTEGER& line);
 
-INTEGER ext__logInfo(const CHARSTRING& message);
+void ext__logInfo(const CHARSTRING& message);
 
-INTEGER ext__logError(const CHARSTRING& message);
+void ext__logError(const CHARSTRING& message);
 
-INTEGER ext__logDebug(const CHARSTRING& message);
+void ext__logDebug(const CHARSTRING& message);
 
 
 /* ============================================================================

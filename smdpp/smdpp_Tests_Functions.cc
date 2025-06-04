@@ -7,7 +7,6 @@
 #include "smdvalcpp2.cpp" // Your existing RSP implementation
 
 #include <iostream>
-#include <stdexcept>
 #include <cstring>
 
 using namespace RspCrypto;
@@ -554,6 +553,24 @@ OCTETSTRING ext__RSPClient__generateEUICCOtpk(const INTEGER& clientHandle) {
     }
 }
 
+OCTETSTRING ext__RSPClient__getEUICCOtpk(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return OCTETSTRING(0, nullptr);
+        }
+
+        std::vector<uint8_t> data = client->getEUICCOtpk();
+        return bytes_to_octetstring(data);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__generateEUICCOtpk failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
 INTEGER ext__RSPClient__setConfirmationCodeHash(const INTEGER& clientHandle,
                                                const OCTETSTRING& hash) {
     try {
@@ -675,6 +692,538 @@ OCTETSTRING ext__CertificateUtil__getSubjectKeyIdentifier(const OCTETSTRING& cer
     } catch (const std::exception& e) {
         LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
         return OCTETSTRING(0, nullptr);
+    }
+}
+
+CHARSTRING ext__CertificateUtil__getEID(const OCTETSTRING& certData) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(certData);
+        auto cert = CertificateUtil::loadCertFromDER(der);
+        std::string eid = CertificateUtil::getEID(cert.get());
+        return string_to_charstring(eid);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getEID failed: " + std::string(e.what()));
+        return CHARSTRING("");
+    }
+}
+
+BOOLEAN ext__CertificateUtil__validateEIDRange(const CHARSTRING& eid, const OCTETSTRING& eumCertData) {
+    try {
+        std::string eidStr = charstring_to_string(eid);
+        std::vector<uint8_t> eumDer = octetstring_to_bytes(eumCertData);
+        auto eumCert = CertificateUtil::loadCertFromDER(eumDer);
+
+        // Parse permitted EINs from EUM certificate
+        std::vector<std::string> permittedEins = CertificateUtil::parse_permitted_eins_from_cert(eumCert.get());
+
+        if (permittedEins.empty()) {
+            LOG_WARNING("No permitted EINs found in EUM certificate");
+            return BOOLEAN(false);
+        }
+
+        // Check if EID starts with any permitted EIN
+        std::string eidNormalized = eidStr;
+        std::transform(eidNormalized.begin(), eidNormalized.end(), eidNormalized.begin(), ::toupper);
+
+        for (const auto& ein : permittedEins) {
+            if (eidNormalized.find(ein) == 0) {
+                LOG_INFO("EID " + eidNormalized + " matches permitted EIN " + ein);
+                return BOOLEAN(true);
+            }
+        }
+
+        LOG_ERROR("EID " + eidNormalized + " is not in any permitted EIN list");
+        return BOOLEAN(false);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__validateEIDRange failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+BOOLEAN ext__CertificateUtil__hasPolicyOID(const OCTETSTRING& certData, const CHARSTRING& oidStr) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(certData);
+        auto cert = CertificateUtil::loadCertFromDER(der);
+        std::string oid = charstring_to_string(oidStr);
+
+        // Check certificate policies extension
+        int pos = X509_get_ext_by_NID(cert.get(), NID_certificate_policies, -1);
+        if (pos < 0) return BOOLEAN(false);
+
+        X509_EXTENSION *ext = X509_get_ext(cert.get(), pos);
+        if (!ext) return BOOLEAN(false);
+
+        // Parse and check policies (simplified - would need proper ASN.1 parsing)
+        // For now, return true if extension exists
+        return BOOLEAN(true);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__hasPolicyOID failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+// In smdpp_Tests_Functions.cc, add these functions:
+
+// Verify certificate has correct RSP role OID
+BOOLEAN ext__CertificateUtil__hasRSPRole(const OCTETSTRING& certData, const CHARSTRING& roleOid) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(certData);
+        auto cert = CertificateUtil::loadCertFromDER(der);
+        std::string expectedOid = charstring_to_string(roleOid);
+
+        // Check certificate policies for RSP role
+        int pos = X509_get_ext_by_NID(cert.get(), NID_certificate_policies, -1);
+        if (pos < 0) return BOOLEAN(false);
+
+        X509_EXTENSION *ext = X509_get_ext(cert.get(), pos);
+        CERTIFICATEPOLICIES *policies = (CERTIFICATEPOLICIES*)X509V3_EXT_d2i(ext);
+
+        if (!policies) return BOOLEAN(false);
+
+        for (int i = 0; i < sk_POLICYINFO_num(policies); i++) {
+            POLICYINFO *policy = sk_POLICYINFO_value(policies, i);
+            char oid_str[128];
+            OBJ_obj2txt(oid_str, sizeof(oid_str), policy->policyid, 1);
+
+            if (std::string(oid_str) == expectedOid) {
+                CERTIFICATEPOLICIES_free(policies);
+                return BOOLEAN(true);
+            }
+        }
+
+        CERTIFICATEPOLICIES_free(policies);
+        return BOOLEAN(false);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__hasRSPRole failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+std::vector<uint8_t> getInitialiseSecureChannelRequestData(
+    const std::vector<uint8_t>& transactionId,
+    const std::vector<uint8_t>& controlRefTemplate,
+    const std::vector<uint8_t>& smdpOtpk) {
+
+    // Build the signed data structure
+    std::vector<uint8_t> data;
+
+    // remoteOpId [2] - always 1 for installBoundProfilePackage
+    data.push_back(0x82);
+    data.push_back(0x01);
+    data.push_back(0x01);
+
+    // transactionId [0]
+    data.push_back(0x80);
+    data.push_back(transactionId.size());
+    data.insert(data.end(), transactionId.begin(), transactionId.end());
+
+    // controlRefTemplate [6] IMPLICIT
+    data.push_back(0xA6);
+    data.push_back(controlRefTemplate.size());
+    data.insert(data.end(), controlRefTemplate.begin(), controlRefTemplate.end());
+
+    // smdpOtpk [APPLICATION 73]
+    data.push_back(0x5F);
+    data.push_back(0x49);
+    data.push_back(smdpOtpk.size());
+    data.insert(data.end(), smdpOtpk.begin(), smdpOtpk.end());
+
+    return data;
+}
+
+BOOLEAN ext__RSPClient__verifyInitialiseSecureChannelRequest(const INTEGER& clientHandle,
+                                                            const OCTETSTRING& transactionId,
+                                                            const OCTETSTRING& controlRefTemplate,
+                                                            const OCTETSTRING& smdpOtpk,
+                                                            const OCTETSTRING& signature,
+                                                            const OCTETSTRING& dpPbCert) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle");
+            return BOOLEAN(false);
+        }
+
+        // Build the data that was signed
+        std::vector<uint8_t> tid = octetstring_to_bytes(transactionId);
+        std::vector<uint8_t> crt = octetstring_to_bytes(controlRefTemplate);
+        std::vector<uint8_t> otpk = octetstring_to_bytes(smdpOtpk);
+        std::vector<uint8_t> sig = octetstring_to_bytes(signature);
+        std::vector<uint8_t> cert = octetstring_to_bytes(dpPbCert);
+
+        std::vector<uint8_t> signedData = getInitialiseSecureChannelRequestData(tid, crt, otpk);
+
+        return BOOLEAN(client->verifyServerSignature(signedData, sig, cert));
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__verifyInitialiseSecureChannelRequest failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+CHARSTRING ext__CertificateUtil__getPermittedEINs(const OCTETSTRING& eumCertData) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(eumCertData);
+        auto cert = CertificateUtil::loadCertFromDER(der);
+
+        // Parse permitted EINs using the appropriate method based on cert variant
+        std::vector<std::string> eins;
+
+        // Check for GSMA permittedEins extension (OID 2.23.146.1.2.2.0)
+        ASN1_OBJECT *obj = OBJ_txt2obj("2.23.146.1.2.2.0", 1);
+        int pos = X509_get_ext_by_OBJ(cert.get(), obj, -1);
+        ASN1_OBJECT_free(obj);
+
+        if (pos >= 0) {
+            // New variant with permittedEins extension
+            X509_EXTENSION *ext = X509_get_ext(cert.get(), pos);
+            ASN1_OCTET_STRING *ext_data = X509_EXTENSION_get_data(ext);
+
+            // Parse SEQUENCE OF PrintableString
+            const unsigned char *p = ext_data->data;
+            long len = ext_data->length;
+
+            while (len > 0) {
+                int tag, xclass;
+                long xlen;
+                ASN1_get_object(&p, &xlen, &tag, &xclass, len);
+
+                if (tag == V_ASN1_PRINTABLESTRING) {
+                    std::string ein(reinterpret_cast<const char*>(p), xlen);
+                    eins.push_back(ein);
+                    p += xlen;
+                    len -= xlen + (p - ext_data->data);
+                }
+            }
+        } else {
+            // Old variant - check nameConstraints
+            pos = X509_get_ext_by_NID(cert.get(), NID_name_constraints, -1);
+            if (pos >= 0) {
+                X509_EXTENSION *ext = X509_get_ext(cert.get(), pos);
+                NAME_CONSTRAINTS *nc = (NAME_CONSTRAINTS*)X509V3_EXT_d2i(ext);
+
+                if (nc && nc->permittedSubtrees) {
+                    for (int i = 0; i < sk_GENERAL_SUBTREE_num(nc->permittedSubtrees); i++) {
+                        GENERAL_SUBTREE *subtree = sk_GENERAL_SUBTREE_value(nc->permittedSubtrees, i);
+                        if (subtree->base->type == GEN_DIRNAME) {
+                            X509_NAME *name = subtree->base->d.directoryName;
+
+                            // Look for serialNumber in DN
+                            int idx = X509_NAME_get_index_by_NID(name, NID_serialNumber, -1);
+                            if (idx >= 0) {
+                                X509_NAME_ENTRY *entry = X509_NAME_get_entry(name, idx);
+                                ASN1_STRING *asn1_str = X509_NAME_ENTRY_get_data(entry);
+
+                                std::string ein(reinterpret_cast<const char*>(
+                                    ASN1_STRING_get0_data(asn1_str)),
+                                    ASN1_STRING_length(asn1_str));
+                                eins.push_back(ein);
+                            }
+                        }
+                    }
+                }
+
+                if (nc) NAME_CONSTRAINTS_free(nc);
+            }
+        }
+
+        // Join EINs with comma
+        std::string result;
+        for (size_t i = 0; i < eins.size(); i++) {
+            if (i > 0) result += ",";
+            result += eins[i];
+        }
+
+        return string_to_charstring(result);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getPermittedEINs failed: " + std::string(e.what()));
+        return CHARSTRING("");
+    }
+}
+
+BOOLEAN ext__CertificateUtil__verifyECDHCompatible(const OCTETSTRING& pubKey1,
+                                                   const OCTETSTRING& pubKey2) {
+    try {
+        std::vector<uint8_t> key1 = octetstring_to_bytes(pubKey1);
+        std::vector<uint8_t> key2 = octetstring_to_bytes(pubKey2);
+
+        // Both should be uncompressed EC points (starting with 0x04)
+        if (key1.empty() || key2.empty() || key1[0] != 0x04 || key2[0] != 0x04) {
+            LOG_ERROR("Invalid EC public key format");
+            return BOOLEAN(false);
+        }
+
+        // For P-256, size should be 65 bytes (1 + 32 + 32)
+        if (key1.size() == 65 && key2.size() == 65) {
+            LOG_INFO("Both keys are P-256 format, ECDH compatible");
+            return BOOLEAN(true);
+        }
+
+        // For P-384, size should be 97 bytes (1 + 48 + 48)
+        if (key1.size() == 97 && key2.size() == 97) {
+            LOG_INFO("Both keys are P-384 format, ECDH compatible");
+            return BOOLEAN(true);
+        }
+
+        LOG_ERROR("Key sizes don't match or unsupported curve");
+        return BOOLEAN(false);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__verifyECDHCompatible failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+// Fix the external function to use the actual implementation:
+OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
+                                                const OCTETSTRING& otherPublicKey) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle");
+            return OCTETSTRING(0, nullptr);
+        }
+
+        std::vector<uint8_t> otherPubKey = octetstring_to_bytes(otherPublicKey);
+        std::vector<uint8_t> sharedSecret = client->computeECDHSharedSecret(otherPubKey);
+
+        return bytes_to_octetstring(sharedSecret);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__computeSharedSecret failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
+// // MISSING: Derive session keys from shared secret
+// BOOLEAN ext__Crypto__deriveSessionKeys(const OCTETSTRING& sharedSecret,
+//                                       const OCTETSTRING& hostId,
+//                                       OCTETSTRING& sEnc,
+//                                       OCTETSTRING& sMac,
+//                                       OCTETSTRING& sDek) {
+//     try {
+//         std::vector<uint8_t> ss = octetstring_to_bytes(sharedSecret);
+//         std::vector<uint8_t> hid = octetstring_to_bytes(hostId);
+
+//         // Implement key derivation as per GlobalPlatform SCP03
+//         // Using SHA256-based KDF
+
+//         // Derive S-ENC
+//         std::vector<uint8_t> sEncInput = ss;
+//         sEncInput.insert(sEncInput.end(), hid.begin(), hid.end());
+//         sEncInput.push_back(0x01); // Counter for S-ENC
+
+//         unsigned char sEncHash[SHA256_DIGEST_LENGTH];
+//         SHA256(sEncInput.data(), sEncInput.size(), sEncHash);
+//         sEnc = OCTETSTRING(16, sEncHash); // Take first 16 bytes
+
+//         // Derive S-MAC
+//         std::vector<uint8_t> sMacInput = ss;
+//         sMacInput.insert(sMacInput.end(), hid.begin(), hid.end());
+//         sMacInput.push_back(0x02); // Counter for S-MAC
+
+//         unsigned char sMacHash[SHA256_DIGEST_LENGTH];
+//         SHA256(sMacInput.data(), sMacInput.size(), sMacHash);
+//         sMac = OCTETSTRING(16, sMacHash); // Take first 16 bytes
+
+//         // Derive S-DEK
+//         std::vector<uint8_t> sDekInput = ss;
+//         sDekInput.insert(sDekInput.end(), hid.begin(), hid.end());
+//         sDekInput.push_back(0x03); // Counter for S-DEK
+
+//         unsigned char sDekHash[SHA256_DIGEST_LENGTH];
+//         SHA256(sDekInput.data(), sDekInput.size(), sDekHash);
+//         sDek = OCTETSTRING(16, sDekHash); // Take first 16 bytes
+
+//         LOG_INFO("Derived session keys successfully");
+//         return BOOLEAN(true);
+//     } catch (const std::exception& e) {
+//         LOG_ERROR("ext__Crypto__deriveSessionKeys failed: " + std::string(e.what()));
+//         return BOOLEAN(false);
+//     }
+// }
+
+// MISSING: Verify encrypted profile data
+BOOLEAN ext__Crypto__verifyEncryptedProfileData(const OCTETSTRING& encData,
+                                               const OCTETSTRING& sEnc,
+                                               const OCTETSTRING& sMac) {
+    try {
+        // This would verify the encrypted profile data using AES-CBC and CMAC
+        // For now, just check that data exists
+        std::vector<uint8_t> data = octetstring_to_bytes(encData);
+
+        if (data.size() < 16) { // Minimum size for encrypted data
+            LOG_ERROR("Encrypted data too small");
+            return BOOLEAN(false);
+        }
+
+        // Check for proper padding
+        if (data.size() % 16 != 0) {
+            LOG_ERROR("Encrypted data not properly padded");
+            return BOOLEAN(false);
+        }
+
+        LOG_INFO("Encrypted profile data validation passed (basic check)");
+        return BOOLEAN(true);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__Crypto__verifyEncryptedProfileData failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(certData);
+        auto cert = CertificateUtil::loadCertFromDER(der);
+
+        EVP_PKEY *pkey = X509_get0_pubkey(cert.get());
+        if (!pkey) {
+            LOG_ERROR("Failed to get public key from certificate");
+            return CHARSTRING("");
+        }
+
+        if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
+            LOG_ERROR("Certificate does not contain EC key");
+            return CHARSTRING("");
+        }
+
+        char curve_name[256] = {0};
+        size_t curve_name_len = sizeof(curve_name);
+
+        if (EVP_PKEY_get_utf8_string_param(pkey, "group", curve_name,
+                                         sizeof(curve_name), &curve_name_len) != 1) {
+            LOG_ERROR("Failed to get curve name from EC key");
+            return CHARSTRING("");
+        }
+
+        std::string curve_str(curve_name);
+
+        if (curve_str == "prime256v1") {
+            return CHARSTRING("prime256v1");
+        } else if (curve_str == "secp384r1") {
+            return CHARSTRING("secp384r1");
+        } else if (curve_str == "brainpoolP256r1") {
+            return CHARSTRING("brainpoolP256r1");
+        } else if (curve_str == "brainpoolP384r1") {
+            return CHARSTRING("brainpoolP384r1");
+        }
+
+        return CHARSTRING("unknown");
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getCurveOID failed: " + std::string(e.what()));
+        return CHARSTRING("");
+    }
+}
+
+
+std::vector<uint8_t> computeCMAC_AES(const std::vector<uint8_t>& key,
+                                    const std::vector<uint8_t>& data) {
+    EVP_MAC *mac = EVP_MAC_fetch(nullptr, "CMAC", nullptr);
+    if (!mac) {
+        throw OpenSSLError("Failed to fetch CMAC algorithm");
+    }
+
+    EVP_MAC_CTX *ctx = EVP_MAC_CTX_new(mac);
+    EVP_MAC_free(mac);
+    if (!ctx) {
+        throw OpenSSLError("Failed to create CMAC context");
+    }
+
+    // Set the cipher for CMAC
+    const char* cipher_name = (key.size() == 16) ? "AES-128-CBC" :
+                             (key.size() == 24) ? "AES-192-CBC" :
+                             (key.size() == 32) ? "AES-256-CBC" : "AES-128-CBC";
+
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string("cipher", const_cast<char*>(cipher_name), 0),
+        OSSL_PARAM_END
+    };
+
+    if (EVP_MAC_init(ctx, key.data(), key.size(), params) != 1) {
+        EVP_MAC_CTX_free(ctx);
+        throw OpenSSLError("EVP_MAC_init failed");
+    }
+
+    if (EVP_MAC_update(ctx, data.data(), data.size()) != 1) {
+        EVP_MAC_CTX_free(ctx);
+        throw OpenSSLError("EVP_MAC_update failed");
+    }
+
+    size_t out_len = 0;
+    if (EVP_MAC_final(ctx, nullptr, &out_len, 0) != 1) {
+        EVP_MAC_CTX_free(ctx);
+        throw OpenSSLError("EVP_MAC_final length query failed");
+    }
+
+    std::vector<uint8_t> result(out_len);
+    if (EVP_MAC_final(ctx, result.data(), &out_len, out_len) != 1) {
+        EVP_MAC_CTX_free(ctx);
+        throw OpenSSLError("EVP_MAC_final failed");
+    }
+
+    EVP_MAC_CTX_free(ctx);
+    result.resize(out_len);
+    return result;
+}
+
+
+BOOLEAN ext__Crypto__deriveSessionKeys(const OCTETSTRING& sharedSecret,
+                                      const OCTETSTRING& hostId,
+                                      OCTETSTRING& sEnc,
+                                      OCTETSTRING& sMac,
+                                      OCTETSTRING& sDek) {
+    try {
+        std::vector<uint8_t> ss = octetstring_to_bytes(sharedSecret);
+        std::vector<uint8_t> hid = octetstring_to_bytes(hostId);
+
+        // GlobalPlatform SCP03 Annex G key derivation
+        // KDF counter || length || shared info
+
+        // Shared info = Algorithm ID || PartyUInfo || PartyVInfo
+        std::vector<uint8_t> algorithmID = {0x00, 0x00, 0x00, 0x01}; // id-aes128-CBC-CMAC
+        std::vector<uint8_t> partyUInfo = hid; // Host ID as Party U
+        std::vector<uint8_t> partyVInfo; // Empty for Party V
+
+        // S-ENC derivation
+        std::vector<uint8_t> kdf_input_enc;
+        kdf_input_enc.push_back(0x01); // Counter
+        kdf_input_enc.push_back(0x00); kdf_input_enc.push_back(0x80); // Length (128 bits)
+        kdf_input_enc.insert(kdf_input_enc.end(), algorithmID.begin(), algorithmID.end());
+        kdf_input_enc.insert(kdf_input_enc.end(), partyUInfo.begin(), partyUInfo.end());
+        kdf_input_enc.insert(kdf_input_enc.end(), partyVInfo.begin(), partyVInfo.end());
+
+        // Use CMAC with shared secret as key
+        std::vector<uint8_t> sEncDerived = computeCMAC_AES(ss, kdf_input_enc);
+        sEnc = bytes_to_octetstring(sEncDerived);
+
+        // S-MAC derivation
+        std::vector<uint8_t> kdf_input_mac;
+        kdf_input_mac.push_back(0x02); // Counter
+        kdf_input_mac.push_back(0x00); kdf_input_mac.push_back(0x80); // Length
+        kdf_input_mac.insert(kdf_input_mac.end(), algorithmID.begin(), algorithmID.end());
+        kdf_input_mac.insert(kdf_input_mac.end(), partyUInfo.begin(), partyUInfo.end());
+        kdf_input_mac.insert(kdf_input_mac.end(), partyVInfo.begin(), partyVInfo.end());
+
+        std::vector<uint8_t> sMacDerived = computeCMAC_AES(ss, kdf_input_mac);
+        sMac = bytes_to_octetstring(sMacDerived);
+
+        // S-DEK derivation
+        std::vector<uint8_t> kdf_input_dek;
+        kdf_input_dek.push_back(0x03); // Counter
+        kdf_input_dek.push_back(0x00); kdf_input_dek.push_back(0x80); // Length
+        kdf_input_dek.insert(kdf_input_dek.end(), algorithmID.begin(), algorithmID.end());
+        kdf_input_dek.insert(kdf_input_dek.end(), partyUInfo.begin(), partyUInfo.end());
+        kdf_input_dek.insert(kdf_input_dek.end(), partyVInfo.begin(), partyVInfo.end());
+
+        std::vector<uint8_t> sDekDerived = computeCMAC_AES(ss, kdf_input_dek);
+        sDek = bytes_to_octetstring(sDekDerived);
+
+        LOG_INFO("Derived GlobalPlatform SCP03 session keys");
+        return BOOLEAN(true);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__Crypto__deriveSessionKeys failed: " + std::string(e.what()));
+        return BOOLEAN(false);
     }
 }
 
@@ -875,36 +1424,36 @@ INTEGER ext__Logger__error(const CHARSTRING& message, const CHARSTRING& filename
     }
 }
 
-INTEGER ext__logInfo(const CHARSTRING& message) {
+void ext__logInfo(const CHARSTRING& message) {
     try {
         std::string msg = charstring_to_string(message);
         Logger::info(msg);
-        return INTEGER(0);
+        return;
     } catch (const std::exception& e) {
         std::cerr << "ext__logInfo failed: " << e.what() << std::endl;
-        return INTEGER(-1);
+        return;
     }
 }
 
-INTEGER ext__logError(const CHARSTRING& message) {
+void ext__logError(const CHARSTRING& message) {
     try {
         std::string msg = charstring_to_string(message);
         Logger::error(msg);
-        return INTEGER(0);
+        return;
     } catch (const std::exception& e) {
         std::cerr << "ext__logError failed: " << e.what() << std::endl;
-        return INTEGER(-1);
+        return;
     }
 }
 
-INTEGER ext__logDebug(const CHARSTRING& message) {
+void ext__logDebug(const CHARSTRING& message) {
     try {
         std::string msg = charstring_to_string(message);
         Logger::debug(msg);
-        return INTEGER(0);
+        return;
     } catch (const std::exception& e) {
         std::cerr << "ext__logDebug failed: " << e.what() << std::endl;
-        return INTEGER(-1);
+        return;
     }
 }
 

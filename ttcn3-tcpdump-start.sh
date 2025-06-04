@@ -114,7 +114,7 @@ do
 	echo "Waiting for packet dumper to start... $i"
 	sleep 1
 	i=$((i+1))
-	if [ $i -eq 10 ]; then
+	if [ $i -eq 3 ]; then
 		echo "Packet dumper didn't start filling pcap file after $i seconds!!!"
 		break
 	fi

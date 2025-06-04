@@ -91,6 +91,23 @@ EUICCSigned2 dec__EUICCSigned2(const OCTETSTRING &stream) {
 	return msg;
 }
 
+OCTETSTRING enc__ControlRefTemplate(const ControlRefTemplate &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(ControlRefTemplate_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+ControlRefTemplate dec__ControlRefTemplate(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	ControlRefTemplate msg;
+	buf.put_os(stream);
+
+	msg.decode(ControlRefTemplate_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 OCTETSTRING enc__AuthenticateServerResponse(const AuthenticateServerResponse &msg) {
 	TTCN_Buffer buf;
 
