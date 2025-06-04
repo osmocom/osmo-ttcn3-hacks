@@ -66,14 +66,6 @@ INTEGER ext__RSPClient__processInitiateAuthenticationResponse(const INTEGER& cli
 
 BOOLEAN ext__RSPClient__initiateAuthentication(const INTEGER& clientHandle);
 
-/* Bound Profile Package */
-CHARSTRING ext__RSPClient__createGetBoundProfilePackageRequest(const INTEGER& clientHandle);
-
-INTEGER ext__RSPClient__processGetBoundProfilePackageResponse(const INTEGER& clientHandle,
-                                                            const CHARSTRING& responseJson);
-
-BOOLEAN ext__RSPClient__getBoundProfilePackage(const INTEGER& clientHandle);
-
 /* Cryptographic Operations */
 OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
                                              const OCTETSTRING& dataToSign);
@@ -89,16 +81,6 @@ INTEGER ext__RSPClient__setConfirmationCodeHash(const INTEGER& clientHandle,
                                                const OCTETSTRING& hash);
 
 BOOLEAN ext__RSPClient__verifyServerSignature(const INTEGER& clientHandle, const OCTETSTRING& serverSigned, const OCTETSTRING& serverSignature1, const OCTETSTRING& serverCert);
-
-/* ASN.1 Structure Creation */
-OCTETSTRING ext__RSPClient__createSmdpSigned2(const INTEGER& clientHandle);
-
-OCTETSTRING ext__RSPClient__createEUICCSigned2(const INTEGER& clientHandle);
-
-OCTETSTRING ext__RSPClient__signEUICCSigned2(const INTEGER& clientHandle,
-                                            const OCTETSTRING& euiccSigned2);
-
-OCTETSTRING ext__RSPClient__createPrepareDownloadResponseOk(const INTEGER& clientHandle);
 
 /* Certificate Utilities */
 OCTETSTRING ext__CertificateUtil__loadCertFromPEM(const CHARSTRING& pemData);

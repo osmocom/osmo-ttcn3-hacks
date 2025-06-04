@@ -431,64 +431,6 @@ BOOLEAN ext__RSPClient__initiateAuthentication(const INTEGER& clientHandle) {
     }
 }
 
-/* Bound Profile Package */
-CHARSTRING ext__RSPClient__createGetBoundProfilePackageRequest(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return CHARSTRING("");
-        }
-
-        std::string request = client->createGetBoundProfilePackageRequest();
-        return string_to_charstring(request);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__createGetBoundProfilePackageRequest failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
-INTEGER ext__RSPClient__processGetBoundProfilePackageResponse(const INTEGER& clientHandle,
-                                                            const CHARSTRING& responseJson) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::string json = charstring_to_string(responseJson);
-        bool result = client->processGetBoundProfilePackageResponse(json);
-
-        return INTEGER(result ? 0 : -1);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__processGetBoundProfilePackageResponse failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
-}
-
-BOOLEAN ext__RSPClient__getBoundProfilePackage(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return BOOLEAN(false);
-        }
-
-        bool result = client->getBoundProfilePackage();
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getBoundProfilePackage failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
 /* Cryptographic Operations */
 OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
                                              const OCTETSTRING& dataToSign) {
