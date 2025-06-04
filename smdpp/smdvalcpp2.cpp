@@ -64,7 +64,6 @@ DEFINE_STACK_OF(ASN1_OCTET_STRING)
 
 namespace RspCrypto
 {
-class SMDPResponseGenerator;
 class SMDPResponseValidator;
 
 
@@ -1845,183 +1844,6 @@ class HttpClient {
 	}
 };
 
-// SM-DP+ Response Generator
-class SMDPResponseGenerator {
-    public:
-	SMDPResponseGenerator()
-	{
-		// Initialize OpenSSL
-		OpenSSL_add_all_algorithms();
-		ERR_load_crypto_strings();
-	}
-
-	~SMDPResponseGenerator()
-	{
-		// Cleanup OpenSSL
-		EVP_cleanup();
-		CRYPTO_cleanup_all_ex_data();
-		ERR_free_strings();
-	}
-
-	std::string generateResponse(const std::string &transactionIdHex, const std::string &euiccChallengeHex,
-				     const std::string &serverAddress, const std::string &serverChallengeHex,
-				     const std::string &privateKeyPath, const std::string &certificatePath)
-	{
-		try {
-			// Create ServerSigned1 structure
-			std::unique_ptr<SERVER_SIGNED1, SERVER_SIGNED1_Deleter> ss1(SERVER_SIGNED1_new());
-
-			if (!ss1) {
-				throw OpenSSLError("Failed to create ServerSigned1 structure");
-			}
-
-			// Set transactionId (16 bytes)
-			std::vector<uint8_t> transId = HexUtil::hexToBytes(transactionIdHex);
-			ASN1_OCTET_STRING_set(ss1->transactionId, transId.data(), transId.size());
-
-			// Set euiccChallenge (16 bytes)
-			std::vector<uint8_t> euicc = HexUtil::hexToBytes(euiccChallengeHex);
-			ASN1_OCTET_STRING_set(ss1->euiccChallenge, euicc.data(), euicc.size());
-
-			// Set serverAddress
-			ASN1_STRING_set(ss1->serverAddress,
-					reinterpret_cast<const unsigned char *>(serverAddress.c_str()),
-					serverAddress.length());
-
-			// Set serverChallenge
-			std::vector<uint8_t> challenge = HexUtil::hexToBytes(serverChallengeHex);
-			ASN1_OCTET_STRING_set(ss1->serverChallenge, challenge.data(), challenge.size());
-
-			// Encode the ServerSigned1 structure to DER
-			unsigned char *derData = nullptr;
-			int derLen = i2d_SERVER_SIGNED1(ss1.get(), &derData);
-
-			if (derLen <= 0) {
-				throw OpenSSLError("Failed to encode ServerSigned1 to DER");
-			}
-
-			// Custom deleter for OpenSSL allocated memory
-			struct OpenSSLFreeDeleter {
-				void operator()(void *p) const
-				{
-					OPENSSL_free(p);
-				}
-			};
-
-			// Use unique_ptr with custom deleter for derData
-			std::unique_ptr<unsigned char, OpenSSLFreeDeleter> derDataPtr(derData);
-
-			// Write the DER data to a file for debugging
-			std::ofstream derFile("serverSigned1.der", std::ios::binary);
-			if (derFile) {
-				derFile.write(reinterpret_cast<const char *>(derDataPtr.get()), derLen);
-			}
-
-			// Load the SM-DP+ private key
-			std::ifstream keyFile(privateKeyPath);
-			if (!keyFile) {
-				throw std::runtime_error("Failed to open private key file: " + privateKeyPath);
-			}
-
-			// Create a BIO from the private key file
-			std::string keyStr((std::istreambuf_iterator<char>(keyFile)), std::istreambuf_iterator<char>());
-			std::unique_ptr<BIO, BIODeleter> keyBio(BIO_new_mem_buf(keyStr.c_str(), -1));
-
-			if (!keyBio) {
-				throw OpenSSLError("Failed to create BIO for private key");
-			}
-
-			// Read the private key
-			std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pkey(
-				PEM_read_bio_PrivateKey(keyBio.get(), nullptr, nullptr, nullptr));
-
-			if (!pkey) {
-				throw OpenSSLError("Failed to read private key");
-			}
-
-			// Create and initialize a signature context
-			std::unique_ptr<EVP_MD_CTX, EVP_MD_CTX_Deleter> mdctx(EVP_MD_CTX_new());
-
-			if (!mdctx) {
-				throw OpenSSLError("Failed to create signature context");
-			}
-
-			// Initialize the signature operation
-			if (EVP_DigestSignInit(mdctx.get(), nullptr, EVP_sha256(), nullptr, pkey.get()) != 1) {
-				throw OpenSSLError("Failed to initialize signature operation");
-			}
-
-			// Update the signature with the data
-			if (EVP_DigestSignUpdate(mdctx.get(), derDataPtr.get(), derLen) != 1) {
-				throw OpenSSLError("Failed to update signature");
-			}
-
-			// Finalize the signature
-			size_t sigLen;
-			if (EVP_DigestSignFinal(mdctx.get(), nullptr, &sigLen) != 1) {
-				throw OpenSSLError("Failed to determine signature length");
-			}
-
-			std::vector<uint8_t> sig(sigLen);
-
-			if (EVP_DigestSignFinal(mdctx.get(), sig.data(), &sigLen) != 1) {
-				throw OpenSSLError("Failed to create signature");
-			}
-
-			sig.resize(sigLen); // Adjust size to actual signature length
-
-			// Write the signature to a file for debugging
-			std::ofstream sigFile("serverSignature1.bin", std::ios::binary);
-			if (sigFile) {
-				sigFile.write(reinterpret_cast<const char *>(sig.data()), sig.size());
-			}
-
-			// Read the SM-DP+ certificate
-			std::ifstream certFile(certificatePath);
-			if (!certFile) {
-				throw std::runtime_error("Failed to open certificate file: " + certificatePath);
-			}
-
-			std::string certStr((std::istreambuf_iterator<char>(certFile)),
-					    std::istreambuf_iterator<char>());
-			std::vector<uint8_t> certData(certStr.begin(), certStr.end());
-
-			// Base64 encode the data for JSON output
-			std::vector<uint8_t> derDataVector(derDataPtr.get(), derDataPtr.get() + derLen);
-			std::string serverSigned1B64 = Base64::encode(derDataVector);
-			std::string serverSignature1B64 = Base64::encode(sig);
-			std::string serverCertificateB64 = Base64::encode(certData);
-
-			// Generate a dummy euiccCiPKIdToBeUsed
-			std::vector<uint8_t> euiccCiPKId = { 0x04, 0x14, 0xF5, 0x41, 0x72, 0xBD, 0xF9, 0x8A,
-							     0x95, 0xD6, 0x5C, 0xBE, 0xB8, 0x8A, 0x38, 0xA1,
-							     0xC1, 0x1D, 0x80, 0x0A, 0x85, 0xC3 };
-			std::string euiccCiPKIdB64 = Base64::encode(euiccCiPKId);
-
-			// Generate JSON output
-			std::stringstream jsonSS;
-			jsonSS << "{\n";
-			jsonSS << "  \"transactionId\": \"" << transactionIdHex << "\",\n";
-			jsonSS << "  \"serverSigned1\": \"" << serverSigned1B64 << "\",\n";
-			jsonSS << "  \"serverSignature1\": \"" << serverSignature1B64 << "\",\n";
-			jsonSS << "  \"serverCertificate\": \"" << serverCertificateB64 << "\",\n";
-			jsonSS << "  \"euiccCiPKIdToBeUsed\": \"" << euiccCiPKIdB64 << "\",\n";
-			jsonSS << "  \"header\": {\n";
-			jsonSS << "    \"functionExecutionStatus\": {\n";
-			jsonSS << "      \"status\": \"Executed-Success\"\n";
-			jsonSS << "    }\n";
-			jsonSS << "  }\n";
-			jsonSS << "}\n";
-
-			return jsonSS.str();
-
-		} catch (const std::exception &e) {
-			std::cerr << "Error generating response: " << e.what() << std::endl;
-			return "{}"; // Return empty JSON on error
-		}
-	}
-};
-
 // RSP (Remote SIM Provisioning) Client implementation
 class RSPClient {
     public:
@@ -2105,13 +1927,6 @@ class RSPClient {
 		EVP_cleanup();
 		CRYPTO_cleanup_all_ex_data();
 		ERR_free_strings();
-	}
-
-	// Set test mode (use mock responses instead of real HTTP requests)
-	void setTestMode(bool testMode)
-	{
-		m_testMode = testMode;
-		Logger::info(std::string("Test mode ") + (testMode ? "enabled" : "disabled"));
 	}
 
 	// Set the path to CA certificates for system verification
@@ -3447,17 +3262,6 @@ class RSPClient {
 
 	std::string simulateSendRequest(const std::string &request)
 	{
-		// Check if we're in test mode (use the existing mock response generator)
-		if (m_testMode) {
-			// For testing, generate a valid response using the mock generator
-			RspCrypto::SMDPResponseGenerator generator;
-			return generator.generateResponse(
-				"F57D9ED494814FBDAED374800610DEAC", // Transaction ID
-				HexUtil::bytesToHex(m_euiccChallenge), // eUICC challenge (from request)
-				m_serverUrl, // Server address
-				"1122334455667788", // Server challenge
-				"demoCA/smdp/smdp.key", "demoCA/smdp/smdp.pem");
-		}
 
 		Logger::info("Sending HTTP request to SM-DP+ server: " + m_serverUrl);
 
@@ -3573,7 +3377,6 @@ class RSPClient {
 
 	std::vector<uint8_t> m_confirmationCodeHash; // Optional confirmation code hash
 
-	bool m_testMode = false; // Flag for test mode
 	std::string m_caCertPath = ""; // Path to system CA certificates
 	std::vector<uint8_t> m_boundProfilePackage; // Bound profile package from SM-DP+
 };
@@ -3882,7 +3685,6 @@ int main(int argc, char *argv[])
 		client.loadEUMCertificate(eumCertPath);
 		client.loadEUMKeyPair(eumprivkeyPath);
 		client.setCACertPath(caCertPath);
-		client.setTestMode(testMode);
 
 		// Perform initiateAuthentication
 		RspCrypto::LOG_INFO("Initiating authentication with SM-DP+ server...");

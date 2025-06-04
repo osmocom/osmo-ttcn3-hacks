@@ -45,8 +45,6 @@ INTEGER ext__RSPClient__loadSMDPKeyAndCertificate(const INTEGER& clientHandle,
                                                  const CHARSTRING& smdpPrivateKeyPath,
                                                  const CHARSTRING& smdpCertPath);
 
-INTEGER ext__RSPClient__setTestMode(const INTEGER& clientHandle, const BOOLEAN& testMode);
-
 /* Challenge Generation and Session Management */
 OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle);
 

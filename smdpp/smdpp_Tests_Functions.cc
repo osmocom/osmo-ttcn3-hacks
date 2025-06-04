@@ -48,7 +48,6 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
 		client->loadEUMCertificate(eumCertPath);
 		client->loadEUMKeyPair(eumprivkeyPath);
 		client->setCACertPath(caCertPath);
-		client->setTestMode(false);
 
         int handle = m_nextHandle++;
         m_clients[handle] = std::move(client);
@@ -268,26 +267,6 @@ INTEGER ext__RSPClient__loadSMDPKeyAndCertificate(const INTEGER& clientHandle,
         return INTEGER(0);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__loadSMDPKeyAndCertificate failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
-}
-
-INTEGER ext__RSPClient__setTestMode(const INTEGER& clientHandle, const BOOLEAN& testMode) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        bool mode = static_cast<bool>(testMode);
-        client->setTestMode(mode);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__setTestMode failed: " + std::string(e.what()));
         return INTEGER(-1);
     }
 }
