@@ -74,6 +74,15 @@ fi
 
 sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q -V 0 -n/' Makefile
 sed -i 's/@echo Creating dependency file for '\''$<'\''; /@/' Makefile
+sed -i 's/if $(CXX) $(LDFLAGS)/@if $(CXX) $(LDFLAGS)/g' Makefile
+sed -i 's/-$(RM)/-@$(RM)/g' Makefile
+sed -i 's/$(CXX) -shared -o/@$(CXX) -shared -o/g' Makefile
+sed -i 's/$(CXX) -c/@$(CXX) -c/g' Makefile
+
+
+
+
+
 #sed -i 's/^$(CXX)/@$(CXX)/g' Makefile
 # sed -i '/^[[:space:]]*$(CXX)/ s/^/@/' Makefile
 # sed -i '/^[[:space:]]*\$(CXX)/ {s/^\([[:space:]]*\)@\?\(\$(CXX)\)/\1@\2/}' Makefile
