@@ -37,7 +37,7 @@ if [ -z "$USE_CCACHE" ] && which ccache 2>/dev/null; then
 	USE_CCACHE=1
 fi
 
-ttcn3_makefilegen -g -p -l -U 8 -f $*
+ttcn3_makefilegen -g -p -l -U 8 -f -w $*
 
 sed -i -e 's/# TTCN3_DIR = /TTCN3_DIR = \/usr/' Makefile
 sed -i -e 's/LDFLAGS = /LDFLAGS = -L \/usr\/lib\/titan/' Makefile
@@ -71,3 +71,10 @@ if [ "x$USE_CCACHE" = "x1" ]; then
 	# inside comments in the generated C++ code which interfere with ccache.
 	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -D/' Makefile
 fi
+
+sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q -V 0 -n/' Makefile
+sed -i 's/@echo Creating dependency file for '\''$<'\''; /@/' Makefile
+#sed -i 's/^$(CXX)/@$(CXX)/g' Makefile
+# sed -i '/^[[:space:]]*$(CXX)/ s/^/@/' Makefile
+# sed -i '/^[[:space:]]*\$(CXX)/ {s/^\([[:space:]]*\)@\?\(\$(CXX)\)/\1@\2/}' Makefile
+
