@@ -1110,7 +1110,7 @@ class CertificateUtil {
 				if (ext == ".pem" || ext == ".crt") {
 					auto fileCerts = loadCertificateChain(entry);
 					for (auto &cert : fileCerts) {
-						printCertificateDetails(cert.get());
+						// printCertificateDetails(cert.get());
 						certificates.push_back(std::move(cert));
 					}
 				}
@@ -1142,7 +1142,7 @@ class CertificateUtil {
 						certificates.push_back(std::unique_ptr<X509, X509Deleter>(cert));
 						Logger::info("Loaded certificate: " + getSubjectName(cert) + " from " +
 							     fpath);
-						printCertificateDetails(cert);
+						// printCertificateDetails(cert);
 					}
 				}
 			} catch (const std::exception &e) {
@@ -1184,7 +1184,7 @@ class CertificateUtil {
 
 	// Build certificate chain using AKI/SKI or issuer/subject matching
 	static STACK_OF(X509) *
-		buildCertificateChain(X509 *cert, const std::vector<X509 *> &certPool, bool verbose = true)
+		buildCertificateChain(X509 *cert, const std::vector<X509 *> &certPool, bool verbose = false)
 	{
 		STACK_OF(X509) *chain = sk_X509_new_null();
 		if (!chain) {
@@ -1271,7 +1271,7 @@ class CertificateUtil {
 	// Enhanced certificate chain verification that discovers the chain
 	// automatically
 	static bool verifyCertificateChainDynamic(X509 *cert, const std::vector<X509 *> &certPool,
-						  X509 *rootCA = nullptr, bool verbose = true, bool testMode = true)
+						  X509 *rootCA = nullptr, bool verbose = false, bool testMode = true)
 	{
 		Logger::info("Verifying certificate chain with dynamic discovery...");
 		Logger::info("Target certificate: " + getSubjectName(cert));
@@ -3643,8 +3643,9 @@ class RSPClient {
 				throw OpenSSLError("Failed to extract public key from certificate");
 			}
 
-			Logger::info("----------- using this cert to verify sig: -----------");
-			CertificateUtil::printCertificateDetails(scertdata);
+			auto ski = CertificateUtil::getSubjectKeyIdentifier(scertdata);
+			Logger::info("----------- using cert with this SKI to verify sig: " + HexUtil::bytesToHex(ski));
+			// CertificateUtil::printCertificateDetails(scertdata);
 
 			auto verifyResult = CertificateUtil::verify_TR031111(
 				signedData, std::vector<unsigned char>(signatureData, signatureData + signatureLen),

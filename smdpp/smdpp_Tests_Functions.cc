@@ -1300,7 +1300,7 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& c
 
         // Enable test mode to handle name constraint violations gracefully
         bool result = CertificateUtil::verifyCertificateChainDynamic(
-            certObj.get(), certPoolRaw, rootObj.get(), true, true); // verbose=true, testMode=true
+            certObj.get(), certPoolRaw, rootObj.get(), false, true); // verbose=false, testMode=true
 
         return BOOLEAN(result);
     } catch (const std::exception& e) {
@@ -1326,7 +1326,7 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTET
 
         // Enable test mode to handle name constraint violations gracefully
         bool result = CertificateUtil::verifyCertificateChainDynamic(
-            certObj.get(), certPool, rootObj.get(), true, true); // verbose=true, testMode=true
+            certObj.get(), certPool, rootObj.get(), false, true); // verbose=false, testMode=true
 
         return BOOLEAN(result);
     } catch (const std::exception& e) {
