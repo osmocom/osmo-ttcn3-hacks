@@ -72,6 +72,10 @@ OCTETSTRING enc__NGAP__PDUSessionResourceSetupRequestTransfer__IEs(const NGAP__I
 	pdu.encode(NGAP__IEs::PDUSessionResourceSetupRequestTransfer_protocolIEs_descr_, TTCN_buf,
 		   TTCN_EncDec::CT_BER, BER_ENCODE_DER);
 
+	for (int i = 0; i < TTCN_buf.get_len(); i++)
+		printf(" %02x", TTCN_buf.get_data()[i]);
+	printf("\n");
+
 	aper_buf_len = fftranscode_ber2aper(FFTRANSC_T_NGAP, &aper_buf, TTCN_buf.get_data(), TTCN_buf.get_len());
 	if (aper_buf_len < 0) {
 		TTCN_error("fftranscode failed.");
