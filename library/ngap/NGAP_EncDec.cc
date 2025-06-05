@@ -61,7 +61,7 @@ NGAP__PDU__Descriptions::NGAP__PDU dec__NGAP__PDU(const OCTETSTRING &stream)
 	return ret_dcc;
 }
 
-OCTETSTRING enc_NGAP_PDUSessionResourceSetupRequestTransfer_IEs(const NGAP__IEs::PDUSessionResourceSetupRequestTransfer &pdu)
+OCTETSTRING enc__NGAP__PDUSessionResourceSetupRequestTransfer__IEs(const NGAP__IEs::PDUSessionResourceSetupRequestTransfer &pdu)
 {
 	uint8_t *aper_buf;
 	int aper_buf_len;
