@@ -23,7 +23,7 @@ rm -f .gitignore
 gen_link() {
 	src="$1"
 	f="$2"
-	echo "Linking $f"
+#	echo "Linking $f"
 	ln -sf "$src" "$f"
 	echo "$f" >> .gitignore
 }
