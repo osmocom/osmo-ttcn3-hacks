@@ -58,7 +58,7 @@ modulepar {
 	integer mp_local_ngap_port := 50000;
 	GsmMcc mp_mcc := '999'H;
 	GsmMnc mp_mnc := '70'H;
-	hexstring mp_imsi := '999700000000000'H;
+	HEX15n mp_imsi := '999700000000000'H;
 	octetstring mp_usim_key := '762a2206fe0b4151ace403c86a11e479'O;
 	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
 	uint24_t mp_tac := 1;
@@ -73,7 +73,8 @@ type record NGRANParams {
 
 /* parameters of emulated UE */
 type record UeParams {
-	hexstring imsi,
+	HEX15n imsi,
+	HEX16n imeisv,
 	octetstring usim_key,
 	octetstring usim_opc,
 	charstring ue_ip,
@@ -85,6 +86,7 @@ type record UeParams {
 template (value) UeParams ts_UeParams(integer imsi_suffix) :=
 {
 	imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), imsi_suffix),
+	imeisv := f_rnd_imeisv(),
 	usim_key := mp_usim_key,
 	usim_opc := mp_usim_opc,
 	ue_ip := "192.168.123.50",
@@ -245,6 +247,24 @@ private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
 	return plmn_id & '21430001'O & imsi_suffix;
 }
 
+private function f_UE_SecurityCapability() runs on ConnHdlr return NG_UE_SecurityCapability {
+	var template (value) NG_UE_SecurityCapability ue_sec_cap;
+	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
+						     ngiaCap := '40'O /* ONLY NIA1 supported */);
+	return valueof(ue_sec_cap);
+}
+
+private function f_ULI() runs on ConnHdlr return UserLocationInformation {
+	var template (value) UserLocationInformation p_ueLocInf
+	p_ueLocInf := m_uPTransportLayerInformation_userLocationInformationNR(
+			m_userLocationInformationNR(
+				g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI,
+				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
+
+	));
+	return valueof(p_ueLocInf);
+}
+
 friend function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
 	var template (present) NGAP_IEs.Cause exp_cause := ?;
 	var boolean exp_fail := false;
@@ -375,35 +395,44 @@ private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
 		};
 		NGAP.send(cfg);
 
-		/* TODO: Tx Security Mode Complete */
+		var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+		var NAS_PDU nas_pdu;
+		nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
+							g_pars.kset_id.nasKeySetId,
+							g_pars.kset_id.tsc,
+							cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
+										 f_SUCI_IMSI()),
+							p_UESecurityCap := f_UE_SecurityCapability());
+		nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+		NGAP.send(cs_NG_SECURITY_MODE_COMPLETE(cs_NG_MobileIdentityTLV_IMEISV(hex2oct(g_pars.ue_pars.imeisv)),
+										      cs_ReplayedNASMessageContainerTLV(nas_pdu)));
+	}
+}
+
+private altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	[] NGAP.receive(cr_NG_CONFIGURATION_UPDATE_COMMAND) -> value rx_nas {
+		NGAP.send(cs_NG_CONFIGURATION_UPDATE_COMPLETE);
 	}
 }
 
 private function f_register() runs on ConnHdlr {
-	var template (value) UserLocationInformation p_ueLocInf;
-	var template (value) NG_UE_SecurityCapability ue_sec_cap;
 	var template (value) NGAP_PDU tx_pdu;
 	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
 	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas;
 
-	p_ueLocInf := m_uPTransportLayerInformation_userLocationInformationNR(
-			m_userLocationInformationNR(
-				g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI,
-				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
-
-	));
-	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
-						     ngiaCap := '40'O /* ONLY NIA1 supported */);
 	nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
 						 g_pars.kset_id.nasKeySetId,
 						 g_pars.kset_id.tsc,
 						 cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
 									  f_SUCI_IMSI()),
-						 p_UESecurityCap := ue_sec_cap);
+						 p_UESecurityCap := f_UE_SecurityCapability());
 	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
 	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.c5g_idx,
 						       nas_pdu, /* Registration request */
-						       p_ueLocInf,
+						       f_ULI(),
 						       mo_Signalling));
 	NGAP.send(tx_pdu);
 
@@ -420,7 +449,12 @@ private function f_register() runs on ConnHdlr {
 	as_ngap_handle_auth();
 	as_ngap_handle_sec_mode();
 
-	/* TODO: handle Auth, SecurityModeCommand, InitialContextSetup, PDUSessionresource, */
+	NGAP.receive(cr_NG_REGISTRATION_ACCEPT) -> value rx_nas;
+	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
+
+	as_ngap_handle_configuration_update();
+
+	/* TODO: PDU session establishment request */
 	f_sleep(5.0);
 }
 
