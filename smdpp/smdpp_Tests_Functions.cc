@@ -2,12 +2,16 @@
  * IMPLEMENTATION FILE: smdpp_Tests_Functions.cc
  * TTCN-3 External Function Implementations
  * ============================================================================ */
-
-#include "smdpp_Tests_Functions.hh"
-#include "smdvalcpp2.cpp" // Your existing RSP implementation
+#include <memory>
+#include <map>
+#include <mutex>
 
 #include <iostream>
 #include <cstring>
+
+#include <TTCN3.hh>
+#include "smdvalcpp2.cpp" // Your existing RSP implementation
+
 
 using namespace RspCrypto;
 
@@ -15,6 +19,29 @@ using namespace RspCrypto;
  * RSP CLIENT REGISTRY IMPLEMENTATION
  * ============================================================================ */
 namespace smdpp__Tests {
+
+
+class RSPClientRegistry {
+public:
+    static RSPClientRegistry& getInstance();
+
+    int createClient(const std::string& serverUrl, unsigned int serverPort,
+                    const std::string& certPath, const std::string& nameFilter);
+
+    RspCrypto::RSPClient* getClient(int handle);
+
+    bool destroyClient(int handle);
+
+    void destroyAllClients();
+
+private:
+    RSPClientRegistry() = default;
+    ~RSPClientRegistry();
+
+    std::mutex m_mutex;
+    std::map<int, std::unique_ptr<RspCrypto::RSPClient>> m_clients;
+    int m_nextHandle = 1;
+};
 
 RSPClientRegistry& RSPClientRegistry::getInstance() {
     static RSPClientRegistry instance;
