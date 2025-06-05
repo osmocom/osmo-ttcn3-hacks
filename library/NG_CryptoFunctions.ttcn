@@ -121,6 +121,19 @@ function f_NG_NAS_mac_calc(NG_NAS_ALG_INT alg, OCT32 k_nas_int, integer seq_nr,
 	}
 }
 
+function f_NG_NAS_encrypt(NG_NAS_ALG_ENC alg, octetstring k_nas_enc, integer count,
+			integer bearer, boolean is_downlink, inout octetstring data) {
+	select (alg) {
+	case (NG_NAS_ALG_ENC_NEA0) { }
+	case (NG_NAS_ALG_ENC_NEA1) {
+		f_snow_3g_f8(k_nas_enc, count, bearer, is_downlink, data);
+		}
+	case else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unsupported EEA: ", alg));
+		}
+	}
+}
+
 /*********************************************************************************
  * high-level API (full NAS encapsulation/decapsulation)
  *********************************************************************************/
@@ -236,27 +249,29 @@ function f_NG_NAS_try_decaps_dl(inout NG_NAS_UE_State nus, NG_NAS_DL_Message_Typ
 		nus.rx_count := nus.rx_count + 1;
 		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
 		}
-//	case ('0010'B) { /* IP + ciphered */
-//		nus.new_ctx := false;
-//		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
-//			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
-//		}
-//		nus.rx_count := nus.rx_count + 1;
-//		f_nas_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count, 0,
-//			      f_rx_is_downlink(nus), secp_nas.nAS_Message);
-//		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
-//		}
-//	case ('0100'B) { /* IP + ciphered; new EPS security context */
-//		nus.new_ctx := true;
-//		nus.rx_count := 0;
-//		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
-//			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
-//		}
-//		f_nas_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count, 0,
-//			      f_rx_is_downlink(nus), secp_nas.nAS_Message);
-//		nus.rx_count := nus.rx_count + 1;
-//		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
-//		}
+	case ('0010'B) { /* IP + ciphered */
+		nus.new_ctx := false;
+		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+		}
+		nus.rx_count := nus.rx_count + 1;
+		f_NG_NAS_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count,
+				 bit2int(tsc_NG_RegResult_3GPP),
+				 f_rx_is_downlink(nus), secp_nas.plainNASMessage);
+		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+		}
+	case ('0100'B) { /* IP + ciphered; new EPS security context */
+		nus.new_ctx := true;
+		nus.rx_count := 0;
+		if (not f_NG_NAS_check_ip(nus, secp_nas)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_NG_NAS_check_ip() failed");
+		}
+		f_NG_NAS_encrypt(nus.alg_enc, nus.k_nas_enc, nus.rx_count,
+				 bit2int(tsc_NG_RegResult_3GPP),
+				 f_rx_is_downlink(nus), secp_nas.plainNASMessage);
+		nus.rx_count := nus.rx_count + 1;
+		return dec_NG_NAS_DL_Message_Type(secp_nas.plainNASMessage);
+		}
 	//case ('0101'B) { /* IP + partially ciphered */ }
 	//case ('1100'B) { /* Service Request Message */ }
 	case else  {
@@ -264,6 +279,65 @@ function f_NG_NAS_try_decaps_dl(inout NG_NAS_UE_State nus, NG_NAS_DL_Message_Typ
 		mtc.stop; /* make compiler happy about not returning. */
 		}
 	}
+}
+
+private function f_NG_NAS_determine_sec_hdr_t(boolean encrypt, boolean authenticate, boolean new_ctx)
+return BIT4
+{
+	if (encrypt == false and authenticate == false and new_ctx == false) {
+		return '0000'B;
+	} else if (encrypt == false and authenticate == true and new_ctx == false) {
+		return '0001'B;
+	} else if (encrypt == false and authenticate == true and new_ctx == true) {
+		return '0011'B;
+	} else if (encrypt == true and authenticate == true and new_ctx == true) {
+		return '0100'B;
+	} else if (encrypt == true and authenticate == true and new_ctx == false) {
+		return '0010'B;
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Invalid sec_hdr conditions");
+		return '0000'B; /* never reached, make compiler happy */
+	}
+}
+
+/* encapsulate a NAS message (encrypt, MAC) */
+function f_NG_NAS_encaps_ul(inout NG_NAS_UE_State nus, NG_NAS_UL_Message_Type nas_in)
+return NG_NAS_UL_Message_Type
+{
+	var BIT4 sec_hdr_t;
+	var OCT4 mac;
+	var NG_NAS_UL_Message_Type nas_out;
+
+	if (nus.use_enc == false and nus.use_int == false) {
+		return nas_in;
+	}
+
+	if (nus.new_ctx) {
+		nus.tx_count := 0;
+	}
+
+	var octetstring nas_enc := enc_NG_NAS_UL_Message_Type(nas_in)
+	if (nus.use_enc) {
+		f_NG_NAS_encrypt(nus.alg_enc, nus.k_nas_enc, nus.tx_count,
+				 bit2int(tsc_NG_RegResult_3GPP),
+				 f_tx_is_downlink(nus), nas_enc);
+	}
+
+	if (not nus.use_int) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Not supported");
+	}
+
+	sec_hdr_t := f_NG_NAS_determine_sec_hdr_t(nus.use_enc, nus.use_int, nus.new_ctx);
+	mac := f_NG_NAS_mac_calc(nus.alg_int, nus.k_nas_int, nus.tx_count,
+				 bit2int(tsc_NG_RegResult_3GPP),
+				 f_tx_is_downlink(nus), '00'O & nas_enc);
+	nas_out := valueof(cs_NG_SECURITY_PROTECTED_NAS_MESSAGE(tsc_EPD_GMM,
+								sec_hdr_t,
+								mac,
+								int2oct(nus.tx_count, 1),
+								nas_enc));
+
+	return nas_out;
 }
 
 }
