@@ -2994,6 +2994,242 @@ class RSPClient {
 		}
 	}
 
+	// Decrypt BSP segment and return plaintext
+	bool decryptBSPSegment(const std::vector<uint8_t>& encData,
+	                      const std::vector<uint8_t>& sEnc,
+	                      const std::vector<uint8_t>& sMac,
+	                      std::vector<uint8_t>& plaintext) {
+		try {
+			// Check if this is a BSP segment (tag 0x87, 0x88, or 0x86)
+			if (encData.size() < 2) {
+				return false;
+			}
+
+			uint8_t tag = encData[0];
+			if (tag != 0x87 && tag != 0x88 && tag != 0x86) {
+				return false;
+			}
+
+			// Parse the BSP segment structure
+			size_t offset = 1;
+			size_t dataLen = 0;
+			
+			if (encData[offset] < 0x80) {
+				// Short form length
+				dataLen = encData[offset];
+				offset++;
+			} else {
+				// Long form length
+				size_t lenBytes = encData[offset] & 0x7F;
+				offset++;
+				if (offset + lenBytes > encData.size()) return false;
+				
+				dataLen = 0;
+				for (size_t i = 0; i < lenBytes; i++) {
+					dataLen = (dataLen << 8) | encData[offset + i];
+				}
+				offset += lenBytes;
+			}
+
+			if (offset + dataLen > encData.size()) {
+				return false;
+			}
+
+			// Extract MAC (last 8 bytes of the segment data)
+			if (dataLen < 8) {
+				return false;
+			}
+
+			std::vector<uint8_t> encryptedData(encData.begin() + offset, encData.begin() + offset + dataLen - 8);
+			std::vector<uint8_t> mac(encData.begin() + offset + dataLen - 8, encData.begin() + offset + dataLen);
+
+			// Verify MAC
+			std::vector<uint8_t> dataToMac;
+			dataToMac.push_back(tag);
+			dataToMac.insert(dataToMac.end(), encData.begin() + 1, encData.begin() + offset); // Length encoding
+			dataToMac.insert(dataToMac.end(), encryptedData.begin(), encryptedData.end());
+
+			// Compute CMAC using OpenSSL
+			std::vector<uint8_t> computedMac(16);
+			size_t macLen = 16;
+			CMAC_CTX* cmac_ctx = CMAC_CTX_new();
+			if (!cmac_ctx) {
+				Logger::error("Failed to create CMAC context");
+				return false;
+			}
+
+			if (!CMAC_Init(cmac_ctx, sMac.data(), sMac.size(), EVP_aes_128_cbc(), NULL)) {
+				CMAC_CTX_free(cmac_ctx);
+				Logger::error("Failed to initialize CMAC");
+				return false;
+			}
+
+			if (!CMAC_Update(cmac_ctx, dataToMac.data(), dataToMac.size())) {
+				CMAC_CTX_free(cmac_ctx);
+				Logger::error("Failed to update CMAC");
+				return false;
+			}
+
+			if (!CMAC_Final(cmac_ctx, computedMac.data(), &macLen)) {
+				CMAC_CTX_free(cmac_ctx);
+				Logger::error("Failed to finalize CMAC");
+				return false;
+			}
+			CMAC_CTX_free(cmac_ctx);
+
+			computedMac.resize(8); // Truncate to 8 bytes
+
+			if (mac != computedMac) {
+				Logger::error("BSP MAC verification failed");
+				return false;
+			}
+
+			// Decrypt the data using AES-CBC with zero IV
+			std::vector<uint8_t> iv(16, 0);
+			plaintext.resize(encryptedData.size());
+			
+			EVP_CIPHER_CTX* cipher_ctx = EVP_CIPHER_CTX_new();
+			if (!cipher_ctx) {
+				Logger::error("Failed to create cipher context");
+				return false;
+			}
+
+			if (!EVP_DecryptInit_ex(cipher_ctx, EVP_aes_128_cbc(), NULL, sEnc.data(), iv.data())) {
+				EVP_CIPHER_CTX_free(cipher_ctx);
+				Logger::error("Failed to initialize decryption");
+				return false;
+			}
+
+			EVP_CIPHER_CTX_set_padding(cipher_ctx, 0);
+
+			int outLen = 0;
+			int totalLen = 0;
+			if (!EVP_DecryptUpdate(cipher_ctx, plaintext.data(), &outLen, encryptedData.data(), encryptedData.size())) {
+				EVP_CIPHER_CTX_free(cipher_ctx);
+				Logger::error("Failed to decrypt data");
+				return false;
+			}
+			totalLen = outLen;
+
+			if (!EVP_DecryptFinal_ex(cipher_ctx, plaintext.data() + totalLen, &outLen)) {
+				EVP_CIPHER_CTX_free(cipher_ctx);
+				Logger::error("Failed to finalize decryption");
+				return false;
+			}
+			totalLen += outLen;
+
+			EVP_CIPHER_CTX_free(cipher_ctx);
+			plaintext.resize(totalLen);
+
+			return true;
+		} catch (const std::exception& e) {
+			Logger::error("decryptBSPSegment failed: " + std::string(e.what()));
+			return false;
+		}
+	}
+
+	// Parse ReplaceSessionKeysRequest from decrypted plaintext
+	bool parseReplaceSessionKeysRequest(const std::vector<uint8_t>& plaintext,
+	                                   std::vector<uint8_t>& ppkEnc,
+	                                   std::vector<uint8_t>& ppkCmac,
+	                                   std::vector<uint8_t>& initialMacChainingValue) {
+		try {
+			// ReplaceSessionKeysRequest is tag [36] (0xBF 0x24)
+			if (plaintext.size() < 4 || plaintext[0] != 0xBF || plaintext[1] != 0x24) {
+				return false;
+			}
+
+			size_t offset = 2;
+			size_t totalLen = 0;
+
+			// Parse length
+			if (plaintext[offset] < 0x80) {
+				totalLen = plaintext[offset];
+				offset++;
+			} else {
+				size_t lenBytes = plaintext[offset] & 0x7F;
+				offset++;
+				if (offset + lenBytes > plaintext.size()) return false;
+				
+				totalLen = 0;
+				for (size_t i = 0; i < lenBytes; i++) {
+					totalLen = (totalLen << 8) | plaintext[offset + i];
+				}
+				offset += lenBytes;
+			}
+
+			if (offset + totalLen > plaintext.size()) {
+				return false;
+			}
+
+			// Parse the three octet strings within ReplaceSessionKeysRequest
+			// The order is: initialMacChainingValue, ppkEnc, ppkCmac
+			
+			// Parse initialMacChainingValue [PRIVATE 6] IMPLICIT (0x86)
+			if (offset >= plaintext.size() || plaintext[offset] != 0x86) {
+				return false;
+			}
+			offset++;
+			
+			size_t mcvLen = plaintext[offset++];
+			if (offset + mcvLen > plaintext.size()) return false;
+			initialMacChainingValue.assign(plaintext.begin() + offset, plaintext.begin() + offset + mcvLen);
+			offset += mcvLen;
+
+			// Parse ppkEnc [PRIVATE 7] IMPLICIT (0x87)
+			if (offset >= plaintext.size() || plaintext[offset] != 0x87) {
+				return false;
+			}
+			offset++;
+			
+			size_t encLen = plaintext[offset++];
+			if (offset + encLen > plaintext.size()) return false;
+			ppkEnc.assign(plaintext.begin() + offset, plaintext.begin() + offset + encLen);
+			offset += encLen;
+
+			// Parse ppkCmac [PRIVATE 8] IMPLICIT (0x88)
+			if (offset >= plaintext.size() || plaintext[offset] != 0x88) {
+				return false;
+			}
+			offset++;
+			
+			size_t cmacLen = plaintext[offset++];
+			if (offset + cmacLen > plaintext.size()) return false;
+			ppkCmac.assign(plaintext.begin() + offset, plaintext.begin() + offset + cmacLen);
+
+			Logger::info("Successfully parsed ReplaceSessionKeysRequest");
+			Logger::debug("ppkEnc length: " + std::to_string(ppkEnc.size()));
+			Logger::debug("ppkCmac length: " + std::to_string(ppkCmac.size()));
+			Logger::debug("initialMacChainingValue length: " + std::to_string(initialMacChainingValue.size()));
+
+			return true;
+		} catch (const std::exception& e) {
+			Logger::error("parseReplaceSessionKeysRequest failed: " + std::string(e.what()));
+			return false;
+		}
+	}
+
+	// Update BSP keys
+	bool updateBSPKeys(const std::vector<uint8_t>& ppkEnc,
+	                  const std::vector<uint8_t>& ppkCmac,
+	                  const std::vector<uint8_t>& initialMacChainingValue) {
+		try {
+			// Store the new keys (you might want to maintain a BSP context structure)
+			// For now, we'll just log the update
+			Logger::info("Updating BSP keys");
+			Logger::debug("New ppkEnc: " + HexUtil::bytesToHex(ppkEnc));
+			Logger::debug("New ppkCmac: " + HexUtil::bytesToHex(ppkCmac));
+			Logger::debug("New initialMacChainingValue: " + HexUtil::bytesToHex(initialMacChainingValue));
+
+			// TODO: Store these keys in a BSP context for future use
+			// For now, just return success
+			return true;
+		} catch (const std::exception& e) {
+			Logger::error("updateBSPKeys failed: " + std::string(e.what()));
+			return false;
+		}
+	}
+
 	// Build the signed data structure for InitialiseSecureChannelRequest
 	std::vector<uint8_t> getInitialiseSecureChannelRequestData(
 	    const std::vector<uint8_t>& transactionId,

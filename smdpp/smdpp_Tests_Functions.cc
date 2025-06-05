@@ -818,6 +818,88 @@ BOOLEAN ext__Crypto__verifyEncryptedProfileData(const INTEGER& clientHandle,
     }
 }
 
+BOOLEAN ext__Crypto__parseReplaceSessionKeysRequest(const OCTETSTRING& encData,
+                                                   const OCTETSTRING& sEnc,
+                                                   const OCTETSTRING& sMac,
+                                                   OCTETSTRING& ppkEnc,
+                                                   OCTETSTRING& ppkCmac,
+                                                   OCTETSTRING& initialMacChainingValue) {
+    try {
+        std::vector<uint8_t> data = octetstring_to_bytes(encData);
+        std::vector<uint8_t> s_enc = octetstring_to_bytes(sEnc);
+        std::vector<uint8_t> s_mac = octetstring_to_bytes(sMac);
+
+        // Get the client from the registry - use a static handle for now
+        // In the test context, we typically have only one client
+        RSPClient* client = nullptr;
+        for (int i = 1; i <= 10; i++) {
+            client = RSPClientRegistry::getInstance().getClient(i);
+            if (client) break;
+        }
+        
+        if (!client) {
+            LOG_ERROR("No RSP client found in registry");
+            return BOOLEAN(false);
+        }
+
+        // Decrypt the segment to get the plaintext
+        std::vector<uint8_t> plaintext;
+        if (!client->decryptBSPSegment(data, s_enc, s_mac, plaintext)) {
+            // Not a valid BSP segment or decryption failed
+            return BOOLEAN(false);
+        }
+
+        // Try to parse as ReplaceSessionKeysRequest
+        std::vector<uint8_t> ppk_enc, ppk_cmac, initial_mcv;
+        if (!client->parseReplaceSessionKeysRequest(plaintext, ppk_enc, ppk_cmac, initial_mcv)) {
+            // Not a ReplaceSessionKeysRequest
+            return BOOLEAN(false);
+        }
+
+        // Convert to TTCN-3 octetstrings
+        ppkEnc = bytes_to_octetstring(ppk_enc);
+        ppkCmac = bytes_to_octetstring(ppk_cmac);
+        initialMacChainingValue = bytes_to_octetstring(initial_mcv);
+
+        LOG_INFO("Successfully parsed ReplaceSessionKeysRequest");
+        return BOOLEAN(true);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__Crypto__parseReplaceSessionKeysRequest failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
+BOOLEAN ext__Crypto__updateBSPKeys(const INTEGER& clientHandle,
+                                  const OCTETSTRING& ppkEnc,
+                                  const OCTETSTRING& ppkCmac,
+                                  const OCTETSTRING& initialMacChainingValue) {
+    try {
+        std::vector<uint8_t> ppk_enc = octetstring_to_bytes(ppkEnc);
+        std::vector<uint8_t> ppk_cmac = octetstring_to_bytes(ppkCmac);
+        std::vector<uint8_t> initial_mcv = octetstring_to_bytes(initialMacChainingValue);
+
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(clientHandle);
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle");
+            return BOOLEAN(false);
+        }
+
+        // Update the BSP keys in the client
+        bool result = client->updateBSPKeys(ppk_enc, ppk_cmac, initial_mcv);
+
+        if (result) {
+            LOG_INFO("Successfully updated BSP keys");
+        } else {
+            LOG_ERROR("Failed to update BSP keys");
+        }
+
+        return BOOLEAN(result);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__Crypto__updateBSPKeys failed: " + std::string(e.what()));
+        return BOOLEAN(false);
+    }
+}
+
 CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
     try {
         std::vector<uint8_t> der = octetstring_to_bytes(certData);

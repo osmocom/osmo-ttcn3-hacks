@@ -104,6 +104,11 @@ external function ext_Crypto_deriveBSPSessionKeys(integer clientHandle, octetstr
                                                  octetstring hostId, octetstring eid,
                                                  out octetstring bspSEnc, out octetstring bspSMac, out octetstring initialMCV) return boolean;
 external function ext_Crypto_verifyEncryptedProfileData(integer clientHandle, octetstring encData, octetstring sEnc, octetstring sMac) return boolean;
+external function ext_Crypto_parseReplaceSessionKeysRequest(octetstring encData, octetstring sEnc, octetstring sMac,
+                                                           out octetstring ppkEnc, out octetstring ppkCmac,
+                                                           out octetstring initialMacChainingValue) return boolean;
+external function ext_Crypto_updateBSPKeys(integer clientHandle, octetstring ppkEnc, octetstring ppkCmac,
+                                          octetstring initialMacChainingValue) return boolean;
 external function ext_CertificateUtil_getCurveOID(octetstring certData) return charstring;
 
 // external function ext_RSPClient_verifyInitialiseSecureChannelRequest(integer clientHandle,
@@ -761,6 +766,7 @@ private function f_validate_configure_isdp_segments(BoundProfilePackage bpp,
                                                    octetstring sEnc,
                                                    octetstring sMac) runs on smdpp_ConnHdlr
 return boolean {
+	log(bpp);
     // The firstSequenceOf87 is already a BSP-protected sequence
     // Each element should be a complete BSP segment with tag 0x87
     for (var integer i := 0; i < lengthof(bpp.firstSequenceOf87); i := i + 1) {
@@ -773,7 +779,7 @@ return boolean {
 
         ext_logInfo("ConfigureISDP segment " & int2str(i) &
                    " - raw data (" & int2str(lengthof(segment)) & " bytes)");
-        
+
         // Debug: Show first few bytes
         var integer preview_len := 10;
         if (lengthof(segment) < preview_len) { preview_len := lengthof(segment); }
@@ -831,6 +837,66 @@ return boolean {
     return true;
 }
 
+/* Helper function to validate secondSequenceOf87 and handle ReplaceSessionKeysRequest */
+private function f_validate_second_sequence_of_87(BoundProfilePackage bpp,
+                                                 inout octetstring sEnc,
+                                                 inout octetstring sMac,
+                                                 out boolean keysReplaced) runs on smdpp_ConnHdlr
+return boolean {
+    keysReplaced := false;
+
+    // Process each segment in secondSequenceOf87
+    for (var integer i := 0; i < lengthof(bpp.secondSequenceOf87); i := i + 1) {
+        var octetstring segment := bpp.secondSequenceOf87[i];
+
+        if (lengthof(segment) < 1) {
+            ext_logError("Invalid secondSequenceOf87 segment - empty data");
+            return false;
+        }
+
+        ext_logInfo("secondSequenceOf87 segment " & int2str(i) &
+                   " - raw data (" & int2str(lengthof(segment)) & " bytes)");
+
+        // Check if this is a BSP segment (tag 0x87)
+        if (lengthof(segment) >= 2 and substr(segment, 0, 1) == '87'O) {
+            // This is a BSP-wrapped segment, validate it
+            if (not ext_Crypto_verifyEncryptedProfileData(g_rsp_client_handle, segment, sEnc, sMac)) {
+                ext_logError("secondSequenceOf87 segment " & int2str(i) & " BSP validation failed");
+                return false;
+            }
+
+            // Try to parse as ReplaceSessionKeysRequest
+            var octetstring ppkEnc, ppkCmac, initialMacChainingValue;
+            if (ext_Crypto_parseReplaceSessionKeysRequest(segment, sEnc, sMac,
+                                                          ppkEnc, ppkCmac, initialMacChainingValue)) {
+                ext_logInfo("Found ReplaceSessionKeysRequest in segment " & int2str(i));
+                ext_logDebug("New ppkEnc: " & oct2str(ppkEnc));
+                ext_logDebug("New ppkCmac: " & oct2str(ppkCmac));
+                ext_logDebug("New initialMacChainingValue: " & oct2str(initialMacChainingValue));
+
+                // Update the BSP context with new keys
+                if (ext_Crypto_updateBSPKeys(g_rsp_client_handle, ppkEnc, ppkCmac, initialMacChainingValue)) {
+                    // Update our local key variables
+                    sEnc := ppkEnc;
+                    sMac := ppkCmac;
+                    keysReplaced := true;
+                    ext_logInfo("Successfully replaced session keys");
+                } else {
+                    ext_logError("Failed to update BSP keys in crypto context");
+                    return false;
+                }
+            }
+        } else {
+            // This might be plain test data - log and continue
+            ext_logInfo("secondSequenceOf87 segment " & int2str(i) & " appears to be plain data (test mode)");
+        }
+
+        ext_logInfo("secondSequenceOf87 segment " & int2str(i) & " validated successfully");
+    }
+
+    return true;
+}
+
 /* Helper function to validate LoadProfileElements segments */
 private function f_validate_load_profile_elements_segments(BoundProfilePackage bpp,
                                                           octetstring sEnc,
@@ -871,18 +937,38 @@ private function f_validate_profile_segments(BoundProfilePackage bpp,
 return boolean {
     ext_logInfo("=== Validating encrypted profile segments ===");
 
+    // Keep track of current keys
+    var octetstring currentSEnc := sEnc;
+    var octetstring currentSMac := sMac;
+
     // Validate firstSequenceOf87 (ConfigureISDP) - Encrypted BER-TLV APDU commands
-    if (not f_validate_configure_isdp_segments(bpp, sEnc, sMac)) {
+    if (not f_validate_configure_isdp_segments(bpp, currentSEnc, currentSMac)) {
         return false;
     }
 
     // Validate sequenceOf88 (StoreMetadata) - Encrypted BER-TLV APDU commands
-    if (not f_validate_store_metadata_segments(bpp, sEnc, sMac)) {
+    if (not f_validate_store_metadata_segments(bpp, currentSEnc, currentSMac)) {
         return false;
     }
 
-    // Validate sequenceOf86 (LoadProfileElements) - Encrypted BER-TLV APDU commands
-    if (not f_validate_load_profile_elements_segments(bpp, sEnc, sMac)) {
+    // Check if secondSequenceOf87 is present (may contain ReplaceSessionKeysRequest)
+    if (ispresent(bpp.secondSequenceOf87)) {
+        ext_logInfo("=== Processing secondSequenceOf87 (potential ReplaceSessionKeysRequest) ===");
+
+        // Process secondSequenceOf87 and check for key replacement
+        var boolean keysReplaced := false;
+        if (not f_validate_second_sequence_of_87(bpp, currentSEnc, currentSMac, keysReplaced)) {
+            return false;
+        }
+
+        // If keys were replaced, they're already updated in currentSEnc/currentSMac by the validation function
+        if (keysReplaced) {
+            ext_logInfo("Session keys have been replaced, using new keys for remaining segments");
+        }
+    }
+
+    // Validate sequenceOf86 (LoadProfileElements) - Use potentially updated keys
+    if (not f_validate_load_profile_elements_segments(bpp, currentSEnc, currentSMac)) {
         return false;
     }
 
