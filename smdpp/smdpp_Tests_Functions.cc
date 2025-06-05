@@ -275,28 +275,6 @@ INTEGER ext__RSPClient__loadEUICCKeyPair(const INTEGER& clientHandle,
     }
 }
 
-INTEGER ext__RSPClient__loadSMDPKeyAndCertificate(const INTEGER& clientHandle,
-                                                 const CHARSTRING& smdpPrivateKeyPath,
-                                                 const CHARSTRING& smdpCertPath) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::string keyPath = charstring_to_string(smdpPrivateKeyPath);
-        std::string certPath = charstring_to_string(smdpCertPath);
-        client->loadSMDPKeyAndCertificate(keyPath, certPath);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__loadSMDPKeyAndCertificate failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
-}
 
 /* Challenge Generation and Session Management */
 OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle) {
@@ -316,83 +294,6 @@ OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle) {
         return OCTETSTRING(0, nullptr);
     }
 }
-
-OCTETSTRING ext__RSPClient__getTransactionId(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        // Access private member through public interface (would need to add getter)
-        // For now, return empty - this would need RSPClient modification
-        return OCTETSTRING(0, nullptr);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getTransactionId failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-OCTETSTRING ext__RSPClient__getServerChallenge(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        // Access private member through public interface (would need to add getter)
-        // For now, return empty - this would need RSPClient modification
-        return OCTETSTRING(0, nullptr);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getServerChallenge failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-OCTETSTRING ext__RSPClient__getEuiccChallenge(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        // Access private member through public interface (would need to add getter)
-        // For now, return empty - this would need RSPClient modification
-        return OCTETSTRING(0, nullptr);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getEuiccChallenge failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-BOOLEAN ext__RSPClient__isAuthenticationComplete(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return BOOLEAN(false);
-        }
-
-        // Access private member through public interface (would need to add getter)
-        // For now, return false - this would need RSPClient modification
-        return BOOLEAN(false);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__isAuthenticationComplete failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
 
 /* Cryptographic Operations */
 OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
@@ -646,8 +547,6 @@ BOOLEAN ext__CertificateUtil__hasPolicyOID(const OCTETSTRING& certData, const CH
     }
 }
 
-// In smdpp_Tests_Functions.cc, add these functions:
-
 // Verify certificate has correct RSP role OID
 BOOLEAN ext__CertificateUtil__hasRSPRole(const OCTETSTRING& certData, const CHARSTRING& roleOid) {
     try {
@@ -744,54 +643,6 @@ OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
     }
 }
 
-// // MISSING: Derive session keys from shared secret
-// BOOLEAN ext__Crypto__deriveSessionKeys(const OCTETSTRING& sharedSecret,
-//                                       const OCTETSTRING& hostId,
-//                                       OCTETSTRING& sEnc,
-//                                       OCTETSTRING& sMac,
-//                                       OCTETSTRING& sDek) {
-//     try {
-//         std::vector<uint8_t> ss = octetstring_to_bytes(sharedSecret);
-//         std::vector<uint8_t> hid = octetstring_to_bytes(hostId);
-
-//         // Implement key derivation as per GlobalPlatform SCP03
-//         // Using SHA256-based KDF
-
-//         // Derive S-ENC
-//         std::vector<uint8_t> sEncInput = ss;
-//         sEncInput.insert(sEncInput.end(), hid.begin(), hid.end());
-//         sEncInput.push_back(0x01); // Counter for S-ENC
-
-//         unsigned char sEncHash[SHA256_DIGEST_LENGTH];
-//         SHA256(sEncInput.data(), sEncInput.size(), sEncHash);
-//         sEnc = OCTETSTRING(16, sEncHash); // Take first 16 bytes
-
-//         // Derive S-MAC
-//         std::vector<uint8_t> sMacInput = ss;
-//         sMacInput.insert(sMacInput.end(), hid.begin(), hid.end());
-//         sMacInput.push_back(0x02); // Counter for S-MAC
-
-//         unsigned char sMacHash[SHA256_DIGEST_LENGTH];
-//         SHA256(sMacInput.data(), sMacInput.size(), sMacHash);
-//         sMac = OCTETSTRING(16, sMacHash); // Take first 16 bytes
-
-//         // Derive S-DEK
-//         std::vector<uint8_t> sDekInput = ss;
-//         sDekInput.insert(sDekInput.end(), hid.begin(), hid.end());
-//         sDekInput.push_back(0x03); // Counter for S-DEK
-
-//         unsigned char sDekHash[SHA256_DIGEST_LENGTH];
-//         SHA256(sDekInput.data(), sDekInput.size(), sDekHash);
-//         sDek = OCTETSTRING(16, sDekHash); // Take first 16 bytes
-
-//         LOG_INFO("Derived session keys successfully");
-//         return BOOLEAN(true);
-//     } catch (const std::exception& e) {
-//         LOG_ERROR("ext__Crypto__deriveSessionKeys failed: " + std::string(e.what()));
-//         return BOOLEAN(false);
-//     }
-// }
-
 // Verify encrypted profile data using session keys (MAC verification and decryption)
 BOOLEAN ext__Crypto__verifyEncryptedProfileData(const INTEGER& clientHandle,
                                                 const OCTETSTRING& encData,
@@ -836,7 +687,7 @@ BOOLEAN ext__Crypto__parseReplaceSessionKeysRequest(const OCTETSTRING& encData,
             client = RSPClientRegistry::getInstance().getClient(i);
             if (client) break;
         }
-        
+
         if (!client) {
             LOG_ERROR("No RSP client found in registry");
             return BOOLEAN(false);
@@ -914,9 +765,6 @@ CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
 }
 
 
-// Helper functions moved to RSPClient class - these are removed
-
-
 BOOLEAN ext__Crypto__deriveSessionKeys(const INTEGER& clientHandle,
                                         const OCTETSTRING& sharedSecret,
                                       const OCTETSTRING& hostId,
@@ -949,8 +797,6 @@ BOOLEAN ext__Crypto__deriveSessionKeys(const INTEGER& clientHandle,
         return BOOLEAN(false);
     }
 }
-
-// Helper functions moved to RSPClient class - these are removed
 
 BOOLEAN ext__Crypto__deriveBSPSessionKeys(const INTEGER& clientHandle,
                                         const OCTETSTRING& sharedSecret,
@@ -1061,19 +907,6 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTET
     }
 }
 
-INTEGER ext__CertificateUtil__printCertificateDetails(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        CertificateUtil::printCertificateDetails(cert.get());
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__printCertificateDetails failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
-}
-
 BOOLEAN ext__CertificateUtil__verify_TR031111(const OCTETSTRING& message,
                                              const OCTETSTRING& bsiSignature,
                                              const OCTETSTRING& publicKey) {
@@ -1087,77 +920,6 @@ BOOLEAN ext__CertificateUtil__verify_TR031111(const OCTETSTRING& message,
     } catch (const std::exception& e) {
         LOG_ERROR("ext__CertificateUtil__verify_TR031111 failed: " + std::string(e.what()));
         return BOOLEAN(false);
-    }
-}
-
-// /* Utility Functions */
-// OCTETSTRING ext__Base64__decode(const CHARSTRING& b64message) {
-//     try {
-//         std::string b64 = charstring_to_string(b64message);
-//         std::vector<uint8_t> decoded = Base64::decode(b64);
-
-//         return bytes_to_octetstring(decoded);
-//     } catch (const std::exception& e) {
-//         LOG_ERROR("ext__Base64__decode failed: " + std::string(e.what()));
-//         return OCTETSTRING(0, nullptr);
-//     }
-// }
-
-// CHARSTRING ext__Base64__encode(const OCTETSTRING& data) {
-//     try {
-//         std::vector<uint8_t> bytes = octetstring_to_bytes(data);
-//         std::string encoded = Base64::encode(bytes);
-
-//         return string_to_charstring(encoded);
-//     } catch (const std::exception& e) {
-//         LOG_ERROR("ext__Base64__encode failed: " + std::string(e.what()));
-//         return CHARSTRING("");
-//     }
-// }
-
-// OCTETSTRING ext__HexUtil__hexToBytes(const CHARSTRING& hex) {
-//     try {
-//         std::string hexStr = charstring_to_string(hex);
-//         std::vector<uint8_t> bytes = HexUtil::hexToBytes(hexStr);
-
-//         return bytes_to_octetstring(bytes);
-//     } catch (const std::exception& e) {
-//         LOG_ERROR("ext__HexUtil__hexToBytes failed: " + std::string(e.what()));
-//         return OCTETSTRING(0, nullptr);
-//     }
-// }
-
-// CHARSTRING ext__HexUtil__bytesToHex(const OCTETSTRING& bytes) {
-//     try {
-//         std::vector<uint8_t> data = octetstring_to_bytes(bytes);
-//         std::string hex = HexUtil::bytesToHex(data);
-
-//         return string_to_charstring(hex);
-//     } catch (const std::exception& e) {
-//         LOG_ERROR("ext__HexUtil__bytesToHex failed: " + std::string(e.what()));
-//         return CHARSTRING("");
-//     }
-// }
-
-/* OpenSSL Error Handling */
-CHARSTRING ext__OpenSSLErrorHandler__getLastError() {
-    try {
-        std::string error = OpenSSLErrorHandler::getLastError();
-        return string_to_charstring(error);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__OpenSSLErrorHandler__getLastError failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
-INTEGER ext__OpenSSLErrorHandler__printSSLErrors(const CHARSTRING& context) {
-    try {
-        std::string ctx = charstring_to_string(context);
-        OpenSSLErrorHandler::printSSLErrors(ctx);
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__OpenSSLErrorHandler__printSSLErrors failed: " + std::string(e.what()));
-        return INTEGER(-1);
     }
 }
 
@@ -1253,90 +1015,3 @@ void ext__logDebug(const CHARSTRING& message) {
 
 
 }
-/* ============================================================================
- * BUILD CONFIGURATION
- * Makefile for TTCN-3 C++ Integration
- * ============================================================================ */
-
-/*
-# Makefile
-
-# TTCN-3 Tools Configuration
-TTCN3_DIR = /usr/local/ttcn3
-TTCN3_COMPILER = $(TTCN3_DIR)/bin/compiler
-TTCN3_MCTR_CLI = $(TTCN3_DIR)/bin/mctr_cli
-
-# Include directories
-TTCN3_INCLUDES = -I$(TTCN3_DIR)/include
-OPENSSL_INCLUDES = -I/usr/include/openssl
-
-# Libraries
-TTCN3_LIBS = -L$(TTCN3_DIR)/lib -lttcn3-rt2 -lttcn3-rt2-parallel
-OPENSSL_LIBS = -lssl -lcrypto
-CURL_LIBS = -lcurl
-JSON_LIBS = -lcjson
-
-# Compiler flags
-CPPFLAGS = -std=c++17 -Wall -Wextra -O2 -g
-CPPFLAGS += $(TTCN3_INCLUDES) $(OPENSSL_INCLUDES)
-
-# Source files
-TTCN3_SOURCES = smdpp_Tests.ttcn3
-CPP_SOURCES = smdpp_Tests_Functions.cc
-
-# Generated files
-TTCN3_GENERATED = smdpp_Tests.cc smdpp_Tests.hh
-
-# Object files
-OBJECTS = smdpp_Tests.o smdpp_Tests_Functions.o
-
-# Target executable
-TARGET = smdpp_test
-
-.PHONY: all clean compile run
-
-all: $(TARGET)
-
-compile:
-	$(TTCN3_COMPILER) $(TTCN3_SOURCES)
-
-$(TARGET): compile $(OBJECTS)
-	$(CXX) $(CPPFLAGS) -o $@ $(OBJECTS) $(TTCN3_LIBS) $(OPENSSL_LIBS) $(CURL_LIBS) $(JSON_LIBS)
-
-%.o: %.cc
-	$(CXX) $(CPPFLAGS) -c $< -o $@
-
-smdpp_Tests.o: smdpp_Tests.cc smdpp_Tests.hh
-
-smdpp_Tests_Functions.o: smdpp_Tests_Functions.cc smdpp_Tests_Functions.hh
-
-run: $(TARGET)
-	./$(TARGET) config.cfg
-
-clean:
-	rm -f $(TARGET) $(OBJECTS) $(TTCN3_GENERATED) *.log
-
-install-deps:
-	# Install TTCN-3 runtime
-	wget https://www.eclipse.org/downloads/download.php?file=/titan/TTCN3-latest.tgz
-	tar -xzf TTCN3-latest.tgz
-	cd TTCN3-* && make install
-
-	# Install OpenSSL development libraries
-	sudo apt-get update
-	sudo apt-get install -y libssl-dev libcurl4-openssl-dev libcjson-dev
-
-# Configuration file for TTCN-3 runtime
-config.cfg:
-	echo "[LOGGING]" > config.cfg
-	echo "LogFile := \"smdpp_test.log\"" >> config.cfg
-	echo "FileMask := LOG_ALL" >> config.cfg
-	echo "[TESTPORT_PARAMETERS]" >> config.cfg
-	echo "[MODULE_PARAMETERS]" >> config.cfg
-	echo "[GROUPS]" >> config.cfg
-	echo "[COMPONENTS]" >> config.cfg
-	echo "[MAIN_CONTROLLER]" >> config.cfg
-	echo "TCPPort := 9999" >> config.cfg
-	echo "[EXECUTE]" >> config.cfg
-	echo "smdpp_Tests.control" >> config.cfg
-*/

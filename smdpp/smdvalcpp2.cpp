@@ -28,27 +28,17 @@ extern "C" {
 #include <openssl/stack.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
-
-#include <openssl/asn1.h>
-#include <openssl/asn1t.h>
-#include <openssl/bio.h>
-#include <openssl/ec.h>
-#include <openssl/err.h>
-#include <openssl/pem.h>
-#include <openssl/rand.h>
-#include <openssl/safestack.h>
-#include <openssl/sha.h>
-#include <openssl/ssl.h>
-#include <openssl/stack.h>
-#include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
+#include <openssl/ec.h>
+#include <openssl/err.h>
+#include <openssl/sha.h>
+#include <openssl/ssl.h>
 
 #include <dirent.h>
 #include <sys/types.h>
-
 #include <sys/stat.h>
 
 #include <curl/curl.h>
@@ -59,6 +49,7 @@ extern "C" {
 }
 
 #include "logger.h"
+#include "helpers.h"
 
 DEFINE_STACK_OF(ASN1_OCTET_STRING)
 
@@ -69,197 +60,6 @@ namespace RspCrypto
 static std::vector<uint8_t> g_mac_chain_value;
 static bool g_mac_chain_initialized = false;
 static int g_block_counter = 1;
-
-// Custom deleters for unique_ptr
-struct BIODeleter {
-	void operator()(BIO *bio) const
-	{
-		BIO_free_all(bio);
-	}
-};
-
-struct X509Deleter {
-	void operator()(X509 *cert) const
-	{
-		X509_free(cert);
-	}
-};
-
-struct X509_STORE_Deleter {
-	void operator()(X509_STORE *store) const
-	{
-		X509_STORE_free(store);
-	}
-};
-
-struct X509_STORE_CTX_Deleter {
-	void operator()(X509_STORE_CTX *ctx) const
-	{
-		X509_STORE_CTX_free(ctx);
-	}
-};
-
-struct STACK_OF_X509_Deleter {
-	void operator()(STACK_OF(X509) * stack) const
-	{
-		sk_X509_pop_free(stack, X509_free);
-	}
-};
-
-struct EVP_PKEY_Deleter {
-	void operator()(EVP_PKEY *key) const
-	{
-		EVP_PKEY_free(key);
-	}
-};
-
-struct EC_KEY_Deleter {
-	void operator()(EC_KEY *key) const
-	{
-		EC_KEY_free(key);
-	}
-};
-
-struct EVP_MD_CTX_Deleter {
-	void operator()(EVP_MD_CTX *ctx) const
-	{
-		EVP_MD_CTX_free(ctx);
-	}
-};
-
-struct SERVER_SIGNED1_Deleter {
-	void operator()(SERVER_SIGNED1 *ss1) const
-	{
-		SERVER_SIGNED1_free(ss1);
-	}
-};
-
-struct EUICC_INFO1_Deleter {
-	void operator()(EUICC_INFO1 *info) const
-	{
-		EUICC_INFO1_free(info);
-	}
-};
-
-struct cJSON_Deleter {
-	void operator()(cJSON *json) const
-	{
-		cJSON_Delete(json);
-	}
-};
-
-// OpenSSL memory free deleter
-struct OpenSSLFreeDeleter {
-	void operator()(void *p) const
-	{
-		OPENSSL_free(p);
-	}
-};
-
-// Base64 utility class
-class Base64 {
-    public:
-	static std::vector<uint8_t> decode(const std::string &b64message)
-	{
-		if (b64message.empty()) {
-			return {};
-		}
-
-		// Calculate decoded length
-		int padding = 0;
-		if (b64message.size() > 0) {
-			if (b64message[b64message.size() - 1] == '=' && b64message[b64message.size() - 2] == '=') {
-				padding = 2;
-			} else if (b64message[b64message.size() - 1] == '=') {
-				padding = 1;
-			}
-		}
-
-		size_t decodeLen = (b64message.size() * 3) / 4 - padding;
-		std::vector<uint8_t> buffer(decodeLen);
-
-		// Create a BIO chain for base64 decoding
-		BIO *b64 = BIO_new(BIO_f_base64());
-		BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // No newlines
-
-		BIO *mem = BIO_new_mem_buf(b64message.c_str(), -1);
-		BIO *bioChain = BIO_push(b64, mem);
-
-		// Ensure proper cleanup with a unique_ptr
-		std::unique_ptr<BIO, BIODeleter> bioPtr(bioChain);
-
-		// Read the decoded data
-		int length = BIO_read(bioChain, buffer.data(), b64message.size());
-		if (length <= 0) {
-			throw std::runtime_error("Failed to decode base64 data");
-		}
-
-		buffer.resize(length); // Resize to actual decoded length
-		return buffer;
-	}
-
-	static std::string encode(const std::vector<uint8_t> &data)
-	{
-		if (data.empty()) {
-			return {};
-		}
-
-		// Create a BIO chain for base64 encoding
-		BIO *b64 = BIO_new(BIO_f_base64());
-		BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL); // No newlines
-
-		BIO *mem = BIO_new(BIO_s_mem());
-		BIO *bioChain = BIO_push(b64, mem);
-
-		// Ensure proper cleanup with a unique_ptr
-		std::unique_ptr<BIO, BIODeleter> bioPtr(bioChain);
-
-		// Write the data to be encoded
-		BIO_write(bioChain, data.data(), data.size());
-		BIO_flush(bioChain);
-
-		// Get the encoded data
-		BUF_MEM *bufferPtr;
-		BIO_get_mem_ptr(mem, &bufferPtr);
-
-		return std::string(bufferPtr->data, bufferPtr->length);
-	}
-};
-
-// Utility for hex conversion
-class HexUtil {
-    public:
-	static std::vector<uint8_t> hexToBytes(const std::string &hex)
-	{
-		if (hex.length() % 2 != 0) {
-			throw std::runtime_error("Invalid hex string length");
-		}
-
-		std::vector<uint8_t> bytes(hex.length() / 2);
-		for (size_t i = 0; i < bytes.size(); ++i) {
-			sscanf(hex.c_str() + (i * 2), "%2hhx", &bytes[i]);
-		}
-
-		return bytes;
-	}
-
-	static std::string bytesToHex(const std::vector<uint8_t> &bytes)
-	{
-		return bytesToHex(bytes.data(), bytes.size());
-	}
-
-	static std::string bytesToHex(const uint8_t *data, size_t length)
-	{
-		std::stringstream ss;
-		ss << std::hex << std::uppercase << std::setfill('0');
-
-		for (size_t i = 0; i < length; ++i) {
-			ss << std::setw(2) << static_cast<int>(data[i]);
-		}
-
-		return ss.str();
-	}
-};
 
 // Certificate utility class
 class CertificateUtil {
@@ -2230,24 +2030,6 @@ class RSPClient {
 		CertificateUtil::xx_generatePublicKeyFromPrivate(m_eumPrivateKey, "EUM", m_eumPublicKeyData);
 	}
 
-	void loadSMDPKeyAndCertificate(const std::string &smdpPrivateKeyPath, const std::string &smdpCertPath,
-				       const std::string &smdpPublicKeyPath = "")
-	{
-		CertificateUtil::xx_loadCertificate(smdpCertPath, "SM-DP+", m_smdpCertificate);
-		CertificateUtil::xx_loadPrivateKey(smdpPrivateKeyPath, "SM-DP+", m_smdpPrivateKey);
-
-		if (!smdpPublicKeyPath.empty() && CertificateUtil::xx_loadPublicKey(smdpPublicKeyPath, "SM-DP+", m_smdpPublicKeyData)) {
-			// Successfully loaded public key from file
-			Logger::info("SM-DP+ certificate subject: " +
-				     CertificateUtil::getSubjectName(m_smdpCertificate.get()));
-			return;
-		}
-
-		// Generate public key from private key
-		CertificateUtil::xx_generatePublicKeyFromPrivate(m_smdpPrivateKey, "SM-DP+", m_smdpPublicKeyData);
-		Logger::info("SM-DP+ certificate subject: " + CertificateUtil::getSubjectName(m_smdpCertificate.get()));
-	}
-
 	// Ultra-generic complete ecosystem loader - handles any certificate type
 	void loadAnyCompleteKeySet(const std::string &certPath, const std::string &privKeyPath,
 				   const std::string &pubKeyPath, const std::string &typeName,
@@ -2783,15 +2565,15 @@ class RSPClient {
 	std::vector<uint8_t> reconstructBSPSegment(uint8_t tag, const std::vector<uint8_t>& strippedData) {
 		// TTCN-3 gives us: encrypted_payload + MAC (8 bytes)
 		// We need to reconstruct: tag + length + encrypted_payload + MAC
-		
+
 		std::vector<uint8_t> result;
-		
-		Logger::info("RECONSTRUCT_DEBUG: tag=0x" + HexUtil::bytesToHex({tag}) + 
+
+		Logger::info("RECONSTRUCT_DEBUG: tag=0x" + HexUtil::bytesToHex({tag}) +
 		           ", stripped_len=" + std::to_string(strippedData.size()));
-		
+
 		// Add tag
 		result.push_back(tag);
-		
+
 		// Add length (total length of encrypted_payload + MAC)
 		size_t totalLength = strippedData.size();
 		if (totalLength < 0x80) {
@@ -2811,18 +2593,18 @@ class RSPClient {
 				return result;
 			}
 		}
-		
+
 		// Add the stripped data (encrypted_payload + MAC)
 		result.insert(result.end(), strippedData.begin(), strippedData.end());
-		
+
 		std::string resultHex = HexUtil::bytesToHex(std::vector<uint8_t>(result.begin(), result.begin() + std::min(20UL, result.size())));
 		Logger::info("RECONSTRUCT_DEBUG: result[:20]=" + resultHex + ", total_len=" + std::to_string(result.size()));
-		
-		Logger::debug("Reconstructed BSP segment - tag: 0x" + 
-		             HexUtil::bytesToHex({tag}) + 
-		             ", length: " + std::to_string(totalLength) + 
+
+		Logger::debug("Reconstructed BSP segment - tag: 0x" +
+		             HexUtil::bytesToHex({tag}) +
+		             ", length: " + std::to_string(totalLength) +
 		             ", total: " + std::to_string(result.size()) + " bytes");
-		
+
 		return result;
 	}
 
@@ -2839,8 +2621,8 @@ class RSPClient {
 			std::string encDataHex = HexUtil::bytesToHex(std::vector<uint8_t>(encData.begin(), encData.begin() + std::min(20UL, encData.size())));
 			std::string sEncHex = HexUtil::bytesToHex(std::vector<uint8_t>(sEnc.begin(), sEnc.begin() + std::min(20UL, sEnc.size())));
 			std::string sMacHex = HexUtil::bytesToHex(std::vector<uint8_t>(sMac.begin(), sMac.begin() + std::min(20UL, sMac.size())));
-			
-			Logger::info("BSP_CPP_DEBUG: Received encData_len=" + std::to_string(encData.size()) + 
+
+			Logger::info("BSP_CPP_DEBUG: Received encData_len=" + std::to_string(encData.size()) +
 			           ", encData[:20]=" + encDataHex);
 			Logger::info("BSP_CPP_DEBUG: sEnc[:20]=" + sEncHex);
 			Logger::info("BSP_CPP_DEBUG: sMac[:20]=" + sMacHex);
@@ -2850,21 +2632,21 @@ class RSPClient {
 
 			// TTCN-3 strips BER-TLV tags and lengths, so we receive only: encrypted_payload + MAC
 			// We need to reconstruct the complete TLV structure for BSP validation
-			
+
 			// For BSP segments, we need to determine which tag to use based on context
 			// Since we can't reliably determine the tag from the stripped data alone,
 			// we'll try each possible tag until one works
-			
+
 			std::vector<uint8_t> possibleTags = {0x87, 0x88, 0x86}; // ConfigureISDP, StoreMetadata, LoadProfileElements
-			
+
 			for (uint8_t tag : possibleTags) {
 				Logger::info("BSP_CPP_DEBUG: Trying tag 0x" + HexUtil::bytesToHex({tag}));
-				
+
 				std::vector<uint8_t> reconstructedTLV = reconstructBSPSegment(tag, encData);
 				std::string reconstructedHex = HexUtil::bytesToHex(std::vector<uint8_t>(reconstructedTLV.begin(), reconstructedTLV.begin() + std::min(20UL, reconstructedTLV.size())));
-				Logger::info("BSP_CPP_DEBUG: Reconstructed[:20]=" + reconstructedHex + 
+				Logger::info("BSP_CPP_DEBUG: Reconstructed[:20]=" + reconstructedHex +
 				           ", len=" + std::to_string(reconstructedTLV.size()));
-				
+
 				if (verifyCompleteBSPSegment(reconstructedTLV, sEnc, sMac)) {
 					Logger::info("BSP_CPP_DEBUG: SUCCESS with tag 0x" + HexUtil::bytesToHex({tag}));
 					return true;
@@ -2872,7 +2654,7 @@ class RSPClient {
 					Logger::info("BSP_CPP_DEBUG: FAILED with tag 0x" + HexUtil::bytesToHex({tag}));
 				}
 			}
-			
+
 			Logger::error("BSP_CPP_DEBUG: All tags failed validation");
 			return false;
 
@@ -2890,7 +2672,7 @@ class RSPClient {
 			// DEBUG: Show what we're validating
 			std::string encDataHex = HexUtil::bytesToHex(std::vector<uint8_t>(encData.begin(), encData.begin() + std::min(20UL, encData.size())));
 			Logger::info("VERIFY_DEBUG: encData[:20]=" + encDataHex + ", len=" + std::to_string(encData.size()));
-			
+
 			// Minimal BSP segment: tag(1) + length(1) + MAC(8) = 10 bytes
 			if (encData.size() < 10) {
 				Logger::error("BSP segment too small - minimum 10 bytes required");
@@ -2994,7 +2776,7 @@ class RSPClient {
 			std::vector<uint8_t> macKey, encKey;
 			std::vector<uint8_t> macChainToUse;
 			std::string keyType;
-			
+
 			if (tag == 0x86) {
 				// Tag 0x86 segments use PPK (Profile Protection Keys) - all zeros for encryption, all 0x11 for MAC
 				macKey = std::vector<uint8_t>(16, 0x11);  // PPK-MAC: all 0x11
@@ -3009,14 +2791,14 @@ class RSPClient {
 				macChainToUse = g_mac_chain_value;  // Use current MAC chain
 				keyType = "BSP session keys (tag 0x" + HexUtil::bytesToHex({tag}) + ")";
 			}
-			
+
 			Logger::info("VERIFY_DEBUG: Using " + keyType + " for BSP segment verification");
-			
+
 			// Create MAC input with the appropriate chain
 			std::vector<uint8_t> thisTagMacInput;
 			thisTagMacInput.insert(thisTagMacInput.end(), macChainToUse.begin(), macChainToUse.end());
 			thisTagMacInput.insert(thisTagMacInput.end(), macInput.begin() + g_mac_chain_value.size(), macInput.end());
-				
+
 			// Compute CMAC with the selected key
 			size_t macLen = 16;
 			std::vector<uint8_t> computedMac(macLen);
@@ -3141,7 +2923,7 @@ class RSPClient {
 			// Parse the BSP segment structure
 			size_t offset = 1;
 			size_t dataLen = 0;
-			
+
 			if (encData[offset] < 0x80) {
 				// Short form length
 				dataLen = encData[offset];
@@ -3151,7 +2933,7 @@ class RSPClient {
 				size_t lenBytes = encData[offset] & 0x7F;
 				offset++;
 				if (offset + lenBytes > encData.size()) return false;
-				
+
 				dataLen = 0;
 				for (size_t i = 0; i < lenBytes; i++) {
 					dataLen = (dataLen << 8) | encData[offset + i];
@@ -3215,7 +2997,7 @@ class RSPClient {
 			// Decrypt the data using AES-CBC with zero IV
 			std::vector<uint8_t> iv(16, 0);
 			plaintext.resize(encryptedData.size());
-			
+
 			EVP_CIPHER_CTX* cipher_ctx = EVP_CIPHER_CTX_new();
 			if (!cipher_ctx) {
 				Logger::error("Failed to create cipher context");
@@ -3278,7 +3060,7 @@ class RSPClient {
 				size_t lenBytes = plaintext[offset] & 0x7F;
 				offset++;
 				if (offset + lenBytes > plaintext.size()) return false;
-				
+
 				totalLen = 0;
 				for (size_t i = 0; i < lenBytes; i++) {
 					totalLen = (totalLen << 8) | plaintext[offset + i];
@@ -3292,13 +3074,13 @@ class RSPClient {
 
 			// Parse the three octet strings within ReplaceSessionKeysRequest
 			// The order is: initialMacChainingValue, ppkEnc, ppkCmac
-			
+
 			// Parse initialMacChainingValue [PRIVATE 6] IMPLICIT (0x86)
 			if (offset >= plaintext.size() || plaintext[offset] != 0x86) {
 				return false;
 			}
 			offset++;
-			
+
 			size_t mcvLen = plaintext[offset++];
 			if (offset + mcvLen > plaintext.size()) return false;
 			initialMacChainingValue.assign(plaintext.begin() + offset, plaintext.begin() + offset + mcvLen);
@@ -3309,7 +3091,7 @@ class RSPClient {
 				return false;
 			}
 			offset++;
-			
+
 			size_t encLen = plaintext[offset++];
 			if (offset + encLen > plaintext.size()) return false;
 			ppkEnc.assign(plaintext.begin() + offset, plaintext.begin() + offset + encLen);
@@ -3320,7 +3102,7 @@ class RSPClient {
 				return false;
 			}
 			offset++;
-			
+
 			size_t cmacLen = plaintext[offset++];
 			if (offset + cmacLen > plaintext.size()) return false;
 			ppkCmac.assign(plaintext.begin() + offset, plaintext.begin() + offset + cmacLen);
@@ -3665,30 +3447,6 @@ private:
 
 } // namespace RspCrypto
 
-
-std::ostream &operator<<(std::ostream &os, const std::vector<std::string> &v)
-{
-	using namespace std;
-	copy(v.begin(), v.end(), std::ostream_iterator<std::string>(os, "\n"));
-	return os;
-}
-
-std::string to_string(const std::vector<std::string> &vec)
-{
-	std::ostringstream oss;
-	oss << vec; // Uses our overloaded << operator
-	return oss.str();
-}
-
-std::string operator+(const std::string &str, const std::vector<std::string> &vec)
-{
-	return str + to_string(vec);
-}
-
-std::string operator+(const std::vector<std::string> &vec, const std::string &str)
-{
-	return to_string(vec) + str;
-}
 
 #ifdef STANDALONE_SMDPCC
 // Main function
