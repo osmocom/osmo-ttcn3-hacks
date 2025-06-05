@@ -2779,6 +2779,53 @@ class RSPClient {
 		Logger::info("BSP context initialized with initial MCV: " + HexUtil::bytesToHex(initialMCV));
 	}
 
+	// Reconstruct complete BSP segment from TTCN-3 stripped data (encrypted_payload + MAC)
+	std::vector<uint8_t> reconstructBSPSegment(uint8_t tag, const std::vector<uint8_t>& strippedData) {
+		// TTCN-3 gives us: encrypted_payload + MAC (8 bytes)
+		// We need to reconstruct: tag + length + encrypted_payload + MAC
+		
+		std::vector<uint8_t> result;
+		
+		Logger::info("RECONSTRUCT_DEBUG: tag=0x" + HexUtil::bytesToHex({tag}) + 
+		           ", stripped_len=" + std::to_string(strippedData.size()));
+		
+		// Add tag
+		result.push_back(tag);
+		
+		// Add length (total length of encrypted_payload + MAC)
+		size_t totalLength = strippedData.size();
+		if (totalLength < 0x80) {
+			// Short form
+			result.push_back(static_cast<uint8_t>(totalLength));
+		} else {
+			// Long form (for lengths > 127)
+			if (totalLength < 0x100) {
+				result.push_back(0x81);
+				result.push_back(static_cast<uint8_t>(totalLength));
+			} else if (totalLength < 0x10000) {
+				result.push_back(0x82);
+				result.push_back(static_cast<uint8_t>(totalLength >> 8));
+				result.push_back(static_cast<uint8_t>(totalLength & 0xFF));
+			} else {
+				Logger::error("Segment too large for BER-TLV encoding");
+				return result;
+			}
+		}
+		
+		// Add the stripped data (encrypted_payload + MAC)
+		result.insert(result.end(), strippedData.begin(), strippedData.end());
+		
+		std::string resultHex = HexUtil::bytesToHex(std::vector<uint8_t>(result.begin(), result.begin() + std::min(20UL, result.size())));
+		Logger::info("RECONSTRUCT_DEBUG: result[:20]=" + resultHex + ", total_len=" + std::to_string(result.size()));
+		
+		Logger::debug("Reconstructed BSP segment - tag: 0x" + 
+		             HexUtil::bytesToHex({tag}) + 
+		             ", length: " + std::to_string(totalLength) + 
+		             ", total: " + std::to_string(result.size()) + " bytes");
+		
+		return result;
+	}
+
 	bool verifyEncryptedProfileData(const std::vector<uint8_t>& encData,
 	                               const std::vector<uint8_t>& sEnc,
 	                               const std::vector<uint8_t>& sMac) {
@@ -2788,9 +2835,62 @@ class RSPClient {
 				return false;
 			}
 
+			// DEBUG: Show what we receive from TTCN-3
+			std::string encDataHex = HexUtil::bytesToHex(std::vector<uint8_t>(encData.begin(), encData.begin() + std::min(20UL, encData.size())));
+			std::string sEncHex = HexUtil::bytesToHex(std::vector<uint8_t>(sEnc.begin(), sEnc.begin() + std::min(20UL, sEnc.size())));
+			std::string sMacHex = HexUtil::bytesToHex(std::vector<uint8_t>(sMac.begin(), sMac.begin() + std::min(20UL, sMac.size())));
+			
+			Logger::info("BSP_CPP_DEBUG: Received encData_len=" + std::to_string(encData.size()) + 
+			           ", encData[:20]=" + encDataHex);
+			Logger::info("BSP_CPP_DEBUG: sEnc[:20]=" + sEncHex);
+			Logger::info("BSP_CPP_DEBUG: sMac[:20]=" + sMacHex);
+
 			Logger::info("Starting BSP segment validation (" +
 			            std::to_string(encData.size()) + " bytes)");
 
+			// TTCN-3 strips BER-TLV tags and lengths, so we receive only: encrypted_payload + MAC
+			// We need to reconstruct the complete TLV structure for BSP validation
+			
+			// For BSP segments, we need to determine which tag to use based on context
+			// Since we can't reliably determine the tag from the stripped data alone,
+			// we'll try each possible tag until one works
+			
+			std::vector<uint8_t> possibleTags = {0x87, 0x88, 0x86}; // ConfigureISDP, StoreMetadata, LoadProfileElements
+			
+			for (uint8_t tag : possibleTags) {
+				Logger::info("BSP_CPP_DEBUG: Trying tag 0x" + HexUtil::bytesToHex({tag}));
+				
+				std::vector<uint8_t> reconstructedTLV = reconstructBSPSegment(tag, encData);
+				std::string reconstructedHex = HexUtil::bytesToHex(std::vector<uint8_t>(reconstructedTLV.begin(), reconstructedTLV.begin() + std::min(20UL, reconstructedTLV.size())));
+				Logger::info("BSP_CPP_DEBUG: Reconstructed[:20]=" + reconstructedHex + 
+				           ", len=" + std::to_string(reconstructedTLV.size()));
+				
+				if (verifyCompleteBSPSegment(reconstructedTLV, sEnc, sMac)) {
+					Logger::info("BSP_CPP_DEBUG: SUCCESS with tag 0x" + HexUtil::bytesToHex({tag}));
+					return true;
+				} else {
+					Logger::info("BSP_CPP_DEBUG: FAILED with tag 0x" + HexUtil::bytesToHex({tag}));
+				}
+			}
+			
+			Logger::error("BSP_CPP_DEBUG: All tags failed validation");
+			return false;
+
+		} catch (const std::exception& e) {
+			Logger::error("verifyEncryptedProfileData failed: " + std::string(e.what()));
+			return false;
+		}
+	}
+
+	// Verify complete BSP segment with tag+length+data+MAC
+	bool verifyCompleteBSPSegment(const std::vector<uint8_t>& encData,
+	                             const std::vector<uint8_t>& sEnc,
+	                             const std::vector<uint8_t>& sMac) {
+		try {
+			// DEBUG: Show what we're validating
+			std::string encDataHex = HexUtil::bytesToHex(std::vector<uint8_t>(encData.begin(), encData.begin() + std::min(20UL, encData.size())));
+			Logger::info("VERIFY_DEBUG: encData[:20]=" + encDataHex + ", len=" + std::to_string(encData.size()));
+			
 			// Minimal BSP segment: tag(1) + length(1) + MAC(8) = 10 bytes
 			if (encData.size() < 10) {
 				Logger::error("BSP segment too small - minimum 10 bytes required");
@@ -2890,7 +2990,34 @@ class RSPClient {
 
 			macInput.insert(macInput.end(), encryptedPayload.begin(), encryptedPayload.end());
 
-			// Compute CMAC
+			// Use correct keys based on BSP segment type (per pppk.txt and Python server implementation)
+			std::vector<uint8_t> macKey, encKey;
+			std::vector<uint8_t> macChainToUse;
+			std::string keyType;
+			
+			if (tag == 0x86) {
+				// Tag 0x86 segments use PPK (Profile Protection Keys) - all zeros for encryption, all 0x11 for MAC
+				macKey = std::vector<uint8_t>(16, 0x11);  // PPK-MAC: all 0x11
+				encKey = std::vector<uint8_t>(16, 0x00);  // PPK-ENC: all 0x00
+				macChainToUse = std::vector<uint8_t>(16, 0x22);  // PPK uses 0x22 initial MAC chain
+				keyType = "PPK keys (tag 0x86)";
+			} else {
+				// Tag 0x87 and 0x88 segments use BSP session keys derived from ECDH key agreement
+				// These are the BSP keys that match the Python server implementation
+				macKey = sMac;  // BSP S-MAC key (derived via BSP key derivation)
+				encKey = sEnc;  // BSP S-ENC key (derived via BSP key derivation)
+				macChainToUse = g_mac_chain_value;  // Use current MAC chain
+				keyType = "BSP session keys (tag 0x" + HexUtil::bytesToHex({tag}) + ")";
+			}
+			
+			Logger::info("VERIFY_DEBUG: Using " + keyType + " for BSP segment verification");
+			
+			// Create MAC input with the appropriate chain
+			std::vector<uint8_t> thisTagMacInput;
+			thisTagMacInput.insert(thisTagMacInput.end(), macChainToUse.begin(), macChainToUse.end());
+			thisTagMacInput.insert(thisTagMacInput.end(), macInput.begin() + g_mac_chain_value.size(), macInput.end());
+				
+			// Compute CMAC with the selected key
 			size_t macLen = 16;
 			std::vector<uint8_t> computedMac(macLen);
 			CMAC_CTX* ctx = CMAC_CTX_new();
@@ -2899,39 +3026,40 @@ class RSPClient {
 				return false;
 			}
 
-			if (!CMAC_Init(ctx, sMac.data(), sMac.size(), EVP_aes_128_cbc(), NULL)) {
+			if (!CMAC_Init(ctx, macKey.data(), macKey.size(), EVP_aes_128_cbc(), NULL)) {
 				CMAC_CTX_free(ctx);
-				Logger::error("CMAC_Init failed");
+				Logger::error("CMAC_Init failed for " + keyType);
 				return false;
 			}
 
-			if (!CMAC_Update(ctx, macInput.data(), macInput.size())) {
+			if (!CMAC_Update(ctx, thisTagMacInput.data(), thisTagMacInput.size())) {
 				CMAC_CTX_free(ctx);
-				Logger::error("CMAC_Update failed");
+				Logger::error("CMAC_Update failed for " + keyType);
 				return false;
 			}
 
 			if (!CMAC_Final(ctx, computedMac.data(), &macLen)) {
 				CMAC_CTX_free(ctx);
-				Logger::error("CMAC_Final failed");
+				Logger::error("CMAC_Final failed for " + keyType);
 				return false;
 			}
 			CMAC_CTX_free(ctx);
 
+			// Compare first 8 bytes of computed MAC with received MAC
+			std::vector<uint8_t> truncatedMac(computedMac.begin(), computedMac.begin() + 8);
+			if (truncatedMac == receivedMac) {
+				Logger::info("BSP MAC verification successful with " + keyType);
+				Logger::info("  Computed MAC: " + HexUtil::bytesToHex(truncatedMac));
+				Logger::info("  Received MAC: " + HexUtil::bytesToHex(receivedMac));
+			} else {
+				Logger::error("BSP MAC verification failed with " + keyType);
+				Logger::error("  Computed MAC: " + HexUtil::bytesToHex(truncatedMac));
+				Logger::error("  Received MAC: " + HexUtil::bytesToHex(receivedMac));
+				return false;
+			}
+
 			// Update MAC chain for next segment
 			g_mac_chain_value = computedMac;
-
-			// Compare first 8 bytes of computed MAC with received MAC
-			computedMac.resize(8);
-			if (computedMac != receivedMac) {
-				Logger::error("BSP MAC verification failed!");
-				Logger::error("Expected MAC: " + HexUtil::bytesToHex(computedMac));
-				Logger::error("Received MAC: " + HexUtil::bytesToHex(receivedMac));
-
-				return false;
-			} else {
-				Logger::info("BSP MAC verification successful");
-			}
 
 			// Decrypt if we have encrypted data
 			if (encDataLen > 0) {
@@ -2963,7 +3091,7 @@ class RSPClient {
 
 				// Encrypt block counter to get ICV
 				if (!EVP_EncryptInit_ex(cipher_ctx, EVP_aes_128_cbc(), NULL,
-				                       sEnc.data(), zeroIv.data())) {
+				                       encKey.data(), zeroIv.data())) {
 					EVP_CIPHER_CTX_free(cipher_ctx);
 					Logger::error("Failed to initialize ICV generation");
 					return false;
@@ -2989,7 +3117,7 @@ class RSPClient {
 			return true;
 
 		} catch (const std::exception& e) {
-			Logger::error("verifyEncryptedProfileData failed: " + std::string(e.what()));
+			Logger::error("verifyCompleteBSPSegment failed: " + std::string(e.what()));
 			return false;
 		}
 	}

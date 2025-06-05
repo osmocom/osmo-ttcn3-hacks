@@ -26,48 +26,29 @@ The SM-DP+ (smdpp) test suite specifically validates RSP (Remote SIM Provisionin
 - ✅ **Implemented proper certificate retrieval using actual certificates instead of PKIDs** (December 2024)
 - ✅ **Enhanced certificate chain validation with intermediate certificate support** (December 2024)
 
-**✅ Complete RSP Protocol Flow Now Passes Successfully**:
-  - InitiateAuthentication ✅
-  - Authentication response validation ✅
-  - GetBoundProfilePackage ✅
-  - BoundProfilePackage structure validation ✅
-  - ECDH key agreement and shared secret computation ✅
-  - GlobalPlatform SCP03 session key derivation ✅
-  - BSP session key derivation and validation ✅
-  - Profile segment cryptographic validation (MAC + decryption) ✅
-  - Certificate roles validation ✅
-  - EUM certificate permissions ✅
-  - Certificate chain discovery ✅
-  - Complete certificate path validation ✅
-
-**Current Test Status**: **PASSING** - Test verdict: **pass** ✅
-
-**Known Issues**:
-- Certificate name constraints validation may fail in test environments due to strict OpenSSL validation
-- This is expected behavior with test certificates and does not indicate RSP protocol issues
-- Test environment uses simplified validation for some encrypted segments (this is intentional for compatibility)
-
 ## Key Commands
 
 ### Building the Test Suite
+- YOU MUST NOT run make in /app/tt-smdp !
+- YOU MUST run make in subdirs. never at the top!
 
 ```bash
 # For a specific test suite (e.g., smdpp)
 cd smdpp/
 
 # Initial setup (only needed once or when dependencies change)
-./gen_links.sh      # Create symbolic links to dependencies
-./regen_makefile.sh # Generate Makefile with proper dependencies
+cd smdpp; ./gen_links.sh      # Create symbolic links to dependencies
+cd smdpp; ./regen_makefile.sh # Generate Makefile with proper dependencies
 
 # Full clean build (recommended when encountering issues)
-make clean; make compile; make -j
+cd smdpp; make clean; make compile; make -j
 
 # Incremental build (for minor changes)
-make -j
+cd smdpp; make compile; make -j
 
 # Alternative commands for specific steps
-make compile        # Compile TTCN-3 to C++ only
-make smdpp         # Build just the smdpp executable
+cd smdpp; make compile        # Compile TTCN-3 to C++ only
+cd smdpp; make smdpp         # Build just the smdpp executable
 ```
 
 **⚠️ Important Build Notes**:
@@ -99,7 +80,7 @@ cd smdpp/
 # Main test log (after running ./uns.sh)
 cat /app/tt-smdpp/smdpp/merged.log
 
-# Python server log  
+# Python server log
 cat /app/pysim/pyserver.log
 
 # Individual component logs (when debugging)
@@ -172,7 +153,7 @@ The smdpp test suite implements a complete RSP protocol flow:
 
 **Test Environment Components**:
 1. **TTCN-3 Test Client**: Implements eUICC side of RSP protocol
-2. **Python SM-DP+ Server**: Implements server side with proper BSP key derivation 
+2. **Python SM-DP+ Server**: Implements server side with proper BSP key derivation
 3. **Network Isolation**: Uses `uns.sh` for clean network namespace
 4. **Certificate Infrastructure**: Complete test certificate chain (CI → EUM → eUICC, DPauth, DPpb)
 5. **Cryptographic Validation**: Full session key derivation and usage
@@ -206,7 +187,7 @@ When modifying tests:
 
 **Debugging Tips**:
 - Check session key derivation logs for S-ENC, S-MAC, and BSP key values
-- Verify Python server logs show proper BSP key derivation  
+- Verify Python server logs show proper BSP key derivation
 - Use `merged.log` for detailed test execution traces
 - MAC verification failures indicate key derivation mismatches
 
@@ -274,7 +255,7 @@ This ensures proper RSP protocol compliance with certificate chain validation as
 
 **Major Technical Achievements**:
 
-1. **GlobalPlatform SCP03 Session Key Derivation**: 
+1. **GlobalPlatform SCP03 Session Key Derivation**:
    - Proper CMAC-based key derivation with shared secret and host ID
    - Generates S-ENC (encryption), S-MAC (MAC), and S-DEK (data encryption keys)
 
@@ -296,7 +277,7 @@ This ensures proper RSP protocol compliance with certificate chain validation as
 **Key Files Modified**:
 - `smdpp_Tests.ttcn`: Added session key parameters to validation functions
 - `smdpp_Tests_Functions.cc`: Implemented cryptographic validation functions:
-  - `ext_Crypto_deriveSessionKeys()`: GlobalPlatform SCP03 key derivation  
+  - `ext_Crypto_deriveSessionKeys()`: GlobalPlatform SCP03 key derivation
   - `ext_Crypto_deriveBSPSessionKeys()`: BSP protocol key derivation
   - `ext_Crypto_verifyEncryptedProfileData()`: MAC verification and decryption
 - `/app/pysim/osmo-smdpp.py`: Enhanced Python server with proper BSP key derivation
