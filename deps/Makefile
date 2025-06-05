@@ -85,7 +85,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 # Do not put references to branches here, except for local testing: this breaks the caching
 # logic of docker containers, which only invalidate their cached ttcn3 dependencies if this
 # file changed.
-nas_commit=					3d14f387cc0d6f09cbbe1cea4920ebcaf1660bcf
+nas_commit=					eff069b772a53e16773638f07599e7936ffcdd9a
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
 titan.ProtocolEmulations.SCCP_commit=	 	750a3e836831e58eae59d4757ef5d0c759f9ca5d
