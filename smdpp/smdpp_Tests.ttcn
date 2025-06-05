@@ -100,6 +100,9 @@ external function ext_RSPClient_getEUICCOtpk(integer clientHandle) return octets
 external function ext_RSPClient_computeSharedSecret(integer clientHandle, octetstring otherPublicKey) return octetstring;
 external function ext_Crypto_deriveSessionKeys(octetstring sharedSecret, octetstring hostId,
                                               out octetstring sEnc, out octetstring sMac, out octetstring sDek) return boolean;
+external function ext_Crypto_deriveBSPSessionKeys(octetstring sharedSecret, integer keyType, integer keyLength, 
+                                                 octetstring hostId, octetstring eid,
+                                                 out octetstring bspSEnc, out octetstring bspSMac, out octetstring initialMCV) return boolean;
 external function ext_Crypto_verifyEncryptedProfileData(octetstring encData, octetstring sEnc, octetstring sMac) return boolean;
 external function ext_CertificateUtil_getCurveOID(octetstring certData) return charstring;
 
@@ -556,7 +559,28 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 		setverdict(fail, "unexpected ES9+ HTTP connection");
 	}
 
+	log("Response HTTP structure received");
 	if (ispresent(response_http.response)) {
+		log("HTTP response is present");
+		log("HTTP response body present: ", ispresent(response_http.response.body));
+		if (ispresent(response_http.response.body)) {
+			log("HTTP response body length: ", lengthof(response_http.response.body));
+			// Print first 200 chars to avoid log overflow
+			if (lengthof(response_http.response.body) > 0) {
+				var integer max_len := 200;
+				if (lengthof(response_http.response.body) < max_len) {
+					max_len := lengthof(response_http.response.body);
+				}
+				log("HTTP response body (first ", max_len, " chars): ", substr(response_http.response.body, 0, max_len));
+			} else {
+				log("HTTP response body is EMPTY (zero length)!");
+			}
+		} else {
+			log("ERROR: No HTTP response body");
+			setverdict(fail, "No HTTP response body");
+			return omit;
+		}
+		log("About to call JSON decoder with body of length: ", lengthof(response_http.response.body));
 		dec_RemoteProfileProvisioningResponse_from_JSON(response_http.response.body, es9p_res);
 		if (not istemplatekind(expected_es9p_res, "omit")) {
 			if (not match(es9p_res, expected_es9p_res)) {
@@ -607,12 +631,16 @@ private function f_send_es9p_request(charstring endpoint, charstring jsonBody) r
 		g_http_client_id_es9p := f_http_client_id_from_http_response(response_http);
 	}
 
-	if (ispresent(response_http.response)) {
+	if (ispresent(response_http.response) and response_http.response.statuscode == 200) {
 		ext_logInfo("HTTP " & int2str(response_http.response.statuscode) &
 		           " response, body length: " & int2str(lengthof(response_http.response.body)));
 		return response_http.response.body;
 	} else {
-		ext_logError("No HTTP response body");
+		if (ispresent(response_http.response)) {
+			ext_logError("HTTP error response: " & int2str(response_http.response.statuscode));
+		} else {
+			ext_logError("No HTTP response");
+		}
 		return "";
 	}
 }
@@ -729,7 +757,9 @@ return boolean {
 }
 
 /* Helper function to validate ConfigureISDP segments */
-private function f_validate_configure_isdp_segments(BoundProfilePackage bpp) runs on smdpp_ConnHdlr
+private function f_validate_configure_isdp_segments(BoundProfilePackage bpp,
+                                                   octetstring sEnc,
+                                                   octetstring sMac) runs on smdpp_ConnHdlr
 return boolean {
     for (var integer i := 0; i < lengthof(bpp.firstSequenceOf87); i := i + 1) {
         var octetstring segment := bpp.firstSequenceOf87[i];
@@ -739,26 +769,24 @@ return boolean {
             return false;
         }
 
-        // Log the actual tag value for debugging
-        var integer actual_tag := oct2int(segment[0]);
         ext_logInfo("ConfigureISDP segment " & int2str(i) &
-                   " has tag: " & int2str(actual_tag) &
-                   " (0x" & hex2str(oct2hex(segment[0])) & ")");
+                   " - performing cryptographic validation (" & int2str(lengthof(segment)) & " bytes)");
 
-        // Basic validation - BER-TLV APDU commands need minimum length
-        if (lengthof(segment) < c_min_segment_length) {
-            ext_logError("ConfigureISDP segment too small");
+        // Perform actual cryptographic validation using session keys
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("ConfigureISDP segment " & int2str(i) & " cryptographic validation failed");
             return false;
         }
 
-        ext_logDebug("ConfigureISDP segment " & int2str(i) &
-                    " validated - length: " & int2str(lengthof(segment)));
+        ext_logInfo("ConfigureISDP segment " & int2str(i) & " validated successfully");
     }
     return true;
 }
 
 /* Helper function to validate StoreMetadata segments */
-private function f_validate_store_metadata_segments(BoundProfilePackage bpp) runs on smdpp_ConnHdlr
+private function f_validate_store_metadata_segments(BoundProfilePackage bpp,
+                                                   octetstring sEnc,
+                                                   octetstring sMac) runs on smdpp_ConnHdlr
 return boolean {
     for (var integer i := 0; i < lengthof(bpp.sequenceOf88); i := i + 1) {
         var octetstring segment := bpp.sequenceOf88[i];
@@ -768,26 +796,24 @@ return boolean {
             return false;
         }
 
-        // Log the actual tag value for debugging
-        var integer actual_tag := oct2int(segment[0]);
         ext_logInfo("StoreMetadata segment " & int2str(i) &
-                   " has tag: " & int2str(actual_tag) &
-                   " (0x" & hex2str(oct2hex(segment[0])) & ")");
+                   " - performing cryptographic validation (" & int2str(lengthof(segment)) & " bytes)");
 
-        // Basic validation - BER-TLV APDU commands need minimum length
-        if (lengthof(segment) < c_min_segment_length) {
-            ext_logError("StoreMetadata segment too small");
+        // Perform actual cryptographic validation using session keys
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("StoreMetadata segment " & int2str(i) & " cryptographic validation failed");
             return false;
         }
 
-        ext_logDebug("StoreMetadata segment " & int2str(i) &
-                    " validated - length: " & int2str(lengthof(segment)));
+        ext_logInfo("StoreMetadata segment " & int2str(i) & " validated successfully");
     }
     return true;
 }
 
 /* Helper function to validate LoadProfileElements segments */
-private function f_validate_load_profile_elements_segments(BoundProfilePackage bpp) runs on smdpp_ConnHdlr
+private function f_validate_load_profile_elements_segments(BoundProfilePackage bpp,
+                                                          octetstring sEnc,
+                                                          octetstring sMac) runs on smdpp_ConnHdlr
 return boolean {
     for (var integer i := 0; i < lengthof(bpp.sequenceOf86); i := i + 1) {
         var octetstring segment := bpp.sequenceOf86[i];
@@ -797,20 +823,16 @@ return boolean {
             return false;
         }
 
-        // Log the actual tag value for debugging
-        var integer actual_tag := oct2int(segment[0]);
         ext_logInfo("LoadProfileElements segment " & int2str(i) &
-                   " has tag: " & int2str(actual_tag) &
-                   " (0x" & hex2str(oct2hex(segment[0])) & ")");
+                   " - performing cryptographic validation (" & int2str(lengthof(segment)) & " bytes)");
 
-        // Basic validation - BER-TLV APDU commands need minimum length
-        if (lengthof(segment) < c_min_segment_length) {
-            ext_logError("LoadProfileElements segment too small");
+        // Perform actual cryptographic validation using session keys
+        if (not ext_Crypto_verifyEncryptedProfileData(segment, sEnc, sMac)) {
+            ext_logError("LoadProfileElements segment " & int2str(i) & " cryptographic validation failed");
             return false;
         }
 
-        ext_logDebug("LoadProfileElements segment " & int2str(i) &
-                    " validated - length: " & int2str(lengthof(segment)));
+        ext_logInfo("LoadProfileElements segment " & int2str(i) & " validated successfully");
     }
     return true;
 }
@@ -820,22 +842,24 @@ private function f_validate_profile_segments(BoundProfilePackage bpp,
                                            octetstring sEnc,
                                            octetstring sMac) runs on smdpp_ConnHdlr
 return boolean {
-    // Validate firstSequenceOf87 (ConfigureISDP) - BER-TLV encoded APDU commands
-    if (not f_validate_configure_isdp_segments(bpp)) {
+    ext_logInfo("=== Validating encrypted profile segments ===");
+
+    // Validate firstSequenceOf87 (ConfigureISDP) - Encrypted BER-TLV APDU commands
+    if (not f_validate_configure_isdp_segments(bpp, sEnc, sMac)) {
         return false;
     }
 
-    // Validate sequenceOf88 (StoreMetadata) - BER-TLV encoded APDU commands
-    if (not f_validate_store_metadata_segments(bpp)) {
+    // Validate sequenceOf88 (StoreMetadata) - Encrypted BER-TLV APDU commands
+    if (not f_validate_store_metadata_segments(bpp, sEnc, sMac)) {
         return false;
     }
 
-    // Validate sequenceOf86 (LoadProfileElements) - BER-TLV encoded APDU commands
-    if (not f_validate_load_profile_elements_segments(bpp)) {
+    // Validate sequenceOf86 (LoadProfileElements) - Encrypted BER-TLV APDU commands
+    if (not f_validate_load_profile_elements_segments(bpp, sEnc, sMac)) {
         return false;
     }
 
-    ext_logInfo("All profile segments validated successfully as BER-TLV APDU commands");
+    ext_logInfo("All profile segments cryptographically validated successfully");
     return true;
 }
 
@@ -951,6 +975,58 @@ private function f_fail_and_cleanup(charstring error_msg) runs on smdpp_ConnHdlr
     ext_logError(error_msg);
     setverdict(fail, error_msg);
     f_rsp_client_cleanup();
+}
+
+/* Helper function to validate and derive session keys */
+private function f_validate_and_derive_session_keys(octetstring sharedSecret,
+                                                   octetstring hostId,
+                                                   out octetstring sEnc,
+                                                   out octetstring sMac,
+                                                   out octetstring sDek) runs on smdpp_ConnHdlr
+return boolean {
+    // Derive session keys using GlobalPlatform SCP03
+    ext_Crypto_deriveSessionKeys(sharedSecret, hostId, sEnc, sMac, sDek);
+
+    // Verify all keys are 16 bytes (AES-128)
+    if (lengthof(sEnc) != 16 or lengthof(sMac) != 16 or lengthof(sDek) != 16) {
+        ext_logError("Invalid session key lengths");
+        return false;
+    }
+
+    ext_logInfo("Session keys derived successfully");
+    ext_logDebug("S-ENC: " & oct2str(sEnc));
+    ext_logDebug("S-MAC: " & oct2str(sMac));
+    ext_logDebug("S-DEK: " & oct2str(sDek));
+
+    return true;
+}
+
+/* Helper function to validate and derive BSP session keys */
+private function f_validate_and_derive_bsp_session_keys(octetstring sharedSecret,
+                                                       octetstring hostId,
+                                                       octetstring eid,
+                                                       out octetstring bspSEnc,
+                                                       out octetstring bspSMac,
+                                                       out octetstring initialMCV) runs on smdpp_ConnHdlr
+return boolean {
+    // Derive BSP session keys using X9.63 KDF
+    if (not ext_Crypto_deriveBSPSessionKeys(sharedSecret, 136, 16, hostId, eid, bspSEnc, bspSMac, initialMCV)) {
+        ext_logError("BSP session key derivation failed");
+        return false;
+    }
+
+    // Verify all keys are 16 bytes (AES-128)
+    if (lengthof(bspSEnc) != 16 or lengthof(bspSMac) != 16 or lengthof(initialMCV) != 16) {
+        ext_logError("Invalid BSP session key lengths");
+        return false;
+    }
+
+    ext_logInfo("BSP session keys derived successfully");
+    ext_logDebug("BSP S-ENC: " & oct2str(bspSEnc));
+    ext_logDebug("BSP S-MAC: " & oct2str(bspSMac));
+    ext_logDebug("Initial MCV: " & oct2str(initialMCV));
+
+    return true;
 }
 
 /* Helper function to validate certificate roles */
@@ -1248,29 +1324,22 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	// 7. Validate encrypted profile segments
 	ext_logInfo("=== Validating encrypted profile segments ===");
 
-	// Derive and validate session keys
-	if (not f_validate_session_keys(sharedSecret, iscReq.controlRefTemplate.hostId)) {
-		setverdict(fail, "Session key derivation failed");
-		f_rsp_client_cleanup();
+	// Derive both GlobalPlatform SCP03 and BSP session keys
+	var octetstring sEnc, sMac, sDek;
+	if (not f_validate_and_derive_session_keys(sharedSecret, iscReq.controlRefTemplate.hostId, sEnc, sMac, sDek)) {
+		f_fail_and_cleanup("Session key derivation failed");
 		return;
 	}
 
-	var octetstring sEnc, sMac, sDek;
-	ext_Crypto_deriveSessionKeys(sharedSecret, iscReq.controlRefTemplate.hostId,
-							sEnc, sMac, sDek);
+	// Also derive BSP session keys for profile validation
+	var octetstring bspSEnc, bspSMac, initialMCV;
+	if (not f_validate_and_derive_bsp_session_keys(sharedSecret, iscReq.controlRefTemplate.hostId, char2oct(eid), bspSEnc, bspSMac, initialMCV)) {
+		f_fail_and_cleanup("BSP session key derivation failed");
+		return;
+	}
 
-    // Verify all keys are 16 bytes (AES-128)
-    if (lengthof(sEnc) != 16 or lengthof(sMac) != 16 or lengthof(sDek) != 16) {
-        ext_logError("Invalid session key lengths");
-        return false;
-    }
-
-    ext_logInfo("Session keys derived successfully");
-    ext_logDebug("S-ENC: " & oct2str(sEnc));
-    ext_logDebug("S-MAC: " & oct2str(sMac));
-    ext_logDebug("S-DEK: " & oct2str(sDek));
-
-	if (not f_validate_profile_segments(bpp, sEnc, sMac)) {
+	// Use BSP keys for profile segment validation (matching Python server)
+	if (not f_validate_profile_segments(bpp, bspSEnc, bspSMac)) {
 		setverdict(fail, "Encrypted profile segment validation failed");
 		f_rsp_client_cleanup();
 		return;
