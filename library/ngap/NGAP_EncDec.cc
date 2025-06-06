@@ -70,11 +70,15 @@ OCTETSTRING enc__NGAP__PDUSessionResourceSetupRequestTransfer__IEs(const NGAP__I
 
 	/* Encode from abstract data type into BER/DER */
 	pdu.encode(NGAP__IEs::PDUSessionResourceSetupRequestTransfer_protocolIEs_descr_, TTCN_buf,
-		   TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
 
 	for (int i = 0; i < TTCN_buf.get_len(); i++)
 		printf(" %02x", TTCN_buf.get_data()[i]);
 	printf("\n");
+
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+
+#if 0
 
 	aper_buf_len = fftranscode_ber2aper(FFTRANSC_T_NGAP, &aper_buf, TTCN_buf.get_data(), TTCN_buf.get_len());
 	if (aper_buf_len < 0) {
@@ -88,6 +92,7 @@ OCTETSTRING enc__NGAP__PDUSessionResourceSetupRequestTransfer__IEs(const NGAP__I
 	fftranscode_free(aper_buf);
 
 	return ret_val;
+#endif
 }
 
 }
