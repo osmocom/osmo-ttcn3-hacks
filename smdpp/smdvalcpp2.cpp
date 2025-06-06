@@ -2447,60 +2447,6 @@ class RSPClient {
 		return output;
 	}
 
-	// Derive GlobalPlatform SCP03 session keys from shared secret
-	bool deriveSessionKeys(const std::vector<uint8_t>& sharedSecret,
-	                      const std::vector<uint8_t>& hostId,
-	                      std::vector<uint8_t>& sEnc,
-	                      std::vector<uint8_t>& sMac,
-	                      std::vector<uint8_t>& sDek) {
-		try {
-			// GlobalPlatform SCP03 Annex G key derivation
-			// KDF counter || length || shared info
-
-			// Shared info = Algorithm ID || PartyUInfo || PartyVInfo
-			std::vector<uint8_t> algorithmID = {0x00, 0x00, 0x00, 0x01}; // id-aes128-CBC-CMAC
-			std::vector<uint8_t> partyUInfo = hostId; // Host ID as Party U
-			std::vector<uint8_t> partyVInfo; // Empty for Party V
-
-			// S-ENC derivation
-			std::vector<uint8_t> kdf_input_enc;
-			kdf_input_enc.push_back(0x01); // Counter
-			kdf_input_enc.push_back(0x00); kdf_input_enc.push_back(0x80); // Length (128 bits)
-			kdf_input_enc.insert(kdf_input_enc.end(), algorithmID.begin(), algorithmID.end());
-			kdf_input_enc.insert(kdf_input_enc.end(), partyUInfo.begin(), partyUInfo.end());
-			kdf_input_enc.insert(kdf_input_enc.end(), partyVInfo.begin(), partyVInfo.end());
-
-			// Use CMAC with shared secret as key
-			sEnc = computeCMAC_AES(sharedSecret, kdf_input_enc);
-
-			// S-MAC derivation
-			std::vector<uint8_t> kdf_input_mac;
-			kdf_input_mac.push_back(0x02); // Counter
-			kdf_input_mac.push_back(0x00); kdf_input_mac.push_back(0x80); // Length
-			kdf_input_mac.insert(kdf_input_mac.end(), algorithmID.begin(), algorithmID.end());
-			kdf_input_mac.insert(kdf_input_mac.end(), partyUInfo.begin(), partyUInfo.end());
-			kdf_input_mac.insert(kdf_input_mac.end(), partyVInfo.begin(), partyVInfo.end());
-
-			sMac = computeCMAC_AES(sharedSecret, kdf_input_mac);
-
-			// S-DEK derivation
-			std::vector<uint8_t> kdf_input_dek;
-			kdf_input_dek.push_back(0x03); // Counter
-			kdf_input_dek.push_back(0x00); kdf_input_dek.push_back(0x80); // Length
-			kdf_input_dek.insert(kdf_input_dek.end(), algorithmID.begin(), algorithmID.end());
-			kdf_input_dek.insert(kdf_input_dek.end(), partyUInfo.begin(), partyUInfo.end());
-			kdf_input_dek.insert(kdf_input_dek.end(), partyVInfo.begin(), partyVInfo.end());
-
-			sDek = computeCMAC_AES(sharedSecret, kdf_input_dek);
-
-			Logger::info("Derived GlobalPlatform SCP03 session keys");
-			return true;
-		} catch (const std::exception& e) {
-			Logger::error("deriveSessionKeys failed: " + std::string(e.what()));
-			return false;
-		}
-	}
-
 	// Derive BSP session keys using X9.63 KDF
 	bool deriveBSPSessionKeys(const std::vector<uint8_t>& sharedSecret,
 	                         uint8_t keyType,

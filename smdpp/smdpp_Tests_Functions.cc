@@ -119,21 +119,21 @@ void RSPClientRegistry::destroyAllClients() {
  * UTILITY FUNCTIONS FOR TYPE CONVERSION
  * ============================================================================ */
 
-std::vector<uint8_t> octetstring_to_bytes(const OCTETSTRING& octetstr) {
+static std::vector<uint8_t> octetstring_to_bytes(const OCTETSTRING& octetstr) {
     const unsigned char* data = static_cast<const unsigned char*>(octetstr);
     int length = octetstr.lengthof();
     return std::vector<uint8_t>(data, data + length);
 }
 
-OCTETSTRING bytes_to_octetstring(const std::vector<uint8_t>& bytes) {
+static OCTETSTRING bytes_to_octetstring(const std::vector<uint8_t>& bytes) {
     return OCTETSTRING(bytes.size(), bytes.data());
 }
 
-std::string charstring_to_string(const CHARSTRING& charstr) {
+static std::string charstring_to_string(const CHARSTRING& charstr) {
     return std::string(static_cast<const char*>(charstr));
 }
 
-CHARSTRING string_to_charstring(const std::string& str) {
+static CHARSTRING string_to_charstring(const std::string& str) {
     return CHARSTRING(str.c_str());
 }
 
@@ -420,85 +420,6 @@ BOOLEAN ext__RSPClient__verifyServerSignature(const INTEGER& clientHandle, const
     }
 }
 
-/* Certificate Utilities */
-OCTETSTRING ext__CertificateUtil__loadCertFromPEM(const CHARSTRING& pemData) {
-    try {
-        std::string pem = charstring_to_string(pemData);
-        auto cert = CertificateUtil::loadCertFromPEM(pem);
-
-        // Convert X509* to DER bytes (would need implementation)
-        return OCTETSTRING(0, nullptr);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__loadCertFromPEM failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-OCTETSTRING ext__CertificateUtil__loadCertFromDER(const OCTETSTRING& derData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(derData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-
-        // Return the same DER data for now
-        return derData;
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__loadCertFromDER failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-CHARSTRING ext__CertificateUtil__getSubjectName(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        std::string subject = CertificateUtil::getSubjectName(cert.get());
-
-        return string_to_charstring(subject);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectName failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
-CHARSTRING ext__CertificateUtil__getIssuerName(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        std::string issuer = CertificateUtil::getIssuerName(cert.get());
-
-        return string_to_charstring(issuer);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getIssuerName failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
-BOOLEAN ext__CertificateUtil__isExpired(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        bool expired = CertificateUtil::isExpired(cert.get());
-
-        return BOOLEAN(expired);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__isExpired failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
-OCTETSTRING ext__CertificateUtil__getSubjectKeyIdentifier(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        std::vector<uint8_t> ski = CertificateUtil::getSubjectKeyIdentifier(cert.get());
-
-        return bytes_to_octetstring(ski);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
 CHARSTRING ext__CertificateUtil__getEID(const OCTETSTRING& certData) {
     try {
         std::vector<uint8_t> der = octetstring_to_bytes(certData);
@@ -765,39 +686,6 @@ CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
 }
 
 
-BOOLEAN ext__Crypto__deriveSessionKeys(const INTEGER& clientHandle,
-                                        const OCTETSTRING& sharedSecret,
-                                      const OCTETSTRING& hostId,
-                                      OCTETSTRING& sEnc,
-                                      OCTETSTRING& sMac,
-                                      OCTETSTRING& sDek) {
-    try {
-        std::vector<uint8_t> ss = octetstring_to_bytes(sharedSecret);
-        std::vector<uint8_t> hid = octetstring_to_bytes(hostId);
-        std::vector<uint8_t> sEnc_vec, sMac_vec, sDek_vec;
-
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(clientHandle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return BOOLEAN(false);
-        }
-
-        bool result = client->deriveSessionKeys(ss, hid, sEnc_vec, sMac_vec, sDek_vec);
-
-        if (result) {
-            sEnc = bytes_to_octetstring(sEnc_vec);
-            sMac = bytes_to_octetstring(sMac_vec);
-            sDek = bytes_to_octetstring(sDek_vec);
-        }
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__Crypto__deriveSessionKeys failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
 BOOLEAN ext__Crypto__deriveBSPSessionKeys(const INTEGER& clientHandle,
                                         const OCTETSTRING& sharedSecret,
                                         const INTEGER& keyType,
@@ -840,18 +728,6 @@ BOOLEAN ext__Crypto__deriveBSPSessionKeys(const INTEGER& clientHandle,
     }
 }
 
-OCTETSTRING ext__CertificateUtil__getAuthorityKeyIdentifier(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        std::vector<uint8_t> aki = CertificateUtil::getAuthorityKeyIdentifier(cert.get());
-
-        return bytes_to_octetstring(aki);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getAuthorityKeyIdentifier failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
 
 BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& cert,
                                                           const CHARSTRING& certPoolDir,
@@ -920,63 +796,6 @@ BOOLEAN ext__CertificateUtil__verify_TR031111(const OCTETSTRING& message,
     } catch (const std::exception& e) {
         LOG_ERROR("ext__CertificateUtil__verify_TR031111 failed: " + std::string(e.what()));
         return BOOLEAN(false);
-    }
-}
-
-/* Logger Functions */
-INTEGER ext__Logger__debug(const CHARSTRING& message, const CHARSTRING& filename, const INTEGER& line) {
-    try {
-        std::string msg = charstring_to_string(message);
-        std::string file = charstring_to_string(filename);
-        int lineNum = static_cast<int>(line);
-
-        Logger::debug(msg, file.c_str(), lineNum);
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        std::cerr << "ext__Logger__debug failed: " << e.what() << std::endl;
-        return INTEGER(-1);
-    }
-}
-
-INTEGER ext__Logger__info(const CHARSTRING& message, const CHARSTRING& filename, const INTEGER& line) {
-    try {
-        std::string msg = charstring_to_string(message);
-        std::string file = charstring_to_string(filename);
-        int lineNum = static_cast<int>(line);
-
-        Logger::info(msg, file.c_str(), lineNum);
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        std::cerr << "ext__Logger__info failed: " << e.what() << std::endl;
-        return INTEGER(-1);
-    }
-}
-
-INTEGER ext__Logger__warning(const CHARSTRING& message, const CHARSTRING& filename, const INTEGER& line) {
-    try {
-        std::string msg = charstring_to_string(message);
-        std::string file = charstring_to_string(filename);
-        int lineNum = static_cast<int>(line);
-
-        Logger::warning(msg, file.c_str(), lineNum);
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        std::cerr << "ext__Logger__warning failed: " << e.what() << std::endl;
-        return INTEGER(-1);
-    }
-}
-
-INTEGER ext__Logger__error(const CHARSTRING& message, const CHARSTRING& filename, const INTEGER& line) {
-    try {
-        std::string msg = charstring_to_string(message);
-        std::string file = charstring_to_string(filename);
-        int lineNum = static_cast<int>(line);
-
-        Logger::error(msg, file.c_str(), lineNum);
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        std::cerr << "ext__Logger__error failed: " << e.what() << std::endl;
-        return INTEGER(-1);
     }
 }
 
