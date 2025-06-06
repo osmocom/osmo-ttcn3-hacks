@@ -19,6 +19,8 @@ import from Misc_Helpers all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 
+import from DNS_Helpers all;
+
 import from Milenage_Functions all;
 
 import from NGAP_PDU_Descriptions all;
@@ -62,6 +64,7 @@ modulepar {
 	octetstring mp_usim_key := '762a2206fe0b4151ace403c86a11e479'O;
 	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
 	uint24_t mp_tac := 1;
+	charstring mp_apn := "internet";
 }
 
 /* parameters of emulated gNB / ng-eNB */
@@ -383,7 +386,6 @@ private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
 					      ngiaCap := '40'O /* ONLY NIA1 supported */);
 
 	[] NGAP.receive(cr_NG_SECURITY_MODE_COMMAND(p_UECap := ue_sec_cap)) -> value rx_nas {
-		log("Rx inner NAS: ", rx_nas);
 		/* Configure integrity protection: */
 		cfg := {
 			set_nas_alg_int := NG_NAS_ALG_IP_NIA1
@@ -415,6 +417,66 @@ private altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
 	[] NGAP.receive(cr_NG_CONFIGURATION_UPDATE_COMMAND) -> value rx_nas {
 		NGAP.send(cs_NG_CONFIGURATION_UPDATE_COMPLETE);
 	}
+}
+
+private function f_pdu_sess_establish() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NGAP_PDU rx_ngap;
+	var NG_NAS_DL_Message_Type rx_nas;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV('01'O), '01'O,
+							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
+							      p_PDU_SessionType := cs_PDU_SessionTypeTV('001'B), /* IPv4 */
+							      p_SSC_Mode := cs_SSC_ModeTV('001'B));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV('01'O),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(mp_apn)));
+	NGAP.send(nas_ul_msg);
+
+	NGAP.receive(mw_ngap_initMsg(mw_n2_InitialContextSetupRequest_withPDUSessionList)) -> value rx_ngap;
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	log("PESPIN: Rx DL_NAST_TRANSPORT: ", rx_nas);
+
+	var NG_NAS_DL_Message_Type inner_nas := dec_NG_NAS_DL_Message_Type(rx_nas.dl_Nas_Transport.payload.payload);
+	log("PESPIN: Rx inner NAS: ", inner_nas);
+
+	/* TODO: the above is being decoded wrong;
+19:49:40.663833 1901 NGAP_Emulation.ttcn:570 Sent on NGAP_CLIENT to TC_ng_register0(4) @NG_NAS_MsgContainers.NG_NAS_DL_Message_Type : {
+    dl_Nas_Transport := {
+        protocolDiscriminator := '01111110'B,
+        spareHalfOctet := '0'H,
+        securityHeaderType := '0000'B,
+        messageType := '01101000'B,
+        spareHalfOctet2 := '0'H,
+        payloadContainerType := {
+            iei := omit,
+            container := '0001'B
+        },
+        payload := {
+            iei := omit,
+            iel := '3500'O,
+            payload := '2E0101C211000901000631310101FF010603F42403F4242905010A2D0002220101790006012041010109250908696E7465726E65741201'O
+        },
+        pduSessionId := omit,
+        additionalInfo := omit,
+        gmmCause := omit,
+        backOffTimerValue := omit,
+        lowerBoundTimerValue := omit
+    }
+}
+
+    dl_Nas_Transport := {
+	The last '1201'O in .payload.payload should actually end up decoded in pduSessionId!!!! Looks like a bug in TTCN3?
+*/
+
+	/* TODO: we should also decode ngap.initiatingMessage.value_.initialContextSetupRequest.protocolIEs[id==id_PDUSessionResourceSetupListCxtReq].value_.pDUSessionResourceSetupListCxtReq.pDUSessionResourceSetupRequestTransfer */
+
+	/* TODO: answer with InitialContextSetupResponse */
+	f_sleep(5.0);
 }
 
 private function f_register() runs on ConnHdlr {
@@ -454,8 +516,7 @@ private function f_register() runs on ConnHdlr {
 
 	as_ngap_handle_configuration_update();
 
-	/* TODO: PDU session establishment request */
-	f_sleep(5.0);
+	f_pdu_sess_establish();
 }
 
 /* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
