@@ -49,6 +49,7 @@ more sections for test components.
 
 ```ini
 [testsuite]
+titan_min=9.0.0
 program=MGCP_Test
 config=MGCP_Test.cfg
 
@@ -63,6 +64,9 @@ vty_port=4243
 ### Keys
 
 #### Testsuite section
+
+* `titan_min=`: the minimum required eclipse-titan version for building and
+  running this testsuite.
 
 * `program=`: the executable for starting the testsuite, without arguments.
 

@@ -121,6 +121,7 @@ def verify(cfg, path):
         "copy",
         "prepare",
         "program",
+        "titan_min",
     ]
     keys_valid_component = [
         "clean",
@@ -148,6 +149,9 @@ def verify(cfg, path):
         logging.error(f"{path}: missing [testsuite] section")
         exit_error_readme()
     if "program" not in cfg["testsuite"]:
+        logging.error(f"{path}: missing program= in [testsuite]")
+        exit_error_readme()
+    if "titan_min" not in cfg["testsuite"]:
         logging.error(f"{path}: missing program= in [testsuite]")
         exit_error_readme()
     if " " in cfg["testsuite"]["program"]:
