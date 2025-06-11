@@ -64,7 +64,7 @@ vty_port=4243
 
 #### Testsuite section
 
-* `program=` the executable for starting the testsuite, without arguments.
+* `program=`: the executable for starting the testsuite, without arguments.
 
 * `config=`: the testsuite configuration file.
 
