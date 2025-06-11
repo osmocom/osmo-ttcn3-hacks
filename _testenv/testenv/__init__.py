@@ -86,6 +86,7 @@ def parse_args():
         help="which testenv.cfg to use (supports * wildcards via fnmatch)",
     )
     group.add_argument("-i", "--io-uring", action="store_true", help="set LIBOSMO_IO_BACKEND=IO_URING")
+    group.add_argument("-T", "--titan-version", help="which eclipse-titan version to use")
 
     group = sub_run.add_argument_group("source/binary options", "All components are built from source by default.")
     group.add_argument(

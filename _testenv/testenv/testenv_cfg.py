@@ -1,5 +1,6 @@
 # Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
+from packaging.version import Version
 import configparser
 import fnmatch
 import glob
@@ -10,6 +11,8 @@ import testenv
 
 cfgs = {}
 current = None
+titan_version_in_path = None
+titan_min_previous = None
 
 
 def set_current(cfg_name, loop_count=0):
@@ -72,6 +75,76 @@ def get_vty_host_port(cfg, path=None):
             host = cfg[section]["vty_host"]
 
     return host, port
+
+
+def get_titan_version_in_path():
+    global titan_version_in_path
+
+    if titan_version_in_path:
+        return titan_version_in_path
+
+    ret = None
+    v = testenv.cmd.run(["ttcn3_compiler", "-v"], capture_output=True, text=True)
+    for line in v.stderr.split("\n"):
+        if line.startswith("Version: "):
+            ret = line.split(":", 1)[1].strip()
+            logging.debug(f"eclipse-titan version: {ret}")
+            break
+    titan_version_in_path = ret
+    return ret
+
+
+def get_titan_version(cfg, path=None):
+    global titan_min_previous
+
+    ret_version = cfg["testsuite"]["titan_min"]
+    ret_reason = "from titan_min= in testenv.cfg"
+
+    if titan_min_previous and titan_min_previous["version"] != ret_version:
+        logging.error("Found different titan_min= versions in testenv.cfg files of the same directory:")
+        logging.error(f"  titan_min={ret_version} in {path}")
+        logging.error(f"  titan_min={titan_min_previous['version']} in {titan_min_previous['path']}")
+        logging.error("This is not supported, please fix it.")
+        sys.exit(1)
+    titan_min_previous = {"version": ret_version, "path": path}
+
+    if testenv.args.titan_version:
+        if Version(ret_version) > Version(testenv.args.titan_version):
+            logging.error(
+                f"--titan-version={testenv.args.titan_version} is lower than titan_min={ret_version} in {path}"
+            )
+            sys.exit(1)
+        ret_version = testenv.args.titan_version
+        ret_reason = "from --titan-version"
+
+    if not testenv.args.podman and not os.path.exists(f"/opt/eclipse-titan-{ret_version}"):
+        path_version = get_titan_version_in_path()
+        if not path_version:
+            logging.error("Failed to parse the ttcn3_compiler version.")
+            logging.error(f"Install eclipse-titan {ret_version} or higher or use --podman.")
+            sys.exit(1)
+        if testenv.args.titan_version and ret_version != path_version:
+            logging.error(
+                f"Installed eclipse-titan version {path_version} is not the same as --titan-version={ret_version}."
+            )
+            sys.exit(1)
+        if Version(ret_version) > Version(path_version):
+            logging.error(
+                f"Installed eclipse-titan version {path_version} is lower than titan_min={ret_version} in {path}."
+            )
+            logging.error(f"Install eclipse-titan {ret_version} or higher or use --podman.")
+            sys.exit(1)
+        ret_version = path_version
+        ret_reason = "installed on host system"
+
+    return ret_version, ret_reason
+
+
+def get_titan_version_first_cfg():
+    """The titan version is the same for all testenv.cfg files in the same
+    testsuite directory, this is enforced in get_titan_version()."""
+    _, cfg = next(iter(cfgs.items()))
+    return get_titan_version(cfg)
 
 
 def verify_qemu_cfgs():
@@ -194,6 +267,7 @@ def verify(cfg, path):
                 sys.exit(1)
 
     get_vty_host_port(cfg, path)
+    get_titan_version(cfg, path)
 
 
 def raise_error_config_arg(glob_result, config_arg):

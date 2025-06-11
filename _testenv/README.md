@@ -66,7 +66,8 @@ vty_port=4243
 #### Testsuite section
 
 * `titan_min=`: the minimum required eclipse-titan version for building and
-  running this testsuite.
+  running this testsuite. See the eclipse-titan versions section below for
+  details.
 
 * `program=`: the executable for starting the testsuite, without arguments.
 
@@ -274,6 +275,17 @@ Testenv sets the following variables while running shell commands from
 
 * `TERM`:
   Is set to the same `TERM` passed to testenv with fallback to `dumb`.
+
+## Eclipse-titan versions
+
+It is possible to change the eclipse-titan version that is used to build and
+run a testsuite if multiple versions are installed. This is the case when
+running in podman (see `testenv/data/podman/Dockerfile`) or if multiple
+versions are installed as `/opt/eclipse-titan-$VERSION` paths on the host
+system.
+
+Switching between the versions is done either by setting a `titan_min` version
+in the `[testsuite]` section, or by using `-T` / `--titan-version`.
 
 ## Troubleshooting
 

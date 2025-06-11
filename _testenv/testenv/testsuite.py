@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import testenv
 import testenv.cmd
+import testenv.testenv_cfg
 import time
 
 builddir_env = {}
@@ -35,15 +36,21 @@ def init():
     atexit.register(stop)
     update_deps()
 
-    if testenv.args.podman:
-        builddir = os.path.join(testenv.args.cache, "podman", "ttcn3")
-        builddir_env = {"BUILDDIR": builddir}
+    titan_version, _ = testenv.testenv_cfg.get_titan_version_first_cfg()
+    ttcn3_dir = f"/opt/eclipse-titan-{titan_version}"
+
+    if testenv.args.podman or os.path.exists(ttcn3_dir):
+        cache_dir = "podman" if testenv.args.podman else "host"
+        builddir = os.path.join(testenv.args.cache, cache_dir, f"titan-{titan_version}")
+        path_old = testenv.cmd.generate_env(podman=testenv.args.podman)["PATH"]
+        builddir_env = {"BUILDDIR": builddir, "TTCN3_DIR": ttcn3_dir, "PATH": f"{ttcn3_dir}/bin:{path_old}"}
 
     prepare_testsuite_dir()
 
 
 def build():
-    logging.info("Building testsuite")
+    titan_version, titan_reason = testenv.testenv_cfg.get_titan_version_first_cfg()
+    logging.info(f"Building testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     env = copy.copy(builddir_env)
     if testenv.args.jobs:
@@ -73,7 +80,7 @@ def merge_log_files(cfg):
     # stdout of this script is very verbose, making it harder to see the output
     # that matters (tests failed or not), so redirect it to /dev/null
     cmd = f"{shlex.quote(log_merge)} {shlex.quote(section_data['program'])} --rm >/dev/null"
-    testenv.cmd.run(cmd, cwd=cwd)
+    testenv.cmd.run(cmd, cwd=cwd, env=builddir_env)
 
 
 def format_log_files(cfg):
@@ -81,7 +88,7 @@ def format_log_files(cfg):
 
     logging.info("Formatting log files")
     cmd = os.path.join(testenv.data_dir, "scripts/log_format.sh")
-    testenv.cmd.run(cmd, cwd=cwd)
+    testenv.cmd.run(cmd, cwd=cwd, env=builddir_env)
 
 
 def get_junit_logs(topdir):
@@ -151,7 +158,8 @@ def run(cfg):
         else:
             cmd += [f"{section_data['program']}.{test_arg}"]
 
-    logging.info("Running testsuite")
+    titan_version, titan_reason = testenv.testenv_cfg.get_titan_version_first_cfg()
+    logging.info(f"Running testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     if testenv.podman.is_running():
         testsuite_proc = testenv.podman.exec_cmd_background(cmd, cwd=cwd, env=env)

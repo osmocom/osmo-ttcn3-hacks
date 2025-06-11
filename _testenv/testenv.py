@@ -43,6 +43,7 @@ def run():
     if testenv.args.podman:
         testenv.podman.init()
         testenv.podman.start()
+        testenv.podman.check_titan_version()
 
     if not testenv.args.binary_repo:
         testenv.osmo_dev.init()

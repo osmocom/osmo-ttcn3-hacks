@@ -147,7 +147,8 @@ ADD	$OSMOCOM_REPO/Release /tmp/Release
 RUN	set -x && \
 	apt-get update && \
 	apt-get install -y --no-install-recommends \
-		eclipse-titan \
+		eclipse-titan-optdir-9.0.0 \
+		eclipse-titan-optdir-11.1.0 \
 		&& \
 	apt-get clean && \
 	rm /etc/apt/sources.list.d/osmocom-latest.list

@@ -12,6 +12,7 @@ import testenv.cmd
 import testenv.testdir
 import testenv.coredump
 import time
+import sys
 
 image_name = None
 distro = None
@@ -281,6 +282,20 @@ def start():
     pkgcache = os.path.join(apt_dir_var_cache, "pkgcache.bin")
     if not os.path.exists(pkgcache):
         exec_cmd(["apt-get", "-q", "update"])
+
+
+def check_titan_version():
+    version, _ = testenv.testenv_cfg.get_titan_version_first_cfg()
+    if not testenv.cmd.run(["test", "-d", f"/opt/eclipse-titan-{version}"], check=False).returncode:
+        return
+
+    up_to_date = testenv.podman.image_up_to_date()
+    logging.error(f"/opt/eclipse-titan-{version} not found in the podman container!")
+    if up_to_date:
+        logging.error("Consider modifying _testenv/data/podman/Dockerfile.")
+    else:
+        logging.error("Try './testenv.py init podman' to update the container.")
+    sys.exit(1)
 
 
 def distro_to_repo_dir(distro):
