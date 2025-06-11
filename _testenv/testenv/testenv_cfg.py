@@ -7,7 +7,6 @@ import logging
 import os.path
 import sys
 import testenv
-import testenv.testsuite
 
 cfgs = {}
 current = None
@@ -30,7 +29,7 @@ def set_current(cfg_name, loop_count=0):
 
 
 def exit_error_readme():
-    readme = os.path.join(testenv.testsuite.ttcn3_hacks_dir, "_testenv/README.md")
+    readme = os.path.join(testenv.ttcn3_hacks_dir, "_testenv/README.md")
     logging.error(f"More information: {readme}")
     sys.exit(1)
 
@@ -215,7 +214,7 @@ def raise_error_config_arg(glob_result, config_arg):
 
 
 def find_configs():
-    dir_testsuite = os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)
+    dir_testsuite = os.path.join(testenv.ttcn3_hacks_dir, testenv.args.testsuite)
     pattern = os.path.join(dir_testsuite, "testenv*.cfg")
     ret = sorted(glob.glob(pattern))
 

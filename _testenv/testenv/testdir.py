@@ -66,7 +66,7 @@ def prepare(cfg_name, cfg, loop_count):
         testdir = os.path.join(topdir, cfg_name.replace("testenv_", "").replace(".cfg", ""))
 
     logging.info(f"Preparing testdir: {testdir}")
-    testsuite_dir = os.path.join(testenv.testsuite.ttcn3_hacks_dir, testenv.args.testsuite)
+    testsuite_dir = os.path.join(testenv.ttcn3_hacks_dir, testenv.args.testsuite)
 
     atexit.register(clean_run_scripts)
 
@@ -96,13 +96,13 @@ def prepare(cfg_name, cfg, loop_count):
 
     # Referenced in testsuite cfgs: Common.cfg
     common_cfg = os.path.join(testdir, "testsuite", "Common.cfg")
-    path = os.path.join(testenv.testsuite.ttcn3_hacks_dir, "Common.cfg")
+    path = os.path.join(testenv.ttcn3_hacks_dir, "Common.cfg")
     testenv.cmd.run(["install", "-Dm644", path, common_cfg])
     testenv.cmd.run(
         [
             "sed",
             "-i",
-            f's#TTCN3_HACKS_PATH := .*#TTCN3_HACKS_PATH := "{testenv.testsuite.ttcn3_hacks_dir}"#',
+            f's#TTCN3_HACKS_PATH := .*#TTCN3_HACKS_PATH := "{testenv.ttcn3_hacks_dir}"#',
             common_cfg,
         ]
     )

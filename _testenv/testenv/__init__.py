@@ -11,6 +11,7 @@ class NoTraceException(Exception):
 
 args = None
 
+ttcn3_hacks_dir = os.path.realpath(f"{__file__}/../../..")
 src_dir = os.environ.get("TESTENV_SRC_DIR", os.path.realpath(f"{__file__}/../../../.."))
 data_dir = os.path.join(os.path.realpath(f"{__file__}/../.."), "data")
 custom_kernel_path = os.path.join(os.path.realpath(f"{__file__}/../../.."), ".linux")
@@ -214,8 +215,7 @@ def verify_args_run():
         )
         raise NoTraceException(f"For --kernel-custom, put a symlink or copy of your kernel to: {custom_kernel_path}")
 
-    ttcn3_hacks_dir_src = os.path.realpath(f"{__file__}/../../..")
-    testsuite_dir = os.path.join(ttcn3_hacks_dir_src, args.testsuite)
+    testsuite_dir = os.path.join(ttcn3_hacks_dir, args.testsuite)
     if not os.path.exists(testsuite_dir):
         raise NoTraceException(f"testsuite dir not found: {testsuite_dir}")
 

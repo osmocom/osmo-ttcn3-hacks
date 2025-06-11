@@ -13,18 +13,17 @@ import testenv
 import testenv.cmd
 import time
 
-ttcn3_hacks_dir = os.path.realpath(f"{__file__}/../../..")
 builddir_env = {}
 testsuite_proc = None
 
 
 def update_deps():
     logging.info("Updating osmo-ttcn3-hacks/deps")
-    testenv.cmd.run(["make", "deps"], cwd=ttcn3_hacks_dir)
+    testenv.cmd.run(["make", "deps"], cwd=testenv.ttcn3_hacks_dir)
 
 
 def prepare_testsuite_dir():
-    testsuite_dir = f"{ttcn3_hacks_dir}/{testenv.args.testsuite}"
+    testsuite_dir = f"{testenv.ttcn3_hacks_dir}/{testenv.args.testsuite}"
     logging.info(f"Generating links and Makefile for {testenv.args.testsuite}")
     testenv.cmd.run(["./gen_links.sh"], cwd=testsuite_dir, env=builddir_env)
     testenv.cmd.run("USE_CCACHE=1 ./regen_makefile.sh", cwd=testsuite_dir, env=builddir_env)
@@ -50,7 +49,7 @@ def build():
     if testenv.args.jobs:
         env["PARALLEL_MAKE"] = f"-j{testenv.args.jobs}"
 
-    testenv.cmd.run(["make", testenv.args.testsuite], cwd=ttcn3_hacks_dir, env=env)
+    testenv.cmd.run(["make", testenv.args.testsuite], cwd=testenv.ttcn3_hacks_dir, env=env)
 
 
 def is_running(pid):
@@ -70,7 +69,7 @@ def merge_log_files(cfg):
     cwd = os.path.join(testenv.testdir.testdir, "testsuite")
 
     logging.info("Merging log files")
-    log_merge = os.path.join(ttcn3_hacks_dir, "log_merge.sh")
+    log_merge = os.path.join(testenv.ttcn3_hacks_dir, "log_merge.sh")
     # stdout of this script is very verbose, making it harder to see the output
     # that matters (tests failed or not), so redirect it to /dev/null
     cmd = f"{shlex.quote(log_merge)} {shlex.quote(section_data['program'])} --rm >/dev/null"
@@ -128,9 +127,9 @@ def run(cfg):
     section_data = cfg["testsuite"]
 
     cwd = os.path.join(testenv.testdir.testdir, "testsuite")
-    start_testsuite = os.path.join(ttcn3_hacks_dir, "start-testsuite.sh")
-    suite = os.path.join(ttcn3_hacks_dir, testenv.args.testsuite, section_data["program"])
-    suite = os.path.relpath(suite, ttcn3_hacks_dir)
+    start_testsuite = os.path.join(testenv.ttcn3_hacks_dir, "start-testsuite.sh")
+    suite = os.path.join(testenv.ttcn3_hacks_dir, testenv.args.testsuite, section_data["program"])
+    suite = os.path.relpath(suite, testenv.ttcn3_hacks_dir)
 
     env = copy.copy(builddir_env)
     env["TTCN3_PCAP_PATH"] = os.path.join(testenv.testdir.testdir, "testsuite")
