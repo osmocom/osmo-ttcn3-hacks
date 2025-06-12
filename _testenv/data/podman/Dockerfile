@@ -55,6 +55,7 @@ RUN	set -x && \
 		libmnl-dev \
 		libmongoc-dev \
 		libnghttp2-dev \
+		libnl-route-3-dev \
 		libortp-dev \
 		libpcap-dev \
 		libpcsclite-dev \
