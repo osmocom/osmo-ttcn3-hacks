@@ -224,7 +224,7 @@ def verify(cfg, path):
         logging.error(f"{path}: missing program= in [testsuite]")
         exit_error_readme()
     if "titan_min" not in cfg["testsuite"]:
-        logging.error(f"{path}: missing program= in [testsuite]")
+        logging.error(f"{path}: missing titan_min= in [testsuite]")
         exit_error_readme()
     if " " in cfg["testsuite"]["program"]:
         logging.error(f"{path}: program= in [testsuite] must not have arguments")
