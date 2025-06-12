@@ -231,6 +231,7 @@ def start():
         f"--security-opt=seccomp={seccomp}",
         "--cap-add=NET_ADMIN",  # for dumpcap, tun devices, osmo-pcap-client
         "--cap-add=NET_RAW",  # for dumpcap, osmo-pcap-client
+        "--cap-add=SYS_ADMIN",  # for osmo-uecups-daemon (CLONE_NEWNET)
         "--device=/dev/net/tun",  # for e.g. ggsn_tests
         "--volume",
         f"{apt_dir_var_cache}:/var/cache/apt",
