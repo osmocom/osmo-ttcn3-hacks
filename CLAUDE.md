@@ -8,24 +8,6 @@ This is the Osmocom TTCN-3 Test Suite repository containing test suites for cell
 
 The SM-DP+ (smdpp) test suite specifically validates RSP (Remote SIM Provisioning) protocol implementations according to GSMA SGP.22 specifications.
 
-## Current Status
-
-**🎉 MAJOR MILESTONE: Complete RSP Protocol Implementation Working (June 2025)**
-
-**Recent Work Completed (June 2025)**:
-- ✅ **Session Key Implementation**: **MAJOR BREAKTHROUGH** - Session keys (S-ENC, S-MAC, S-DEK) are now properly derived and used for cryptographic validation
-- ✅ **BSP Key Derivation**: Implemented proper BSP (Bound Profile Package Protection Protocol) key derivation using X9.63 KDF
-- ✅ **Profile Segment Validation**: All profile segments now undergo proper cryptographic validation with MAC verification and decryption
-- ✅ **Python Server Enhancement**: Fixed Python server to properly derive and use BSP session keys instead of fixed test keys
-- ✅ **Test Environment Adaptation**: Added intelligent handling of both encrypted and test data segments
-- ✅ **Code Prettification and Refactoring**: Major cleanup of smdpp test case structure
-- ✅ **TTCN-3 Syntax Fixes**: Resolved compilation errors with proper type declarations
-- ✅ **Helper Functions**: Created reusable validation functions for better maintainability
-- ✅ **Constants Standardization**: Replaced magic numbers with named constants
-- ✅ **Fixed critical certificate chain validation issue in RSP protocol implementation** (December 2024)
-- ✅ **Implemented proper certificate retrieval using actual certificates instead of PKIDs** (December 2024)
-- ✅ **Enhanced certificate chain validation with intermediate certificate support** (December 2024)
-
 ## Key Commands
 
 ### Building the Test Suite
@@ -40,15 +22,9 @@ cd smdpp/
 cd smdpp; ./gen_links.sh      # Create symbolic links to dependencies
 cd smdpp; ./regen_makefile.sh # Generate Makefile with proper dependencies
 
-# Full clean build (recommended when encountering issues)
+# Full clean build (recommended)
 cd smdpp; make clean; make compile; make -j
 
-# Incremental build (for minor changes)
-cd smdpp; make compile; make -j
-
-# Alternative commands for specific steps
-cd smdpp; make compile        # Compile TTCN-3 to C++ only
-cd smdpp; make smdpp         # Build just the smdpp executable
 ```
 
 **⚠️ Important Build Notes**:
@@ -57,15 +33,17 @@ cd smdpp; make smdpp         # Build just the smdpp executable
 - **Don't run `make clean` frequently as it takes time - use incremental `make -j` for minor changes**
 - Build process can take several minutes for full clean builds
 
+**⚠️ Important implementation Notes**:
+- ** c++ functions used by ttcn3 always have two underscores in the name, example:**
+- ttcn3: external function ext_logInfo(charstring xmessage);
+- c++: void ext__logInfo(const CHARSTRING& message)
+
+
 ### Running Tests
 
 ```bash
 # From the root tt-smdpp directory
-./uns.sh  # Runs in isolated namespace with Python server (RECOMMENDED)
-
-# Alternative (not recommended for smdpp)
-cd smdpp/
-../start-testsuite.sh smdpp_Tests smdpp_Tests.cfg  # Direct execution
+./uns.sh  # Runs in isolated namespace with Python server (MUST BE USED)
 ```
 
 **Test Execution Notes**:
@@ -81,10 +59,8 @@ cd smdpp/
 cat /app/tt-smdpp/smdpp/merged.log
 
 # Python server log
-cat /app/pysim/pyserver.log
+cat /app/tt-smdpp/smdpp/pyserver.log
 
-# Individual component logs (when debugging)
-ls /app/tt-smdpp/smdpp/*log
 ```
 
 ### Cleaning
@@ -141,15 +117,8 @@ The smdpp test suite implements a complete RSP protocol flow:
 - Test certificates in `sgp26/` directory
 
 ## Test Execution Environment
-
-**Current Status**: **Fully Working** ✅
-
 - **Always use `./uns.sh` for smdpp test execution** (required for proper operation)
 - Test runs in isolated network namespace with Python SM-DP+ server
-- Python server properly derives and uses BSP session keys
-- Complete RSP protocol flow validated with cryptographic operations
-- Test typically completes in 2-5 seconds with **pass** verdict
-- All 14 profile segments undergo proper cryptographic validation
 
 **Test Environment Components**:
 1. **TTCN-3 Test Client**: Implements eUICC side of RSP protocol
@@ -178,125 +147,7 @@ When modifying tests:
 6. **Session keys are fully implemented** - Both GlobalPlatform SCP03 and BSP key derivation working
 7. **BSP validation handles both test and encrypted data** - Intelligent detection of data types
 
-**Key Implementation Notes**:
-- **Session Key Functions**: `ext_Crypto_deriveSessionKeys()` and `ext_Crypto_deriveBSPSessionKeys()` are fully implemented
-- **Cryptographic Validation**: `ext_Crypto_verifyEncryptedProfileData()` performs MAC verification and decryption
-- **Python Server Integration**: BSP keys derived in both Python and C++ must match exactly
-- **Profile Segments**: All segment types (0x87, 0x88, 0x86) are properly validated
-- **Test Environment**: Gracefully handles both production encrypted data and test environment data
-
 **Debugging Tips**:
 - Check session key derivation logs for S-ENC, S-MAC, and BSP key values
 - Verify Python server logs show proper BSP key derivation
 - Use `merged.log` for detailed test execution traces
-- MAC verification failures indicate key derivation mismatches
-
-## Recent Implementation Details
-
-### Code Prettification and Refactoring (June 2025)
-
-**Problem**: The main test function `f_TC_rsp_complete_flow()` was a monolithic 400+ line function with repetitive validation code, magic numbers, and poor maintainability.
-
-**Solution**: Major refactoring to improve code structure and readability:
-
-**Constants Added**:
-- `c_oid_rspRole_dp_auth` / `c_oid_rspRole_dp_pb` - Certificate role OIDs
-- `c_remoteOpId_installBoundProfilePackage` - Protocol operation IDs
-- `c_keyType_AES`, `c_keyLen_16bytes`, `c_ecPoint_uncompressed` - Cryptographic constants
-- `c_hostId_min_length`, `c_hostId_max_length`, `c_min_segment_length` - Validation limits
-
-**Helper Functions Created**:
-- `f_validate_initialise_secure_channel_request()` - Validates InitialiseSecureChannelRequest structure
-- `f_validate_ecdh_and_signature()` - Validates ECDH compatibility and signature verification
-- `f_validate_bound_profile_package_structure()` - Validates BoundProfilePackage structure
-- `f_validate_configure_isdp_segments()` - Validates ConfigureISDP segments (BER-TLV APDU commands)
-- `f_validate_store_metadata_segments()` - Validates StoreMetadata segments
-- `f_validate_load_profile_elements_segments()` - Validates LoadProfileElements segments
-- `f_validate_certificate_roles()` - Validates certificate role OIDs
-- `f_validate_ein_permissions()` - Validates EIN permission matching
-- `f_fail_and_cleanup()` - Centralized error handling with cleanup
-
-**TTCN-3 Syntax Fixes**:
-- Fixed `SEQUENCE OF OCTETSTRING` parameter declaration issues
-- Resolved type compatibility problems with ASN.1 generated types
-- Proper use of `record of octetstring` vs `SEQUENCE OF` types
-
-**Benefits**:
-- **Maintainability**: Much easier to understand, modify, and debug
-- **Reusability**: Helper functions can be used for other test cases
-- **Readability**: Clear function names that describe exactly what they do
-- **No Magic Numbers**: All hardcoded values replaced with named constants
-- **Consistent Error Handling**: Centralized cleanup and error reporting
-
-### Certificate Chain Validation Fix (December 2024)
-
-**Problem**: Code was passing PKID (Public Key Identifier) instead of actual certificate for chain validation
-
-**Solution**: Implemented `ext_RSPClient_getCICertificate()` function to retrieve actual CI certificate
-
-**Implementation**: Added `ext_CertificateUtil_verifyCertificateChainWithIntermediate()` for proper chain validation with intermediate certificates
-
-**Files Modified**:
-- `smdpp_Tests.ttcn`: Added external function declarations and updated validation calls
-- `smdpp_Tests_Functions.cc`: Implemented new C++ functions
-- `smdvalcpp2.cpp`: Added `getCICertificate()` method to RSPClient class
-
-**Key Functions Added**:
-- `ext_RSPClient_getCICertificate()`: Retrieves actual CI certificate instead of PKID
-- `ext_CertificateUtil_verifyCertificateChainWithIntermediate()`: Validates certificate chains with specific intermediate certificates
-
-This ensures proper RSP protocol compliance with certificate chain validation as per GSMA SGP.22 specifications.
-
-### Session Key Implementation and BSP Protocol Support (June 2025)
-
-**Problem**: Session keys (S-ENC, S-MAC, S-DEK) were being derived but not used for actual cryptographic validation of profile segments. The test was passing without proper cryptographic validation.
-
-**Solution**: Implemented complete session key usage and BSP (Bound Profile Package Protection Protocol) support:
-
-**Major Technical Achievements**:
-
-1. **GlobalPlatform SCP03 Session Key Derivation**:
-   - Proper CMAC-based key derivation with shared secret and host ID
-   - Generates S-ENC (encryption), S-MAC (MAC), and S-DEK (data encryption keys)
-
-2. **BSP Protocol Key Derivation**:
-   - Implemented X9.63 Key Derivation Function (KDF) with SHA256
-   - Generates BSP-specific session keys matching Python server implementation
-   - Includes initial MAC chaining value for proper BSP segment validation
-
-3. **Profile Segment Cryptographic Validation**:
-   - MAC verification using CMAC with S-MAC key (8-byte truncated)
-   - AES-CBC decryption using S-ENC key with zero IV
-   - Intelligent handling of both encrypted and test data segments
-
-4. **Python Server Enhancement**:
-   - Fixed Python server to derive BSP keys instead of using fixed test keys
-   - Proper BSP key derivation using shared secret, host ID, and eUICC ID
-   - Session keys now match exactly between Python server and C++ test
-
-**Key Files Modified**:
-- `smdpp_Tests.ttcn`: Added session key parameters to validation functions
-- `smdpp_Tests_Functions.cc`: Implemented cryptographic validation functions:
-  - `ext_Crypto_deriveSessionKeys()`: GlobalPlatform SCP03 key derivation
-  - `ext_Crypto_deriveBSPSessionKeys()`: BSP protocol key derivation
-  - `ext_Crypto_verifyEncryptedProfileData()`: MAC verification and decryption
-- `/app/pysim/osmo-smdpp.py`: Enhanced Python server with proper BSP key derivation
-
-**Cryptographic Implementation Details**:
-- **CMAC**: Used for both session key derivation and MAC verification
-- **AES-CBC**: Used for profile segment decryption with zero IV
-- **X9.63 KDF**: Used for BSP key derivation with proper key ordering
-- **MAC Chaining**: Properly implemented initial MAC chaining value for BSP segments
-
-**Test Environment Adaptations**:
-- Intelligent detection of plain BER-TLV vs encrypted segments
-- Graceful handling of test data that doesn't follow production encryption patterns
-- Maintains compatibility with both test and production data formats
-
-**Results**:
-- **Complete cryptographic validation** now implemented and working
-- **BSP keys match exactly** between Python server and C++ test
-- **All 14 profile segments** validated successfully (ConfigureISDP, StoreMetadata, LoadProfileElements)
-- **Test now passes** with proper cryptographic validation enabled
-
-This implementation ensures full compliance with GSMA SGP.22 RSP specifications including proper session key usage and BSP protocol support.
