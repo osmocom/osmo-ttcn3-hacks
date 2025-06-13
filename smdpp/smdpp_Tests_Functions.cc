@@ -197,22 +197,6 @@ OCTETSTRING ext__RSPClient__getEUICCCertificate(const INTEGER& clientHandle) {
     }
 }
 
-
-
-OCTETSTRING ext__RSPClient__getSMDPCertificate(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        std::vector<uint8_t> cert = client->getSMDPCertificate();
-
-        return bytes_to_octetstring(cert);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
 OCTETSTRING ext__RSPClient__getCICertificate(const INTEGER& clientHandle) {
     try {
         int handle = static_cast<int>(clientHandle);
@@ -313,27 +297,6 @@ OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
         return bytes_to_octetstring(signature);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__signDataWithEUICC failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
-}
-
-OCTETSTRING ext__RSPClient__signDataWithSMDP(const INTEGER& clientHandle,
-                                            const OCTETSTRING& dataToSign) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> data = octetstring_to_bytes(dataToSign);
-        std::vector<uint8_t> signature = client->signDataWithSMDP(data);
-
-        return bytes_to_octetstring(signature);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__signDataWithSMDP failed: " + std::string(e.what()));
         return OCTETSTRING(0, nullptr);
     }
 }
@@ -483,37 +446,6 @@ BOOLEAN ext__CertificateUtil__hasRSPRole(const OCTETSTRING& certData, const CHAR
     }
 }
 
-BOOLEAN ext__RSPClient__verifyInitialiseSecureChannelRequest(const INTEGER& clientHandle,
-                                                            const OCTETSTRING& transactionId,
-                                                            const OCTETSTRING& controlRefTemplate,
-                                                            const OCTETSTRING& smdpOtpk,
-                                                            const OCTETSTRING& signature,
-                                                            const OCTETSTRING& dpPbCert) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return BOOLEAN(false);
-        }
-
-        // Build the data that was signed
-        std::vector<uint8_t> tid = octetstring_to_bytes(transactionId);
-        std::vector<uint8_t> crt = octetstring_to_bytes(controlRefTemplate);
-        std::vector<uint8_t> otpk = octetstring_to_bytes(smdpOtpk);
-        std::vector<uint8_t> sig = octetstring_to_bytes(signature);
-        std::vector<uint8_t> cert = octetstring_to_bytes(dpPbCert);
-
-        // This is a thin wrapper - the actual logic is in RSPClient::verifyInitialiseSecureChannelRequest
-        bool result = client->verifyInitialiseSecureChannelRequest(tid, crt, otpk, sig, cert);
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__verifyInitialiseSecureChannelRequest failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
 CHARSTRING ext__CertificateUtil__getPermittedEINs(const OCTETSTRING& eumCertData) {
     try {
         std::vector<uint8_t> der = octetstring_to_bytes(eumCertData);
@@ -557,6 +489,8 @@ OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
         std::vector<uint8_t> otherPubKey = octetstring_to_bytes(otherPublicKey);
         std::vector<uint8_t> sharedSecret = client->computeECDHSharedSecret(otherPubKey);
 
+        LOG_INFO("ECDH shared secret computed: " + HexUtil::bytesToHex(sharedSecret));
+
         return bytes_to_octetstring(sharedSecret);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__computeSharedSecret failed: " + std::string(e.what()));
@@ -564,113 +498,6 @@ OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
     }
 }
 
-// Verify encrypted profile data using session keys (MAC verification and decryption)
-BOOLEAN ext__Crypto__verifyEncryptedProfileData(const INTEGER& clientHandle,
-                                                const OCTETSTRING& encData,
-                                               const OCTETSTRING& sEnc,
-                                               const OCTETSTRING& sMac) {
-    try {
-        std::vector<uint8_t> data = octetstring_to_bytes(encData);
-        std::vector<uint8_t> s_enc = octetstring_to_bytes(sEnc);
-        std::vector<uint8_t> s_mac = octetstring_to_bytes(sMac);
-
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(clientHandle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return BOOLEAN(false);
-        }
-
-        bool result = client->verifyEncryptedProfileData(data, s_enc, s_mac);
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__Crypto__verifyEncryptedProfileData failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
-BOOLEAN ext__Crypto__parseReplaceSessionKeysRequest(const OCTETSTRING& encData,
-                                                   const OCTETSTRING& sEnc,
-                                                   const OCTETSTRING& sMac,
-                                                   OCTETSTRING& ppkEnc,
-                                                   OCTETSTRING& ppkCmac,
-                                                   OCTETSTRING& initialMacChainingValue) {
-    try {
-        std::vector<uint8_t> data = octetstring_to_bytes(encData);
-        std::vector<uint8_t> s_enc = octetstring_to_bytes(sEnc);
-        std::vector<uint8_t> s_mac = octetstring_to_bytes(sMac);
-
-        // Get the client from the registry - use a static handle for now
-        // In the test context, we typically have only one client
-        RSPClient* client = nullptr;
-        for (int i = 1; i <= 10; i++) {
-            client = RSPClientRegistry::getInstance().getClient(i);
-            if (client) break;
-        }
-
-        if (!client) {
-            LOG_ERROR("No RSP client found in registry");
-            return BOOLEAN(false);
-        }
-
-        // Decrypt the segment to get the plaintext
-        std::vector<uint8_t> plaintext;
-        if (!client->decryptBSPSegment(data, s_enc, s_mac, plaintext)) {
-            // Not a valid BSP segment or decryption failed
-            return BOOLEAN(false);
-        }
-
-        // Try to parse as ReplaceSessionKeysRequest
-        std::vector<uint8_t> ppk_enc, ppk_cmac, initial_mcv;
-        if (!client->parseReplaceSessionKeysRequest(plaintext, ppk_enc, ppk_cmac, initial_mcv)) {
-            // Not a ReplaceSessionKeysRequest
-            return BOOLEAN(false);
-        }
-
-        // Convert to TTCN-3 octetstrings
-        ppkEnc = bytes_to_octetstring(ppk_enc);
-        ppkCmac = bytes_to_octetstring(ppk_cmac);
-        initialMacChainingValue = bytes_to_octetstring(initial_mcv);
-
-        LOG_INFO("Successfully parsed ReplaceSessionKeysRequest");
-        return BOOLEAN(true);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__Crypto__parseReplaceSessionKeysRequest failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
-BOOLEAN ext__Crypto__updateBSPKeys(const INTEGER& clientHandle,
-                                  const OCTETSTRING& ppkEnc,
-                                  const OCTETSTRING& ppkCmac,
-                                  const OCTETSTRING& initialMacChainingValue) {
-    try {
-        std::vector<uint8_t> ppk_enc = octetstring_to_bytes(ppkEnc);
-        std::vector<uint8_t> ppk_cmac = octetstring_to_bytes(ppkCmac);
-        std::vector<uint8_t> initial_mcv = octetstring_to_bytes(initialMacChainingValue);
-
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(clientHandle);
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return BOOLEAN(false);
-        }
-
-        // Update the BSP keys in the client
-        bool result = client->updateBSPKeys(ppk_enc, ppk_cmac, initial_mcv);
-
-        if (result) {
-            LOG_INFO("Successfully updated BSP keys");
-        } else {
-            LOG_ERROR("Failed to update BSP keys");
-        }
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__Crypto__updateBSPKeys failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
 
 CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
     try {
@@ -684,50 +511,6 @@ CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
         return CHARSTRING("");
     }
 }
-
-
-BOOLEAN ext__Crypto__deriveBSPSessionKeys(const INTEGER& clientHandle,
-                                        const OCTETSTRING& sharedSecret,
-                                        const INTEGER& keyType,
-                                        const INTEGER& keyLength,
-                                        const OCTETSTRING& hostId,
-                                        const OCTETSTRING& eid,
-                                        OCTETSTRING& bspSEnc,
-                                        OCTETSTRING& bspSMac,
-                                        OCTETSTRING& initialMCV) {
-    try {
-        std::vector<uint8_t> ss = octetstring_to_bytes(sharedSecret);
-        std::vector<uint8_t> host_id = octetstring_to_bytes(hostId);
-        std::vector<uint8_t> eid_bytes = octetstring_to_bytes(eid);
-
-        uint8_t key_type = static_cast<uint8_t>(keyType.get_long_long_val());
-        uint8_t key_len = static_cast<uint8_t>(keyLength.get_long_long_val());
-
-        std::vector<uint8_t> bspSEnc_vec, bspSMac_vec, initialMCV_vec;
-
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(clientHandle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return BOOLEAN(false);
-        }
-
-        bool result = client->deriveBSPSessionKeys(ss, key_type, key_len, host_id, eid_bytes,
-                                                     bspSEnc_vec, bspSMac_vec, initialMCV_vec);
-
-        if (result) {
-            bspSEnc = bytes_to_octetstring(bspSEnc_vec);
-            bspSMac = bytes_to_octetstring(bspSMac_vec);
-            initialMCV = bytes_to_octetstring(initialMCV_vec);
-        }
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__Crypto__deriveBSPSessionKeys failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
 
 BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& cert,
                                                           const CHARSTRING& certPoolDir,

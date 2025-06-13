@@ -82,20 +82,6 @@ struct EVP_MD_CTX_Deleter {
 	}
 };
 
-struct SERVER_SIGNED1_Deleter {
-	void operator()(SERVER_SIGNED1 *ss1) const
-	{
-		SERVER_SIGNED1_free(ss1);
-	}
-};
-
-struct EUICC_INFO1_Deleter {
-	void operator()(EUICC_INFO1 *info) const
-	{
-		EUICC_INFO1_free(info);
-	}
-};
-
 struct cJSON_Deleter {
 	void operator()(cJSON *json) const
 	{
