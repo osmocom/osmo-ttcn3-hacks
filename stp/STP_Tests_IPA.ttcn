@@ -107,7 +107,24 @@ private function f_vty_cs7_listen_ipa_cmd(charstring cmd, integer ipa_port := 50
 friend function f_vty_cs7_ipa_as_cmd(charstring as_name, charstring cmd) runs on IPA_CT
 {
 	f_vty_config2(VTY, {"cs7 instance 0", "as " & as_name & " ipa"}, cmd);
+}
 
+private function f_ipa_asp_cfg_str(in IpaConfig cfg)
+return charstring {
+	var charstring str;
+
+	str := "asp " & cfg.asp_name;
+	str := str & " " & int2str(cfg.local_port);
+	str := str & " " & int2str(cfg.remote_port);
+	str := str & " ipa";
+
+	return str;
+}
+
+private function f_vty_cs7_ipa_asp_cmd(IpaConfig cfg, charstring cmd) runs on IPA_CT
+{
+	var charstring asp_cfg_str := f_ipa_asp_cfg_str(cfg);
+	f_vty_config2(VTY, {"cs7 instance 0", asp_cfg_str}, cmd);
 }
 
 friend function f_IPA_send(integer idx, octetstring data) runs on IPA_CT {
@@ -115,14 +132,20 @@ friend function f_IPA_send(integer idx, octetstring data) runs on IPA_CT {
 	IPA[idx].send(t_ASP_MTP3_TRANSFERreq(sio, 0, 0, 0, data));
 }
 
-friend function f_IPA_exp(integer idx, template (present) octetstring data) runs on IPA_CT {
+friend function f_IPA_exp(integer idx, template (present) octetstring data, float timeout_val := 5.0) runs on IPA_CT {
+	timer T := timeout_val;
+	T.start;
 	alt {
 	[] IPA[idx].receive(t_ASP_MTP3_TRANSFERind(?, ?, ?, ?, data)) {
 		setverdict(pass);
 		}
 	[] IPA[idx].receive {
-		setverdict(fail, "Received unexpected data on IPA port while waiting for ", data);
-		mtc.stop;
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected data on IPA port while waiting for ", data));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Timeout waiting for IPA[", idx, "] ", data));
 		}
 	}
 }
@@ -525,6 +548,68 @@ testcase TC_beat() runs on IPA_CT {
 	f_IPA_ping(0);
 }
 
+private function f_TC_beat_timeout(Misc_Helpers.ro_charstring asps) runs on IPA_CT
+{
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	var ASP_MTP3_TRANSFERind rx;
+	var float timeout_val := 3.0 + 1.0;
+	var IpaCcmMsgtype ipa_ping_msg := IPAC_MSGT_PING;
+	var IpaCcmMsgtype ipa_pong_msg := IPAC_MSGT_PONG;
+	var octetstring ipa_ping_data := int2oct(enum2int(ipa_ping_msg), 1);
+	var octetstring ipa_pong_data := int2oct(enum2int(ipa_pong_msg), 1);
+
+	f_init_common();
+	f_init_ipa(ipa_configs := ipa_configs);
+
+	f_vty_cs7_ipa_asp_cmd(ipa_configs[0], "timer xua beat 3");
+
+	if (ipa_configs[0].is_server) {
+		/* TODO */
+	} else {
+		f_connect_ipa(0);
+	}
+	f_sleep(3.0);
+	/* receive CCM IPA PING: */
+	f_ipa_cfg_chg_ccm_enabled(IPA_CFG[0], false);
+
+	IPA_CTRL[0].receive(t_ASP_IPA_UD(IPAC_PROTO_CCM, ipa_ping_data));
+	log("1st PING received");
+	IPA_CTRL[0].send(valueof(t_ASP_IPA_UD(IPAC_PROTO_CCM, ipa_pong_data)));
+
+	/* Make sure next HEARBEAT arrives around the time we configured.
+	 * Do not answer this nor next heardbeat: */
+	IPA_CTRL[0].receive(t_ASP_IPA_UD(IPAC_PROTO_CCM, ipa_ping_data));
+	log("2nd PING received");
+	IPA_CTRL[0].receive(t_ASP_IPA_UD(IPAC_PROTO_CCM, ipa_ping_data));
+	log("3rd PING received");
+
+	/* After 2*T(beat), IUT should figure out peer is not responding and terminate the conn: */
+	timer T := timeout_val;
+	T.start;
+	alt {
+	[] IPA_CTRL[0].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) {
+		setverdict(pass);
+	}
+	[] IPA[0].receive(t_ASP_MTP3_TRANSFERind(?, ?, ?, ?, ?)) -> value rx {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected IPA ", rx, " while waiting for connClosed"));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Timeout waiting for IPA connClosed"));
+		}
+	}
+
+	/* return to default value: */
+	f_vty_cs7_ipa_asp_cmd(g_ipa_configs[0], "timer xua beat 30");
+}
+
+/* Test the IUT sends heartbeat procedure when needed. */
+testcase TC_beat_timeout() runs on IPA_CT {
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-override-sender" };
+	f_TC_beat_timeout(asps);
+}
+
 control {
 	execute( TC_unknown_client_nodynamic() );
 	execute( TC_unknown_as_client_nodynamic() );
@@ -538,6 +623,7 @@ control {
 	execute( TC_unknown_client_dynamic_tmt_loadshare() );
 
 	execute( TC_beat() );
+	execute( TC_beat_timeout() );
 }
 
 
