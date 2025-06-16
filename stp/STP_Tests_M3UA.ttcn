@@ -159,12 +159,13 @@ runs on RAW_M3UA_CT {
 }
 
 friend function f_M3UA_exp(integer idx, template (present) PDU_M3UA msg,
-			   float timeout_val := 5.0, boolean answer_beat := true) runs on RAW_M3UA_CT {
+			   float timeout_val := 5.0, boolean answer_beat := true)
+runs on RAW_M3UA_CT return M3UA_RecvFrom {
 	var M3UA_RecvFrom rx;
 	timer T := timeout_val;
 	T.start;
 	alt {
-	[] M3UA[idx].receive(t_M3UA_RecvFrom(msg)) {
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(msg)) -> value rx {
 		setverdict(pass);
 		}
 	[answer_beat] as_m3ua_beat_answer(idx);
@@ -178,6 +179,7 @@ friend function f_M3UA_exp(integer idx, template (present) PDU_M3UA msg,
 					log2str("Timeout waiting for M3UA[", idx, "] ", msg));
 		}
 	}
+	return rx;
 }
 
 /* flush any number of queued messages matching 'msg' */
@@ -494,6 +496,71 @@ testcase TC_beat_payload() runs on RAW_M3UA_CT {
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
 	f_M3UA_beat(0, 'a1a2a3a4a5'O);
 	f_clear_m3ua();
+}
+
+friend function f_TC_beat_timeout(Misc_Helpers.ro_charstring asps) runs on RAW_M3UA_CT
+{
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var M3UA_RecvFrom rx;
+	var template (omit) M3UA_Heartbeat_Data hbd := omit;
+	var float timeout_val := 3.0 + 1.0;
+
+	f_init_m3ua(answer_beat := false, m3ua_configs := m3ua_configs);
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "timer xua beat 3");
+
+	if (m3ua_configs[0].is_server) {
+		f_init_m3ua_srv();
+		f_M3UA_CLNT_asp_up_act(0, rctx := int2oct(m3ua_configs[0].routing_ctx, 4));
+	} else {
+		f_M3UA_asp_up(0);
+		f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, *));
+	}
+
+	rx := f_M3UA_exp(0, tr_M3UA_BEAT(*), timeout_val := timeout_val, answer_beat := false);
+	log("1st BEAT received");
+	if (ispresent(rx.msg.m3UA_BEAT.messageParameters.heartbeat_Data)) {
+		hbd := rx.msg.m3UA_BEAT.messageParameters.heartbeat_Data;
+	}
+	f_M3UA_send(0, ts_M3UA_BEAT_ACK(hbd));
+	/* Make sure next HEARBEAT arrives around the time we configured.
+	 * Do not answer this nor next heardbeat: */
+	rx := f_M3UA_exp(0, tr_M3UA_BEAT(*), timeout_val := timeout_val, answer_beat := false);
+	log("2nd BEAT received");
+	rx := f_M3UA_exp(0, tr_M3UA_BEAT(*), timeout_val := timeout_val, answer_beat := false);
+	log("3rd BEAT received");
+
+	/* After 2*T(beat), IUT should figure out peer is not responding and terminate the conn: */
+	timer T := timeout_val;
+	T.start;
+	alt {
+	[] M3UA[0].receive(PortEvent:{connClosed := ?}) {
+		setverdict(pass); /* TCP */
+	}
+	[] M3UA[0].receive(tr_SctpShutDownEvent(g_m3ua_conn_id[0])) {
+		setverdict(pass); /* SCTP */
+		}
+	[] M3UA[0].receive(tr_SctpAssocChange) { repeat; }
+	[] M3UA[0].receive(tr_SctpPeerAddrChange) { repeat; }
+	[] M3UA[0].receive(t_M3UA_RecvFrom(?)) -> value rx {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected M3UA ", rx, " while waiting for SctpShutDownEvent"));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Timeout waiting for M3UA SctpShutDownEvent"));
+		}
+	}
+
+	/* return to default value: */
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "timer xua beat 30");
+
+	f_clear_m3ua();
+}
+
+/* Test the IUT sends heartbeat procedure when needed. */
+testcase TC_beat_timeout() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	f_TC_beat_timeout(asps);
 }
 
 /* Test the ASP-ACTIVATE procedure (without traffic-mode or routing ctx) */
@@ -1138,6 +1205,12 @@ testcase TC_clnt_connect_asp_up() runs on RAW_M3UA_CT {
 	f_clear_m3ua();
 }
 
+/* Test the IUT sends heartbeat procedure when needed. */
+testcase TC_clnt_beat_timeout() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
+	f_TC_beat_timeout(asps);
+}
+
 /* Expect inbound connection from ASP/SCTP-client, followed by ASP-UP + ASP-ACT */
 testcase TC_clnt_asp_act() runs on RAW_M3UA_CT {
 	var Misc_Helpers.ro_charstring asps := { "asp-client0" };
@@ -1587,6 +1660,7 @@ control {
 	execute( TC_connect_asp_up() );
 	execute( TC_beat() );
 	execute( TC_beat_payload() );
+	execute( TC_beat_timeout() );
 	execute( TC_asp_act() );
 	execute( TC_asp_act_override() );
 	execute( TC_asp_act_loadshare() );
@@ -1617,6 +1691,7 @@ control {
 
 	/* Test STP as SCTP client + M3UA ASP role */
 	execute( TC_clnt_connect_asp_up() );
+	execute( TC_clnt_beat_timeout() );
 	execute( TC_clnt_asp_act() );
 	execute( TC_clnt_sg_to_asp() );
 	execute( TC_clnt_asp_to_sg() );
