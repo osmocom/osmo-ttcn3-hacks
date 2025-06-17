@@ -16,7 +16,7 @@ set +x
 FOUND=0
 for i in $(seq 1 10); do
 	sleep 1
-	if ip link ls dev "$EPDG_TUN" 2>&1 >/dev/null; then
+	if ip link ls dev "$EPDG_TUN" >/dev/null 2>&1; then
 		FOUND=1
 		break
 	fi
