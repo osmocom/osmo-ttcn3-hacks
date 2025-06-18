@@ -460,41 +460,34 @@ public:
         return chain;
     }
 
-    // Enhanced certificate chain verification with dynamic discovery
+    // Enhanced certificate chain verification with proper trust model
     static bool verifyCertificateChainDynamic(X509 *cert, const std::vector<X509 *> &certPool,
-                                              X509 *rootCA = nullptr, bool verbose = false,
-                                              bool testMode = true) {
-        Logger::info("Verifying certificate chain with dynamic discovery...");
+                                              X509 *rootCA = nullptr, bool verbose = false) {
+        Logger::info("Verifying certificate chain...");
         Logger::info("Target certificate: " + getSubjectName(cert));
 
-        // Create a combined certificate pool
-        std::vector<X509 *> combinedPool = certPool;
-
-        // Add root CA to the pool if provided
-        if (rootCA) {
-            combinedPool.push_back(rootCA);
-            if (verbose) {
-                Logger::info("Using provided root CA: " + getSubjectName(rootCA));
-            }
-        }
-
-        // Create certificate store
+        // Create certificate store for trusted roots only
         std::unique_ptr<X509_STORE, X509_STORE_Deleter> store(X509_STORE_new());
         if (!store) {
             throw OpenSSLError("Failed to create X509_STORE");
         }
 
-        // If we have a specific rootCA, add it to the store
+        // Only add the explicitly provided root CA to the trust store
         if (rootCA) {
+            if (verbose) {
+                Logger::info("Adding trusted root CA: " + getSubjectName(rootCA));
+            }
             if (X509_STORE_add_cert(store.get(), rootCA) != 1) {
                 throw OpenSSLError("Failed to add root CA to store");
             }
         } else {
-            // Otherwise, find root certificates in the pool (self-signed)
-            for (auto candidate : combinedPool) {
+            // If no root CA provided, find self-signed certificates in the pool
+            // WARNING: This should only be used in test environments
+            Logger::warning("No explicit root CA provided - searching for self-signed certificates");
+            for (auto candidate : certPool) {
                 if (X509_check_issued(candidate, candidate) == X509_V_OK) {
                     if (verbose) {
-                        Logger::info("Adding root CA to trust store: " +
+                        Logger::info("Adding self-signed certificate as trusted root: " +
                                      getSubjectName(candidate));
                     }
                     if (X509_STORE_add_cert(store.get(), candidate) != 1) {
@@ -509,20 +502,30 @@ public:
             }
         }
 
-        // Build certificate chain automatically with verbose output
-        std::unique_ptr<STACK_OF(X509), STACK_OF_X509_Deleter> chain(
-            buildCertificateChain(cert, combinedPool, verbose));
+        // Build untrusted chain from cert pool (excluding the root if it's in there)
+        std::unique_ptr<STACK_OF(X509), STACK_OF_X509_Deleter> untrusted_chain(sk_X509_new_null());
+        if (!untrusted_chain) {
+            throw OpenSSLError("Failed to create untrusted chain");
+        }
 
-        // Print the complete chain we're verifying
-        if (verbose && sk_X509_num(chain.get()) > 0) {
-            Logger::info("Complete certificate chain for verification:");
-            Logger::info("1. " + getSubjectName(cert) + " (Target certificate)");
-
-            for (int i = 0; i < sk_X509_num(chain.get()); i++) {
-                X509 *chainCert = sk_X509_value(chain.get(), i);
-                Logger::info(std::to_string(i + 2) + ". " + getSubjectName(chainCert));
+        // Add all certificates from the pool as untrusted intermediates
+        for (auto poolCert : certPool) {
+            // Skip if this is the target certificate
+            if (X509_cmp(poolCert, cert) == 0) {
+                continue;
             }
-            Logger::info(""); // Empty line for readability
+            // Skip if this is the root CA (already in trust store)
+            if (rootCA && X509_cmp(poolCert, rootCA) == 0) {
+                continue;
+            }
+            // Add to untrusted chain
+            if (sk_X509_push(untrusted_chain.get(), poolCert) == 0) {
+                throw OpenSSLError("Failed to add certificate to untrusted chain");
+            }
+        }
+
+        if (verbose) {
+            Logger::info("Untrusted chain contains " + std::to_string(sk_X509_num(untrusted_chain.get())) + " certificates");
         }
 
         // Create verification context
@@ -531,33 +534,31 @@ public:
             throw OpenSSLError("Failed to create X509_STORE_CTX");
         }
 
-        // Initialize verification context
-        if (X509_STORE_CTX_init(ctx.get(), store.get(), cert, chain.get()) != 1) {
+        // Initialize with trust store, target cert, and untrusted chain
+        if (X509_STORE_CTX_init(ctx.get(), store.get(), cert, untrusted_chain.get()) != 1) {
             throw OpenSSLError("Failed to initialize X509_STORE_CTX");
         }
 
-        // Set verification parameters
+        // Set verification flags
         unsigned long flags = X509_V_FLAG_CHECK_SS_SIGNATURE;
         X509_STORE_CTX_set_flags(ctx.get(), flags);
 
-        // In test mode, set a custom verification callback to handle name constraint violations
-        if (testMode) {
-            Logger::info("Test mode enabled: will ignore name constraint violations");
-            X509_STORE_CTX_set_verify_cb(ctx.get(), [](int ok, X509_STORE_CTX *ctx) -> int {
-                if (!ok) {
-                    int error = X509_STORE_CTX_get_error(ctx);
-                    // Allow verification to continue for name constraint violations in test mode
-                    if (error == X509_V_ERR_PERMITTED_VIOLATION ||
-                        error == X509_V_ERR_EXCLUDED_VIOLATION ||
-                        error == X509_V_ERR_SUBTREE_MINMAX) {
-                        Logger::info("Ignoring name constraint violation in test mode: " +
-                                    std::string(X509_verify_cert_error_string(error)));
-                        return 1; // Continue verification despite the error
-                    }
+        // Always handle SGP.22 name constraint violations
+        Logger::info("SGP.22 mode: name constraint violations will be ignored");
+        X509_STORE_CTX_set_verify_cb(ctx.get(), [](int ok, X509_STORE_CTX *ctx) -> int {
+            if (!ok) {
+                int error = X509_STORE_CTX_get_error(ctx);
+                // SGP.22 certificates often violate name constraints
+                if (error == X509_V_ERR_PERMITTED_VIOLATION ||
+                    error == X509_V_ERR_EXCLUDED_VIOLATION ||
+                    error == X509_V_ERR_SUBTREE_MINMAX) {
+                    Logger::info("Ignoring SGP.22 name constraint violation: " +
+                                std::string(X509_verify_cert_error_string(error)));
+                    return 1; // Continue verification despite the error
                 }
-                return ok; // Use default behavior for other errors
-            });
-        }
+            }
+            return ok; // Use default behavior for other errors
+        });
 
         // Perform verification
         int result = X509_verify_cert(ctx.get());
@@ -579,6 +580,20 @@ public:
         }
 
         Logger::info("Certificate verification successful ✓");
+        
+        // Print the verified chain if verbose
+        if (verbose) {
+            STACK_OF(X509) *verified_chain = X509_STORE_CTX_get1_chain(ctx.get());
+            if (verified_chain) {
+                Logger::info("Verified certificate chain:");
+                for (int i = 0; i < sk_X509_num(verified_chain); i++) {
+                    X509 *chainCert = sk_X509_value(verified_chain, i);
+                    Logger::info("  " + std::to_string(i + 1) + ". " + getSubjectName(chainCert));
+                }
+                sk_X509_pop_free(verified_chain, X509_free);
+            }
+        }
+
         return true;
     }
 

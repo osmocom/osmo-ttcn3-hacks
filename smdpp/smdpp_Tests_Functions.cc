@@ -529,9 +529,8 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& c
             certPoolRaw.push_back(c.get());
         }
 
-        // Enable test mode to handle name constraint violations gracefully
         bool result = CertificateUtil::verifyCertificateChainDynamic(
-            certObj.get(), certPoolRaw, rootObj.get(), false, true); // verbose=false, testMode=true
+            certObj.get(), certPoolRaw, rootObj.get(), false); // verbose=false
 
         return BOOLEAN(result);
     } catch (const std::exception& e) {
@@ -555,9 +554,8 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTET
         // Create a certificate pool containing just the intermediate certificate
         std::vector<X509*> certPool = { intermediateObj.get() };
 
-        // Enable test mode to handle name constraint violations gracefully
         bool result = CertificateUtil::verifyCertificateChainDynamic(
-            certObj.get(), certPool, rootObj.get(), false, true); // verbose=false, testMode=true
+            certObj.get(), certPool, rootObj.get(), false); // verbose=false
 
         return BOOLEAN(result);
     } catch (const std::exception& e) {
