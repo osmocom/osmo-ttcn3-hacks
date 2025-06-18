@@ -503,7 +503,13 @@ public:
         }
 
         // Build untrusted chain from cert pool (excluding the root if it's in there)
-        std::unique_ptr<STACK_OF(X509), STACK_OF_X509_Deleter> untrusted_chain(sk_X509_new_null());
+        // IMPORTANT: We create a custom deleter that only frees the stack, not the certificates
+        auto stack_only_deleter = [](STACK_OF(X509)* stack) {
+            if (stack) {
+                sk_X509_free(stack);  // This only frees the stack structure, not the contents
+            }
+        };
+        std::unique_ptr<STACK_OF(X509), decltype(stack_only_deleter)> untrusted_chain(sk_X509_new_null(), stack_only_deleter);
         if (!untrusted_chain) {
             throw OpenSSLError("Failed to create untrusted chain");
         }
@@ -543,18 +549,24 @@ public:
         unsigned long flags = X509_V_FLAG_CHECK_SS_SIGNATURE;
         X509_STORE_CTX_set_flags(ctx.get(), flags);
 
-        // Always handle SGP.22 name constraint violations
-        Logger::info("SGP.22 mode: name constraint violations will be ignored");
+        // Set up verification callback
         X509_STORE_CTX_set_verify_cb(ctx.get(), [](int ok, X509_STORE_CTX *ctx) -> int {
             if (!ok) {
                 int error = X509_STORE_CTX_get_error(ctx);
-                // SGP.22 certificates often violate name constraints
+                // SGP.22 EUM certificates use name constraints in a specific way
                 if (error == X509_V_ERR_PERMITTED_VIOLATION ||
                     error == X509_V_ERR_EXCLUDED_VIOLATION ||
                     error == X509_V_ERR_SUBTREE_MINMAX) {
-                    Logger::info("Ignoring SGP.22 name constraint violation: " +
-                                std::string(X509_verify_cert_error_string(error)));
-                    return 1; // Continue verification despite the error
+
+                    // Get the certificate that triggered this
+                    X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
+                    if (cert) {
+                        char subject_buf[256];
+                        X509_NAME_oneline(X509_get_subject_name(cert), subject_buf, sizeof(subject_buf));
+                        Logger::info("Processing certificate with name constraint abuse: " + std::string(subject_buf));
+                    }
+
+                    return 1; // Accept - SGP.22 specific handling
                 }
             }
             return ok; // Use default behavior for other errors
@@ -579,8 +591,8 @@ public:
             return false;
         }
 
-        Logger::info("Certificate verification successful ✓");
-        
+        Logger::info("Certificate verification successful");
+
         // Print the verified chain if verbose
         if (verbose) {
             STACK_OF(X509) *verified_chain = X509_STORE_CTX_get1_chain(ctx.get());
