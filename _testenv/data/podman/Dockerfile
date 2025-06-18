@@ -76,7 +76,11 @@ RUN	set -x && \
 		pkg-config \
 		procps \
 		psmisc \
+		python3-build \
+		python3-dev \
 		python3-pip \
+		python3-poetry-core \
+		python3-venv \
 		qemu-system-x86 \
 		rsync \
 		source-highlight \
