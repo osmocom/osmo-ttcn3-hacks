@@ -634,11 +634,14 @@ type component test_CT extends CTRL_Adapter_CT {
 	var MGCP_Emulation_CT vc_MGCP[NUM_MGW];
 	var integer g_nr_mgw; /* number of vc_MGCP to initialize */
 	port TELNETasp_PT BSCVTY;
+	port TELNETasp_PT STPVTY;
 
 	/* StatsD */
 	var StatsD_Checker_CT vc_STATSD;
 
 	var RAN_Adapter g_bssap[NUM_MSC];
+	/* Configure/manage IPA_Emulation RAN_Adapter: */
+	port IPA_CFG_PT SCCPLITE_IPA_CFG_PORT[NUM_MSC];
 	var BSSAP_LE_Adapter g_bssap_le;
 	/* for old legacy-tests only */
 	port BSSAP_CODEC_PT BSSAP;
@@ -1131,6 +1134,34 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 			  "sccp-timer iar " & int2str(g_bsc_sccp_timer_iar)});
 }
 
+private function f_init_vty_stp() runs on test_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
+}
+
+private function f_vty_stp_bsc_asp_cmd(charstring cmd) runs on test_CT
+{
+	var charstring asp_name;
+	var charstring loc_port;
+	var charstring rem_port;
+	var charstring asp_proto;
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		asp_name := "bsc0-0";
+		loc_port := int2str(1905);
+		rem_port := int2str(2905);
+		asp_proto := "m3ua";
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "osmo-stp not used in SCCPLite!");
+	}
+	var charstring asp_node := "asp " & asp_name & " " & loc_port & " " & rem_port & " " & asp_proto;
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
+}
+
 private function f_sysinfo_seen(integer rsl_idx, RSL_Message rsl) runs on test_CT
 {
 	if (rsl_idx >= lengthof(g_system_information)) {
@@ -1212,10 +1243,16 @@ private function f_bssap_idx_init(integer bssap_idx) runs on test_CT {
 		var RanOps ranops := MSC_RanOps;
 		ranops.use_osmux := g_osmux_enabled_cn;
 		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", ranops);
+		if (isbound(g_bssap[bssap_idx].vc_IPA)) {
+			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].vc_IPA:CFG_PORT);
+		}
 		connect(self:SCCPLITE_IPA_CTRL, g_bssap[bssap_idx].vc_RAN:CTRL_CLIENT);
 		f_ran_adapter_start(g_bssap[bssap_idx]);
 	} else {
 		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", omit);
+		if (isbound(g_bssap[bssap_idx].vc_IPA)) {
+			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].vc_IPA:CFG_PORT);
+		}
 		connect(self:BSSAP, g_bssap[bssap_idx].vc_SCCP:SCCP_SP_PORT);
 		f_ran_adapter_start(g_bssap[bssap_idx]);
 		f_legacy_bssap_reset();
@@ -1223,7 +1260,21 @@ private function f_bssap_idx_init(integer bssap_idx) runs on test_CT {
 }
 
 private function f_bssap_idx_disconnect(integer bssap_idx) runs on test_CT {
-	f_ran_adapter_cleanup(g_bssap[bssap_idx]);
+	var IPL4asp_Types.Result res := {
+		errorCode := omit,
+		connId := omit,
+		os_error_code := omit,
+		os_error_text := omit
+	};
+
+	if (isbound(g_bssap[bssap_idx].vc_IPA)) {
+		/* Alive components don't finish sockets (TCP FIN) when they are
+		* stopped. Hence, we need to manually call close() on them to make sure
+		* the IUT knows about it. */
+		f_ipa_cfg_disconnect(SCCPLITE_IPA_CFG_PORT[bssap_idx], res);
+	} else {
+		f_ran_adapter_cleanup(g_bssap[bssap_idx]);
+	}
 }
 
 /* global initialization function
@@ -3219,6 +3270,62 @@ private function f_tc_stat_num_msc_connected_3(charstring id) runs on MSC_ConnHd
 }
 testcase TC_stat_num_msc_connected_3() runs on test_CT {
 	f_tc_stat_num_msc_connected_test_ct(refers(f_tc_stat_num_msc_connected_3), 3);
+}
+
+/* When the last local IPA/SCTP link/ASP is terminated, last AS goes inactive
+ * and a SCCP N-PCSTATE.ind (unavailable) should arrive to upper layers.
+ * As a result, osmo-bsc should immediately mark the MSC link as unusable.
+ * The scenario is slightly different in AoIP and SCCPLite:
+ * - AoIP: the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the BSC, which will close the SCTP assoc between
+ * itself and IUT (BSC), which should then generate an N-PCSTATE.ind.
+ * - SCCPLite: Since osmo-bsc is connected directly to us (TTCN3), terminate our
+ *   local SCTP conn to trigger the actions.
+ */
+testcase TC_stat_msc_sctp_disconnected() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+	var integer exp_total_num_msc;
+
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 1);
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		exp_total_num_msc := NUM_MSC;
+		f_init_vty_stp();
+	} else {
+		exp_total_num_msc := 1;
+	}
+	f_sleep(1.0);
+
+	f_ctrs_msc_init();
+
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(1));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(exp_total_num_msc));
+
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		f_logp(BSCVTY, "Shutting down BSC ASP in STP");
+		f_vty_stp_bsc_asp_cmd("shutdown");
+	} else {
+		f_logp(BSCVTY, "Disconnecting msc0");
+		f_bssap_idx_disconnect(0);
+	}
+
+	/* Wait for AS PENDING ->INACTIVE transition (T(r) timeout after 2000msec): */
+
+	f_ctrl_exp_trap(IPA_CTRL, "msc." & int2str(0) & ".connection_status", "disconnected", timeout_val := 5.0);
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(0));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(exp_total_num_msc));
+
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		f_logp(BSCVTY, "Restarting BSC ASP in STP");
+		f_vty_stp_bsc_asp_cmd("no shutdown");
+	} else {
+		f_logp(BSCVTY, "Waiting for bsc to reconnect to msc0");
+	}
+
+	f_ctrl_exp_trap(IPA_CTRL, "msc." & int2str(0) & ".connection_status", "connected", timeout_val := 10.0);
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(1));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(exp_total_num_msc));
+
+	f_shutdown_helper();
 }
 
 /* Verify correct stats on the number of configured and connected MSCs */
@@ -9266,7 +9373,13 @@ testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
 	f_shutdown_helper();
 }
 
-/* When an MSC point-code gets an SCCP N-PCSTATE saying it is unreachable, immediately mark the MSC as unusable. */
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the MSC link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by locally dropping the
+ * SCTP assoc at the virtual MSC (TTCN3). When STP osmo-bsc finds out about
+ * the SCTP conn STP<->MSC going down, it will send an M3UA DUNA to the IUT
+ * (BSC) which should then generate an N-PCSTATE.ind.
+ */
 testcase TC_mscpool_sccp_n_pcstate_detaches_msc() runs on test_CT {
 
 	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
@@ -12588,6 +12701,7 @@ control {
 	execute( TC_stat_num_bts_connected_1() );
 	execute( TC_stat_num_bts_connected_2() );
 	execute( TC_stat_num_bts_connected_3() );
+	execute( TC_stat_msc_sctp_disconnected() );
 	execute( TC_ctrl() );
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_SCCPlite_SERVER) {
 		execute( TC_ctrl_location() );
