@@ -634,6 +634,7 @@ type component test_CT extends CTRL_Adapter_CT {
 	var MGCP_Emulation_CT vc_MGCP[NUM_MGW];
 	var integer g_nr_mgw; /* number of vc_MGCP to initialize */
 	port TELNETasp_PT BSCVTY;
+	port TELNETasp_PT STPVTY;
 
 	/* StatsD */
 	var StatsD_Checker_CT vc_STATSD;
@@ -1129,6 +1130,34 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 	f_vty_transceive(BSCVTY, "enable");
 	f_cs7_inst_0_cfg(BSCVTY, {"sccp-timer ias " & int2str(g_bsc_sccp_timer_ias),
 			  "sccp-timer iar " & int2str(g_bsc_sccp_timer_iar)});
+}
+
+private function f_init_vty_stp() runs on test_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
+}
+
+private function f_vty_stp_bsc_asp_cmd(charstring cmd) runs on test_CT
+{
+	var charstring loc_port;
+	var charstring rem_port;
+	var charstring asp_proto;
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		loc_port := int2str(1905);
+		rem_port := int2str(2905);
+		asp_proto := "m3ua";
+	} else {
+		loc_port := int2str(0); /* TODO: need to define static ipa ASPs in osmo-stp.cfg.... */
+		rem_port := int2str(5000);
+		asp_proto := "ipa";
+	}
+	var charstring asp_node := "asp bsc-0 " & loc_port & " " & rem_port & " " & asp_proto;
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
 }
 
 private function f_sysinfo_seen(integer rsl_idx, RSL_Message rsl) runs on test_CT
@@ -3219,6 +3248,43 @@ private function f_tc_stat_num_msc_connected_3(charstring id) runs on MSC_ConnHd
 }
 testcase TC_stat_num_msc_connected_3() runs on test_CT {
 	f_tc_stat_num_msc_connected_test_ct(refers(f_tc_stat_num_msc_connected_3), 3);
+}
+
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the MSC link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the BSC, which will close the SCTP assoc between
+ * itself and IUT (BSC), which should then generate an N-PCSTATE.ind.
+ */
+testcase TC_stat_msc_sctp_disconnected() runs on test_CT {
+	var MSC_ConnHdlr vc_conn;
+
+	f_init(nr_bts := 1, handler_mode := true, nr_msc := 1);
+	f_init_vty_stp();
+	f_sleep(1.0);
+
+	f_ctrs_msc_init();
+
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(1));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(NUM_MSC));
+
+	f_logp(BSCVTY, "Shutting down BSC ASP in STP");
+	f_vty_stp_bsc_asp_cmd("shutdown");
+
+	/* Wait for AS PENDING ->INACTIVE transition (T(r) timeout after 2000msec): */
+
+	f_ctrl_exp_trap(IPA_CTRL, "msc." & int2str(0) & ".connection_status", "disconnected");
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(0));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(NUM_MSC));
+
+	f_logp(BSCVTY, "Restarting BSC ASP in STP");
+	f_vty_stp_bsc_asp_cmd("no shutdown");
+
+	f_sleep(10.0);
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:connected", int2str(1));
+	f_ctrl_get_exp(IPA_CTRL, "stat_item.last.bsc.0.num_msc:total", int2str(NUM_MSC));
+
+	f_shutdown_helper();
 }
 
 /* Verify correct stats on the number of configured and connected MSCs */
@@ -9266,7 +9332,13 @@ testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
 	f_shutdown_helper();
 }
 
-/* When an MSC point-code gets an SCCP N-PCSTATE saying it is unreachable, immediately mark the MSC as unusable. */
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the MSC link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by locally dropping the
+ * SCTP assoc at the virtual MSC (TTCN3). When STP osmo-hnbgw finds out about
+ * the SCTP conn STP<->MSC going down, it will send an M3UA DUNA to the IUT
+ * (BSC) which should then generate an N-PCSTATE.ind.
+ */
 testcase TC_mscpool_sccp_n_pcstate_detaches_msc() runs on test_CT {
 
 	f_init(nr_bts := 3, handler_mode := true, nr_msc := 2);
@@ -12588,6 +12660,7 @@ control {
 	execute( TC_stat_num_bts_connected_1() );
 	execute( TC_stat_num_bts_connected_2() );
 	execute( TC_stat_num_bts_connected_3() );
+	execute( TC_stat_msc_sctp_disconnected() );
 	execute( TC_ctrl() );
 	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_SCCPlite_SERVER) {
 		execute( TC_ctrl_location() );
