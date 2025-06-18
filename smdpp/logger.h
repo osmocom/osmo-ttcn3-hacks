@@ -242,14 +242,6 @@ class OpenSSLErrorHandler {
 		}
 	}
 
-	// Initialize error strings (call once at startup)
-	static void initializeErrorStrings()
-	{
-		SSL_load_error_strings();
-		ERR_load_crypto_strings();
-		OpenSSL_add_all_algorithms();
-	}
-
     private:
 	static std::string getSSLErrorType(int sslError)
 	{

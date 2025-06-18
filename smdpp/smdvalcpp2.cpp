@@ -47,6 +47,8 @@ extern "C" {
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/types.h>
+#include <openssl/param_build.h>
+#include <openssl/core_names.h>
 
 // OpenSSL headers - Cryptographic operations
 #include <openssl/cmac.h>
@@ -805,36 +807,22 @@ public:
                 return false;
             }
 
-            // Extract public key data
-            EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(pubKey.get());
-            if (!ec_key) {
-                Logger::warning("Failed to extract EC key from " + typeName +
-                                " public key file (will generate from private key)");
-                return false;
-            }
-
-            std::unique_ptr<EC_KEY, void (*)(EC_KEY *)> ec_key_guard(ec_key, EC_KEY_free);
-
-            const EC_POINT *pub_point = EC_KEY_get0_public_key(ec_key);
-            const EC_GROUP *group = EC_KEY_get0_group(ec_key);
-
-            if (!pub_point || !group) {
-                Logger::warning("Failed to get public key point or group from " + typeName +
+            // Extract public key data using OpenSSL 3.0+ API
+            // Get the public key as an octet string directly
+            size_t pub_len = 0;
+            
+            // First get the size needed
+            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY, 
+                                               nullptr, 0, &pub_len) != 1) {
+                Logger::warning("Failed to get public key size from " + typeName +
                                 " file (will generate from private key)");
                 return false;
             }
-
-            size_t pub_len = EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0,
-                                                nullptr);
-            if (pub_len == 0) {
-                Logger::warning("Failed to get public key length from " + typeName +
-                                " file (will generate from private key)");
-                return false;
-            }
-
+            
+            // Allocate and get the actual public key data
             publicKeyStorage.resize(pub_len);
-            if (EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED, publicKeyStorage.data(),
-                                   pub_len, nullptr) != pub_len) {
+            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                               publicKeyStorage.data(), pub_len, &pub_len) != 1) {
                 Logger::warning("Failed to extract public key data from " + typeName +
                                 " file (will generate from private key)");
                 return false;
@@ -858,29 +846,20 @@ public:
             throw std::runtime_error("No " + typeName + " private key available for public key generation");
         }
 
-        EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(privateKey.get());
-        if (!ec_key) {
-            throw OpenSSLError("Failed to extract EC key for " + typeName + " public key generation");
+        // Using OpenSSL 3.0+ API to get public key from private key
+        size_t pub_len = 0;
+        
+        // First get the size needed
+        if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                           nullptr, 0, &pub_len) != 1) {
+            throw OpenSSLError("Failed to get public key size from " + typeName + " private key");
         }
-
-        std::unique_ptr<EC_KEY, void (*)(EC_KEY *)> ec_key_guard(ec_key, EC_KEY_free);
-
-        const EC_POINT *pub_point = EC_KEY_get0_public_key(ec_key);
-        const EC_GROUP *group = EC_KEY_get0_group(ec_key);
-
-        if (!pub_point || !group) {
-            throw OpenSSLError("Failed to get public key point or group for " + typeName + " generation");
-        }
-
-        size_t pub_len = EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);
-        if (pub_len == 0) {
-            throw OpenSSLError("Failed to get public key length for " + typeName + " generation");
-        }
-
+        
+        // Allocate and get the actual public key data
         publicKeyStorage.resize(pub_len);
-        if (EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED, publicKeyStorage.data(),
-                               pub_len, nullptr) != pub_len) {
-            throw OpenSSLError("Failed to generate public key data for " + typeName);
+        if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                           publicKeyStorage.data(), pub_len, &pub_len) != 1) {
+            throw OpenSSLError("Failed to extract public key from " + typeName + " private key");
         }
 
         Logger::info("Generated " + typeName + " public key from private key (" + std::to_string(pub_len) +
@@ -1488,9 +1467,7 @@ public:
               const std::vector<std::string> &certPath,
               const std::vector<std::string> &name_filters = {})
         : m_serverUrl(serverUrl), m_serverPort(serverPort) {
-        // Initialize OpenSSL
-        OpenSSL_add_all_algorithms();
-        ERR_load_crypto_strings();
+        // OpenSSL 3.0+ initializes automatically
 
         for (auto cpath : certPath) {
             bool isDirectory = std::filesystem::is_directory(cpath);
@@ -1558,10 +1535,7 @@ public:
     }
 
     ~RSPClient() {
-        // Cleanup OpenSSL
-        EVP_cleanup();
-        CRYPTO_cleanup_all_ex_data();
-        ERR_free_strings();
+        // OpenSSL 3.0+ handles cleanup automatically
     }
 
     // ========================================================================
@@ -1649,50 +1623,51 @@ public:
 
     // Generate eUICC one-time public key (OtPK)
     void generateEUICCOtpk() {
-        // Create EC key using P-256 curve (secp256r1)
-        std::unique_ptr<EC_KEY, EC_KEY_Deleter> ecKey(EC_KEY_new());
-        if (!ecKey) {
-            throw OpenSSLError("Failed to create EC_KEY");
+        // Create EC key context for P-256 curve using OpenSSL 3.0+ API
+        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> 
+            pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
+        if (!pctx) {
+            throw OpenSSLError("Failed to create EVP_PKEY_CTX");
         }
 
-        // Get the P-256 curve group
-        std::unique_ptr<EC_GROUP, decltype(&EC_GROUP_free)> group(
-            EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1), EC_GROUP_free);
-        if (!group) {
-            throw OpenSSLError("Failed to create EC_GROUP for P-256");
+        // Initialize key generation
+        if (EVP_PKEY_keygen_init(pctx.get()) <= 0) {
+            throw OpenSSLError("Failed to initialize key generation");
         }
 
-        // Set the group for the key
-        if (EC_KEY_set_group(ecKey.get(), group.get()) != 1) {
-            throw OpenSSLError("Failed to set EC group");
+        // Set the curve to P-256 (prime256v1)
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx.get(), NID_X9_62_prime256v1) <= 0) {
+            throw OpenSSLError("Failed to set P-256 curve");
         }
 
         // Generate the key pair
-        if (EC_KEY_generate_key(ecKey.get()) != 1) {
+        EVP_PKEY *pkey_raw = nullptr;
+        if (EVP_PKEY_keygen(pctx.get(), &pkey_raw) <= 0) {
             throw OpenSSLError("Failed to generate EC key pair");
         }
-
-        // Get the public key point
-        const EC_POINT *pubKeyPoint = EC_KEY_get0_public_key(ecKey.get());
-        if (!pubKeyPoint) {
-            throw OpenSSLError("Failed to get public key point");
-        }
-
-        // Convert public key to uncompressed format (0x04 + X + Y coordinates)
-        // For P-256: 1 byte (0x04) + 32 bytes (X) + 32 bytes (Y) = 65 bytes total
-        m_euiccOtpk.resize(65);
-
-        size_t pubKeyLen = EC_POINT_point2oct(group.get(), pubKeyPoint, POINT_CONVERSION_UNCOMPRESSED,
-                                              m_euiccOtpk.data(), m_euiccOtpk.size(), nullptr);
-
-        if (pubKeyLen != 65) {
-            throw OpenSSLError("Failed to encode public key or unexpected size");
-        }
-
+        
         // Store the private key for later use in key agreement
-        m_euicc_ot_PrivateKey.reset(EC_KEY_dup(ecKey.get()));
-        if (!m_euicc_ot_PrivateKey) {
-            throw OpenSSLError("Failed to duplicate private key");
+        m_euicc_ot_PrivateKey.reset(pkey_raw);
+
+        // Get the public key in uncompressed format
+        size_t pub_len = 0;
+        
+        // First get the size needed
+        if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                           nullptr, 0, &pub_len) != 1) {
+            throw OpenSSLError("Failed to get public key size");
+        }
+        
+        // For P-256: should be 65 bytes (0x04 + 32 bytes X + 32 bytes Y)
+        if (pub_len != 65) {
+            throw OpenSSLError("Unexpected public key size for P-256");
+        }
+        
+        // Get the actual public key data
+        m_euiccOtpk.resize(pub_len);
+        if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
+                                           m_euiccOtpk.data(), pub_len, &pub_len) != 1) {
+            throw OpenSSLError("Failed to extract public key");
         }
 
         Logger::info("Generated eUICC OtPK (P-256): " + HexUtil::bytesToHex(m_euiccOtpk));
@@ -1711,28 +1686,83 @@ public:
             throw std::runtime_error("eUICC ephemeral private key not available");
         }
 
-        // Create EC_POINT from other party's public key
-        const EC_GROUP *group = EC_KEY_get0_group(m_euicc_ot_PrivateKey.get());
-        std::unique_ptr<EC_POINT, decltype(&EC_POINT_free)> other_point(EC_POINT_new(group), EC_POINT_free);
-
-        if (!other_point) {
-            throw OpenSSLError("Failed to create EC_POINT");
+        // Create EVP_PKEY for the other party's public key using OpenSSL 3.0+ API
+        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
+            pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
+        if (!pctx) {
+            throw OpenSSLError("Failed to create EVP_PKEY_CTX");
         }
 
-        // Convert octets to EC_POINT
-        if (EC_POINT_oct2point(group, other_point.get(), otherPublicKey.data(), otherPublicKey.size(),
-                               nullptr) != 1) {
-            throw OpenSSLError("Failed to convert public key to EC_POINT");
+        if (EVP_PKEY_fromdata_init(pctx.get()) <= 0) {
+            throw OpenSSLError("Failed to initialize fromdata");
         }
 
-        // Compute shared secret
-        size_t secret_len = (EC_GROUP_get_degree(group) + 7) / 8;
+        // Build OSSL_PARAM array for the public key
+        OSSL_PARAM_BLD *param_bld = OSSL_PARAM_BLD_new();
+        if (!param_bld) {
+            throw OpenSSLError("Failed to create OSSL_PARAM_BLD");
+        }
+
+        // Set the curve name (P-256)
+        if (!OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0)) {
+            OSSL_PARAM_BLD_free(param_bld);
+            throw OpenSSLError("Failed to set curve name");
+        }
+
+        // Set the public key
+        if (!OSSL_PARAM_BLD_push_octet_string(param_bld, OSSL_PKEY_PARAM_PUB_KEY,
+                                             otherPublicKey.data(), otherPublicKey.size())) {
+            OSSL_PARAM_BLD_free(param_bld);
+            throw OpenSSLError("Failed to set public key");
+        }
+
+        OSSL_PARAM *params = OSSL_PARAM_BLD_to_param(param_bld);
+        if (!params) {
+            OSSL_PARAM_BLD_free(param_bld);
+            throw OpenSSLError("Failed to build params");
+        }
+
+        EVP_PKEY *other_pkey_raw = nullptr;
+        if (EVP_PKEY_fromdata(pctx.get(), &other_pkey_raw, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
+            OSSL_PARAM_free(params);
+            OSSL_PARAM_BLD_free(param_bld);
+            throw OpenSSLError("Failed to create public key from data");
+        }
+
+        OSSL_PARAM_free(params);
+        OSSL_PARAM_BLD_free(param_bld);
+
+        std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> other_pkey(other_pkey_raw);
+
+        // Perform ECDH using EVP_PKEY_derive
+        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
+            derive_ctx(EVP_PKEY_CTX_new(m_euicc_ot_PrivateKey.get(), nullptr), EVP_PKEY_CTX_free);
+        if (!derive_ctx) {
+            throw OpenSSLError("Failed to create derive context");
+        }
+
+        if (EVP_PKEY_derive_init(derive_ctx.get()) <= 0) {
+            throw OpenSSLError("Failed to initialize key derivation");
+        }
+
+        if (EVP_PKEY_derive_set_peer(derive_ctx.get(), other_pkey.get()) <= 0) {
+            throw OpenSSLError("Failed to set peer key");
+        }
+
+        // Determine shared secret length
+        size_t secret_len = 0;
+        if (EVP_PKEY_derive(derive_ctx.get(), nullptr, &secret_len) <= 0) {
+            throw OpenSSLError("Failed to get shared secret length");
+        }
+
+        // Perform the derivation
         std::vector<uint8_t> shared_secret(secret_len);
-
-        if (ECDH_compute_key(shared_secret.data(), secret_len, other_point.get(), m_euicc_ot_PrivateKey.get(),
-                             nullptr) <= 0) {
+        if (EVP_PKEY_derive(derive_ctx.get(), shared_secret.data(), &secret_len) <= 0) {
             throw OpenSSLError("ECDH computation failed");
         }
+
+        // Resize to actual length (should be the same)
+        shared_secret.resize(secret_len);
 
         Logger::info("Computed ECDH shared secret: " + HexUtil::bytesToHex(shared_secret));
         return shared_secret;
@@ -1900,7 +1930,7 @@ private:
     std::unique_ptr<X509, X509Deleter> m_euiccCert; // eUICC certificate
     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> m_euiccPrivateKey; // eUICC private key for signing
     std::vector<uint8_t> m_euiccPublicKeyData; // eUICC public key data
-    std::unique_ptr<EC_KEY, EC_KEY_Deleter> m_euicc_ot_PrivateKey; // One-time private key
+    std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> m_euicc_ot_PrivateKey; // One-time private key
     std::vector<uint8_t> m_euiccOtpk; // One-time public key from eUICC
 
     // EUM data

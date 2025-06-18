@@ -54,24 +54,10 @@ struct X509_STORE_CTX_Deleter {
 	}
 };
 
-struct STACK_OF_X509_Deleter {
-	void operator()(STACK_OF(X509) * stack) const
-	{
-		sk_X509_pop_free(stack, X509_free);
-	}
-};
-
 struct EVP_PKEY_Deleter {
 	void operator()(EVP_PKEY *key) const
 	{
 		EVP_PKEY_free(key);
-	}
-};
-
-struct EC_KEY_Deleter {
-	void operator()(EC_KEY *key) const
-	{
-		EC_KEY_free(key);
 	}
 };
 
@@ -82,20 +68,7 @@ struct EVP_MD_CTX_Deleter {
 	}
 };
 
-struct cJSON_Deleter {
-	void operator()(cJSON *json) const
-	{
-		cJSON_Delete(json);
-	}
-};
-
 // OpenSSL memory free deleter
-struct OpenSSLFreeDeleter {
-	void operator()(void *p) const
-	{
-		OPENSSL_free(p);
-	}
-};
 
 // Base64 utility class
 class Base64 {
