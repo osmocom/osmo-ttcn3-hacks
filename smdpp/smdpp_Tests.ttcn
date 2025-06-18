@@ -121,6 +121,37 @@ external function ext_logError(charstring xmessage);
 
 external function ext_logDebug(charstring xmessage);
 
+/* BSP Crypto Processing */
+type record ProcessedBoundProfilePackage {
+    octetstring configureIsdp,
+    octetstring storeMetadata,
+    boolean hasReplaceSessionKeys,
+    octetstring profileData,
+    octetstring ppkEnc optional,
+    octetstring ppkMac optional,
+    octetstring ppkInitialMCV optional
+}
+
+external function ext_BSP_processBoundProfilePackage(
+    octetstring sharedSecret,
+    integer keyType,
+    integer keyLength,
+    octetstring hostId,
+    charstring eid,
+    octetstring encodedBoundProfilePackage
+) return ProcessedBoundProfilePackage;
+
+external function ext_BSP_processSegments(
+    octetstring sharedSecret,
+    integer keyType,
+    integer keyLength,
+    octetstring hostId,
+    charstring eid,
+    octetstring firstSequenceOf87,
+    octetstring sequenceOf88,
+    octetstring secondSequenceOf87,
+    octetstring sequenceOf86
+) return ProcessedBoundProfilePackage;
 
 /* RSP Protocol Constants */
 const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
@@ -1034,15 +1065,92 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		return;
 	}
 
-	// 7. Validate encrypted profile segments
-	ext_logInfo("=== Validating encrypted profile segments ===");
+	// 7. Process BoundProfilePackage with BSP crypto
+	ext_logInfo("=== Processing BoundProfilePackage with BSP crypto ===");
 
-	// var octetstring eidBytes := char2oct(eid);
-	// var octetstring bspSEnc, bspSMac, initialMCV;
-    // if (not ext_Crypto_deriveBSPSessionKeys(g_rsp_client_handle, sharedSecret, 136, 16, iscReq.controlRefTemplate.hostId, eidBytes, bspSEnc, bspSMac, initialMCV)) {
-	// 	f_fail_and_cleanup("BSP session key derivation failed");
-    //     return;
-    // }
+	// Prepare segments for BSP processing
+	// The EID conversion is handled in the C++ function
+	// It converts the decimal string as hexadecimal digits to bytes
+
+	// Encode each segment - TTCN-3 has parsed the TLV, so we need to re-encode with tags
+	var octetstring firstSeq87Encoded := ''O;
+	if (ispresent(bpp.firstSequenceOf87) and lengthof(bpp.firstSequenceOf87) > 0) {
+		// Re-encode with tag 87
+		firstSeq87Encoded := '87'O & f_enc_length(lengthof(bpp.firstSequenceOf87[0])) & bpp.firstSequenceOf87[0];
+		ext_logInfo("firstSequenceOf87[0] re-encoded hex: " & oct2str(firstSeq87Encoded));
+	}
+
+	var octetstring seq88Encoded := ''O;
+	if (ispresent(bpp.sequenceOf88) and lengthof(bpp.sequenceOf88) > 0) {
+		// Re-encode with tag 88
+		seq88Encoded := '88'O & f_enc_length(lengthof(bpp.sequenceOf88[0])) & bpp.sequenceOf88[0];
+		ext_logInfo("sequenceOf88[0] re-encoded hex: " & oct2str(seq88Encoded));
+	}
+
+	var octetstring secondSeq87Encoded := ''O;
+	if (ispresent(bpp.secondSequenceOf87) and lengthof(bpp.secondSequenceOf87) > 0) {
+		// Re-encode with tag 87
+		secondSeq87Encoded := '87'O & f_enc_length(lengthof(bpp.secondSequenceOf87[0])) & bpp.secondSequenceOf87[0];
+		ext_logInfo("secondSequenceOf87[0] re-encoded hex: " & oct2str(secondSeq87Encoded));
+	}
+
+	// For sequence of 86, re-encode all segments with tags
+	var octetstring seq86Encoded := ''O;
+	if (ispresent(bpp.sequenceOf86)) {
+		for (var integer i := 0; i < lengthof(bpp.sequenceOf86); i := i + 1) {
+			seq86Encoded := seq86Encoded & '86'O & f_enc_length(lengthof(bpp.sequenceOf86[i])) & bpp.sequenceOf86[i];
+		}
+		ext_logInfo("Total sequenceOf86 re-encoded size: " & int2str(lengthof(seq86Encoded)));
+	}
+
+	// // Process the segments with BSP crypto
+	// var ProcessedBoundProfilePackage processed := ext_BSP_processSegments(
+	// 	sharedSecret,
+	// 	136,  // keyType: AES (0x88)
+	// 	16,   // keyLength: 16 bytes
+	// 	iscReq.controlRefTemplate.hostId,
+	// 	eid,
+	// 	firstSeq87Encoded,
+	// 	seq88Encoded,
+	// 	secondSeq87Encoded,
+	// 	seq86Encoded
+	// );
+
+	var octetstring encbpp := enc_BoundProfilePackage(bpp);
+	var ProcessedBoundProfilePackage processed :=  ext_BSP_processBoundProfilePackage(
+	sharedSecret,
+	136,  // keyType: AES (0x88)
+	16,   // keyLength: 16 bytes
+	iscReq.controlRefTemplate.hostId,
+	eid,  // Pass EID as string, C++ will convert it
+    encbpp
+	);
+
+	// Validate the decrypted content
+	if (lengthof(processed.configureIsdp) == 0) {
+		f_fail_and_cleanup("Failed to decrypt ConfigureISDP");
+		return;
+	}
+	ext_logInfo("ConfigureISDP decrypted successfully, length: " & int2str(lengthof(processed.configureIsdp)));
+
+	if (lengthof(processed.storeMetadata) == 0) {
+		f_fail_and_cleanup("Failed to verify StoreMetadata");
+		return;
+	}
+	ext_logInfo("StoreMetadata verified successfully, length: " & int2str(lengthof(processed.storeMetadata)));
+
+	if (lengthof(processed.profileData) == 0) {
+		f_fail_and_cleanup("Failed to decrypt profile data");
+		return;
+	}
+	ext_logInfo("Profile data decrypted successfully, length: " & int2str(lengthof(processed.profileData)));
+
+	if (processed.hasReplaceSessionKeys) {
+		ext_logInfo("ReplaceSessionKeys present - PPK used for profile decryption");
+		if (ispresent(processed.ppkEnc)) {
+			ext_logInfo("PPK-ENC: " & oct2str(processed.ppkEnc));
+		}
+	}
 
 	// 8. Verify complete certificate path for all certificates
 	ext_logInfo("=== Final certificate path validation ===");
@@ -1074,6 +1182,24 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("Complete RSP flow successful");
 	f_rsp_client_cleanup();
 	setverdict(pass);
+}
+
+/* ============================================================================
+ * HELPER FUNCTIONS
+ * ============================================================================ */
+
+/* Encode BER-TLV length */
+private function f_enc_length(integer len) return octetstring {
+	if (len < 128) {
+		return int2oct(len, 1);
+	} else if (len < 256) {
+		return '81'O & int2oct(len, 1);
+	} else if (len < 65536) {
+		return '82'O & int2oct(len, 2);
+	} else {
+		setverdict(fail, "Length too large for BER-TLV encoding");
+		return ''O;
+	}
 }
 
 /* ============================================================================

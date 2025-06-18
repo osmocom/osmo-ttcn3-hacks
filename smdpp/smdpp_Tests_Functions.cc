@@ -10,7 +10,9 @@
 #include <cstring>
 
 #include <TTCN3.hh>
+#include "smdpp_Tests.hh"
 #include "smdvalcpp2.cpp" // Your existing RSP implementation
+#include "bsp_crypto.cpp"
 
 
 using namespace RspCrypto;
@@ -610,6 +612,173 @@ void ext__logDebug(const CHARSTRING& message) {
     } catch (const std::exception& e) {
         std::cerr << "ext__logDebug failed: " << e.what() << std::endl;
         return;
+    }
+}
+
+}
+
+// Include BSP crypto implementation
+#include "bsp_crypto.h"
+
+namespace smdpp__Tests {
+
+ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
+    const OCTETSTRING& sharedSecret,
+    const INTEGER& keyType,
+    const INTEGER& keyLength,
+    const OCTETSTRING& hostId,
+    const CHARSTRING& eid,
+    const OCTETSTRING& encodedBoundProfilePackage
+) {
+    try {
+        // Convert TTCN-3 types to C++ vectors
+        std::vector<uint8_t> sharedSecretVec = octetstring_to_bytes(sharedSecret);
+        std::vector<uint8_t> hostIdVec = octetstring_to_bytes(hostId);
+
+        std::string eidStr = charstring_to_string(eid);
+        std::vector<uint8_t> eidVec;
+        for (size_t i = 0; i < eidStr.length(); i += 2) {
+            std::string hexByte = eidStr.substr(i, 2);
+            uint8_t byte = static_cast<uint8_t>(std::stoi(hexByte, nullptr, 16));
+            eidVec.push_back(byte);
+        }
+
+        std::vector<uint8_t> bppData = octetstring_to_bytes(encodedBoundProfilePackage);
+
+        // Derive BSP session keys using X9.63 KDF (from_kdf)
+        auto bsp = BspCryptoNS::BspCrypto::from_kdf(
+            sharedSecretVec,
+            static_cast<uint8_t>(keyType.get_long_long_val()),
+            static_cast<uint8_t>(keyLength.get_long_long_val()),
+            hostIdVec,
+            eidVec
+        );
+
+        LOG_INFO("BSP session keys derived successfully");
+        LOG_INFO("Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
+        LOG_INFO("EID (converted): " + HexUtil::bytesToHex(eidVec));
+        LOG_INFO("Processing BoundProfilePackage of size: " + std::to_string(bppData.size()));
+
+        // Process the entire BoundProfilePackage
+        auto result = bsp.process_bound_profile_package(bppData);
+
+        // Convert result back to TTCN-3
+        ProcessedBoundProfilePackage ttcn_result;
+        ttcn_result.configureIsdp() = bytes_to_octetstring(result.configureIsdp);
+        ttcn_result.storeMetadata() = bytes_to_octetstring(result.storeMetadata);
+        ttcn_result.hasReplaceSessionKeys() = BOOLEAN(result.hasReplaceSessionKeys);
+        ttcn_result.profileData() = bytes_to_octetstring(result.profileData);
+
+        if (result.hasReplaceSessionKeys) {
+            ttcn_result.ppkEnc() = bytes_to_octetstring(result.replaceSessionKeys.ppkEnc);
+            ttcn_result.ppkMac() = bytes_to_octetstring(result.replaceSessionKeys.ppkCmac);
+            ttcn_result.ppkInitialMCV() = bytes_to_octetstring(result.replaceSessionKeys.initialMacChainingValue);
+            LOG_INFO("ReplaceSessionKeys present - PPK will be used for profile decryption");
+        }
+
+        LOG_INFO("BoundProfilePackage processed successfully");
+        LOG_INFO("ConfigureISDP size: " + std::to_string(result.configureIsdp.size()));
+        LOG_INFO("StoreMetadata size: " + std::to_string(result.storeMetadata.size()));
+        LOG_INFO("Profile data size: " + std::to_string(result.profileData.size()));
+
+        return ttcn_result;
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("BSP processing failed: " + std::string(e.what()));
+        // Return empty result on error
+        ProcessedBoundProfilePackage error_result;
+        error_result.configureIsdp() = OCTETSTRING(0, nullptr);
+        error_result.storeMetadata() = OCTETSTRING(0, nullptr);
+        error_result.hasReplaceSessionKeys() = BOOLEAN(false);
+        error_result.profileData() = OCTETSTRING(0, nullptr);
+        return error_result;
+    }
+}
+
+ProcessedBoundProfilePackage ext__BSP__processSegments(
+    const OCTETSTRING& sharedSecret,
+    const INTEGER& keyType,
+    const INTEGER& keyLength,
+    const OCTETSTRING& hostId,
+    const CHARSTRING& eid,
+    const OCTETSTRING& firstSequenceOf87,
+    const OCTETSTRING& sequenceOf88,
+    const OCTETSTRING& secondSequenceOf87,
+    const OCTETSTRING& sequenceOf86
+) {
+    try {
+        // Convert TTCN-3 types to C++ vectors
+        std::vector<uint8_t> sharedSecretVec = octetstring_to_bytes(sharedSecret);
+        std::vector<uint8_t> hostIdVec = octetstring_to_bytes(hostId);
+
+        std::string eidStr = charstring_to_string(eid);
+        std::vector<uint8_t> eidVec;
+        for (size_t i = 0; i < eidStr.length(); i += 2) {
+            std::string hexByte = eidStr.substr(i, 2);
+            uint8_t byte = static_cast<uint8_t>(std::stoi(hexByte, nullptr, 16));
+            eidVec.push_back(byte);
+        }
+
+        // Convert segments
+        std::vector<uint8_t> firstSeq87Vec = octetstring_to_bytes(firstSequenceOf87);
+        std::vector<uint8_t> seq88Vec = octetstring_to_bytes(sequenceOf88);
+        std::vector<uint8_t> secondSeq87Vec = octetstring_to_bytes(secondSequenceOf87);
+        std::vector<uint8_t> seq86Vec = octetstring_to_bytes(sequenceOf86);
+
+        // Derive BSP session keys using X9.63 KDF (from_kdf)
+        auto bsp = BspCryptoNS::BspCrypto::from_kdf(
+            sharedSecretVec,
+            static_cast<uint8_t>(keyType.get_long_long_val()),
+            static_cast<uint8_t>(keyLength.get_long_long_val()),
+            hostIdVec,
+            eidVec
+        );
+
+        LOG_INFO("BSP session keys derived successfully");
+        LOG_INFO("Processing BoundProfilePackage segments");
+        LOG_INFO("firstSequenceOf87 size: " + std::to_string(firstSeq87Vec.size()));
+        LOG_INFO("sequenceOf88 size: " + std::to_string(seq88Vec.size()));
+        LOG_INFO("secondSequenceOf87 size: " + std::to_string(secondSeq87Vec.size()));
+        LOG_INFO("sequenceOf86 size: " + std::to_string(seq86Vec.size()));
+
+        // Process segments using the 4-parameter version
+        auto result = bsp.process_bound_profile_package(
+            firstSeq87Vec,
+            seq88Vec,
+            secondSeq87Vec,
+            seq86Vec
+        );
+
+        // Convert result back to TTCN-3
+        ProcessedBoundProfilePackage ttcn_result;
+        ttcn_result.configureIsdp() = bytes_to_octetstring(result.configureIsdp);
+        ttcn_result.storeMetadata() = bytes_to_octetstring(result.storeMetadata);
+        ttcn_result.hasReplaceSessionKeys() = BOOLEAN(result.hasReplaceSessionKeys);
+        ttcn_result.profileData() = bytes_to_octetstring(result.profileData);
+
+        if (result.hasReplaceSessionKeys) {
+            ttcn_result.ppkEnc() = bytes_to_octetstring(result.replaceSessionKeys.ppkEnc);
+            ttcn_result.ppkMac() = bytes_to_octetstring(result.replaceSessionKeys.ppkCmac);
+            ttcn_result.ppkInitialMCV() = bytes_to_octetstring(result.replaceSessionKeys.initialMacChainingValue);
+            LOG_INFO("ReplaceSessionKeys present - PPK will be used for profile decryption");
+        }
+
+        LOG_INFO("BoundProfilePackage segments processed successfully");
+        LOG_INFO("ConfigureISDP size: " + std::to_string(result.configureIsdp.size()));
+        LOG_INFO("StoreMetadata size: " + std::to_string(result.storeMetadata.size()));
+        LOG_INFO("Profile data size: " + std::to_string(result.profileData.size()));
+
+        return ttcn_result;
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("BSP segment processing failed: " + std::string(e.what()));
+        // Return empty result on error
+        ProcessedBoundProfilePackage error_result;
+        error_result.configureIsdp() = OCTETSTRING(0, nullptr);
+        error_result.storeMetadata() = OCTETSTRING(0, nullptr);
+        error_result.hasReplaceSessionKeys() = BOOLEAN(false);
+        error_result.profileData() = OCTETSTRING(0, nullptr);
+        return error_result;
     }
 }
 
