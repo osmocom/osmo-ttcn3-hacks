@@ -14,44 +14,7 @@
 # limitations under the License.
 
 SUBDIRS= \
-	asterisk \
-	bsc \
-	bsc-nat \
-	bts \
-	cbc \
-	ccid \
-	dia2gsup \
-	eim \
-	fr \
-	fr-net \
-	epdg \
-	gbproxy \
-	ggsn_tests \
-	hlr \
-	hnbgw \
-	hnodeb \
-	hss \
-	ipad \
-	mgw \
-	mme \
-	msc \
-	ns \
-	pcap-client \
-	pcu \
-	pcrf \
-	pgw \
-	remsim \
-	s1gw \
-	sccp \
-	selftest \
-	sgsn \
-	simtrace \
-	sip \
-	smlc \
 	smdpp \
-	stp \
-	sysinfo \
-	upf \
 	$(NULL)
 
 NPROC=$(shell nproc 2>/dev/null)
