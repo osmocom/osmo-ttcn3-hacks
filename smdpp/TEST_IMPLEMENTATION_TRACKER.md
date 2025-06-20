@@ -6,11 +6,18 @@ This document tracks the implementation progress of SM-DP+ test cases from SGP.2
 ## Implementation Status
 
 ### InitiateAuthentication Tests
-- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_01_Nominal - Implemented
-- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_02_Uniqueness - Implemented
-- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_03_InvalidServerAddress - Implemented
+- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_01_Nominal - ✅ PASS
+- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_02_Uniqueness - ✅ PASS
+- [x] TC_SM-DP+_ES9+.InitiateAuthenticationNIST_03_InvalidServerAddress - ✅ PASS
 - [ ] TC_SM-DP+_ES9+.InitiateAuthenticationFRP (FRP variant)
 - [ ] TC_SM-DP+_ES9+.InitiateAuthenticationBRP (BRP variant)
+
+### AuthenticateClient Tests
+- [x] TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal - ✅ PASS
+- [x] TC_SM-DP+_ES9+.AuthenticateClientNIST_02_ConfirmationCode - ✅ PASS
+- [x] TC_SM-DP+_ES9+.AuthenticateClientNIST_03_Mismatched_Transaction_ID - ✅ PASS
+- [x] TC_SM-DP+_ES9+.AuthenticateClientNIST_04_Invalid_euiccInfo1 - ⚠️ INCONC (requires cert regen)
+- [x] TC_SM-DP+_ES9+.AuthenticateClientNIST_05_eUICC_Challenge_Reuse - ✅ PASS
 
 ### GetBoundProfilePackage Tests
 - [ ] TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_01_Nominal
@@ -19,13 +26,6 @@ This document tracks the implementation progress of SM-DP+ test cases from SGP.2
 - [ ] TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_04_Preparation_Error
 - [ ] TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_05_PPK_Test_Key
 - [ ] TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_06_PPK_Session_Key
-
-### AuthenticateClient Tests
-- [ ] TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal
-- [ ] TC_SM-DP+_ES9+.AuthenticateClientNIST_02_ConfirmationCode
-- [ ] TC_SM-DP+_ES9+.AuthenticateClientNIST_03_Mismatched_Transaction_ID
-- [ ] TC_SM-DP+_ES9+.AuthenticateClientNIST_04_Invalid_euiccInfo1
-- [ ] TC_SM-DP+_ES9+.AuthenticateClientNIST_05_eUICC_Challenge_Reuse
 
 ### HandleNotification Tests
 - [ ] TC_SM-DP+_ES2+.HandleNotification3.1_01_Install
