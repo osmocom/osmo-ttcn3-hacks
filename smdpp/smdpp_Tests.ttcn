@@ -26,6 +26,7 @@ import from PKIX1Implicit88_Types all;
 import from es12_Types_JSON all;
 import from es9p_Types_JSON all;
 import from es2p_Types_JSON all;
+import from esx_header_Types_JSON all;
 
 /* ============================================================================
  * EXTERNAL C++ FUNCTION DECLARATIONS
@@ -619,47 +620,103 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 	return es9p_res;
 }
 
+/* ============================================================================
+ * IMPROVED REQUEST/RESPONSE HANDLING FUNCTIONS
+ * Uses f_es9p_send_new for automatic URL routing
+ * ============================================================================ */
 
-private function f_perform_es9p_request_response_new(RemoteProfileProvisioningRequest request,
-                                                   charstring endpoint) runs on smdpp_ConnHdlr
-return RemoteProfileProvisioningResponse {
+/* Unified function that returns the wrapper type for maximum flexibility */
+private function f_es9p_transceive_wrap(RemoteProfileProvisioningRequest request)
+runs on smdpp_ConnHdlr
+return DecodedRPPReponse_Wrap {
+	// Use f_es9p_send_new to automatically determine the URL
+	f_es9p_send_new(request);
 
-	/* Encode request to JSON */
-	var charstring requestJson;
-	enc_RemoteProfileProvisioningRequest_to_JSON(request, requestJson);
-
-	ext_logInfo("Sending " & endpoint & " request");
-	ext_logDebug("Request JSON length: " & int2str(lengthof(requestJson)));
-
-	/* Send HTTP request using HttpClient */
+	// Send the stored request using HttpClient
 	var integer http_status;
-	var charstring responseJson := ext_RSPClient_sendHttpsPost(
+	var charstring response_body := ext_RSPClient_sendHttpsPost(
 		g_rsp_client_handle,
-		endpoint,
-		requestJson,
+		g_last_es9p_endpoint,
+		g_last_es9p_request,
 		http_status
 	);
 
 	if (http_status != 200) {
-		ext_logError("HTTP error response: " & int2str(http_status));
-		setverdict(fail, "HTTP error");
-		// Return empty response to avoid decoding errors
-		var RemoteProfileProvisioningResponse empty_response;
+		setverdict(fail, "HTTP error response: " & int2str(http_status));
+		var DecodedRPPReponse_Wrap empty_response;
 		return empty_response;
 	}
 
-	if (lengthof(responseJson) == 0) {
-		ext_logError("Empty response received");
-		setverdict(fail, "Empty HTTP response");
-		var RemoteProfileProvisioningResponse empty_response;
-		return empty_response;
-	}
-
-	/* Decode JSON response */
+	// Decode to wrapper type that handles both success and error
 	var DecodedRPPReponse_Wrap response;
-	dec_RemoteProfileProvisioningResponse_from_JSON(responseJson, response);
+	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, response);
 
-	return response.asn1_pdu;
+	return response;
+}
+
+/* Helper for tests expecting successful responses */
+private function f_es9p_transceive_success(RemoteProfileProvisioningRequest request)
+runs on smdpp_ConnHdlr
+return RemoteProfileProvisioningResponse {
+	var DecodedRPPReponse_Wrap wrap := f_es9p_transceive_wrap(request);
+
+	if (ispresent(wrap.asn1_pdu)) {
+		return wrap.asn1_pdu;
+	} else if (ispresent(wrap.err)) {
+		setverdict(fail, "Expected success but got error: ",
+		           wrap.err.subjectCode, "/", wrap.err.reasonCode,
+		           " - ", wrap.err.message_);
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	setverdict(fail, "Invalid response - neither success nor error");
+	f_shutdown(__FILE__, __LINE__);
+	// Dummy return to satisfy compiler - never reached due to f_shutdown()
+	var RemoteProfileProvisioningResponse dummy;
+	return dummy;
+}
+
+/* Helper for tests expecting error responses */
+private function f_es9p_transceive_error(RemoteProfileProvisioningRequest request)
+runs on smdpp_ConnHdlr
+return JSON_ESx_FunctionExecutionStatusCodeData {
+	var DecodedRPPReponse_Wrap wrap := f_es9p_transceive_wrap(request);
+
+	if (ispresent(wrap.err)) {
+		return wrap.err;
+	} else if (ispresent(wrap.asn1_pdu)) {
+		setverdict(fail, "Expected error but got success response");
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	setverdict(fail, "Invalid response - neither success nor error");
+	f_shutdown(__FILE__, __LINE__);
+	// Dummy return to satisfy compiler - never reached due to f_shutdown()
+	var JSON_ESx_FunctionExecutionStatusCodeData dummy;
+	return dummy;
+}
+
+/* Reusable error validation function */
+private function f_validate_error_response(
+	JSON_ESx_FunctionExecutionStatusCodeData actual_error,
+	charstring expected_subject_code,
+	charstring expected_reason_code,
+	charstring test_description := ""
+) runs on smdpp_ConnHdlr {
+	if (actual_error.subjectCode != expected_subject_code or
+	    actual_error.reasonCode != expected_reason_code) {
+		var charstring desc := "";
+		if (lengthof(test_description) > 0) {
+			desc := test_description & " - ";
+		}
+		setverdict(fail, desc,
+		           "Expected error ", expected_subject_code, "/", expected_reason_code,
+		           " but got ", actual_error.subjectCode, "/", actual_error.reasonCode);
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	log("Error validation passed: ", expected_subject_code, "/", expected_reason_code,
+	    " (", actual_error.message_, ")");
 }
 
 /* ============================================================================
@@ -858,24 +915,9 @@ private function f_TC_InitiateAuth_01_Nominal(charstring id) runs on smdpp_ConnH
 		return;
 	}
 
-	/* Step 1: Send InitiateAuthentication request */
+	/* Step 1: Send InitiateAuthentication request - URL is automatically determined */
 	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse authResponse :=
-		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
-
-	if (not isvalue(authResponse)) {
-		setverdict(fail, "InitiateAuthentication request failed");
-		f_rsp_client_cleanup();
-		return;
-	}
-
-	/* Validate response structure */
-	if (not ispresent(authResponse.initiateAuthenticationResponse) or
-	    not ispresent(authResponse.initiateAuthenticationResponse.initiateAuthenticationOk)) {
-		setverdict(fail, "Invalid response structure");
-		f_rsp_client_cleanup();
-		return;
-	}
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
 
 	var InitiateAuthenticationOkEs9 authOk := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk;
 
@@ -926,17 +968,9 @@ private function f_TC_InitiateAuth_02_Uniqueness(charstring id) runs on smdpp_Co
 		return;
 	}
 
-	/* Step 1: First InitiateAuthentication request */
+	/* Step 1: First InitiateAuthentication request - URL is automatically determined */
 	var RemoteProfileProvisioningRequest authRequest1 := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse authResponse1 :=
-		f_perform_es9p_request_response_new(authRequest1, "/gsma/rsp2/es9plus/initiateAuthentication");
-
-	if (not isvalue(authResponse1) or
-	    not ispresent(authResponse1.initiateAuthenticationResponse.initiateAuthenticationOk)) {
-		setverdict(fail, "First InitiateAuthentication request failed");
-		f_rsp_client_cleanup();
-		return;
-	}
+	var RemoteProfileProvisioningResponse authResponse1 := f_es9p_transceive_success(authRequest1);
 
 	var InitiateAuthenticationOkEs9 authOk1 := authResponse1.initiateAuthenticationResponse.initiateAuthenticationOk;
 	var octetstring transactionId1 := authOk1.transactionId;
@@ -953,17 +987,9 @@ private function f_TC_InitiateAuth_02_Uniqueness(charstring id) runs on smdpp_Co
 		return;
 	}
 
-	/* Step 3: Second InitiateAuthentication request */
+	/* Step 3: Second InitiateAuthentication request - URL is automatically determined */
 	var RemoteProfileProvisioningRequest authRequest2 := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse authResponse2 :=
-		f_perform_es9p_request_response_new(authRequest2, "/gsma/rsp2/es9plus/initiateAuthentication");
-
-	if (not isvalue(authResponse2) or
-	    not ispresent(authResponse2.initiateAuthenticationResponse.initiateAuthenticationOk)) {
-		setverdict(fail, "Second InitiateAuthentication request failed");
-		f_rsp_client_cleanup();
-		return;
-	}
+	var RemoteProfileProvisioningResponse authResponse2 := f_es9p_transceive_success(authRequest2);
 
 	var InitiateAuthenticationOkEs9 authOk2 := authResponse2.initiateAuthenticationResponse.initiateAuthenticationOk;
 	var octetstring transactionId2 := authOk2.transactionId;
@@ -1009,42 +1035,15 @@ private function f_TC_InitiateAuth_03_InvalidServerAddress(charstring id) runs o
 	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
 	authRequest.initiateAuthenticationRequest.smdpAddress := "unknown.server.invalid";
 
-	var RemoteProfileProvisioningResponse authResponse :=
-		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+	/* Send request expecting an error response - URL is automatically determined */
+	var JSON_ESx_FunctionExecutionStatusCodeData errorData := f_es9p_transceive_error(authRequest);
 
-	if (not isvalue(authResponse)) {
-		setverdict(fail, "No response received");
-		f_rsp_client_cleanup();
-		return;
-	}
+	/* Verify error codes: Subject Code 8.8.1 Reason Code 3.8 */
+	f_validate_error_response(errorData, "8.8.1", "3.8", "Invalid server address test");
 
-	/* Expect error response */
-	if (not ispresent(authResponse.initiateAuthenticationResponse) or
-	    not ispresent(authResponse.initiateAuthenticationResponse.initiateAuthenticationError)) {
-		setverdict(fail, "Expected error response not received");
-		f_rsp_client_cleanup();
-		return;
-	}
-
-	var integer authError := authResponse.initiateAuthenticationResponse.initiateAuthenticationError;
-
-	/* According to ASN.1 definition:
-	 * invalidDpAddress(1),
-	 * euiccVersionNotSupportedByDp(2),
-	 * ciPKNotSupported(3)
-	 *
-	 * For invalid server address, we expect error code 1
-	 */
-	var integer expectedError := 1;  // invalidDpAddress
-
-	if (authError != expectedError) {
-		setverdict(fail, "Expected error code " & int2str(expectedError) & " but got " & int2str(authError));
-		f_rsp_client_cleanup();
-		return;
-	}
-
-	ext_logInfo("Test passed - Correct error code received for invalid server address");
-	ext_logInfo("Error code: " & int2str(authError) & " (invalidDpAddress)");
+	ext_logInfo("Test passed - Correct error codes received for invalid server address");
+	ext_logInfo("Subject Code: " & errorData.subjectCode & ", Reason Code: " & errorData.reasonCode);
+	ext_logInfo("Error message: " & errorData.message_);
 
 	f_rsp_client_cleanup();
 	setverdict(pass);
@@ -1064,14 +1063,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Step 1: InitiateAuthentication ===");
 
 	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse authResponse :=
-		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
-
-	if (not isvalue(authResponse)) {
-		setverdict(fail, "InitiateAuthentication request failed");
-		f_rsp_client_cleanup();
-		return;
-	}
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
 
 	if (not f_validate_initiate_authentication_response(authResponse)) {
 		setverdict(fail, "InitiateAuthentication validation failed");

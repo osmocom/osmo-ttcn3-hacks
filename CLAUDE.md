@@ -33,11 +33,11 @@ cd smdpp; make clean; make compile; make -j
 - **Don't run `make clean` frequently as it takes time - use incremental `make -j` for minor changes**
 - Build process can take several minutes for full clean builds
 
-**⚠️ Important implementation Notes**:
+**⚠️ Important Implementation Notes**:
+- Always clean before make, because not doing that produces weird errors like smdpp_Tests_part_5.cc:364:15: error: 'init_ttcn3_debugger' is not a member of 'smdpp__Tests and those are a waste of time fixed by clean builds.
 - ** c++ functions used by ttcn3 always have two underscores in the name, example:**
 - ttcn3: external function ext_logInfo(charstring xmessage);
 - c++: void ext__logInfo(const CHARSTRING& message)
-
 
 ### Running Tests
 
@@ -178,3 +178,14 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 - **Test Types**: Nominal (success), Error cases, Retry scenarios, Confirmation code tests
 - **Message Notation**: `#` for constants, `<>` for dynamic values, MTD_HTTP_REQ/RESP for HTTP
 - **Error Format**: "Subject Code X.X.X Reason Code Y.Y" (e.g., "8.2.1 3.7" for missing confirmation code)
+
+## Implementation Documentation
+- **Test Implementation Notes**: `/app/tt-smdpp/smdpp/TEST_IMPLEMENTATION_NOTES.md` - Patterns and guidelines for implementing new tests
+- **JSON Error Handling**: `/app/tt-smdpp/smdpp/JSON_ERROR_HANDLING.md` - How JSON/ASN.1 dual-layer error handling works
+- **Implementation Summary**: `/app/tt-smdpp/smdpp/IMPLEMENTATION_SUMMARY.md` - Summary of implemented InitiateAuthentication tests
+- **ispresent() Guidelines**: `/app/tt-smdpp/smdpp/ISPRESENT_GUIDELINES.md` - When to use or omit ispresent() checks
+
+## Memory Notes
+
+### Testing and Execution Strategies
+- Use tasks and workers to ensure your context does not get polluted by the expansive code and the massive log output these tests generate.

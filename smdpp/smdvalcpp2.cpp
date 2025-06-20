@@ -810,15 +810,15 @@ public:
             // Extract public key data using OpenSSL 3.0+ API
             // Get the public key as an octet string directly
             size_t pub_len = 0;
-            
+
             // First get the size needed
-            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY, 
+            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                                nullptr, 0, &pub_len) != 1) {
                 Logger::warning("Failed to get public key size from " + typeName +
                                 " file (will generate from private key)");
                 return false;
             }
-            
+
             // Allocate and get the actual public key data
             publicKeyStorage.resize(pub_len);
             if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
@@ -848,13 +848,13 @@ public:
 
         // Using OpenSSL 3.0+ API to get public key from private key
         size_t pub_len = 0;
-        
+
         // First get the size needed
         if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            nullptr, 0, &pub_len) != 1) {
             throw OpenSSLError("Failed to get public key size from " + typeName + " private key");
         }
-        
+
         // Allocate and get the actual public key data
         publicKeyStorage.resize(pub_len);
         if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
@@ -1428,7 +1428,7 @@ public:
             curl_easy_setopt(curl, CURLOPT_CAINFO, nullptr); // Disable default CA bundle
             curl_easy_setopt(curl, CURLOPT_CAPATH, nullptr);
 
-            curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+            // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
             // Perform the request
             CURLcode res = curl_easy_perform(curl);
@@ -1465,7 +1465,7 @@ public:
 static std::vector<uint8_t> computeConfirmationCodeHash(
     const std::string& confirmationCode,
     const std::vector<uint8_t>& transactionId) {
-    
+
     // Convert confirmation code from hex string to bytes (like EID handling)
     std::vector<uint8_t> ccBytes;
     for (size_t i = 0; i < confirmationCode.length(); i += 2) {
@@ -1475,20 +1475,20 @@ static std::vector<uint8_t> computeConfirmationCodeHash(
             ccBytes.push_back(byte);
         }
     }
-    
+
     // Step 1: SHA256(Confirmation Code)
     unsigned char firstHash[SHA256_DIGEST_LENGTH];
     SHA256(ccBytes.data(), ccBytes.size(), firstHash);
-    
+
     // Step 2: Concatenate SHA256(CC) with TransactionID
     std::vector<uint8_t> concatenated;
     concatenated.insert(concatenated.end(), firstHash, firstHash + SHA256_DIGEST_LENGTH);
     concatenated.insert(concatenated.end(), transactionId.begin(), transactionId.end());
-    
+
     // Step 3: SHA256(SHA256(CC) | TransactionID)
     unsigned char finalHash[SHA256_DIGEST_LENGTH];
     SHA256(concatenated.data(), concatenated.size(), finalHash);
-    
+
     return std::vector<uint8_t>(finalHash, finalHash + SHA256_DIGEST_LENGTH);
 }
 
@@ -1660,7 +1660,7 @@ public:
     // Generate eUICC one-time public key (OtPK)
     void generateEUICCOtpk() {
         // Create EC key context for P-256 curve using OpenSSL 3.0+ API
-        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> 
+        std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
             pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
         if (!pctx) {
             throw OpenSSLError("Failed to create EVP_PKEY_CTX");
@@ -1681,24 +1681,24 @@ public:
         if (EVP_PKEY_keygen(pctx.get(), &pkey_raw) <= 0) {
             throw OpenSSLError("Failed to generate EC key pair");
         }
-        
+
         // Store the private key for later use in key agreement
         m_euicc_ot_PrivateKey.reset(pkey_raw);
 
         // Get the public key in uncompressed format
         size_t pub_len = 0;
-        
+
         // First get the size needed
         if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            nullptr, 0, &pub_len) != 1) {
             throw OpenSSLError("Failed to get public key size");
         }
-        
+
         // For P-256: should be 65 bytes (0x04 + 32 bytes X + 32 bytes Y)
         if (pub_len != 65) {
             throw OpenSSLError("Unexpected public key size for P-256");
         }
-        
+
         // Get the actual public key data
         m_euiccOtpk.resize(pub_len);
         if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
@@ -1831,7 +1831,7 @@ public:
             Logger::warning("Cannot compute confirmation code hash - transaction ID not set");
         }
     }
-    
+
     // Set transaction ID (needed for confirmation code hash)
     void setTransactionId(const std::vector<uint8_t> &transactionId) {
         m_transactionId = transactionId;
@@ -1842,12 +1842,12 @@ public:
             Logger::info("Recalculated confirmation code hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
         }
     }
-    
+
     // Get computed confirmation code hash
     std::vector<uint8_t> getConfirmationCodeHash() const {
         return m_confirmationCodeHash;
     }
-    
+
     // Set confirmation code hash directly (for backwards compatibility)
     void setConfirmationCodeHash(const std::vector<uint8_t> &hash) {
         m_confirmationCodeHash = hash;
@@ -1973,32 +1973,32 @@ private:
         return verifyServerSignature(serverSigned1, serverSignature1, m_serverCert.get());
     }
 
-public:    
+public:
     // ========================================================================
     // HTTP CLIENT METHODS
     // ========================================================================
-    
+
     // Configure HTTP client settings
     void configureHttpClient(bool useCustomTlsCert, const std::string& customTlsCertPath = "") {
         m_useCustomTlsCert = useCustomTlsCert;
         m_customTlsCertPath = customTlsCertPath;
     }
-    
+
     // Send HTTPS POST request and return response body
-    std::string sendHttpsPost(const std::string& endpoint, 
-                             const std::string& body, 
+    std::string sendHttpsPost(const std::string& endpoint,
+                             const std::string& body,
                              int& httpStatusCode) {
         // Initialize HTTP client if not already done
         if (!m_httpClient) {
             m_httpClient = std::make_unique<HttpClient>();
         }
-        
+
         // Build full URL
-        std::string url = "https://" + m_serverUrl + ":" + 
+        std::string url = "https://" + m_serverUrl + ":" +
                          std::to_string(m_serverPort) + endpoint;
-        
+
         HttpClient::ResponseData response;
-        
+
         if (m_useCustomTlsCert) {
             // Load custom TLS certificate if path provided
             if (!m_customTlsCertPath.empty()) {
@@ -2013,13 +2013,13 @@ public:
                     Logger::warning("Failed to load custom TLS certificate: " + std::string(e.what()));
                 }
             }
-            
+
             // Convert unique_ptr vector to raw pointer vector for HttpClient
             std::vector<X509*> rawCertPool;
             for (const auto& cert : m_certPool) {
                 rawCertPool.push_back(cert.get());
             }
-            
+
             // Use custom certificate verification with our cert store
             response = m_httpClient->postJsonWithCustomVerification(
                 url, m_serverPort, body, nullptr, rawCertPool
@@ -2033,12 +2033,12 @@ public:
             );
             Logger::info("Using standard CA bundle for TLS verification");
         }
-        
+
         httpStatusCode = response.statusCode;
-        
-        Logger::info("HTTP " + std::to_string(httpStatusCode) + " response, body length: " + 
+
+        Logger::info("HTTP " + std::to_string(httpStatusCode) + " response, body length: " +
                     std::to_string(response.body.length()));
-        
+
         return response.body;
     }
 
@@ -2075,7 +2075,7 @@ public:
     std::vector<uint8_t> m_confirmationCodeHash; // Computed confirmation code hash
     std::vector<uint8_t> m_transactionId; // Transaction ID for hash computation
     std::string m_caCertPath = ""; // Path to system CA certificates
-    
+
     // HTTP client
     std::unique_ptr<HttpClient> m_httpClient;
     bool m_useCustomTlsCert = true; // Flag for custom vs public CA
