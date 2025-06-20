@@ -6,8 +6,6 @@ FILES="
 	*.ttcn
 	*.asn
 	Abstract_Socket.cc
-	HTTPmsg_MessageLen_Function.cc
-	HTTPmsg_PT.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
