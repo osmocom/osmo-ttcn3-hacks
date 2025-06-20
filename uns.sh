@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export TTCN3_DIR="/usr"
+
 WHCIHT="smdpp"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PYSRVPATH=$(realpath ${SCRIPT_DIR}/../pysim)
