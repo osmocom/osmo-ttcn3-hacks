@@ -730,7 +730,7 @@ public:
             }
 
             certStorage = std::move(certs[0]);
-            LOG_INFO("Loaded " + typeName +
+            LOG_DEBUG("Loaded " + typeName +
                          " certificate: " + getSubjectName(certStorage.get()));
 
         } catch (const std::exception &e) {
@@ -1509,11 +1509,11 @@ public:
             bool isDirectory = std::filesystem::is_directory(cpath);
             try {
                 if (isDirectory) {
-                    LOG_INFO("Loading certificates from directory: " + cpath);
+                    LOG_DEBUG("Loading certificates from directory: " + cpath);
 
                     // Load all certificates from the directory
                     auto certs = CertificateUtil::loadCertificatesFromDirectory(cpath, name_filters);
-                    LOG_INFO("Loaded " + std::to_string(certs.size()) + " certificates");
+                    LOG_DEBUG("Loaded " + std::to_string(certs.size()) + " certificates");
 
                     // Separate root CAs and intermediates
                     for (auto &cert : certs) {
