@@ -842,5 +842,77 @@ ProcessedBoundProfilePackage ext__BSP__processSegments(
     }
 }
 
+// HTTP client function wrapper
+CHARSTRING ext__RSPClient__sendHttpsPost(
+    const INTEGER& clientHandle,
+    const CHARSTRING& endpoint,
+    const CHARSTRING& body,
+    INTEGER& statusCode
+) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            statusCode = 0;
+            return CHARSTRING("");
+        }
+
+        // Convert TTCN-3 types to C++
+        std::string endpointStr = charstring_to_string(endpoint);
+        std::string bodyStr = charstring_to_string(body);
+        
+        // Send HTTP request
+        int httpStatus = 0;
+        std::string response = client->sendHttpsPost(endpointStr, bodyStr, httpStatus);
+        
+        // Set output status code
+        statusCode = httpStatus;
+        
+        // Return response body as CHARSTRING
+        return CHARSTRING(response.c_str());
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__sendHttpsPost failed: " + std::string(e.what()));
+        statusCode = 0;
+        return CHARSTRING("");
+    }
+}
+
+// Configure HTTP client settings
+INTEGER ext__RSPClient__configureHttpClient(
+    const INTEGER& clientHandle,
+    const BOOLEAN& useCustomTlsCert,
+    const CHARSTRING& customTlsCertPath
+) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        // Convert TTCN-3 types to C++
+        bool useCustomCert = useCustomTlsCert;
+        std::string certPath = charstring_to_string(customTlsCertPath);
+        
+        // Configure HTTP client
+        client->configureHttpClient(useCustomCert, certPath);
+        
+        LOG_INFO("Configured HTTP client - custom TLS cert: " + 
+                 std::string(useCustomCert ? "true" : "false") +
+                 (certPath.empty() ? "" : " (" + certPath + ")"));
+        
+        return INTEGER(0);
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__configureHttpClient failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
+}
+
 
 }

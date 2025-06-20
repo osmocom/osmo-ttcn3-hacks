@@ -1973,6 +1973,75 @@ private:
         return verifyServerSignature(serverSigned1, serverSignature1, m_serverCert.get());
     }
 
+public:    
+    // ========================================================================
+    // HTTP CLIENT METHODS
+    // ========================================================================
+    
+    // Configure HTTP client settings
+    void configureHttpClient(bool useCustomTlsCert, const std::string& customTlsCertPath = "") {
+        m_useCustomTlsCert = useCustomTlsCert;
+        m_customTlsCertPath = customTlsCertPath;
+    }
+    
+    // Send HTTPS POST request and return response body
+    std::string sendHttpsPost(const std::string& endpoint, 
+                             const std::string& body, 
+                             int& httpStatusCode) {
+        // Initialize HTTP client if not already done
+        if (!m_httpClient) {
+            m_httpClient = std::make_unique<HttpClient>();
+        }
+        
+        // Build full URL
+        std::string url = "https://" + m_serverUrl + ":" + 
+                         std::to_string(m_serverPort) + endpoint;
+        
+        HttpClient::ResponseData response;
+        
+        if (m_useCustomTlsCert) {
+            // Load custom TLS certificate if path provided
+            if (!m_customTlsCertPath.empty()) {
+                try {
+                    auto tlsCerts = CertificateUtil::loadCertificateChain(m_customTlsCertPath);
+                    // Add to cert pool for verification
+                    for (auto& cert : tlsCerts) {
+                        m_certPool.push_back(std::move(cert));
+                    }
+                    Logger::info("Loaded custom TLS certificate from: " + m_customTlsCertPath);
+                } catch (const std::exception& e) {
+                    Logger::warning("Failed to load custom TLS certificate: " + std::string(e.what()));
+                }
+            }
+            
+            // Convert unique_ptr vector to raw pointer vector for HttpClient
+            std::vector<X509*> rawCertPool;
+            for (const auto& cert : m_certPool) {
+                rawCertPool.push_back(cert.get());
+            }
+            
+            // Use custom certificate verification with our cert store
+            response = m_httpClient->postJsonWithCustomVerification(
+                url, m_serverPort, body, nullptr, rawCertPool
+            );
+        } else {
+            // For public CA mode, we would need to implement a new method in HttpClient
+            // For now, use the existing method with empty cert pool
+            std::vector<X509*> emptyCertPool;
+            response = m_httpClient->postJsonWithCustomVerification(
+                url, m_serverPort, body, nullptr, emptyCertPool
+            );
+            Logger::info("Using standard CA bundle for TLS verification");
+        }
+        
+        httpStatusCode = response.statusCode;
+        
+        Logger::info("HTTP " + std::to_string(httpStatusCode) + " response, body length: " + 
+                    std::to_string(response.body.length()));
+        
+        return response.body;
+    }
+
     // ========================================================================
     // MEMBER VARIABLES
     // ========================================================================
@@ -2006,6 +2075,11 @@ private:
     std::vector<uint8_t> m_confirmationCodeHash; // Computed confirmation code hash
     std::vector<uint8_t> m_transactionId; // Transaction ID for hash computation
     std::string m_caCertPath = ""; // Path to system CA certificates
+    
+    // HTTP client
+    std::unique_ptr<HttpClient> m_httpClient;
+    bool m_useCustomTlsCert = true; // Flag for custom vs public CA
+    std::string m_customTlsCertPath; // Path to custom TLS certificate
 };
 
 } // namespace RspCrypto

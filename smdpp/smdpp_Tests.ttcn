@@ -23,9 +23,6 @@ import from PKIX1Implicit88_Templates all;
 import from PKIX1Implicit88_Types all;
 
 import from HTTP_Server_Emulation all;
-import from HTTPmsg_Types all;
-import from HTTPmsg_PortType all;
-import from HTTP_Adapter all;
 
 import from es12_Types_JSON all;
 import from es9p_Types_JSON all;
@@ -162,6 +159,20 @@ external function ext_BSP_processSegments(
     octetstring sequenceOf86
 ) return ProcessedBoundProfilePackage;
 
+/* HTTP Client Functions */
+external function ext_RSPClient_sendHttpsPost(
+    integer clientHandle,
+    charstring endpoint,
+    charstring body,
+    out integer statusCode
+) return charstring;
+
+external function ext_RSPClient_configureHttpClient(
+    integer clientHandle,
+    boolean useCustomTlsCert,
+    charstring customTlsCertPath
+) return integer;
+
 /* RSP Protocol Constants */
 const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
 const charstring c_oid_rspRole_dp_pb := "2.23.146.1.2.1.5";
@@ -189,7 +200,7 @@ type component MTC_CT {
 	var HTTP_Server_Emulation_CT vc_HTTP_es2p;
 };
 
-type component smdpp_ConnHdlr extends HTTP_ConnHdlr, http_CT {
+type component smdpp_ConnHdlr extends HTTP_ConnHdlr {
 	var smdpp_ConnHdlrPars g_pars_smdpp;
 	var template integer g_http_client_id_es9p := omit;
 	var template integer g_http_client_id_es2p := omit;
@@ -203,6 +214,10 @@ type component smdpp_ConnHdlr extends HTTP_ConnHdlr, http_CT {
 	var octetstring g_serverChallenge := ''O;
 	var octetstring g_serverCert := ''O;
 	var boolean g_authenticationComplete := false;
+
+	/* HTTP Client state for new approach */
+	var charstring g_last_es9p_endpoint := "";
+	var charstring g_last_es9p_request := "";
 };
 
 type record smdpp_ConnHdlrPars {
@@ -229,17 +244,6 @@ private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 }
 
 modulepar {
-	HTTP_Adapter_Params mp_es9p_client := {
-		http_host := "127.0.0.1",
-		http_port := 8000,
-		use_ssl := true
-	};
-
-	HTTP_Adapter_Params mp_es2p_client := {
-		http_host := "127.0.0.1",
-		http_port := 8001,
-		use_ssl := true
-	};
 
 	HttpServerEmulationCfg mp_es12_server := {
 		http_bind_ip := "127.0.0.1",
@@ -252,6 +256,10 @@ modulepar {
 		http_bind_port := 8003,
 		use_ssl := false
 	};
+
+	// New HTTP client parameters
+	boolean mp_use_custom_tls_cert := true;
+	charstring mp_custom_tls_cert_path := "";  // Empty means use cert pool only
 }
 
 private altstep as_Tguard() runs on MTC_CT {
@@ -331,6 +339,26 @@ private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
 	}
 
 	ext_logInfo("RSP client initialized with handle: " & int2str(g_rsp_client_handle));
+
+	// Configure HTTP client
+	var integer result := ext_RSPClient_configureHttpClient(
+		g_rsp_client_handle,
+		mp_use_custom_tls_cert,
+		mp_custom_tls_cert_path
+	);
+
+	if (result != 0) {
+		ext_logError("Failed to configure HTTP client");
+		f_rsp_client_cleanup();
+		return false;
+	}
+
+	if (mp_use_custom_tls_cert) {
+		ext_logInfo("HTTP client configured - custom TLS: true");
+	} else {
+		ext_logInfo("HTTP client configured - custom TLS: false");
+	}
+
 	return true;
 }
 
@@ -443,7 +471,7 @@ return RemoteProfileProvisioningRequest {
 		euiccOtpk := euiccOtpk,
 		hashCc := omit  // Will be set below if confirmation code is required
 	};
-	
+
 	// Add confirmation code hash if required
 	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
 	ext_logInfo("Checking confirmation code hash, length: " & int2str(lengthof(ccHash)));
@@ -538,14 +566,9 @@ runs on smdpp_ConnHdlr return boolean {
  * HTTP COMMUNICATION
  * ============================================================================ */
 
-template (value) HeaderLines ts_rsp_HTTP_Header := {
-	{ header_name := "User-Agent", header_value := "TTCN3 smdpp testsuite" },
-	{ header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.5.0" },
-	{ header_name := "Content-Type", header_value := "application/json;charset=UTF-8" }
-};
 
-/* Send ES9+ HTTP request */
-private function f_es9p_send(RemoteProfileProvisioningRequest es9p_req) runs on smdpp_ConnHdlr {
+/* Send ES9+ request using new HttpClient approach */
+private function f_es9p_send_new(RemoteProfileProvisioningRequest es9p_req) runs on smdpp_ConnHdlr {
 	var charstring es9p_req_enc;
 	var charstring es9p_url;
 
@@ -561,125 +584,71 @@ private function f_es9p_send(RemoteProfileProvisioningRequest es9p_req) runs on 
 		es9p_url := "/gsma/rsp2/es9plus/cancelSession";
 	} else {
 		setverdict(fail, "unknown JSON ES9+ function");
+		return;
 	}
 
 	enc_RemoteProfileProvisioningRequest_to_JSON(es9p_req, es9p_req_enc);
 
-	f_http_tx_request(url := es9p_url,
-			  method := "POST",
-			  body := es9p_req_enc,
-			  custom_hdr := valueof(ts_rsp_HTTP_Header),
-			  client_id := g_http_client_id_es9p,
-			  http_pars := mp_es9p_client);
+	// Store for use in receive function
+	g_last_es9p_endpoint := es9p_url;
+	g_last_es9p_request := es9p_req_enc;
 }
 
-/* Receive ES9+ HTTP response */
-private function f_es9p_receive(template RemoteProfileProvisioningResponse expected_es9p_res := omit)
+/* Receive ES9+ response using new HttpClient approach */
+private function f_es9p_receive_new(template RemoteProfileProvisioningResponse expected_es9p_res := omit)
 runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 	var RemoteProfileProvisioningResponse es9p_res;
-	var HTTPMessage response_http;
-	response_http := f_http_rx_response(exp := ?,
-					    client_id := g_http_client_id_es9p,
-					    keep_connection := true);
+	var integer http_status;
 
-	if (istemplatekind(g_http_client_id_es9p, "omit")) {
-		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
-		 * in all consecutive requests. */
-		g_http_client_id_es9p := f_http_client_id_from_http_response(response_http);
-	} else if (valueof(g_http_client_id_es9p) != valueof(f_http_client_id_from_http_response(response_http))) {
-		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
-		 * HTTP connection. This must not happen unexpectetly. */
-		setverdict(fail, "unexpected ES9+ HTTP connection");
-	}
+	// Send the stored request using HttpClient
+	var charstring response_body := ext_RSPClient_sendHttpsPost(
+		g_rsp_client_handle,
+		g_last_es9p_endpoint,
+		g_last_es9p_request,
+		http_status
+	);
 
-	log("Response HTTP structure received");
-	if (ispresent(response_http.response)) {
-		log("HTTP response is present");
-		log("HTTP response body present: ", ispresent(response_http.response.body));
-		if (ispresent(response_http.response.body)) {
-			log("HTTP response body length: ", lengthof(response_http.response.body));
-			// Print first 200 chars to avoid log overflow
-			if (lengthof(response_http.response.body) > 0) {
-				var integer max_len := 200;
-				if (lengthof(response_http.response.body) < max_len) {
-					max_len := lengthof(response_http.response.body);
-				}
-				log("HTTP response body (first ", max_len, " chars): ", substr(response_http.response.body, 0, max_len));
-			} else {
-				log("HTTP response body is EMPTY (zero length)!");
-			}
-		} else {
-			log("ERROR: No HTTP response body");
-			setverdict(fail, "No HTTP response body");
-			return omit;
-		}
-		log("About to call JSON decoder with body of length: ", lengthof(response_http.response.body));
-		dec_RemoteProfileProvisioningResponse_from_JSON(response_http.response.body, es9p_res);
-		if (not istemplatekind(expected_es9p_res, "omit")) {
-			if (not match(es9p_res, expected_es9p_res)) {
-				setverdict(fail, "unexpected response from SM-DP+ on ES9+");
-			}
-		}
-
-		if (isvalue(es9p_res)) {
-			return es9p_res;
-		}
-		return omit
-	} else {
-		setverdict(fail,
-			   "unexpected ES9+ response, the HTTP body did either contain no or a non binary response");
+	if (http_status != 200) {
+		setverdict(fail, "HTTP error response: " & int2str(http_status));
 		return omit;
 	}
-}
 
-/* Perform one ES9+ HTTP request/response cycle */
-private function f_es9p_client_transceive(RemoteProfileProvisioningRequest es9p_req,
-					  template RemoteProfileProvisioningResponse expected_es9p_res := omit)
-runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
-	var template RemoteProfileProvisioningResponse es9p_res
-	f_es9p_send(es9p_req);
-	es9p_res := f_es9p_receive();
+	if (lengthof(response_body) == 0) {
+		setverdict(fail, "Empty HTTP response body");
+		return omit;
+	}
+
+	ext_logInfo("HTTP " & int2str(http_status) & " response, body length: " &
+	           int2str(lengthof(response_body)));
+
+	// Decode JSON response
+	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, es9p_res);
+
 	if (not istemplatekind(expected_es9p_res, "omit")) {
-		if (not match(valueof(es9p_res), expected_es9p_res)) {
+		if (not match(es9p_res, expected_es9p_res)) {
 			setverdict(fail, "unexpected response from SM-DP+ on ES9+");
 		}
 	}
+
+	if (isvalue(es9p_res)) {
+		return es9p_res;
+	}
+	return omit;
+}
+
+/* Perform one ES9+ HTTP request/response cycle using new HttpClient */
+private function f_es9p_client_transceive_new(RemoteProfileProvisioningRequest es9p_req,
+					      template RemoteProfileProvisioningResponse expected_es9p_res := omit)
+runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
+	var template RemoteProfileProvisioningResponse es9p_res;
+	f_es9p_send_new(es9p_req);
+	es9p_res := f_es9p_receive_new(expected_es9p_res);
 	return es9p_res;
 }
 
 
-private function f_send_es9p_request(charstring endpoint, charstring jsonBody) runs on smdpp_ConnHdlr return charstring {
-	f_http_tx_request(url := endpoint,
-	                  method := "POST",
-	                  body := jsonBody,
-	                  custom_hdr := valueof(ts_rsp_HTTP_Header),
-	                  client_id := g_http_client_id_es9p,
-	                  http_pars := mp_es9p_client);
-
-	var HTTPMessage response_http := f_http_rx_response(exp := ?,
-	                                                   client_id := g_http_client_id_es9p,
-	                                                   keep_connection := true);
-
-	if (istemplatekind(g_http_client_id_es9p, "omit")) {
-		g_http_client_id_es9p := f_http_client_id_from_http_response(response_http);
-	}
-
-	if (ispresent(response_http.response) and response_http.response.statuscode == 200) {
-		ext_logInfo("HTTP " & int2str(response_http.response.statuscode) &
-		           " response, body length: " & int2str(lengthof(response_http.response.body)));
-		return response_http.response.body;
-	} else {
-		if (ispresent(response_http.response)) {
-			ext_logError("HTTP error response: " & int2str(response_http.response.statuscode));
-		} else {
-			ext_logError("No HTTP response");
-		}
-		return "";
-	}
-}
-
-private function f_perform_es9p_request_response(RemoteProfileProvisioningRequest request,
-                                               charstring endpoint) runs on smdpp_ConnHdlr
+private function f_perform_es9p_request_response_new(RemoteProfileProvisioningRequest request,
+                                                   charstring endpoint) runs on smdpp_ConnHdlr
 return RemoteProfileProvisioningResponse {
 
 	/* Encode request to JSON */
@@ -689,13 +658,29 @@ return RemoteProfileProvisioningResponse {
 	ext_logInfo("Sending " & endpoint & " request");
 	ext_logDebug("Request JSON length: " & int2str(lengthof(requestJson)));
 
-	/* Send HTTP request */
-	var charstring responseJson := f_send_es9p_request(endpoint, requestJson);
+	/* Send HTTP request using HttpClient */
+	var integer http_status;
+	var charstring responseJson := ext_RSPClient_sendHttpsPost(
+		g_rsp_client_handle,
+		endpoint,
+		requestJson,
+		http_status
+	);
 
-	// if (lengthof(responseJson) == 0) {
-	// 	ext_logError("Empty response received");
-	// 	return omit;
-	// }
+	if (http_status != 200) {
+		ext_logError("HTTP error response: " & int2str(http_status));
+		setverdict(fail, "HTTP error");
+		// Return empty response to avoid decoding errors
+		var RemoteProfileProvisioningResponse empty_response;
+		return empty_response;
+	}
+
+	if (lengthof(responseJson) == 0) {
+		ext_logError("Empty response received");
+		setverdict(fail, "Empty HTTP response");
+		var RemoteProfileProvisioningResponse empty_response;
+		return empty_response;
+	}
 
 	/* Decode JSON response */
 	var RemoteProfileProvisioningResponse response;
@@ -892,9 +877,7 @@ runs on smdpp_ConnHdlr return boolean {
 
 
 private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
-	f_http_init();
-	f_http_register(0);
-	f_http_register(1);
+
 
 	ext_logInfo("Starting complete RSP flow test");
 
@@ -908,7 +891,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 
 	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse authResponse :=
-		f_perform_es9p_request_response(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
 
 	if (not isvalue(authResponse)) {
 		setverdict(fail, "InitiateAuthentication request failed");
@@ -970,7 +953,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	}
 
 	var RemoteProfileProvisioningRequest rrq := 	valueof(ts_authenticateClientRequest(transactionId := g_transactionId, authenticateServerResponse := authresp));
-	var RemoteProfileProvisioningResponse rresp := valueof(f_es9p_client_transceive(rrq, tr_authenticateClientResponseEs9));
+	var RemoteProfileProvisioningResponse rresp := valueof(f_es9p_client_transceive_new(rrq, tr_authenticateClientResponseEs9));
 	var AuthenticateClientOk auok := rresp.authenticateClientResponseEs9.authenticateClientOk;
 
 	if (auok.transactionId != g_transactionId or auok.smdpSigned2.transactionId != g_transactionId) {
@@ -987,11 +970,11 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		f_rsp_client_cleanup();
 		return;
 	}
-	
+
 	// Handle confirmation code if required
 	if (auok.smdpSigned2.ccRequiredFlag == true) {
 		ext_logInfo("Confirmation code is required for this profile");
-		
+
 		// Store transaction ID in client for hash calculation
 		// Transaction ID is already an octetstring in the ASN.1 definition
 		ext_logInfo("Setting transaction ID: " & oct2str(auok.transactionId));
@@ -999,7 +982,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		if (result != 0) {
 			ext_logError("Failed to set transaction ID");
 		}
-		
+
 		// Set confirmation code (from test parameters or default)
 		var charstring confirmationCode := "12345678";  // Default test code
 		if (ispresent(g_pars_smdpp.confirmation_code)) {
@@ -1010,7 +993,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 			ext_logError("Failed to set confirmation code");
 		}
 		ext_logInfo("Set confirmation code: " & confirmationCode);
-		
+
 		// Verify the hash was computed
 		var octetstring hashCheck := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
 		ext_logInfo("Confirmation code hash length: " & int2str(lengthof(hashCheck)));
@@ -1043,7 +1026,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Step 2: GetBoundProfilePackage ===");
 
 	var RemoteProfileProvisioningRequest packageRequest := f_create_get_bound_profile_package_request(auok.smdpSignature2);
-	var RemoteProfileProvisioningResponse packageResponse := valueof(f_es9p_client_transceive(valueof(packageRequest), tr_getBoundProfilePackageResponse));
+	var RemoteProfileProvisioningResponse packageResponse := valueof(f_es9p_client_transceive_new(valueof(packageRequest), tr_getBoundProfilePackageResponse));
     var GetBoundProfilePackageOk packageOk := packageResponse.getBoundProfilePackageResponse.getBoundProfilePackageOk;
     var BoundProfilePackage bpp := packageOk.boundProfilePackage;
 	var InitialiseSecureChannelRequest iscReq := bpp.initialiseSecureChannelRequest;
