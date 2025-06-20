@@ -1362,7 +1362,7 @@ private:
         X509_STORE *store = SSL_CTX_get_cert_store(ctx);
 
         for (auto cert : *ctxData->certPool) {
-            LOG_INFO("ADDED Issuer: " + get_cn_name(X509_get_issuer_name(cert)) +
+            LOG_DEBUG("ADDED Issuer: " + get_cn_name(X509_get_issuer_name(cert)) +
                          " Subject: " + get_cn_name(X509_get_subject_name(cert)) +
                          " SKI: " + HexUtil::bytesToHex(CertificateUtil::getSubjectKeyIdentifier(cert)) +
                          " AKI: " + HexUtil::bytesToHex(CertificateUtil::getAuthorityKeyIdentifier(cert)));
@@ -1519,7 +1519,7 @@ public:
                     for (auto &cert : certs) {
                         // Identify root certificates (self-signed)
                         if (X509_check_issued(cert.get(), cert.get()) == X509_V_OK) {
-                            LOG_INFO("Found root CA: " +
+                            LOG_DEBUG("Found root CA: " +
                                          CertificateUtil::getSubjectName(cert.get()));
 
                             // Store the first root CA as our primary root
