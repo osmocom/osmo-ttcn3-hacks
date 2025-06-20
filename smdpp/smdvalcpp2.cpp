@@ -1457,6 +1457,42 @@ public:
 };
 
 // ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+// Compute confirmation code hash according to SGP.22 specification
+// Hashed Confirmation Code = SHA256(SHA256(Confirmation Code) | TransactionID)
+static std::vector<uint8_t> computeConfirmationCodeHash(
+    const std::string& confirmationCode,
+    const std::vector<uint8_t>& transactionId) {
+    
+    // Convert confirmation code from hex string to bytes (like EID handling)
+    std::vector<uint8_t> ccBytes;
+    for (size_t i = 0; i < confirmationCode.length(); i += 2) {
+        if (i + 1 < confirmationCode.length()) {
+            std::string byteString = confirmationCode.substr(i, 2);
+            uint8_t byte = static_cast<uint8_t>(std::stoi(byteString, nullptr, 16));
+            ccBytes.push_back(byte);
+        }
+    }
+    
+    // Step 1: SHA256(Confirmation Code)
+    unsigned char firstHash[SHA256_DIGEST_LENGTH];
+    SHA256(ccBytes.data(), ccBytes.size(), firstHash);
+    
+    // Step 2: Concatenate SHA256(CC) with TransactionID
+    std::vector<uint8_t> concatenated;
+    concatenated.insert(concatenated.end(), firstHash, firstHash + SHA256_DIGEST_LENGTH);
+    concatenated.insert(concatenated.end(), transactionId.begin(), transactionId.end());
+    
+    // Step 3: SHA256(SHA256(CC) | TransactionID)
+    unsigned char finalHash[SHA256_DIGEST_LENGTH];
+    SHA256(concatenated.data(), concatenated.size(), finalHash);
+    
+    return std::vector<uint8_t>(finalHash, finalHash + SHA256_DIGEST_LENGTH);
+}
+
+// ============================================================================
 // CLASS: RSPClient
 // Main RSP client implementation for Remote SIM Provisioning operations
 // ============================================================================
@@ -1785,10 +1821,37 @@ public:
         return verifyServerSignature(serverSigned1, serverSignature1, serverCert.get());
     }
 
-    // Set confirmation code hash (optional)
+    // Set confirmation code (calculates hash according to SGP.22)
+    void setConfirmationCode(const std::string &confirmationCode) {
+        m_confirmationCode = confirmationCode;
+        if (!m_transactionId.empty()) {
+            m_confirmationCodeHash = computeConfirmationCodeHash(m_confirmationCode, m_transactionId);
+            Logger::info("Set confirmation code, computed hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
+        } else {
+            Logger::warning("Cannot compute confirmation code hash - transaction ID not set");
+        }
+    }
+    
+    // Set transaction ID (needed for confirmation code hash)
+    void setTransactionId(const std::vector<uint8_t> &transactionId) {
+        m_transactionId = transactionId;
+        Logger::info("Set transaction ID: " + HexUtil::bytesToHex(transactionId));
+        // If confirmation code was already set, recalculate hash
+        if (!m_confirmationCode.empty()) {
+            m_confirmationCodeHash = computeConfirmationCodeHash(m_confirmationCode, m_transactionId);
+            Logger::info("Recalculated confirmation code hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
+        }
+    }
+    
+    // Get computed confirmation code hash
+    std::vector<uint8_t> getConfirmationCodeHash() const {
+        return m_confirmationCodeHash;
+    }
+    
+    // Set confirmation code hash directly (for backwards compatibility)
     void setConfirmationCodeHash(const std::vector<uint8_t> &hash) {
         m_confirmationCodeHash = hash;
-        Logger::info("Set confirmation code hash: " + HexUtil::bytesToHex(hash));
+        Logger::info("Set confirmation code hash directly: " + HexUtil::bytesToHex(hash));
     }
 
     // ========================================================================
@@ -1939,7 +2002,9 @@ private:
     std::vector<uint8_t> m_eumPublicKeyData; // EUM public key data
 
     // Other data
-    std::vector<uint8_t> m_confirmationCodeHash; // Optional confirmation code hash
+    std::string m_confirmationCode; // Confirmation code (PIN)
+    std::vector<uint8_t> m_confirmationCodeHash; // Computed confirmation code hash
+    std::vector<uint8_t> m_transactionId; // Transaction ID for hash computation
     std::string m_caCertPath = ""; // Path to system CA certificates
 };
 

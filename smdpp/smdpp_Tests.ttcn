@@ -96,6 +96,15 @@ external function ext_RSPClient_computeSharedSecret(integer clientHandle, octets
 
 external function ext_CertificateUtil_getCurveOID(octetstring certData) return charstring;
 
+/* Confirmation Code Functions */
+external function ext_RSPClient_setConfirmationCode(integer clientHandle,
+                                                    charstring confirmationCode) return integer;
+
+external function ext_RSPClient_setTransactionId(integer clientHandle,
+                                                octetstring transactionId) return integer;
+
+external function ext_RSPClient_getConfirmationCodeHash(integer clientHandle) return octetstring;
+
 
 
 /* Utility Functions */
@@ -202,7 +211,8 @@ type record smdpp_ConnHdlrPars {
 	charstring cert_path,
 	charstring cert_name_filter,
 	charstring euicc_cert_path,
-	charstring euicc_key_path
+	charstring euicc_key_path,
+	charstring confirmation_code optional
 };
 
 private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
@@ -212,7 +222,8 @@ private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 		cert_path := "./sgp26/CertificateIssuer",
 		cert_name_filter := "NIST",
 		euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der",
-		euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem"
+		euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem",
+		confirmation_code := omit  // No confirmation code by default
 	};
 	return pars;
 }
@@ -430,8 +441,20 @@ return RemoteProfileProvisioningRequest {
 	var EUICCSigned2 euiccSigned2 := {
 		transactionId := g_transactionId,
 		euiccOtpk := euiccOtpk,
-		hashCc := omit
+		hashCc := omit  // Will be set below if confirmation code is required
 	};
+	
+	// Add confirmation code hash if required
+	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+	ext_logInfo("Checking confirmation code hash, length: " & int2str(lengthof(ccHash)));
+	if (lengthof(ccHash) == 32) {  // SHA256 is 32 bytes
+		euiccSigned2.hashCc := ccHash;
+		ext_logInfo("Added confirmation code hash to PrepareDownloadRequest: " & oct2str(ccHash));
+	} else if (lengthof(ccHash) > 0) {
+		ext_logError("Invalid confirmation code hash length: " & int2str(lengthof(ccHash)));
+	} else {
+		ext_logInfo("No confirmation code hash available");
+	}
 
 	var octetstring euiccSigned2Data := enc_EUICCSigned2(euiccSigned2);
 	var octetstring concatdata := euiccSigned2Data & smdpSignature2;
@@ -963,6 +986,41 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return;
+	}
+	
+	// Handle confirmation code if required
+	if (auok.smdpSigned2.ccRequiredFlag == true) {
+		ext_logInfo("Confirmation code is required for this profile");
+		
+		// Store transaction ID in client for hash calculation
+		// Transaction ID is already an octetstring in the ASN.1 definition
+		ext_logInfo("Setting transaction ID: " & oct2str(auok.transactionId));
+		var integer result := ext_RSPClient_setTransactionId(g_rsp_client_handle, auok.transactionId);
+		if (result != 0) {
+			ext_logError("Failed to set transaction ID");
+		}
+		
+		// Set confirmation code (from test parameters or default)
+		var charstring confirmationCode := "12345678";  // Default test code
+		if (ispresent(g_pars_smdpp.confirmation_code)) {
+			confirmationCode := g_pars_smdpp.confirmation_code;
+		}
+		result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+		if (result != 0) {
+			ext_logError("Failed to set confirmation code");
+		}
+		ext_logInfo("Set confirmation code: " & confirmationCode);
+		
+		// Verify the hash was computed
+		var octetstring hashCheck := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+		ext_logInfo("Confirmation code hash length: " & int2str(lengthof(hashCheck)));
+		if (lengthof(hashCheck) == 32) {
+			ext_logInfo("Confirmation code hash computed successfully: " & oct2str(hashCheck));
+		} else {
+			ext_logError("Failed to compute confirmation code hash");
+		}
+	} else {
+		ext_logInfo("Confirmation code is NOT required for this profile");
 	}
 
     var charstring eid := ext_CertificateUtil_getEID(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));

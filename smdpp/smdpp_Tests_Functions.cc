@@ -340,6 +340,66 @@ OCTETSTRING ext__RSPClient__getEUICCOtpk(const INTEGER& clientHandle) {
     }
 }
 
+INTEGER ext__RSPClient__setConfirmationCode(const INTEGER& clientHandle,
+                                           const CHARSTRING& confirmationCode) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        std::string code = charstring_to_string(confirmationCode);
+        client->setConfirmationCode(code);
+
+        return INTEGER(0);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__setConfirmationCode failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
+}
+
+INTEGER ext__RSPClient__setTransactionId(const INTEGER& clientHandle,
+                                        const OCTETSTRING& transactionId) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        std::vector<uint8_t> tidVec = octetstring_to_bytes(transactionId);
+        client->setTransactionId(tidVec);
+
+        return INTEGER(0);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__setTransactionId failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
+}
+
+OCTETSTRING ext__RSPClient__getConfirmationCodeHash(const INTEGER& clientHandle) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return OCTETSTRING(0, nullptr);
+        }
+
+        std::vector<uint8_t> hash = client->getConfirmationCodeHash();
+        return bytes_to_octetstring(hash);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__getConfirmationCodeHash failed: " + std::string(e.what()));
+        return OCTETSTRING(0, nullptr);
+    }
+}
+
 INTEGER ext__RSPClient__setConfirmationCodeHash(const INTEGER& clientHandle,
                                                const OCTETSTRING& hash) {
     try {

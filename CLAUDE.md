@@ -151,3 +151,30 @@ When modifying tests:
 - Check session key derivation logs for S-ENC, S-MAC, and BSP key values
 - Verify Python server logs show proper BSP key derivation
 - Use `merged.log` for detailed test execution traces
+
+## Additional Implementation Details
+
+### BSP (Bound Session Protocol) Integration
+- BSP crypto functionality extracted from `bsp_python_bindings.cpp` into separate C++ modules
+- Key functions: `from_kdf` for session key derivation, `process_bound_profile_package` for decryption/verification
+- Session keys derived using X9.63 KDF with shared secret from ECDH
+- Supports both session keys (S-ENC, S-MAC) and Profile Protection Keys (PPK) via ReplaceSessionKeys
+
+### PIN Code / Confirmation Code Handling
+- Implements SGP.22 confirmation code verification: `SHA256(SHA256(CC) | TransactionID)`
+- Confirmation codes treated as hex strings (like EID) - converted to bytes before hashing
+- Test detects `ccRequiredFlag` in authenticateClient response and includes hash in PrepareDownloadRequest
+- Both Python server and C++ client implement identical hash computation
+
+### Data Encoding Conventions
+- EID: Decimal string of digits interpreted as hex bytes (e.g., "89049032..." → [0x89, 0x04, 0x90, 0x32, ...])
+- Confirmation Code: Hex string interpreted as bytes (e.g., "12345678" → [0x12, 0x34, 0x56, 0x78])
+- Transaction ID: Already in binary format (octetstring in ASN.1)
+
+## Test Specification Reference (SGP.23)
+Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
+- **Naming**: `TC_Component_Interface.OperationVariant` (e.g., TC_SM-DP+_ES9+.InitiateAuthenticationNIST)
+- **Structure**: Initial Conditions → Test Sequences → Step-by-step validation
+- **Test Types**: Nominal (success), Error cases, Retry scenarios, Confirmation code tests
+- **Message Notation**: `#` for constants, `<>` for dynamic values, MTD_HTTP_REQ/RESP for HTTP
+- **Error Format**: "Subject Code X.X.X Reason Code Y.Y" (e.g., "8.2.1 3.7" for missing confirmation code)
