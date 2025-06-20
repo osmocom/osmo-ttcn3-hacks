@@ -90,7 +90,7 @@ fi
 # Log stderr to CMD_OUTFILE and a dedicated error log file
 tee $CMD_OUTFILE < $FIFO > $CMD_OUTFILE_ERR &
 CMD_STR="$CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE 2>$FIFO &"
-echo "$CMD_STR"
+#echo "$CMD_STR"
 eval $CMD_STR
 # $CMD -s 1520 -n -i any -w \"$TTCN3_PCAP_PATH/$TESTCASE.pcap\" >$CMD_OUTFILE &
 PID=$!
@@ -111,14 +111,14 @@ i=0
 while [ ! -f "$TTCN3_PCAP_PATH/$TESTCASE.pcap" ] ||
       [ "$(stat -c '%s' "$TTCN3_PCAP_PATH/$TESTCASE.pcap")" -eq 32 ]
 do
-	echo "Waiting for packet dumper to start... $i"
+	# echo "Waiting for packet dumper to start... $i"
 	sleep 1
 	i=$((i+1))
 	if [ $i -eq 1 ]; then
-		echo "Packet dumper didn't start filling pcap file after $i seconds!!!"
+		# echo "Packet dumper didn't start filling pcap file after $i seconds!!!"
 		break
 	fi
 done
-kill $PID
+kill $PID 2>/dev/null
 
 echo "$TESTCASE" > "$TTCN3_PCAP_PATH/.current_test"

@@ -81,7 +81,7 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
         int handle = m_nextHandle++;
         m_clients[handle] = std::move(client);
 
-        LOG_INFO("Created RSP client with handle: " + std::to_string(handle));
+        LOG_DEBUG("Created RSP client with handle: " + std::to_string(handle));
         return handle;
     } catch (const std::exception& e) {
         LOG_ERROR("Failed to create RSP client: " + std::string(e.what()));
@@ -104,7 +104,7 @@ bool RSPClientRegistry::destroyClient(int handle) {
 
     auto it = m_clients.find(handle);
     if (it != m_clients.end()) {
-        LOG_INFO("Destroying RSP client with handle: " + std::to_string(handle));
+        LOG_DEBUG("Destroying RSP client with handle: " + std::to_string(handle));
         m_clients.erase(it);
         return true;
     }
@@ -113,7 +113,7 @@ bool RSPClientRegistry::destroyClient(int handle) {
 
 void RSPClientRegistry::destroyAllClients() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    LOG_INFO("Destroying all RSP clients (" + std::to_string(m_clients.size()) + " clients)");
+    LOG_DEBUG("Destroying all RSP clients (" + std::to_string(m_clients.size()) + " clients)");
     m_clients.clear();
 }
 
@@ -551,7 +551,7 @@ OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
         std::vector<uint8_t> otherPubKey = octetstring_to_bytes(otherPublicKey);
         std::vector<uint8_t> sharedSecret = client->computeECDHSharedSecret(otherPubKey);
 
-        LOG_INFO("ECDH shared secret computed: " + HexUtil::bytesToHex(sharedSecret));
+        LOG_DEBUG("ECDH shared secret computed: " + HexUtil::bytesToHex(sharedSecret));
 
         return bytes_to_octetstring(sharedSecret);
     } catch (const std::exception& e) {
@@ -714,10 +714,10 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
             eidVec
         );
 
-        LOG_INFO("BSP session keys derived successfully");
-        LOG_INFO("Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
-        LOG_INFO("EID (converted): " + HexUtil::bytesToHex(eidVec));
-        LOG_INFO("Processing BoundProfilePackage of size: " + std::to_string(bppData.size()));
+        LOG_DEBUG("BSP session keys derived successfully");
+        LOG_DEBUG("Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
+        LOG_DEBUG("EID (converted): " + HexUtil::bytesToHex(eidVec));
+        LOG_DEBUG("Processing BoundProfilePackage of size: " + std::to_string(bppData.size()));
 
         // Process the entire BoundProfilePackage
         auto result = bsp.process_bound_profile_package(bppData);
@@ -733,13 +733,13 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
             ttcn_result.ppkEnc() = bytes_to_octetstring(result.replaceSessionKeys.ppkEnc);
             ttcn_result.ppkMac() = bytes_to_octetstring(result.replaceSessionKeys.ppkCmac);
             ttcn_result.ppkInitialMCV() = bytes_to_octetstring(result.replaceSessionKeys.initialMacChainingValue);
-            LOG_INFO("ReplaceSessionKeys present - PPK will be used for profile decryption");
+            LOG_DEBUG("ReplaceSessionKeys present - PPK will be used for profile decryption");
         }
 
-        LOG_INFO("BoundProfilePackage processed successfully");
-        LOG_INFO("ConfigureISDP size: " + std::to_string(result.configureIsdp.size()));
-        LOG_INFO("StoreMetadata size: " + std::to_string(result.storeMetadata.size()));
-        LOG_INFO("Profile data size: " + std::to_string(result.profileData.size()));
+        LOG_DEBUG("BoundProfilePackage processed successfully");
+        LOG_DEBUG("ConfigureISDP size: " + std::to_string(result.configureIsdp.size()));
+        LOG_DEBUG("StoreMetadata size: " + std::to_string(result.storeMetadata.size()));
+        LOG_DEBUG("Profile data size: " + std::to_string(result.profileData.size()));
 
         return ttcn_result;
 
@@ -902,7 +902,7 @@ INTEGER ext__RSPClient__configureHttpClient(
         // Configure HTTP client
         client->configureHttpClient(useCustomCert, certPath);
         
-        LOG_INFO("Configured HTTP client - custom TLS cert: " + 
+        LOG_DEBUG("Configured HTTP client - custom TLS cert: " +
                  std::string(useCustomCert ? "true" : "false") +
                  (certPath.empty() ? "" : " (" + certPath + ")"));
         

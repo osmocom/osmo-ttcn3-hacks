@@ -333,16 +333,16 @@ public:
         auto aki = getAuthorityKeyIdentifier(cert);
 
         // Print all details
-        Logger::info("Certificate Details:");
-        Logger::info("  Subject: " + std::string(subjectName));
-        Logger::info("  Issuer:  " + std::string(issuerName));
-        Logger::info("  Valid:   " + startDate + " to " + endDate);
-        Logger::info("  SKI:     " + HexUtil::bytesToHex(ski));
-        Logger::info("  AKI:     " + HexUtil::bytesToHex(aki));
+        LOG_INFO("Certificate Details:");
+        LOG_INFO("  Subject: " + std::string(subjectName));
+        LOG_INFO("  Issuer:  " + std::string(issuerName));
+        LOG_INFO("  Valid:   " + startDate + " to " + endDate);
+        LOG_INFO("  SKI:     " + HexUtil::bytesToHex(ski));
+        LOG_INFO("  AKI:     " + HexUtil::bytesToHex(aki));
 
         // Check if self-signed
         if (X509_check_issued(cert, cert) == X509_V_OK) {
-            Logger::info("  Note:    Self-signed (Root) certificate");
+            LOG_INFO("  Note:    Self-signed (Root) certificate");
         }
     }
 
@@ -358,7 +358,7 @@ public:
             for (auto candidate : certPool) {
                 auto ski = getSubjectKeyIdentifier(candidate);
                 if (!ski.empty() && ski == aki) {
-                    Logger::debug("Found issuer by SKI match: " + getSubjectName(candidate));
+                    LOG_DEBUG("Found issuer by SKI match: " + getSubjectName(candidate));
                     return candidate;
                 }
             }
@@ -369,7 +369,7 @@ public:
         for (auto candidate : certPool) {
             X509_NAME *subjectName = X509_get_subject_name(candidate);
             if (X509_NAME_cmp(subjectName, issuerName) == 0) {
-                Logger::debug("Found issuer by subject name match: " + getSubjectName(candidate));
+                LOG_DEBUG("Found issuer by subject name match: " + getSubjectName(candidate));
                 return candidate;
             }
         }
@@ -386,7 +386,7 @@ public:
         }
 
         if (verbose) {
-            Logger::info("Building certificate chain starting with:");
+            LOG_INFO("Building certificate chain starting with:");
             printCertificateDetails(cert);
         }
 
@@ -406,7 +406,7 @@ public:
             // Check if this is a self-signed certificate (root)
             if (X509_check_issued(current, current) == X509_V_OK) {
                 if (verbose) {
-                    Logger::info("Reached root certificate: " + getSubjectName(current));
+                    LOG_INFO("Reached root certificate: " + getSubjectName(current));
                 }
                 break;
             }
@@ -414,7 +414,7 @@ public:
             // Track visited certificates to prevent loops
             std::string subject = getSubjectName(current);
             if (visited.find(subject) != visited.end()) {
-                Logger::warning("Certificate chain contains a cycle at: " + subject);
+                LOG_WARNING("Certificate chain contains a cycle at: " + subject);
                 break;
             }
             visited.insert(subject);
@@ -422,7 +422,7 @@ public:
             // Find the issuer
             X509 *issuer = findIssuerCertificate(current, certPool);
             if (!issuer) {
-                Logger::warning("Could not find issuer for: " + subject);
+                LOG_WARNING("Could not find issuer for: " + subject);
                 break;
             }
 
@@ -433,26 +433,26 @@ public:
                 auto currentAKI = getAuthorityKeyIdentifier(current);
                 auto issuerAKI = getAuthorityKeyIdentifier(issuer);
 
-                Logger::info("Certificate validation link:");
-                Logger::info("  Subject: " + getSubjectName(current));
-                Logger::info("  AKI:     " + HexUtil::bytesToHex(currentAKI));
-                Logger::info("  SKI:     " + HexUtil::bytesToHex(currentSKI));
-                Logger::info("  ↓");
-                Logger::info("  Issuer:  " + getSubjectName(issuer));
-                Logger::info("  AKI:     " + HexUtil::bytesToHex(issuerAKI));
-                Logger::info("  SKI:     " + HexUtil::bytesToHex(issuerSKI));
+                LOG_INFO("Certificate validation link:");
+                LOG_INFO("  Subject: " + getSubjectName(current));
+                LOG_INFO("  AKI:     " + HexUtil::bytesToHex(currentAKI));
+                LOG_INFO("  SKI:     " + HexUtil::bytesToHex(currentSKI));
+                LOG_INFO("  ↓");
+                LOG_INFO("  Issuer:  " + getSubjectName(issuer));
+                LOG_INFO("  AKI:     " + HexUtil::bytesToHex(issuerAKI));
+                LOG_INFO("  SKI:     " + HexUtil::bytesToHex(issuerSKI));
 
                 // Verify AKI/SKI match
                 if (!currentAKI.empty() && !issuerSKI.empty()) {
                     if (currentAKI == issuerSKI) {
-                        Logger::info("  Match:   AKI and SKI match ✓");
+                        LOG_INFO("  Match:   AKI and SKI match ✓");
                     } else {
-                        Logger::warning("  Match:   AKI and SKI DO NOT match ✗");
+                        LOG_WARNING("  Match:   AKI and SKI DO NOT match ✗");
                     }
                 } else {
-                    Logger::warning("  Match:   Cannot verify - missing AKI or SKI");
+                    LOG_WARNING("  Match:   Cannot verify - missing AKI or SKI");
                 }
-                Logger::info(""); // Empty line for readability
+                LOG_INFO(""); // Empty line for readability
             }
 
             // Move up the chain
@@ -465,8 +465,8 @@ public:
     // Enhanced certificate chain verification with proper trust model
     static bool verifyCertificateChainDynamic(X509 *cert, const std::vector<X509 *> &certPool,
                                               X509 *rootCA = nullptr, bool verbose = false) {
-        Logger::info("Verifying certificate chain...");
-        Logger::info("Target certificate: " + getSubjectName(cert));
+        LOG_INFO("Verifying certificate chain...");
+        LOG_INFO("Target certificate: " + getSubjectName(cert));
 
         // Create certificate store for trusted roots only
         std::unique_ptr<X509_STORE, X509_STORE_Deleter> store(X509_STORE_new());
@@ -477,7 +477,7 @@ public:
         // Only add the explicitly provided root CA to the trust store
         if (rootCA) {
             if (verbose) {
-                Logger::info("Adding trusted root CA: " + getSubjectName(rootCA));
+                LOG_INFO("Adding trusted root CA: " + getSubjectName(rootCA));
             }
             if (X509_STORE_add_cert(store.get(), rootCA) != 1) {
                 throw OpenSSLError("Failed to add root CA to store");
@@ -485,11 +485,11 @@ public:
         } else {
             // If no root CA provided, find self-signed certificates in the pool
             // WARNING: This should only be used in test environments
-            Logger::warning("No explicit root CA provided - searching for self-signed certificates");
+            LOG_WARNING("No explicit root CA provided - searching for self-signed certificates");
             for (auto candidate : certPool) {
                 if (X509_check_issued(candidate, candidate) == X509_V_OK) {
                     if (verbose) {
-                        Logger::info("Adding self-signed certificate as trusted root: " +
+                        LOG_INFO("Adding self-signed certificate as trusted root: " +
                                      getSubjectName(candidate));
                     }
                     if (X509_STORE_add_cert(store.get(), candidate) != 1) {
@@ -533,7 +533,7 @@ public:
         }
 
         if (verbose) {
-            Logger::info("Untrusted chain contains " + std::to_string(sk_X509_num(untrusted_chain.get())) + " certificates");
+            LOG_INFO("Untrusted chain contains " + std::to_string(sk_X509_num(untrusted_chain.get())) + " certificates");
         }
 
         // Create verification context
@@ -565,7 +565,7 @@ public:
                     if (cert) {
                         char subject_buf[256];
                         X509_NAME_oneline(X509_get_subject_name(cert), subject_buf, sizeof(subject_buf));
-                        Logger::info("Processing certificate with name constraint abuse: " + std::string(subject_buf));
+                        LOG_INFO("Processing certificate with name constraint abuse: " + std::string(subject_buf));
                     }
 
                     return 1; // Accept - SGP.22 specific handling
@@ -582,27 +582,27 @@ public:
             int depth = X509_STORE_CTX_get_error_depth(ctx.get());
             X509 *errorCert = X509_STORE_CTX_get_current_cert(ctx.get());
 
-            Logger::error("Certificate verification failed:");
-            Logger::error("  Error:   " + std::string(X509_verify_cert_error_string(error)));
-            Logger::error("  Depth:   " + std::to_string(depth));
+            LOG_ERROR("Certificate verification failed:");
+            LOG_ERROR("  Error:   " + std::string(X509_verify_cert_error_string(error)));
+            LOG_ERROR("  Depth:   " + std::to_string(depth));
 
             if (errorCert) {
-                Logger::error("  Cert:    " + getSubjectName(errorCert));
+                LOG_ERROR("  Cert:    " + getSubjectName(errorCert));
             }
 
             return false;
         }
 
-        Logger::info("Certificate verification successful");
+        LOG_INFO("Certificate verification successful");
 
         // Print the verified chain if verbose
         if (verbose) {
             STACK_OF(X509) *verified_chain = X509_STORE_CTX_get1_chain(ctx.get());
             if (verified_chain) {
-                Logger::info("Verified certificate chain:");
+                LOG_INFO("Verified certificate chain:");
                 for (int i = 0; i < sk_X509_num(verified_chain); i++) {
                     X509 *chainCert = sk_X509_value(verified_chain, i);
-                    Logger::info("  " + std::to_string(i + 1) + ". " + getSubjectName(chainCert));
+                    LOG_INFO("  " + std::to_string(i + 1) + ". " + getSubjectName(chainCert));
                 }
                 sk_X509_pop_free(verified_chain, X509_free);
             }
@@ -682,7 +682,7 @@ public:
                 else if (ext == ".der") {
                     FILE *file = fopen(fpath.c_str(), "rb");
                     if (!file) {
-                        Logger::warning("Failed to open certificate file: " + fpath);
+                        LOG_WARNING("Failed to open certificate file: " + fpath);
                         continue;
                     }
 
@@ -693,7 +693,7 @@ public:
                     std::vector<unsigned char> data(file_size);
                     if (fread(data.data(), 1, file_size, file) != static_cast<size_t>(file_size)) {
                         fclose(file);
-                        Logger::warning("Failed to read certificate file: " + fpath);
+                        LOG_WARNING("Failed to read certificate file: " + fpath);
                         continue;
                     }
 
@@ -704,7 +704,7 @@ public:
 
                     if (cert) {
                         certificates.push_back(std::unique_ptr<X509, X509Deleter>(cert));
-                        Logger::info("Loaded certificate: " + getSubjectName(cert) + " from " +
+                        LOG_INFO("Loaded certificate: " + getSubjectName(cert) + " from " +
                                      fpath);
                     }
                 }
@@ -730,11 +730,11 @@ public:
             }
 
             certStorage = std::move(certs[0]);
-            Logger::info("Loaded " + typeName +
+            LOG_INFO("Loaded " + typeName +
                          " certificate: " + getSubjectName(certStorage.get()));
 
         } catch (const std::exception &e) {
-            Logger::error("Failed to load " + typeName + " certificate: " + std::string(e.what()));
+            LOG_ERROR("Failed to load " + typeName + " certificate: " + std::string(e.what()));
             throw;
         }
     }
@@ -765,10 +765,10 @@ public:
                 throw OpenSSLError("Failed to read " + typeName + " private key");
             }
 
-            Logger::info("Loaded " + typeName + " private key from: " + keyPath);
+            LOG_DEBUG("Loaded " + typeName + " private key from: " + keyPath);
 
         } catch (const std::exception &e) {
-            Logger::error("Failed to load " + typeName + " private key: " + std::string(e.what()));
+            LOG_ERROR("Failed to load " + typeName + " private key: " + std::string(e.what()));
             throw;
         }
     }
@@ -778,14 +778,14 @@ public:
                                 std::vector<uint8_t> &publicKeyStorage) {
         try {
             if (!std::filesystem::exists(pubKeyPath)) {
-                Logger::info(typeName + " public key file not found: " + pubKeyPath +
+                LOG_INFO(typeName + " public key file not found: " + pubKeyPath +
                              " (will generate from private key)");
                 return false;
             }
 
             std::ifstream keyFile(pubKeyPath);
             if (!keyFile) {
-                Logger::warning("Failed to open " + typeName + " public key file: " + pubKeyPath +
+                LOG_WARNING("Failed to open " + typeName + " public key file: " + pubKeyPath +
                                 " (will generate from private key)");
                 return false;
             }
@@ -794,7 +794,7 @@ public:
             std::unique_ptr<BIO, BIODeleter> keyBio(BIO_new_mem_buf(keyStr.c_str(), -1));
 
             if (!keyBio) {
-                Logger::warning("Failed to create BIO for " + typeName +
+                LOG_WARNING("Failed to create BIO for " + typeName +
                                 " public key (will generate from private key)");
                 return false;
             }
@@ -802,7 +802,7 @@ public:
             std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubKey(
                 PEM_read_bio_PUBKEY(keyBio.get(), nullptr, nullptr, nullptr));
             if (!pubKey) {
-                Logger::warning("Failed to read " + typeName +
+                LOG_WARNING("Failed to read " + typeName +
                                 " public key from file (will generate from private key)");
                 return false;
             }
@@ -814,7 +814,7 @@ public:
             // First get the size needed
             if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                                nullptr, 0, &pub_len) != 1) {
-                Logger::warning("Failed to get public key size from " + typeName +
+                LOG_WARNING("Failed to get public key size from " + typeName +
                                 " file (will generate from private key)");
                 return false;
             }
@@ -823,17 +823,17 @@ public:
             publicKeyStorage.resize(pub_len);
             if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                                publicKeyStorage.data(), pub_len, &pub_len) != 1) {
-                Logger::warning("Failed to extract public key data from " + typeName +
+                LOG_WARNING("Failed to extract public key data from " + typeName +
                                 " file (will generate from private key)");
                 return false;
             }
 
-            Logger::info("Loaded " + typeName + " public key from file (" + std::to_string(pub_len) +
+            LOG_INFO("Loaded " + typeName + " public key from file (" + std::to_string(pub_len) +
                          " bytes)");
             return true;
 
         } catch (const std::exception &e) {
-            Logger::warning("Failed to load " + typeName + " public key from file: " +
+            LOG_WARNING("Failed to load " + typeName + " public key from file: " +
                             std::string(e.what()) + " (will generate from private key)");
             return false;
         }
@@ -862,8 +862,8 @@ public:
             throw OpenSSLError("Failed to extract public key from " + typeName + " private key");
         }
 
-        Logger::info("Generated " + typeName + " public key from private key (" + std::to_string(pub_len) +
-                     " bytes)");
+        LOG_DEBUG("Generated " + typeName + " public key from private key (" + std::to_string(pub_len) +
+                      " bytes)");
     }
 
     // Load complete key set (certificate, private key, public key)
@@ -1007,7 +1007,7 @@ public:
 
             return result;
         } catch (const std::exception& e) {
-            Logger::error("getPermittedEINs failed: " + std::string(e.what()));
+            LOG_ERROR("getPermittedEINs failed: " + std::string(e.what()));
             return "";
         }
     }
@@ -1019,7 +1019,7 @@ public:
             std::vector<std::string> permittedEins = parse_permitted_eins_from_cert(eumCert.get());
 
             if (permittedEins.empty()) {
-                Logger::warning("No permitted EINs found in EUM certificate");
+                LOG_WARNING("No permitted EINs found in EUM certificate");
                 return false;
             }
 
@@ -1029,15 +1029,15 @@ public:
 
             for (const auto& ein : permittedEins) {
                 if (eidNormalized.find(ein) == 0) {
-                    Logger::info("EID " + eidNormalized + " matches permitted EIN " + ein);
+                    LOG_INFO("EID " + eidNormalized + " matches permitted EIN " + ein);
                     return true;
                 }
             }
 
-            Logger::error("EID " + eidNormalized + " is not in any permitted EIN list");
+            LOG_ERROR("EID " + eidNormalized + " is not in any permitted EIN list");
             return false;
         } catch (const std::exception& e) {
-            Logger::error("validateEIDRange failed: " + std::string(e.what()));
+            LOG_ERROR("validateEIDRange failed: " + std::string(e.what()));
             return false;
         }
     }
@@ -1070,7 +1070,7 @@ public:
             CERTIFICATEPOLICIES_free(policies);
             return false;
         } catch (const std::exception& e) {
-            Logger::error("hasRSPRole failed: " + std::string(e.what()));
+            LOG_ERROR("hasRSPRole failed: " + std::string(e.what()));
             return false;
         }
     }
@@ -1082,12 +1082,12 @@ public:
 
             EVP_PKEY *pkey = X509_get0_pubkey(cert.get());
             if (!pkey) {
-                Logger::error("Failed to get public key from certificate");
+                LOG_ERROR("Failed to get public key from certificate");
                 return "";
             }
 
             if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
-                Logger::error("Certificate does not contain EC key");
+                LOG_ERROR("Certificate does not contain EC key");
                 return "";
             }
 
@@ -1096,7 +1096,7 @@ public:
 
             if (EVP_PKEY_get_utf8_string_param(pkey, "group", curve_name,
                                              sizeof(curve_name), &curve_name_len) != 1) {
-                Logger::error("Failed to get curve name from EC key");
+                LOG_ERROR("Failed to get curve name from EC key");
                 return "";
             }
 
@@ -1114,7 +1114,7 @@ public:
 
             return "unknown";
         } catch (const std::exception& e) {
-            Logger::error("getCurveOID failed: " + std::string(e.what()));
+            LOG_ERROR("getCurveOID failed: " + std::string(e.what()));
             return "";
         }
     }
@@ -1125,26 +1125,26 @@ public:
         try {
             // Both should be uncompressed EC points (starting with 0x04)
             if (pubKey1.empty() || pubKey2.empty() || pubKey1[0] != 0x04 || pubKey2[0] != 0x04) {
-                Logger::error("Invalid EC public key format");
+                LOG_ERROR("Invalid EC public key format");
                 return false;
             }
 
             // For P-256, size should be 65 bytes (1 + 32 + 32)
             if (pubKey1.size() == 65 && pubKey2.size() == 65) {
-                Logger::info("Both keys are P-256 format, ECDH compatible");
+                LOG_INFO("Both keys are P-256 format, ECDH compatible");
                 return true;
             }
 
             // For P-384, size should be 97 bytes (1 + 48 + 48)
             if (pubKey1.size() == 97 && pubKey2.size() == 97) {
-                Logger::info("Both keys are P-384 format, ECDH compatible");
+                LOG_INFO("Both keys are P-384 format, ECDH compatible");
                 return true;
             }
 
-            Logger::error("Key sizes don't match or unsupported curve");
+            LOG_ERROR("Key sizes don't match or unsupported curve");
             return false;
         } catch (const std::exception& e) {
-            Logger::error("verifyECDHCompatible failed: " + std::string(e.what()));
+            LOG_ERROR("verifyECDHCompatible failed: " + std::string(e.what()));
             return false;
         }
     }
@@ -1362,7 +1362,7 @@ private:
         X509_STORE *store = SSL_CTX_get_cert_store(ctx);
 
         for (auto cert : *ctxData->certPool) {
-            Logger::info("ADDED Issuer: " + get_cn_name(X509_get_issuer_name(cert)) +
+            LOG_INFO("ADDED Issuer: " + get_cn_name(X509_get_issuer_name(cert)) +
                          " Subject: " + get_cn_name(X509_get_subject_name(cert)) +
                          " SKI: " + HexUtil::bytesToHex(CertificateUtil::getSubjectKeyIdentifier(cert)) +
                          " AKI: " + HexUtil::bytesToHex(CertificateUtil::getAuthorityKeyIdentifier(cert)));
@@ -1509,17 +1509,17 @@ public:
             bool isDirectory = std::filesystem::is_directory(cpath);
             try {
                 if (isDirectory) {
-                    Logger::info("Loading certificates from directory: " + cpath);
+                    LOG_INFO("Loading certificates from directory: " + cpath);
 
                     // Load all certificates from the directory
                     auto certs = CertificateUtil::loadCertificatesFromDirectory(cpath, name_filters);
-                    Logger::info("Loaded " + std::to_string(certs.size()) + " certificates");
+                    LOG_INFO("Loaded " + std::to_string(certs.size()) + " certificates");
 
                     // Separate root CAs and intermediates
                     for (auto &cert : certs) {
                         // Identify root certificates (self-signed)
                         if (X509_check_issued(cert.get(), cert.get()) == X509_V_OK) {
-                            Logger::info("Found root CA: " +
+                            LOG_INFO("Found root CA: " +
                                          CertificateUtil::getSubjectName(cert.get()));
 
                             // Store the first root CA as our primary root
@@ -1536,11 +1536,11 @@ public:
                     }
 
                     if (!m_rootCA) {
-                        Logger::warning("No root CA found in directory");
+                        LOG_WARNING("No root CA found in directory");
                     }
                 } else {
                     // Original behavior - load certificate chain from file
-                    Logger::info("Loading certificates from file: " + cpath);
+                    LOG_INFO("Loading certificates from file: " + cpath);
                     auto caChain = CertificateUtil::loadCertificateChain(cpath);
 
                     if (!caChain.empty()) {
@@ -1550,11 +1550,11 @@ public:
                             m_intermediateCA.push_back(std::move(caChain[i]));
                         }
 
-                        Logger::info("Loaded root CA: " +
+                        LOG_INFO("Loaded root CA: " +
                                      CertificateUtil::getSubjectName(m_rootCA.get()));
 
                         for (const auto &cert : m_intermediateCA) {
-                            Logger::info("Loaded intermediate CA: " +
+                            LOG_INFO("Loaded intermediate CA: " +
                                          CertificateUtil::getSubjectName(cert.get()));
 
                             // Also add intermediates to certificate pool for compatibility
@@ -1564,7 +1564,7 @@ public:
                     }
                 }
             } catch (const std::exception &e) {
-                Logger::error("Failed to load certificates: " + std::string(e.what()));
+                LOG_ERROR("Failed to load certificates: " + std::string(e.what()));
                 throw;
             }
         }
@@ -1590,13 +1590,13 @@ public:
         // EUICC-specific operations
         try {
             m_EID = CertificateUtil::getEID(m_euiccCert.get());
-            Logger::info("Using EID from certificate: " + m_EID);
+            LOG_INFO("Using EID from certificate: " + m_EID);
 
             auto ski = CertificateUtil::getSubjectKeyIdentifier(m_euiccCert.get());
             m_euiccSKI = ski;
-            Logger::info("Using eUICC SKI as PKID: " + HexUtil::bytesToHex(m_euiccSKI));
+            LOG_INFO("Using eUICC SKI as PKID: " + HexUtil::bytesToHex(m_euiccSKI));
         } catch (const std::exception &e) {
-            Logger::error("Failed to extract EUICC-specific data: " + std::string(e.what()));
+            LOG_ERROR("Failed to extract EUICC-specific data: " + std::string(e.what()));
             throw;
         }
     }
@@ -1706,14 +1706,14 @@ public:
             throw OpenSSLError("Failed to extract public key");
         }
 
-        Logger::info("Generated eUICC OtPK (P-256): " + HexUtil::bytesToHex(m_euiccOtpk));
+        LOG_INFO("Generated eUICC OtPK (P-256): " + HexUtil::bytesToHex(m_euiccOtpk));
 
         // Verify the key format
         if (m_euiccOtpk[0] != 0x04) {
             throw std::runtime_error("Invalid public key format - expected uncompressed point");
         }
 
-        Logger::debug("Public key format verified - uncompressed EC point");
+        LOG_DEBUG("Public key format verified - uncompressed EC point");
     }
 
     // Compute ECDH shared secret
@@ -1800,7 +1800,7 @@ public:
         // Resize to actual length (should be the same)
         shared_secret.resize(secret_len);
 
-        Logger::info("Computed ECDH shared secret: " + HexUtil::bytesToHex(shared_secret));
+        LOG_INFO("Computed ECDH shared secret: " + HexUtil::bytesToHex(shared_secret));
         return shared_secret;
     }
 
@@ -1826,20 +1826,20 @@ public:
         m_confirmationCode = confirmationCode;
         if (!m_transactionId.empty()) {
             m_confirmationCodeHash = computeConfirmationCodeHash(m_confirmationCode, m_transactionId);
-            Logger::info("Set confirmation code, computed hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
+            LOG_INFO("Set confirmation code, computed hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
         } else {
-            Logger::warning("Cannot compute confirmation code hash - transaction ID not set");
+            LOG_WARNING("Cannot compute confirmation code hash - transaction ID not set");
         }
     }
 
     // Set transaction ID (needed for confirmation code hash)
     void setTransactionId(const std::vector<uint8_t> &transactionId) {
         m_transactionId = transactionId;
-        Logger::info("Set transaction ID: " + HexUtil::bytesToHex(transactionId));
+        LOG_INFO("Set transaction ID: " + HexUtil::bytesToHex(transactionId));
         // If confirmation code was already set, recalculate hash
         if (!m_confirmationCode.empty()) {
             m_confirmationCodeHash = computeConfirmationCodeHash(m_confirmationCode, m_transactionId);
-            Logger::info("Recalculated confirmation code hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
+            LOG_INFO("Recalculated confirmation code hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
         }
     }
 
@@ -1851,7 +1851,7 @@ public:
     // Set confirmation code hash directly (for backwards compatibility)
     void setConfirmationCodeHash(const std::vector<uint8_t> &hash) {
         m_confirmationCodeHash = hash;
-        Logger::info("Set confirmation code hash directly: " + HexUtil::bytesToHex(hash));
+        LOG_INFO("Set confirmation code hash directly: " + HexUtil::bytesToHex(hash));
     }
 
     // ========================================================================
@@ -1921,8 +1921,8 @@ private:
         }
 
         signature.resize(sigLen);
-        Logger::debug("Created signature (" + std::to_string(sigLen) + " bytes) over " +
-                      std::to_string(dataToSign.size()) + " bytes of data");
+        LOG_DEBUG("Created signature (" + std::to_string(sigLen) + " bytes) over " +
+                       std::to_string(dataToSign.size()) + " bytes of data");
 
         return signature;
     }
@@ -1937,7 +1937,7 @@ private:
 
             if (signatureLen >= 3 && signatureData[0] == 0x5f && signatureData[1] == 0x37 &&
                 signatureData[2] == 0x40) {
-                LOG_INFO("Detected 5F3740 prefix in serverSignature1, skipping for verification");
+                LOG_DEBUG("Detected 5F3740 prefix in serverSignature1, skipping for verification");
                 signatureData += 3;
                 signatureLen -= 3;
             }
@@ -1949,7 +1949,7 @@ private:
             }
 
             auto ski = CertificateUtil::getSubjectKeyIdentifier(scertdata);
-            Logger::info("----------- using cert with this SKI to verify sig: " + HexUtil::bytesToHex(ski));
+            LOG_INFO("----------- using cert with this SKI to verify sig: " + HexUtil::bytesToHex(ski));
 
             auto verifyResult = CertificateUtil::verify_TR031111(
                 signedData, std::vector<unsigned char>(signatureData, signatureData + signatureLen),
@@ -2008,9 +2008,9 @@ public:
                     for (auto& cert : tlsCerts) {
                         m_certPool.push_back(std::move(cert));
                     }
-                    Logger::info("Loaded custom TLS certificate from: " + m_customTlsCertPath);
+                    LOG_DEBUG("Loaded custom TLS certificate from: " + m_customTlsCertPath);
                 } catch (const std::exception& e) {
-                    Logger::warning("Failed to load custom TLS certificate: " + std::string(e.what()));
+                    LOG_WARNING("Failed to load custom TLS certificate: " + std::string(e.what()));
                 }
             }
 
@@ -2031,13 +2031,13 @@ public:
             response = m_httpClient->postJsonWithCustomVerification(
                 url, m_serverPort, body, nullptr, emptyCertPool
             );
-            Logger::info("Using standard CA bundle for TLS verification");
+            LOG_INFO("Using standard CA bundle for TLS verification");
         }
 
         httpStatusCode = response.statusCode;
 
-        Logger::info("HTTP " + std::to_string(httpStatusCode) + " response, body length: " +
-                    std::to_string(response.body.length()));
+        LOG_DEBUG("HTTP " + std::to_string(httpStatusCode) + " response, body length: " +
+                     std::to_string(response.body.length()));
 
         return response.body;
     }
