@@ -568,7 +568,7 @@ private function f_es9p_send_new(RemoteProfileProvisioningRequest es9p_req) runs
 /* Receive ES9+ response using new HttpClient approach */
 private function f_es9p_receive_new(template RemoteProfileProvisioningResponse expected_es9p_res := omit)
 runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
-	var RemoteProfileProvisioningResponse es9p_res;
+	var DecodedRPPReponse_Wrap resp;
 	var integer http_status;
 
 	// Send the stored request using HttpClient
@@ -593,7 +593,9 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 	           int2str(lengthof(response_body)));
 
 	// Decode JSON response
-	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, es9p_res);
+	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, resp);
+	var RemoteProfileProvisioningResponse es9p_res;
+	es9p_res := resp.asn1_pdu;
 
 	if (not istemplatekind(expected_es9p_res, "omit")) {
 		if (not match(es9p_res, expected_es9p_res)) {
@@ -654,10 +656,10 @@ return RemoteProfileProvisioningResponse {
 	}
 
 	/* Decode JSON response */
-	var RemoteProfileProvisioningResponse response;
+	var DecodedRPPReponse_Wrap response;
 	dec_RemoteProfileProvisioningResponse_from_JSON(responseJson, response);
 
-	return response;
+	return response.asn1_pdu;
 }
 
 /* ============================================================================
@@ -846,6 +848,207 @@ runs on smdpp_ConnHdlr return boolean {
     return true;
 }
 
+
+/* Test handler for TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #01 Nominal */
+private function f_TC_InitiateAuth_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: InitiateAuthentication - Nominal ===");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Step 1: Send InitiateAuthentication request */
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse :=
+		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse)) {
+		setverdict(fail, "InitiateAuthentication request failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Validate response structure */
+	if (not ispresent(authResponse.initiateAuthenticationResponse) or
+	    not ispresent(authResponse.initiateAuthenticationResponse.initiateAuthenticationOk)) {
+		setverdict(fail, "Invalid response structure");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var InitiateAuthenticationOkEs9 authOk := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk;
+
+	/* Verify transaction ID matches in both places */
+	if (authOk.transactionId != authOk.serverSigned1.transactionId) {
+		setverdict(fail, "Transaction ID mismatch between outer and signed data");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Verify server signature */
+	var octetstring serverCert := enc_Certificate(authOk.serverCertificate);
+	if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle,
+	                                           enc_ServerSigned1(authOk.serverSigned1),
+	                                           authOk.serverSignature1,
+	                                           serverCert)) {
+		setverdict(fail, "Server signature validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Verify PKID is in requested list */
+	var boolean pkid_found := false;
+	for (var integer i := 0; i < lengthof(authRequest.initiateAuthenticationRequest.euiccInfo1.euiccCiPKIdListForSigning); i := i + 1) {
+		if (authOk.euiccCiPKIdToBeUsed == authRequest.initiateAuthenticationRequest.euiccInfo1.euiccCiPKIdListForSigning[i]) {
+			pkid_found := true;
+			break;
+		}
+	}
+
+	if (not pkid_found) {
+		setverdict(fail, "euiccCiPKIdToBeUsed not in requested list");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	ext_logInfo("Test passed - InitiateAuthentication nominal flow successful");
+	f_rsp_client_cleanup();
+	setverdict(pass);
+}
+
+/* Test handler for TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #02 Uniqueness */
+private function f_TC_InitiateAuth_02_Uniqueness(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: InitiateAuthentication - Uniqueness of Transaction ID and Server Challenge ===");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Step 1: First InitiateAuthentication request */
+	var RemoteProfileProvisioningRequest authRequest1 := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse1 :=
+		f_perform_es9p_request_response_new(authRequest1, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse1) or
+	    not ispresent(authResponse1.initiateAuthenticationResponse.initiateAuthenticationOk)) {
+		setverdict(fail, "First InitiateAuthentication request failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var InitiateAuthenticationOkEs9 authOk1 := authResponse1.initiateAuthenticationResponse.initiateAuthenticationOk;
+	var octetstring transactionId1 := authOk1.transactionId;
+	var octetstring serverChallenge1 := authOk1.serverSigned1.serverChallenge;
+
+	ext_logInfo("First transaction ID: " & oct2str(transactionId1));
+	ext_logInfo("First server challenge: " & oct2str(serverChallenge1));
+
+	/* Step 2: Re-initialize TLS connection (simulated by re-init) */
+	f_rsp_client_cleanup();
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client re-initialization failed");
+		return;
+	}
+
+	/* Step 3: Second InitiateAuthentication request */
+	var RemoteProfileProvisioningRequest authRequest2 := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse2 :=
+		f_perform_es9p_request_response_new(authRequest2, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse2) or
+	    not ispresent(authResponse2.initiateAuthenticationResponse.initiateAuthenticationOk)) {
+		setverdict(fail, "Second InitiateAuthentication request failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var InitiateAuthenticationOkEs9 authOk2 := authResponse2.initiateAuthenticationResponse.initiateAuthenticationOk;
+	var octetstring transactionId2 := authOk2.transactionId;
+	var octetstring serverChallenge2 := authOk2.serverSigned1.serverChallenge;
+
+	ext_logInfo("Second transaction ID: " & oct2str(transactionId2));
+	ext_logInfo("Second server challenge: " & oct2str(serverChallenge2));
+
+	/* Verify uniqueness */
+	if (transactionId1 == transactionId2) {
+		setverdict(fail, "Transaction IDs are not unique");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (authOk1.serverSigned1.transactionId == authOk2.serverSigned1.transactionId) {
+		setverdict(fail, "Signed transaction IDs are not unique");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	if (serverChallenge1 == serverChallenge2) {
+		setverdict(fail, "Server challenges are not unique");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	ext_logInfo("Test passed - Transaction IDs and server challenges are unique");
+	f_rsp_client_cleanup();
+	setverdict(pass);
+}
+
+/* Test handler for TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #03 Invalid Server Address */
+private function f_TC_InitiateAuth_03_InvalidServerAddress(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: InitiateAuthentication - Invalid Server Address Error ===");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Create request with invalid server address */
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	authRequest.initiateAuthenticationRequest.smdpAddress := "unknown.server.invalid";
+
+	var RemoteProfileProvisioningResponse authResponse :=
+		f_perform_es9p_request_response_new(authRequest, "/gsma/rsp2/es9plus/initiateAuthentication");
+
+	if (not isvalue(authResponse)) {
+		setverdict(fail, "No response received");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Expect error response */
+	if (not ispresent(authResponse.initiateAuthenticationResponse) or
+	    not ispresent(authResponse.initiateAuthenticationResponse.initiateAuthenticationError)) {
+		setverdict(fail, "Expected error response not received");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var integer authError := authResponse.initiateAuthenticationResponse.initiateAuthenticationError;
+
+	/* According to ASN.1 definition:
+	 * invalidDpAddress(1),
+	 * euiccVersionNotSupportedByDp(2),
+	 * ciPKNotSupported(3)
+	 *
+	 * For invalid server address, we expect error code 1
+	 */
+	var integer expectedError := 1;  // invalidDpAddress
+
+	if (authError != expectedError) {
+		setverdict(fail, "Expected error code " & int2str(expectedError) & " but got " & int2str(authError));
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	ext_logInfo("Test passed - Correct error code received for invalid server address");
+	ext_logInfo("Error code: " & int2str(authError) & " (invalidDpAddress)");
+
+	f_rsp_client_cleanup();
+	setverdict(pass);
+}
 
 private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 
@@ -1229,8 +1432,47 @@ testcase TC_rsp_complete_flow() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* Test Case: TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #01 Nominal */
+testcase TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_InitiateAuth_01_Nominal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* Test Case: TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #02 Uniqueness */
+testcase TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_InitiateAuth_02_Uniqueness), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* Test Case: TC_SM-DP+_ES9+.InitiateAuthenticationNIST - Test Sequence #03 Invalid Server Address */
+testcase TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_InitiateAuth_03_InvalidServerAddress), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute(TC_rsp_complete_flow());
+	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal());
+	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness());
+	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress());
 }
 
 }
