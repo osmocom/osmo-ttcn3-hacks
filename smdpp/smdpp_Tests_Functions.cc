@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <cstring>
+#include <fstream>
 
 #include <TTCN3.hh>
 #include "smdpp_Tests.hh"
@@ -862,17 +863,17 @@ CHARSTRING ext__RSPClient__sendHttpsPost(
         // Convert TTCN-3 types to C++
         std::string endpointStr = charstring_to_string(endpoint);
         std::string bodyStr = charstring_to_string(body);
-        
+
         // Send HTTP request
         int httpStatus = 0;
         std::string response = client->sendHttpsPost(endpointStr, bodyStr, httpStatus);
-        
+
         // Set output status code
         statusCode = httpStatus;
-        
+
         // Return response body as CHARSTRING
         return CHARSTRING(response.c_str());
-        
+
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__sendHttpsPost failed: " + std::string(e.what()));
         statusCode = 0;
@@ -898,19 +899,115 @@ INTEGER ext__RSPClient__configureHttpClient(
         // Convert TTCN-3 types to C++
         bool useCustomCert = useCustomTlsCert;
         std::string certPath = charstring_to_string(customTlsCertPath);
-        
+
         // Configure HTTP client
         client->configureHttpClient(useCustomCert, certPath);
-        
+
         LOG_DEBUG("Configured HTTP client - custom TLS cert: " +
                  std::string(useCustomCert ? "true" : "false") +
                  (certPath.empty() ? "" : " (" + certPath + ")"));
-        
+
         return INTEGER(0);
-        
+
     } catch (const std::exception& e) {
         LOG_ERROR("ext__RSPClient__configureHttpClient failed: " + std::string(e.what()));
         return INTEGER(-1);
+    }
+}
+
+CHARSTRING ext__CertificateUtil__getSubjectAltNameOID(const OCTETSTRING& certData) {
+    try {
+        std::vector<uint8_t> der = octetstring_to_bytes(certData);
+
+        // Load certificate
+        const uint8_t* p = der.data();
+        X509* cert = d2i_X509(nullptr, &p, der.size());
+        if (!cert) {
+            LOG_ERROR("Failed to parse certificate");
+            return CHARSTRING("");
+        }
+        std::unique_ptr<X509, decltype(&X509_free)> cert_ptr(cert, X509_free);
+
+        // Get Subject Alternative Name extension
+        GENERAL_NAMES* san = static_cast<GENERAL_NAMES*>(
+            X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+        if (!san) {
+            LOG_ERROR("No Subject Alternative Name extension found");
+            return CHARSTRING("");
+        }
+        std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> san_ptr(san, GENERAL_NAMES_free);
+
+        // Look for registered ID (OID) in SAN
+        for (int i = 0; i < sk_GENERAL_NAME_num(san); i++) {
+            GENERAL_NAME* gen = sk_GENERAL_NAME_value(san, i);
+            if (gen->type == GEN_RID) {  // Registered ID
+                ASN1_OBJECT* oid = gen->d.registeredID;
+                char oid_str[256];
+                OBJ_obj2txt(oid_str, sizeof(oid_str), oid, 1);  // 1 = numerical form
+                LOG_INFO("Found Subject Alternative Name OID: " + std::string(oid_str));
+                return string_to_charstring(oid_str);
+            }
+        }
+
+        LOG_ERROR("No registered ID found in Subject Alternative Name");
+        return CHARSTRING("");
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getSubjectAltNameOID failed: " + std::string(e.what()));
+        return CHARSTRING("");
+    }
+}
+
+CHARSTRING ext__CertificateUtil__getSubjectAltNameOIDFromFile(const CHARSTRING& certPath) {
+    try {
+        std::string path = charstring_to_string(certPath);
+
+        // Read certificate file
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            LOG_ERROR("Failed to open certificate file: " + path);
+            return CHARSTRING("");
+        }
+
+        std::vector<uint8_t> der((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+
+        // Load certificate
+        const uint8_t* p = der.data();
+        X509* cert = d2i_X509(nullptr, &p, der.size());
+        if (!cert) {
+            LOG_ERROR("Failed to parse certificate from file: " + path);
+            return CHARSTRING("");
+        }
+        std::unique_ptr<X509, decltype(&X509_free)> cert_ptr(cert, X509_free);
+
+        // Get Subject Alternative Name extension
+        GENERAL_NAMES* san = static_cast<GENERAL_NAMES*>(
+            X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+        if (!san) {
+            LOG_ERROR("No Subject Alternative Name extension found in certificate: " + path);
+            return CHARSTRING("");
+        }
+        std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> san_ptr(san, GENERAL_NAMES_free);
+
+        // Look for registered ID (OID) in SAN
+        for (int i = 0; i < sk_GENERAL_NAME_num(san); i++) {
+            GENERAL_NAME* gen = sk_GENERAL_NAME_value(san, i);
+            if (gen->type == GEN_RID) {  // Registered ID
+                ASN1_OBJECT* oid = gen->d.registeredID;
+                char oid_str[256];
+                OBJ_obj2txt(oid_str, sizeof(oid_str), oid, 1);  // 1 = numerical form
+                LOG_INFO("Found Subject Alternative Name OID in " + path + ": " + std::string(oid_str));
+                return string_to_charstring(oid_str);
+            }
+        }
+
+        LOG_ERROR("No registered ID found in Subject Alternative Name for certificate: " + path);
+        return CHARSTRING("");
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__CertificateUtil__getSubjectAltNameOIDFromFile failed: " + std::string(e.what()));
+        return CHARSTRING("");
     }
 }
 

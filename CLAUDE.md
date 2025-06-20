@@ -189,3 +189,13 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 
 ### Testing and Execution Strategies
 - Use tasks and workers to ensure your context does not get polluted by the expansive code and the massive log output these tests generate.
+- Always use task workers to run the full test suite so you don't pollute your context
+
+### Testspec File Locations
+- Full path of testspec: `/app/testspec.md`
+
+### Test Case Analysis Reference
+- Take note of previous test case analysis at `/app/tt-smdpp/smdpp/TEST_CASE_ANALYSIS.md` - reference this file for specific test case numbers and details to help locate and understand specific test scenarios
+
+### Test Running Strategies
+- You can and should run single tests most of the time like this: ./uns.sh smdpp_Tests.TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST

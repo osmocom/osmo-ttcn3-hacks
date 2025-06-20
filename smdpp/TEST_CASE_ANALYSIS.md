@@ -3,43 +3,50 @@
 ## Overview
 This document provides a comprehensive analysis of the SM-DP+ test cases defined in SGP.23 v1.15 test specification. The tests validate the ES9+ interface between LPA and SM-DP+ for Remote SIM Provisioning (RSP) protocol.
 
+**Test Specification Location**: `/app/testspec.md`
+
 ## Test Case Inventory
 
-### 1. InitiateAuthentication Tests (4.3.12)
-- **TC_SM-DP+_ES9+.InitiateAuthenticationNIST** - NIST P-256 curve tests
-  - Test Sequence #01: Nominal case
-  - Test Sequence #02: Uniqueness of Transaction ID and Server Challenge
-  - Test Sequence #03: Error - Invalid Server Address (8.8.1/3.8)
-  - Test Sequence #04: Error - Unsupported Public Key Identifiers (8.8.2/3.1)
-  - Test Sequence #05: Error - Unsupported Specification Version (8.8.3/3.1)
-  - Test Sequence #06: Error - Unavailable Server Auth Certificate (8.8.4/3.7)
-  - Test Sequence #07: Nominal - eUICC v2.2.1
-  - Test Sequence #08: Nominal - eUICC v2.2.2
-  - Test Sequence #09: Nominal - eUICC v2.3
-- **TC_SM-DP+_ES9+.InitiateAuthenticationFRP** - Fast RSA Provisioning (FFS)
-- **TC_SM-DP+_ES9+.InitiateAuthenticationBRP** - BrainpoolP256r1 curve tests
+### 1. InitiateAuthentication Tests (4.3.12 - Line 3)
+- **TC_SM-DP+_ES9+.InitiateAuthenticationNIST** (4.3.12.2.1 - Line 22) - NIST P-256 curve tests
+  - Test Sequence #01: Nominal case (Line 24)
+  - Test Sequence #02: Uniqueness of Transaction ID and Server Challenge (Line 31)
+  - Test Sequence #03: Error - Invalid Server Address (8.8.1/3.8) (Line 40)
+  - Test Sequence #04: Error - Unsupported Public Key Identifiers (8.8.2/3.1) (Line 47)
+  - Test Sequence #05: Error - Unsupported Specification Version (8.8.3/3.1) (Line 54)
+  - Test Sequence #06: Error - Unavailable Server Auth Certificate (8.8.4/3.7) (Line 63)
+  - Test Sequence #07: Nominal - eUICC v2.2.1 (Line 70)
+  - Test Sequence #08: Nominal - eUICC v2.2.2 (Line 77)
+  - Test Sequence #09: Nominal - eUICC v2.3 (Line 84)
+- **TC_SM-DP+_ES9+.InitiateAuthenticationFRP** (4.3.12.2.2 - Line 91) - Fast RSA Provisioning (FFS)
+- **TC_SM-DP+_ES9+.InitiateAuthenticationBRP** (4.3.12.2.3 - Line 95) - BrainpoolP256r1 curve tests
 
-### 2. GetBoundProfilePackage Tests (4.3.13)
-- **TC_SM-DP+_ES9+.GetBoundProfilePackageNIST**
-  - Test Sequence #01: Using S-ENC/S-MAC without Confirmation Code
-  - Test Sequence #02: Using S-ENC/S-MAC with Confirmation Code
-  - Test Sequence #03: Using PPK-ENC/PPK-MAC without Confirmation Code
-  - Test Sequence #04: Using PPK-ENC/PPK-MAC with Confirmation Code
-  - Test Sequence #05: S-ENC/S-MAC with Metadata split over 2 segments (no CC)
-  - Test Sequence #06: PPK-ENC/PPK-MAC with Metadata split over 2 segments (no CC)
-- **TC_SM-DP+_ES9+.GetBoundProfilePackageFRP** - Fast RSA Provisioning
-- **TC_SM-DP+_ES9+.GetBoundProfilePackageBRP** - BrainpoolP256r1 tests
-- **TC_SM-DP+_ES9+.GetBoundProfilePackage_RetryCases_ReuseOTPK_NIST**
-  - Test Sequence #01: Retry with same otPK using S-ENC/S-MAC without CC
-  - Test Sequence #02: Retry with same otPK using S-ENC/S-MAC with CC
-  - Test Sequence #03: Retry with same otPK using PPK-ENC/PPK-MAC without CC
-  - Test Sequence #04: Retry with same otPK using PPK-ENC/PPK-MAC with CC
-  - Test Sequence #05: Retry with same otPK rejected by eUICC
-  - Test Sequence #06: Retry with same otPK rejected by eUICC (PPK)
-- **TC_SM-DP+_ES9+.GetBoundProfilePackage_RetryCases_DifferentOTPK_NIST**
-  - Test Sequence #01: Retry with different otPK using S-ENC/S-MAC
-  - Test Sequence #02: Retry with different otPK using PPK-ENC/PPK-MAC
-- **TC_SM-DP+_ES9+.GetBoundProfilePackage_ErrorCasesNIST**
+### 2. GetBoundProfilePackage Tests (4.3.13 - Line 106)
+- **TC_SM-DP+_ES9+.GetBoundProfilePackageNIST** (4.3.13.2.1 - Line 118)
+  - Test Sequence #01: Using S-ENC/S-MAC without Confirmation Code (Line 125)
+  - Test Sequence #02: Using S-ENC/S-MAC with Confirmation Code (Line 137)
+  - Test Sequence #03: Using PPK-ENC/PPK-MAC without Confirmation Code (Line 149)
+  - Test Sequence #04: Using PPK-ENC/PPK-MAC with Confirmation Code (Line 161)
+  - Test Sequence #05: S-ENC/S-MAC with Metadata split over 2 segments (no CC) (Line 173)
+  - Test Sequence #06: PPK-ENC/PPK-MAC with Metadata split over 2 segments (no CC) (Line 186)
+- **TC_SM-DP+_ES9+.GetBoundProfilePackageFRP** (4.3.13.2.2 - Line 199) - Fast RSA Provisioning
+- **TC_SM-DP+_ES9+.GetBoundProfilePackageBRP** (4.3.13.2.3 - Line 203) - BrainpoolP256r1 tests
+- **TC_SM-DP+_ES9+.GetBoundProfilePackage_RetryCases_ReuseOTPK_NIST** (4.3.13.2.4 - Line 218)
+  - Test Sequence #01: Retry with same otPK using S-ENC/S-MAC without CC (Line 225)
+  - Test Sequence #02: Retry with same otPK using S-ENC/S-MAC with CC (Line 240)
+  - Test Sequence #03: Retry with same otPK using PPK-ENC/PPK-MAC without CC (Line 255)
+  - Test Sequence #04: Retry with same otPK using PPK-ENC/PPK-MAC with CC (Line 270)
+  - Test Sequence #05: Retry with same otPK rejected by eUICC using S-ENC/S-MAC without CC (Line 285)
+  - Test Sequence #06: Retry with same otPK rejected by eUICC using S-ENC/S-MAC with CC (Line 300)
+  - Test Sequence #07: Retry with same otPK rejected by eUICC using PPK-ENC/PPK-MAC without CC (Line 315)
+  - Test Sequence #08: Retry with same otPK rejected by eUICC using PPK-ENC/PPK-MAC with CC (Line 330)
+  - Test Sequence #09: Confirmation Code retry (Line 345)
+- **TC_SM-DP+_ES9+.GetBoundProfilePackage_RetryCases_DifferentOTPK_NIST** (4.3.13.2.7 - Line 364)
+  - Test Sequence #01: Retry without otPK using S-ENC/S-MAC without CC (Line 371)
+  - Test Sequence #02: Retry without otPK using S-ENC/S-MAC with CC (Line 386)
+  - Test Sequence #03: Retry without otPK using PPK-ENC/PPK-MAC without CC (Line 401)
+  - Test Sequence #04: Retry without otPK using PPK-ENC/PPK-MAC with CC (Line 416)
+- **TC_SM-DP+_ES9+.GetBoundProfilePackage_ErrorCasesNIST** (Not found in current excerpt)
   - Test Sequence #01: Error - Invalid eUICC Signature (8.1/6.1)
   - Test Sequence #02: Error - Unknown TransactionID in JSON (8.10.1/3.9)
   - Test Sequence #03: Error - Unknown TransactionID in ASN.1 (8.10.1/3.9)

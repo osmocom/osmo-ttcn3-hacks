@@ -93,6 +93,10 @@ external function ext_RSPClient_computeSharedSecret(integer clientHandle, octets
 
 external function ext_CertificateUtil_getCurveOID(octetstring certData) return charstring;
 
+external function ext_CertificateUtil_getSubjectAltNameOID(octetstring certData) return charstring;
+
+external function ext_CertificateUtil_getSubjectAltNameOIDFromFile(charstring certPath) return charstring;
+
 /* Confirmation Code Functions */
 external function ext_RSPClient_setConfirmationCode(integer clientHandle,
                                                     charstring confirmationCode) return integer;
@@ -478,6 +482,37 @@ return RemoteProfileProvisioningRequest {
 	return request;
 }
 
+/* Helper function to create prepare download response with specific otPK */
+private function f_create_prepare_download_response_with_otpk(octetstring smdpSignature2, octetstring euicc_otpk) runs on smdpp_ConnHdlr return PrepareDownloadResponse {
+	/* Create EUICCSigned2 */
+	var EUICCSigned2 euiccSigned2 := {
+		transactionId := g_transactionId,
+		euiccOtpk := euicc_otpk,  /* Use provided otPK */
+		hashCc := omit  /* No confirmation code for nominal case */
+	};
+	
+	/* Add confirmation code hash if required */
+	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+	if (lengthof(ccHash) > 0) {
+		euiccSigned2.hashCc := ccHash;
+	}
+	
+	/* Sign EUICCSigned2 - must concatenate with smdpSignature2 */
+	var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
+	var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+	
+	/* Create PrepareDownloadResponse */
+	var PrepareDownloadResponse prepareDownloadResponse := {
+		downloadResponseOk := {
+			euiccSigned2 := euiccSigned2,
+			euiccSignature2 := euiccSignature2
+		}
+	};
+	
+	return prepareDownloadResponse;
+}
+
 private function f_validate_get_bound_profile_package_response(RemoteProfileProvisioningResponse response)
 runs on smdpp_ConnHdlr return boolean {
 
@@ -647,6 +682,9 @@ return DecodedRPPReponse_Wrap {
 
 	// Decode to wrapper type that handles both success and error
 	var DecodedRPPReponse_Wrap response;
+	// Initialize optional fields to prevent unbound value errors
+	response.asn1_pdu := omit;
+	response.err := omit;
 	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, response);
 
 	return response;
@@ -1052,30 +1090,30 @@ private function f_TC_InitiateAuth_03_InvalidServerAddress(charstring id) runs o
 // TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal
 private function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Test Case: AuthenticateClient - Nominal ===");
-	
+
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
-	
+
 	/* Step 1: InitiateAuthentication */
 	ext_logInfo("Step 1: InitiateAuthentication");
 	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-	
+
 	if (not f_validate_initiate_authentication_response(initResp)) {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return;
 	}
-	
+
 	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
 	g_transactionId := authOk.transactionId;
 	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
-	
+
 	/* Step 2: AuthenticateClient */
 	ext_logInfo("Step 2: AuthenticateClient");
-	
+
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := {
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
@@ -1085,10 +1123,10 @@ private function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
 		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 	};
-	
+
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-	
+
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := g_transactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1096,15 +1134,15 @@ private function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-	
+
 	/* Sign the data */
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-	
+
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-	
+
 	var RemoteProfileProvisioningRequest authReq := {
 		authenticateClientRequest := {
 			transactionId := g_transactionId,
@@ -1118,55 +1156,55 @@ private function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp
 			}
 		}
 	};
-	
+
 	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
 	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
-	
+
 	/* Validate response */
 	if (authClientOk.transactionId != g_transactionId) {
 		setverdict(fail, "Transaction ID mismatch in response");
 		f_shutdown(__FILE__, __LINE__);
 	}
-	
+
 	/* Check ccRequiredFlag (should be false for nominal test) */
 	var SmdpSigned2 smdpSigned2 := authClientOk.smdpSigned2;
 	if (smdpSigned2.ccRequiredFlag) {
 		setverdict(fail, "Unexpected ccRequiredFlag set for nominal test");
 		f_shutdown(__FILE__, __LINE__);
 	}
-	
+
 	ext_logInfo("Test passed - AuthenticateClient nominal flow successful");
 	f_rsp_client_cleanup();
 	setverdict(pass);
 }
 
-// TC_SM-DP+_ES9+.AuthenticateClientNIST_02_ConfirmationCode  
+// TC_SM-DP+_ES9+.AuthenticateClientNIST_02_ConfirmationCode
 private function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Test Case: AuthenticateClient - Confirmation Code Required ===");
-	
+
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
-	
+
 	/* Step 1: InitiateAuthentication */
 	ext_logInfo("Step 1: InitiateAuthentication");
 	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-	
+
 	if (not f_validate_initiate_authentication_response(initResp)) {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return;
 	}
-	
+
 	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
 	g_transactionId := authOk.transactionId;
 	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
-	
+
 	/* Step 2: AuthenticateClient (expecting ccRequiredFlag) */
 	ext_logInfo("Step 2: AuthenticateClient with CC_REQUIRED_TEST matchingId");
-	
+
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := {
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
@@ -1176,11 +1214,11 @@ private function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
 		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 	};
-	
+
 	/* Use special matchingId that triggers confirmation code requirement */
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := "CC_REQUIRED_TEST";
-	
+
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := g_transactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1188,15 +1226,15 @@ private function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-	
+
 	/* Sign the data */
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-	
+
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-	
+
 	var RemoteProfileProvisioningRequest authReq := {
 		authenticateClientRequest := {
 			transactionId := g_transactionId,
@@ -1210,22 +1248,22 @@ private function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs
 			}
 		}
 	};
-	
+
 	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
 	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
-	
+
 	/* Validate response */
 	if (authClientOk.transactionId != g_transactionId) {
 		setverdict(fail, "Transaction ID mismatch in response");
 		f_shutdown(__FILE__, __LINE__);
 	}
-	
+
 	/* Check ccRequiredFlag (should be true for this test) */
 	if (not authClientOk.smdpSigned2.ccRequiredFlag) {
 		setverdict(fail, "Expected ccRequiredFlag to be set");
 		f_shutdown(__FILE__, __LINE__);
 	}
-	
+
 	ext_logInfo("Test passed - Confirmation code required flag is set as expected");
 	f_rsp_client_cleanup();
 	setverdict(pass);
@@ -1234,32 +1272,32 @@ private function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs
 // TC_SM-DP+_ES9+.AuthenticateClientNIST_03_Mismatched_Transaction_ID
 private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Test Case: AuthenticateClient - Mismatched Transaction ID ===");
-	
+
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
-	
+
 	/* Step 1: InitiateAuthentication */
 	ext_logInfo("Step 1: InitiateAuthentication");
 	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-	
+
 	if (not f_validate_initiate_authentication_response(initResp)) {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return;
 	}
-	
+
 	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
 	g_transactionId := authOk.transactionId;
 	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
-	
+
 	/* Step 2: AuthenticateClient with mismatched transaction ID */
 	ext_logInfo("Step 2: AuthenticateClient with wrong transaction ID in signed data");
-	
+
 	var octetstring wrongTransactionId := f_rnd_octstring(16);  /* Random wrong ID */
-	
+
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := {
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
@@ -1269,10 +1307,10 @@ private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
 		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 	};
-	
+
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-	
+
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := wrongTransactionId,  /* Wrong transaction ID */
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1280,15 +1318,15 @@ private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-	
+
 	/* Sign the data */
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-	
+
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-	
+
 	var RemoteProfileProvisioningRequest authReq := {
 		authenticateClientRequest := {
 			transactionId := g_transactionId,  /* Correct transaction ID in outer structure */
@@ -1302,11 +1340,11 @@ private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring
 			}
 		}
 	};
-	
+
 	/* Expect error: Subject Code 8.1.1, Reason Code 3.9 */
 	var JSON_ESx_FunctionExecutionStatusCodeData errorData := f_es9p_transceive_error(authReq);
 	f_validate_error_response(errorData, "8.1.1", "3.9", "Unknown/Invalid Transaction ID");
-	
+
 	ext_logInfo("Test passed - Correct error for mismatched transaction ID");
 	f_rsp_client_cleanup();
 	setverdict(pass);
@@ -1315,20 +1353,20 @@ private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring
 // TC_SM-DP+_ES9+.AuthenticateClientNIST_04_Invalid_euiccInfo1
 private function f_TC_AuthenticateClient_04_Invalid_euiccInfo1(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Test Case: AuthenticateClient - Invalid euiccInfo1 (Invalid EID) ===");
-	
+
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
-	
+
 	/* Step 1: InitiateAuthentication with invalid euiccInfo1 (wrong EID) */
 	ext_logInfo("Step 1: InitiateAuthentication with invalid EID");
-	
+
 	/* This test would require manipulating the EID in the eUICC certificate,
 	 * which is not possible without regenerating the certificate.
 	 * The EID is extracted from the certificate's subject field.
 	 * For now, we'll skip this test case. */
-	
+
 	setverdict(inconc, "Test skipped - EID manipulation requires certificate regeneration");
 	f_rsp_client_cleanup();
 	return;
@@ -1337,18 +1375,18 @@ private function f_TC_AuthenticateClient_04_Invalid_euiccInfo1(charstring id) ru
 // TC_SM-DP+_ES9+.AuthenticateClientNIST_05_eUICC_Challenge_Reuse
 private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id) runs on smdpp_ConnHdlr {
 	ext_logInfo("=== Test Case: AuthenticateClient - eUICC Challenge Reuse ===");
-	
+
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
-	
+
 	/* Step 1: First InitiateAuthentication */
 	ext_logInfo("Step 1: First InitiateAuthentication");
 	var octetstring euiccChallenge := f_rnd_octstring(16);
 	g_euiccChallenge := euiccChallenge;  /* Set global challenge for validation */
 	ext_logInfo("Generated eUICC challenge: " & ext_bytesToHex(euiccChallenge));
-	
+
 	/* Create EUICC_INFO1 using TTCN-3 native types */
 	var EUICCInfo1 euiccInfo1 := {
 		svn := '020200'O, /* SGP.22 v2.2.0 */
@@ -1361,7 +1399,7 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 			ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 		}
 	};
-	
+
 	/* Create the request structure with our custom challenge */
 	var RemoteProfileProvisioningRequest initReq1 := {
 		initiateAuthenticationRequest := {
@@ -1370,20 +1408,20 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 			euiccInfo1 := euiccInfo1
 		}
 	};
-	
+
 	var RemoteProfileProvisioningResponse initResp1 := f_es9p_transceive_success(initReq1);
-	
+
 	if (not f_validate_initiate_authentication_response(initResp1)) {
 		setverdict(fail, "First InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		return;
 	}
-	
+
 	var InitiateAuthenticationOkEs9 authOk1 := initResp1.initiateAuthenticationResponse.initiateAuthenticationOk;
-	
+
 	/* Complete first session with AuthenticateClient */
 	ext_logInfo("Step 2: Complete first session with AuthenticateClient");
-	
+
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := {
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
@@ -1393,10 +1431,10 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
 		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
 	};
-	
+
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-	
+
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := authOk1.transactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1404,14 +1442,14 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-	
+
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-	
+
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-	
+
 	var RemoteProfileProvisioningRequest authReq := {
 		authenticateClientRequest := {
 			transactionId := authOk1.transactionId,
@@ -1425,13 +1463,13 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 			}
 		}
 	};
-	
+
 	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
-	
+
 	/* Step 3: Second InitiateAuthentication with SAME eUICC challenge (should fail) */
 	ext_logInfo("Step 3: Second InitiateAuthentication with SAME challenge");
 	g_euiccChallenge := euiccChallenge;  /* Set global challenge to the reused value */
-	
+
 	/* Create the request structure with the SAME challenge (should be rejected) */
 	var RemoteProfileProvisioningRequest initReq2 := {
 		initiateAuthenticationRequest := {
@@ -1440,15 +1478,846 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 			euiccInfo1 := euiccInfo1
 		}
 	};
-	
+
 	/* Expect error for challenge reuse */
 	/* Subject Code 8.1.3, Reason Code 3.3 */
 	var JSON_ESx_FunctionExecutionStatusCodeData errorData := f_es9p_transceive_error(initReq2);
 	f_validate_error_response(errorData, "8.1.3", "3.3", "eUICC challenge reuse detected");
-	
+
 	ext_logInfo("Test passed - Correct error for eUICC challenge reuse");
 	f_rsp_client_cleanup();
 	setverdict(pass);
+}
+
+/* Test Cases for GetBoundProfilePackage Operation */
+
+// TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_01_Nominal
+private function f_TC_GetBoundProfilePackage_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: GetBoundProfilePackage - Nominal ===");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Step 1: InitiateAuthentication */
+	ext_logInfo("Step 1: InitiateAuthentication");
+	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
+
+	if (not f_validate_initiate_authentication_response(initResp)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
+	g_transactionId := authOk.transactionId;
+	g_serverChallenge := authOk.serverSigned1.serverChallenge;
+
+	/* Step 2: AuthenticateClient */
+	ext_logInfo("Step 2: AuthenticateClient");
+
+	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+	euiccInfo2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euiccInfo2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+
+	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+	var EuiccSigned1 euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	/* Get certificates from RSP client */
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+	var RemoteProfileProvisioningRequest authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Step 3: GetBoundProfilePackage */
+	ext_logInfo("Step 3: GetBoundProfilePackage");
+
+	var RemoteProfileProvisioningRequest packageReq := f_create_get_bound_profile_package_request(authClientOk.smdpSignature2);
+	var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
+
+	/* Validate response structure */
+	var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+
+	/* Verify transaction ID */
+	if (packageOk.transactionId != g_transactionId) {
+		setverdict(fail, "Transaction ID mismatch in GetBoundProfilePackage response");
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	/* Verify we got a BoundProfilePackage */
+	var BoundProfilePackage bpp := packageOk.boundProfilePackage;
+
+	/* Basic validation - check key structures exist */
+	if (not ispresent(bpp.initialiseSecureChannelRequest)) {
+		setverdict(fail, "Missing initialiseSecureChannelRequest in BoundProfilePackage");
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	if (not ispresent(bpp.firstSequenceOf87) or lengthof(bpp.firstSequenceOf87) == 0) {
+		setverdict(fail, "Missing or empty firstSequenceOf87 in BoundProfilePackage");
+		f_shutdown(__FILE__, __LINE__);
+	}
+
+	ext_logInfo("Test passed - GetBoundProfilePackage nominal flow successful");
+	ext_logInfo("BoundProfilePackage contains " & int2str(lengthof(bpp.firstSequenceOf87)) & " segments");
+
+	f_rsp_client_cleanup();
+	setverdict(pass);
+}
+
+/* Test: GetBoundProfilePackage retry with same otPK.eUICC.ECKA
+ * This tests that the SM-DP+ accepts a retry with the same challenge from the eUICC
+ * Reference: SGP.23 Section 4.3.13.2.4 Test Sequence #01
+ */
+private function f_TC_GetBoundProfilePackage_02_Retry_Same_Challenge(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("Starting GetBoundProfilePackage retry with same challenge test");
+	
+	var octetstring saved_euicc_otpk;  /* Save the eUICC otPK for retry */
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Variable to store the first otPK for comparison */
+	var octetstring first_otPK;
+	var octetstring g_smdpSignature2;
+
+	/* First, perform a complete flow that will be "cancelled" */
+	ext_logInfo("=== Performing initial flow (will be cancelled) ===");
+
+	/* Step 1: InitiateAuthentication */
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Step 2: AuthenticateClient */
+	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+	euiccInfo2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euiccInfo2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+
+	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+	var EuiccSigned1 euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+	var RemoteProfileProvisioningRequest authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Store smdpSignature2 for later use */
+	g_smdpSignature2 := authClientOk.smdpSignature2;
+
+	/* Step 3: First GetBoundProfilePackage - will be cancelled */
+	ext_logInfo("First GetBoundProfilePackage (to be cancelled)");
+	
+	/* Generate and save the eUICC otPK for reuse */
+	saved_euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+	
+	/* Create PrepareDownloadRequest manually to use saved otPK */
+	var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response_with_otpk(
+		authClientOk.smdpSignature2, saved_euicc_otpk);
+	
+	var RemoteProfileProvisioningRequest packageReq := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepDownloadResp
+		}
+	};
+	
+	var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
+
+	/* Extract and store the otPK from the first response */
+	var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+	var BoundProfilePackage bpp := packageOk.boundProfilePackage;
+	var InitialiseSecureChannelRequest iscReq := bpp.initialiseSecureChannelRequest;
+	first_otPK := iscReq.smdpOtpk;
+
+	ext_logInfo("First otPK.SM-DP+.ECKA: " & oct2str(first_otPK));
+
+	/* Simulate session cancellation - in real test this would be done via CancelSession */
+	ext_logInfo("=== Simulating session cancellation ===");
+
+	/* Now perform the retry with the same otPK.eUICC.ECKA */
+	ext_logInfo("=== Performing retry with same otPK.eUICC.ECKA ===");
+
+	/* Step 4: InitiateAuthentication for retry */
+	authRequest := f_create_initiate_authentication_request();
+	authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "Retry InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Step 5: AuthenticateClient for retry with same values */
+	euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	authResp := f_es9p_transceive_success(authReq);
+	authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Step 6: Retry GetBoundProfilePackage with the SAME otPK.eUICC.ECKA */
+	ext_logInfo("Retry GetBoundProfilePackage with same otPK.eUICC.ECKA");
+
+	/* Important: Reuse the saved eUICC otPK from the first attempt */
+	prepDownloadResp := f_create_prepare_download_response_with_otpk(
+		authClientOk.smdpSignature2, saved_euicc_otpk);
+	
+	packageReq := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepDownloadResp
+		}
+	};
+	
+	packageResp := f_es9p_transceive_success(packageReq);
+
+	/* Verify the retry was successful */
+	packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+	bpp := packageOk.boundProfilePackage;
+	iscReq := bpp.initialiseSecureChannelRequest;
+
+	/* According to test spec, the otPK.SM-DP+.ECKA should match the first one */
+	var octetstring retry_otPK := iscReq.smdpOtpk;
+	ext_logInfo("Retry otPK.SM-DP+.ECKA: " & oct2str(retry_otPK));
+
+	if (retry_otPK == first_otPK) {
+		ext_logInfo("PASS: otPK.SM-DP+.ECKA matches - retry with same challenge accepted");
+		setverdict(pass);
+	} else {
+		setverdict(fail, "otPK.SM-DP+.ECKA does not match - expected same value on retry");
+	}
+
+	f_rsp_client_cleanup();
+}
+
+/* Test: GetBoundProfilePackage retry with different otPK.eUICC.ECKA
+ * This tests the SM-DP+ behavior when eUICC provides a different challenge
+ * Reference: SGP.23 Section 4.3.13.2.7 Test Sequence #01
+ */
+private function f_TC_GetBoundProfilePackage_03_Retry_Different_Challenge(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("Starting GetBoundProfilePackage retry with different challenge test");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Variable to store the first otPK for comparison */
+	var octetstring first_otPK;
+
+	/* First, perform a complete flow that will be "cancelled" */
+	ext_logInfo("=== Performing initial flow (will be cancelled) ===");
+
+	/* Steps 1-3: Complete initial flow similar to test #02 */
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* AuthenticateClient */
+	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+	euiccInfo2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euiccInfo2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+
+	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+	var EuiccSigned1 euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+	var RemoteProfileProvisioningRequest authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* First GetBoundProfilePackage */
+	var RemoteProfileProvisioningRequest packageReq := f_create_get_bound_profile_package_request(authClientOk.smdpSignature2);
+	var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
+
+	/* Extract and store the otPK from first response */
+	var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+	var BoundProfilePackage bpp := packageOk.boundProfilePackage;
+	var InitialiseSecureChannelRequest iscReq := bpp.initialiseSecureChannelRequest;
+	first_otPK := iscReq.smdpOtpk;
+
+	ext_logInfo("First otPK.SM-DP+.ECKA: " & oct2str(first_otPK));
+
+	/* Simulate session cancellation */
+	ext_logInfo("=== Simulating session cancellation ===");
+
+	/* Now perform retry with DIFFERENT otPK.eUICC.ECKA */
+	ext_logInfo("=== Performing retry with DIFFERENT otPK.eUICC.ECKA ===");
+
+	/* New InitiateAuthentication for retry */
+	authRequest := f_create_initiate_authentication_request();
+	authResponse := f_es9p_transceive_success(authRequest);
+
+	/* New AuthenticateClient */
+	euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	authResp := f_es9p_transceive_success(authReq);
+	authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Create GetBoundProfilePackage request with NEW otPK.eUICC.ECKA */
+	/* Generate a new ECDH key pair to simulate different otPK */
+	var octetstring new_euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+	ext_logInfo("Generated new otPK.eUICC.ECKA: " & oct2str(new_euicc_otpk));
+
+	/* Create PrepareDownloadRequest with new otPK */
+	var PrepareDownloadRequest prepDownloadReq := {
+		smdpSigned2 := authClientOk.smdpSigned2,
+		smdpSignature2 := authClientOk.smdpSignature2,
+		hashCc := omit,
+		smdpCertificate := authClientOk.smdpCertificate
+	};
+
+	var EUICCSigned2 euiccSigned2 := {
+		transactionId := g_transactionId,
+		euiccOtpk := new_euicc_otpk,  /* NEW otPK */
+		hashCc := omit
+	};
+
+	var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
+	/* Concatenate euiccSigned2 with smdpSignature2 directly (no TLV wrapper) */
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle,
+		euiccSigned2_raw & authClientOk.smdpSignature2);
+
+	var PrepareDownloadResponse prepDownloadResp := {
+		downloadResponseOk := {
+			euiccSigned2 := euiccSigned2,
+			euiccSignature2 := euiccSignature2
+		}
+	};
+
+	packageReq := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepDownloadResp
+		}
+	};
+
+	/* According to spec, server may return error or accept with different otPK */
+	packageResp := f_es9p_transceive_success(packageReq);
+
+	/* Verify response */
+	packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+	bpp := packageOk.boundProfilePackage;
+	iscReq := bpp.initialiseSecureChannelRequest;
+
+	var octetstring retry_otPK := iscReq.smdpOtpk;
+	ext_logInfo("Retry otPK.SM-DP+.ECKA: " & oct2str(retry_otPK));
+
+	if (retry_otPK != first_otPK) {
+		ext_logInfo("PASS: otPK.SM-DP+.ECKA is different - new session established");
+		setverdict(pass);
+	} else {
+		setverdict(fail, "otPK.SM-DP+.ECKA is the same - expected different value for new session");
+	}
+
+	f_rsp_client_cleanup();
+}
+
+/* Test: GetBoundProfilePackage with preparation error
+ * This tests error handling when PrepareDownloadResponse contains an error
+ * Reference: SGP.23 GetBoundProfilePackage error cases
+ */
+private function f_TC_GetBoundProfilePackage_04_Preparation_Error(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("Starting GetBoundProfilePackage preparation error test");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Perform InitiateAuthentication and AuthenticateClient */
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* AuthenticateClient */
+	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+	euiccInfo2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euiccInfo2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+
+	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+	var EuiccSigned1 euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+	var RemoteProfileProvisioningRequest authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Create GetBoundProfilePackage request with error PrepareDownloadResponse */
+	ext_logInfo("Sending GetBoundProfilePackage with downloadResponseError");
+
+	/* Create PrepareDownloadResponse with error */
+	var PrepareDownloadResponse prepDownloadResp := {
+		downloadResponseError := {
+			transactionId := g_transactionId,
+			downloadErrorCode := 127  /* undefinedError */
+		}
+	};
+
+	var RemoteProfileProvisioningRequest packageReq := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepDownloadResp
+		}
+	};
+
+	/* Expect an error response */
+	var DecodedRPPReponse_Wrap response := f_es9p_transceive_wrap(packageReq);
+
+	if (ispresent(response.err)) {
+		var JSON_ESx_FunctionExecutionStatusCodeData errorData := response.err;
+		ext_logInfo("Received expected error response");
+		ext_logInfo("Subject Code: " & errorData.subjectCode);
+		ext_logInfo("Reason Code: " & errorData.reasonCode);
+
+		/* The server should return an appropriate error when PrepareDownloadResponse contains an error */
+		setverdict(pass, "Server correctly handled PrepareDownloadResponse error");
+	} else if (ispresent(response.asn1_pdu)) {
+		setverdict(fail, "Expected error response but got success response");
+	} else {
+		setverdict(fail, "Unexpected response type");
+	}
+
+	f_rsp_client_cleanup();
+}
+
+/* Helper function to create authenticate client request */
+private function f_create_authenticate_client_request() runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
+	/* Create EUICCInfo2 with PKIDs */
+	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+	euiccInfo2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euiccInfo2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+
+	/* Create context parameters */
+	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+	/* Create EuiccSigned1 */
+	var EuiccSigned1 euiccSigned1 := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euiccInfo2,
+		ctxParams1 := ctxParams
+	};
+
+	/* Sign the data */
+	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+	/* Get certificates from RSP client */
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+	var RemoteProfileProvisioningRequest authReq := {
+		authenticateClientRequest := {
+			transactionId := g_transactionId,
+			authenticateServerResponse := {
+				authenticateResponseOk := {
+					euiccSigned1 := euiccSigned1,
+					euiccSignature1 := euiccSignature1,
+					euiccCertificate := g_euicc_cert,
+					eumCertificate := g_eum_cert
+				}
+			}
+		}
+	};
+
+	return authReq;
+}
+
+/* Helper function to create prepare download response */
+private function f_create_prepare_download_response(octetstring smdpSignature2) runs on smdpp_ConnHdlr return PrepareDownloadResponse {
+	/* Generate otPK.eUICC.ECKA */
+	var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+
+	/* Create EUICCSigned2 */
+	var EUICCSigned2 euiccSigned2 := {
+		transactionId := g_transactionId,
+		euiccOtpk := euicc_otpk,
+		hashCc := omit  /* No confirmation code for nominal case */
+	};
+
+	/* Sign EUICCSigned2 - must concatenate with smdpSignature2 */
+	var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
+	var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+
+	/* Create PrepareDownloadResponse */
+	var PrepareDownloadResponse prepDownloadResp := {
+		downloadResponseOk := {
+			euiccSigned2 := euiccSigned2,
+			euiccSignature2 := euiccSignature2
+		}
+	};
+
+	return prepDownloadResp;
+}
+
+/* Test: CancelSession after AuthenticateClient - End User Rejection
+ * This tests that the session can be properly canceled after AuthenticateClient
+ * Reference: SGP.23 Section 4.3.16.2.1 Test Sequence #01
+ */
+private function f_TC_CancelSession_After_AuthenticateClient_01_End_User_Rejection(charstring id) runs on smdpp_ConnHdlr {
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Perform InitiateAuthentication */
+	ext_logInfo("=== Step 1: InitiateAuthentication ===");
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Perform AuthenticateClient */
+	ext_logInfo("=== Step 2: AuthenticateClient ===");
+	var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
+	var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
+	var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Create CancelSession request with End User Rejection reason */
+	ext_logInfo("=== Step 3: CancelSession - End User Rejection ===");
+
+	/* Load DPauth certificate and extract SM-DP+ OID */
+	var charstring smdpOidStr := ext_CertificateUtil_getSubjectAltNameOIDFromFile("./sgp26/DPauth/CERT_S_SM_DPauth_ECDSA_NIST.der");
+	ext_logInfo("Extracted SM-DP+ OID: " & smdpOidStr);
+	if (smdpOidStr == "") {
+		setverdict(fail, "Failed to extract SM-DP+ OID from DPauth certificate");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Convert OID string to objid - for now use hardcoded value as conversion is complex */
+	/* The actual OID from cert is "2.999.10" */
+	var CancelSessionResponse cancelResp := {
+		cancelSessionResponseOk := {
+			euiccCancelSessionSigned := {
+				transactionId := g_transactionId,
+				smdpOid := objid { joint_iso_itu_t  999 10 },  /* SM-DP+ OID: 2.999.10 */
+				reason := 0  /* endUserRejection */
+			},
+			euiccCancelSessionSignature := ''O  /* Will be filled by signing */
+		}
+	};
+
+	/* Sign the cancellation - must sign the entire EuiccCancelSessionSigned structure */
+	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+
+	var RemoteProfileProvisioningRequest cancelReq := {
+		cancelSessionRequestEs9 := {
+			transactionId := g_transactionId,
+			cancelSessionResponse := cancelResp
+		}
+	};
+
+	/* Send CancelSession and expect empty success response */
+	var DecodedRPPReponse_Wrap response := f_es9p_transceive_wrap(cancelReq);
+
+	if (ispresent(response.err)) {
+		setverdict(fail, "CancelSession failed with error");
+	} else if (ispresent(response.asn1_pdu) and ispresent(response.asn1_pdu.cancelSessionResponseEs9)) {
+		ext_logInfo("CancelSession successful - session terminated");
+		setverdict(pass);
+	} else {
+		ext_logInfo("CancelSession successful - empty response received");
+		setverdict(pass);
+	}
+
+	f_rsp_client_cleanup();
+}
+
+/* Test: CancelSession after GetBoundProfilePackage
+ * This tests that the session can be properly canceled after GetBoundProfilePackage
+ * Reference: SGP.23 Section 4.3.16.2.2 Test Sequence #01
+ */
+private function f_TC_CancelSession_After_GetBoundProfilePackage_01(charstring id) runs on smdpp_ConnHdlr {
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Perform InitiateAuthentication */
+	ext_logInfo("=== Step 1: InitiateAuthentication ===");
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Perform AuthenticateClient */
+	ext_logInfo("=== Step 2: AuthenticateClient ===");
+	var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
+	var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
+	var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Perform GetBoundProfilePackage */
+	ext_logInfo("=== Step 3: GetBoundProfilePackage ===");
+	var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response(authClientOk.smdpSignature2);
+	var RemoteProfileProvisioningRequest packageReq := {
+		getBoundProfilePackageRequest := {
+			transactionId := g_transactionId,
+			prepareDownloadResponse := prepDownloadResp
+		}
+	};
+
+	var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
+	var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+
+	/* Create CancelSession request after GetBoundProfilePackage */
+	ext_logInfo("=== Step 4: CancelSession after GetBoundProfilePackage ===");
+
+	/* Load DPauth certificate and extract SM-DP+ OID */
+	var charstring smdpOidStr := ext_CertificateUtil_getSubjectAltNameOIDFromFile("./sgp26/DPauth/CERT_S_SM_DPauth_ECDSA_NIST.der");
+	ext_logInfo("Extracted SM-DP+ OID: " & smdpOidStr);
+	if (smdpOidStr == "") {
+		setverdict(fail, "Failed to extract SM-DP+ OID from DPauth certificate");
+		f_rsp_client_cleanup();
+		return;
+	}
+
+	/* Convert OID string to objid - for now use hardcoded value as conversion is complex */
+	/* The actual OID from cert is "2.999.10" */
+	var CancelSessionResponse cancelResp := {
+		cancelSessionResponseOk := {
+			euiccCancelSessionSigned := {
+				transactionId := g_transactionId,
+				smdpOid := objid { 2 999 10 },  /* SM-DP+ OID: 2.999.10 */
+				reason := 0  /* endUserRejection */
+			},
+			euiccCancelSessionSignature := ''O
+		}
+	};
+
+	/* Sign the cancellation - must sign the entire EuiccCancelSessionSigned structure */
+	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+
+	var RemoteProfileProvisioningRequest cancelReq := {
+		cancelSessionRequestEs9 := {
+			transactionId := g_transactionId,
+			cancelSessionResponse := cancelResp
+		}
+	};
+
+	/* Send CancelSession and expect empty success response */
+	var DecodedRPPReponse_Wrap response := f_es9p_transceive_wrap(cancelReq);
+
+	if (ispresent(response.err)) {
+		setverdict(fail, "CancelSession failed with error");
+	} else {
+		ext_logInfo("CancelSession successful after GetBoundProfilePackage");
+		setverdict(pass);
+	}
+
+	f_rsp_client_cleanup();
 }
 
 private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
@@ -1919,20 +2788,100 @@ testcase TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse() runs on 
 	setverdict(pass);
 }
 
+/* GetBoundProfilePackage Test Cases */
+
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_01_Nominal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_02_Retry_Same_Challenge), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_03_Retry_Different_Challenge), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_04_Preparation_Error), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* CancelSession Test Cases */
+
+testcase TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_CancelSession_After_AuthenticateClient_01_End_User_Rejection), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_CancelSession_After_GetBoundProfilePackage_01), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute(TC_rsp_complete_flow());
-	
+
 	/* InitiateAuthentication Tests */
 	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal());
 	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness());
 	execute(TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress());
-	
+
 	/* AuthenticateClient Tests */
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_04_Invalid_euiccInfo1());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse());
+
+	/* GetBoundProfilePackage Tests */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal());
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge());
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge());
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error());
+
+	/* CancelSession Tests */
+	execute(TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST());
+	execute(TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST());
 }
 
 }

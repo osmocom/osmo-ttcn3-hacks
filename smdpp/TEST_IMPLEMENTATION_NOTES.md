@@ -6,11 +6,11 @@
 - **Purpose**: Tests nominal successful InitiateAuthentication flow
 - **Location**: smdpp_Tests.ttcn:1504-1512
 - **Handler**: f_TC_InitiateAuth_01_Nominal (lines 958-991)
-- **Key Points**: 
+- **Key Points**:
   - Reuses existing helper functions from complete flow test
   - Validates server response structure and certificate chain
 
-### 2. TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness  
+### 2. TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness
 - **Purpose**: Validates transaction IDs and server challenges are unique across calls
 - **Location**: smdpp_Tests.ttcn:1516-1524
 - **Handler**: f_TC_InitiateAuth_02_Uniqueness (lines 994-1069)
@@ -21,7 +21,7 @@
 
 ### 3. TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress
 - **Purpose**: Tests JSON error handling for invalid server address
-- **Location**: smdpp_Tests.ttcn:1528-1536  
+- **Location**: smdpp_Tests.ttcn:1528-1536
 - **Handler**: f_TC_InitiateAuth_03_InvalidServerAddress (lines 1072-1119)
 - **Key Points**:
   - Uses new f_perform_es9p_request_expecting_error helper

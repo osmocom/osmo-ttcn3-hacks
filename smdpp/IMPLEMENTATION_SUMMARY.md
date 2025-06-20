@@ -126,12 +126,12 @@ if (error.subjectCode != "8.8.1" or error.reasonCode != "3.8") {
 ### After Refactoring
 ```ttcn
 // Success case - URL automatically determined
-var RemoteProfileProvisioningResponse authResponse := 
+var RemoteProfileProvisioningResponse authResponse :=
     f_es9p_transceive_success(authRequest);
 // No need to check - fails automatically if unsuccessful
 
 // Error case - URL automatically determined + concise validation
-var JSON_ESx_FunctionExecutionStatusCodeData error := 
+var JSON_ESx_FunctionExecutionStatusCodeData error :=
     f_es9p_transceive_error(req);
 f_validate_error_response(error, "8.8.1", "3.8", "Invalid server address test");
 ```
