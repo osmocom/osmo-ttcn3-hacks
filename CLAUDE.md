@@ -166,7 +166,15 @@ When modifying tests:
 - Verify Python server logs show proper BSP key derivation
 - Use `merged.log` for detailed test execution traces
 - For "TLV is not complete" errors, check certificate loading in RSPClientRegistry
-- BRP tests require special SSL/TLS configuration for Brainpool curves
+
+## Known Limitations
+
+### BRP (Brainpool) Tests
+**BRP tests are incompatible with TLS 1.3** - This is a fundamental protocol limitation:
+- TLS 1.3 (RFC 8446) only supports specific curves: secp256r1, secp384r1, secp521r1, x25519, x448
+- Brainpool curves (brainpoolP256r1, etc.) are NOT supported in TLS 1.3
+- Since TLS >= 1.3 is required, BRP tests cannot function
+- This is not fixable through patches or configuration changes
 
 ## Additional Implementation Details
 
