@@ -11,7 +11,7 @@ The SM-DP+ (smdpp) test suite specifically validates RSP (Remote SIM Provisionin
 ## Key Commands
 
 ### Building the Test Suite
-- YOU MUST NOT run make in /app/tt-smdp !
+- YOU MUST NOT run make in /app/tt-smdpp !
 - YOU MUST run make in subdirs. never at the top!
 
 ```bash
@@ -180,9 +180,9 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 - **Error Format**: "Subject Code X.X.X Reason Code Y.Y" (e.g., "8.2.1 3.7" for missing confirmation code)
 
 ## Implementation Documentation
-- **Test Implementation Notes**: `/app/tt-smdpp/smdpp/TEST_IMPLEMENTATION_NOTES.md` - Patterns and guidelines for implementing new tests
+- **Test Implementation Status**: `/app/tt-smdpp/smdpp/TEST_IMPLEMENTATION_STATUS.md` - Current test implementation status and progress tracking
+- **Test Case Analysis**: `/app/tt-smdpp/smdpp/TEST_CASE_ANALYSIS.md` - Detailed analysis of test cases with line references to testspec.md
 - **JSON Error Handling**: `/app/tt-smdpp/smdpp/JSON_ERROR_HANDLING.md` - How JSON/ASN.1 dual-layer error handling works
-- **Implementation Summary**: `/app/tt-smdpp/smdpp/IMPLEMENTATION_SUMMARY.md` - Summary of implemented InitiateAuthentication tests
 - **ispresent() Guidelines**: `/app/tt-smdpp/smdpp/ISPRESENT_GUIDELINES.md` - When to use or omit ispresent() checks
 
 ## Memory Notes
@@ -190,6 +190,7 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 ### Testing and Execution Strategies
 - Use tasks and workers to ensure your context does not get polluted by the expansive code and the massive log output these tests generate.
 - Always use task workers to run the full test suite so you don't pollute your context
+- Always make a plan, and use tasks and worker thingies to preserve your context, because this codebase is large.
 
 ### Testspec File Locations
 - Full path of testspec: `/app/testspec.md`
@@ -199,3 +200,105 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 
 ### Test Running Strategies
 - You can and should run single tests most of the time like this: ./uns.sh smdpp_Tests.TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST
+
+## TTCN-3 Language Patterns and Best Practices
+
+### Error Injection Framework Pattern
+When implementing error test cases, use a generic function with error injection:
+
+```ttcn
+/* Define union type for different error scenarios */
+type union AuthClientErrorInjection {
+    CertificateError cert_error,
+    SignatureError sig_error,
+    TransactionIdError trans_error
+}
+
+/* Generic test function accepting error injection */
+private function f_TC_AuthenticateClient_Error_Generic(
+    charstring test_name,
+    charstring expected_subject_code,
+    charstring expected_reason_code,
+    AuthClientErrorInjection error_injection
+) runs on smdpp_ConnHdlr
+```
+
+This pattern enables:
+- Reusable test logic for multiple error scenarios
+- Type-safe error injection
+- Clear test intent through descriptive injection types
+- Consolidation of 20+ individual tests into 1 generic function
+
+### Union Type Usage
+TTCN-3 unions work like C unions or Rust enums:
+- Use `ischosen()` to check which variant is active
+- Only one variant can be active at a time
+- Example: `if (ischosen(error_injection.sig_error)) { ... }`
+
+### External Function Integration
+TTCN-3 to C++ function mapping uses double underscores:
+- TTCN-3: `external function ext_someFunction()`
+- C++: `void ext__someFunction()` (note the double underscore)
+- Parameters and return types must match exactly
+- Use `enc_*/dec_*` naming convention for encode/decode functions
+
+### Test Consolidation Strategy
+Instead of implementing individual test cases for each error scenario:
+- Create consolidated test cases that run multiple scenarios
+- Use descriptive logging to identify which scenario is running
+- Example: `TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases` covers 4 error scenarios
+
+## HTTP Response Handling
+
+### HTTP 204 No Content
+HandleNotification endpoint returns HTTP 204 with no body on success:
+```ttcn
+} else if (resp.response.statuscode == 204) {
+    /* HTTP 204 No Content - success with no body */
+    es9p_resp.emptyResponse := {
+        header := { functionExecutionStatus := { status := "Executed-Success" } }
+    };
+    es9p_resp.err := omit;
+    return es9p_resp;
+}
+```
+
+## Certificate and Cryptographic Variants
+
+### Certificate Type Clarifications
+- **NIST**: Uses NIST P-256 elliptic curves (default)
+- **BRP**: Brainpool curves - same tests with different certificates
+- **FRP**: Marked as FFS (For Further Study) - not applicable for current version
+
+### ASN.1 Encoding Important Notes
+- **Object Identifiers**: Must use numeric form: `objid { 2 999 10 }`
+- **Signature Concatenation**: Raw concatenation without TLV wrappers
+- **Order Matters**: eUICC data first, then SM-DP+ signature
+
+## Error Validation Pattern
+Centralize error validation for consistency:
+```ttcn
+private function f_validate_error_response(
+    JSON_ESx_FunctionExecutionStatusCodeData errorData,
+    charstring expected_subject_code,
+    charstring expected_reason_code,
+    charstring test_description
+)
+```
+
+## Python Server State Management
+For retry scenarios, the server maintains global state:
+```python
+# Global mapping for retry scenarios
+self.otpk_mapping = {}  # Maps euicc_otpk -> (smdp_ot, smdp_otpk, timestamp)
+self.otpk_timeout = 86400  # 24 hours
+
+# Cleanup task using Twisted
+self.cleanup_task = task.LoopingCall(self.cleanup_expired_otpk_mappings)
+self.cleanup_task.start(3600)  # Hourly cleanup
+```
+
+## Memory Notes
+
+### Specification File Location
+- the full specification is available at `/app/sgp22_2.5.md` WARNING it is a very large file you must be selective when reading it 
