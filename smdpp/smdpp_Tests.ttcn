@@ -197,6 +197,60 @@ const integer c_hostId_min_length := 4;
 const integer c_hostId_max_length := 16;
 const integer c_min_segment_length := 2;
 
+/* Error injection types for AuthenticateClient testing */
+type union AuthClientErrorInjection {
+    CertificateError cert_error,
+    SignatureError sig_error,
+    TransactionIdError trans_error,
+    ServerChallengeError challenge_error,
+    ContextParamError ctx_error
+}
+
+type record CertificateError {
+    CertErrorType error_type,
+    charstring cert_path optional
+}
+
+type enumerated CertErrorType {
+    INVALID_EUM_SIGNATURE,
+    INVALID_EUM_KEY_USAGE,
+    EXPIRED_EUM,
+    INVALID_EUICC_SIGNATURE,
+    EXPIRED_EUICC,
+    UNKNOWN_CI_KEY
+}
+
+type record SignatureError {
+    boolean corrupt_signature
+}
+
+type record TransactionIdError {
+    boolean in_json,  // true = error in JSON, false = error in ASN.1
+    octetstring wrong_transaction_id optional
+}
+
+type record ServerChallengeError {
+    octetstring wrong_challenge optional
+}
+
+type record ContextParamError {
+    charstring wrong_matching_id optional,
+    boolean omit_matching_id
+}
+
+/* Error injection types for GetBoundProfilePackage testing */
+type union GetBppErrorInjection {
+    SignatureError sig_error,
+    TransactionIdError trans_error,
+    ConfirmationCodeError cc_error
+}
+
+type record ConfirmationCodeError {
+    boolean omit_cc,          /* true = omit confirmation code when required */
+    boolean wrong_cc,         /* true = send wrong confirmation code */
+    octetstring invalid_cc optional  /* specific wrong CC to use */
+}
+
 /* ============================================================================
  * TTCN-3 COMPONENT TYPES
  * ============================================================================ */
@@ -232,7 +286,13 @@ type record smdpp_ConnHdlrPars {
 	charstring cert_name_filter,
 	charstring euicc_cert_path,
 	charstring euicc_key_path,
-	charstring confirmation_code optional
+	charstring confirmation_code optional,
+	AuthClientErrorInjection error_injection optional,
+	charstring test_name optional,
+	charstring expected_subject_code optional,
+	charstring expected_reason_code optional,
+	GetBppErrorInjection gbpp_error_injection optional,
+	boolean cc_required optional
 };
 
 private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
@@ -243,7 +303,13 @@ private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 		cert_name_filter := "NIST",
 		euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der",
 		euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem",
-		confirmation_code := omit  // No confirmation code by default
+		confirmation_code := omit,  // No confirmation code by default
+		error_injection := omit,
+		test_name := omit,
+		expected_subject_code := omit,
+		expected_reason_code := omit,
+		gbpp_error_injection := omit,
+		cc_required := false
 	};
 	return pars;
 }
@@ -756,6 +822,26 @@ private function f_validate_error_response(
 
 	log("Error validation passed: ", expected_subject_code, "/", expected_reason_code,
 	    " (", actual_error.message_, ")");
+}
+
+/* Helper function to corrupt a signature */
+private function f_corrupt_signature(octetstring valid_sig) return octetstring {
+    var octetstring corrupted := valid_sig;
+    if (lengthof(corrupted) > 0) {
+        /* Flip some bits in the first byte */
+        corrupted[0] := int2oct((oct2int(corrupted[0]) + 1) mod 256, 1);
+    }
+    return corrupted;
+}
+
+/* Helper function to generate wrong transaction ID */
+private function f_generate_wrong_transaction_id() return octetstring {
+    return f_rnd_octstring(16);
+}
+
+/* Helper function to generate wrong server challenge */
+private function f_generate_wrong_challenge() return octetstring {
+    return f_rnd_octstring(16);
 }
 
 /* ============================================================================
@@ -1647,6 +1733,147 @@ private function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id)
 	setverdict(pass);
 }
 
+/* Generic function for AuthenticateClient error testing */
+private function f_TC_AuthenticateClient_Error_Generic(
+    charstring test_name,
+    charstring expected_subject_code,
+    charstring expected_reason_code,
+    AuthClientErrorInjection error_injection
+) runs on smdpp_ConnHdlr {
+    
+    ext_logInfo("=== Testing AuthenticateClient Error: " & test_name & " ===");
+    
+    /* Initialize HTTP/TLS and RSP client */
+    if (not f_rsp_client_init()) {
+        setverdict(fail, "RSP client initialization failed");
+        return;
+    }
+    
+    /* Step 1: InitiateAuthentication (normal) */
+    var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
+    var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
+    
+    if (not f_validate_initiate_authentication_response(initResp)) {
+        setverdict(fail, "InitiateAuthentication validation failed");
+        f_rsp_client_cleanup();
+        return;
+    }
+    
+    /* Extract InitiateAuthentication response data */
+    var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
+    var octetstring transactionId := authOk.transactionId;
+    var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
+    
+    /* Apply transaction ID error if specified */
+    if (ischosen(error_injection.trans_error) and error_injection.trans_error.in_json) {
+        if (ispresent(error_injection.trans_error.wrong_transaction_id)) {
+            transactionId := error_injection.trans_error.wrong_transaction_id;
+        } else {
+            transactionId := f_generate_wrong_transaction_id();
+        }
+    }
+    
+    /* Build EUICCInfo2 */
+    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+    euiccInfo2.euiccCiPKIdListForVerification := {
+        ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+        ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+    };
+    euiccInfo2.euiccCiPKIdListForSigning := {
+        ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+        ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+    };
+    
+    /* Build CtxParams */
+    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+    
+    /* Apply context parameter errors if specified */
+    if (ischosen(error_injection.ctx_error)) {
+        if (ispresent(error_injection.ctx_error.wrong_matching_id)) {
+            ctxParams.ctxParamsForCommonAuthentication.matchingId := error_injection.ctx_error.wrong_matching_id;
+        }
+        if (error_injection.ctx_error.omit_matching_id) {
+            ctxParams.ctxParamsForCommonAuthentication.matchingId := omit;
+        }
+    }
+    
+    /* Build euiccSigned1 */
+    var EuiccSigned1 euiccSigned1 := {
+        transactionId := transactionId,
+        serverAddress := g_pars_smdpp.smdp_server_url,
+        serverChallenge := serverChallenge,
+        euiccInfo2 := euiccInfo2,
+        ctxParams1 := ctxParams
+    };
+    
+    /* Apply transaction ID error in ASN.1 if specified */
+    if (ischosen(error_injection.trans_error) and not error_injection.trans_error.in_json) {
+        if (ispresent(error_injection.trans_error.wrong_transaction_id)) {
+            euiccSigned1.transactionId := error_injection.trans_error.wrong_transaction_id;
+        } else {
+            euiccSigned1.transactionId := f_generate_wrong_transaction_id();
+        }
+    }
+    
+    /* Apply server challenge error if specified */
+    if (ischosen(error_injection.challenge_error)) {
+        if (ispresent(error_injection.challenge_error.wrong_challenge)) {
+            euiccSigned1.serverChallenge := error_injection.challenge_error.wrong_challenge;
+        } else {
+            euiccSigned1.serverChallenge := f_generate_wrong_challenge();
+        }
+    }
+    
+    /* Sign the data */
+    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+    
+    /* Apply signature error if specified */
+    if (ischosen(error_injection.sig_error) and error_injection.sig_error.corrupt_signature) {
+        euiccSignature1 := f_corrupt_signature(euiccSignature1);
+    }
+    
+    /* Get certificates from RSP client */
+    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+    
+    /* Build the request */
+    var RemoteProfileProvisioningRequest authClientReq := {
+        authenticateClientRequest := {
+            transactionId := transactionId,
+            authenticateServerResponse := {
+                authenticateResponseOk := {
+                    euiccSigned1 := euiccSigned1,
+                    euiccSignature1 := euiccSignature1,
+                    euiccCertificate := g_euicc_cert,
+                    eumCertificate := g_eum_cert
+                }
+            }
+        }
+    };
+    
+    /* Send request and expect error */
+    var JSON_ESx_FunctionExecutionStatusCodeData errorData := f_es9p_transceive_error(authClientReq);
+    
+    /* Validate error response */
+    f_validate_error_response(errorData, expected_subject_code, expected_reason_code, test_name);
+    
+    ext_logInfo("Test passed - " & test_name);
+    f_rsp_client_cleanup();
+    setverdict(pass);
+}
+
+/* Wrapper function to use the parameters */
+private function f_TC_AuthenticateClient_Error_Generic_Wrapper(charstring id) runs on smdpp_ConnHdlr {
+    f_TC_AuthenticateClient_Error_Generic(
+        g_pars_smdpp.test_name,
+        g_pars_smdpp.expected_subject_code,
+        g_pars_smdpp.expected_reason_code,
+        g_pars_smdpp.error_injection
+    );
+}
+
 /* Test Cases for GetBoundProfilePackage Operation */
 
 // TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_01_Nominal
@@ -2229,6 +2456,206 @@ private function f_TC_GetBoundProfilePackage_04_Preparation_Error(charstring id)
 	}
 
 	f_rsp_client_cleanup();
+}
+
+/* Helper function to perform InitiateAuthentication */
+private function f_initiateAuthentication() runs on smdpp_ConnHdlr return InitiateAuthenticationOkEs9 {
+    var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+    var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+    
+    if (not f_validate_initiate_authentication_response(authResponse)) {
+        setverdict(fail, "InitiateAuthentication validation failed");
+        mtc.stop;
+    }
+    
+    var InitiateAuthenticationOkEs9 initAuthOk := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk;
+    
+    /* Store transaction ID and server challenge */
+    g_transactionId := initAuthOk.transactionId;
+    g_serverChallenge := initAuthOk.serverSigned1.serverChallenge;
+    
+    return initAuthOk;
+}
+
+/* Helper function to perform AuthenticateClient */
+private function f_authenticateClient(InitiateAuthenticationOkEs9 initAuthOk) runs on smdpp_ConnHdlr return AuthenticateClientOk {
+    /* Create EUICCInfo2 with PKIDs */
+    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+    euiccInfo2.euiccCiPKIdListForVerification := {
+        ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+        ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+    };
+    euiccInfo2.euiccCiPKIdListForSigning := {
+        ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+        ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+    };
+    
+    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+    
+    var EuiccSigned1 euiccSigned1 := {
+        transactionId := g_transactionId,
+        serverAddress := g_pars_smdpp.smdp_server_url,
+        serverChallenge := g_serverChallenge,
+        euiccInfo2 := euiccInfo2,
+        ctxParams1 := ctxParams
+    };
+    
+    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+    
+    /* Get certificates from RSP client */
+    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+    
+    var RemoteProfileProvisioningRequest authReq := {
+        authenticateClientRequest := {
+            transactionId := g_transactionId,
+            authenticateServerResponse := {
+                authenticateResponseOk := {
+                    euiccSigned1 := euiccSigned1,
+                    euiccSignature1 := euiccSignature1,
+                    euiccCertificate := g_euicc_cert,
+                    eumCertificate := g_eum_cert
+                }
+            }
+        }
+    };
+    
+    var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+    var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+    
+    return authClientOk;
+}
+
+/* Generic function for GetBoundProfilePackage error testing */
+private function f_TC_GetBoundProfilePackage_Error_Generic(
+    charstring test_name,
+    charstring expected_subject_code,
+    charstring expected_reason_code,
+    GetBppErrorInjection error_injection,
+    boolean cc_required := false
+) runs on smdpp_ConnHdlr {
+    
+    ext_logInfo("=== Testing GetBoundProfilePackage Error: " & test_name & " ===");
+    
+    /* Initialize RSP client */
+    if (not f_rsp_client_init()) {
+        setverdict(fail, "RSP client initialization failed");
+        return;
+    }
+    
+    /* Step 1: InitiateAuthentication */
+    var InitiateAuthenticationOkEs9 initAuthOk;
+    initAuthOk := f_initiateAuthentication();
+    
+    /* Step 2: AuthenticateClient with ccRequiredFlag if needed */
+    var AuthenticateClientOk authClientOk;
+    if (cc_required) {
+        /* For confirmation code tests, we need to trigger ccRequiredFlag */
+        /* This would require server support - for now we just proceed normally */
+        authClientOk := f_authenticateClient(initAuthOk);
+    } else {
+        authClientOk := f_authenticateClient(initAuthOk);
+    }
+    
+    /* Step 3: PrepareDownloadResponse with error injection */
+    var octetstring smdpSignature2 := authClientOk.smdpSignature2;
+    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+    
+    /* Build EUICCSigned2 */
+    var EUICCSigned2 euiccSigned2 := {
+        transactionId := g_transactionId,
+        euiccOtpk := euicc_otpk,
+        hashCc := omit  /* Default: no confirmation code */
+    };
+    
+    /* Apply error injections */
+    var octetstring transactionId := g_transactionId;
+    
+    if (ischosen(error_injection.trans_error)) {
+        if (error_injection.trans_error.in_json) {
+            /* Error in JSON layer */
+            if (ispresent(error_injection.trans_error.wrong_transaction_id)) {
+                transactionId := error_injection.trans_error.wrong_transaction_id;
+            } else {
+                transactionId := f_generate_wrong_transaction_id();
+            }
+        } else {
+            /* Error in ASN.1 */
+            if (ispresent(error_injection.trans_error.wrong_transaction_id)) {
+                euiccSigned2.transactionId := error_injection.trans_error.wrong_transaction_id;
+            } else {
+                euiccSigned2.transactionId := f_generate_wrong_transaction_id();
+            }
+        }
+    }
+    
+    if (ischosen(error_injection.cc_error)) {
+        if (cc_required) {
+            if (error_injection.cc_error.omit_cc) {
+                /* Omit confirmation code when required */
+                euiccSigned2.hashCc := omit;
+            } else if (error_injection.cc_error.wrong_cc) {
+                /* Send wrong confirmation code */
+                if (ispresent(error_injection.cc_error.invalid_cc)) {
+                    euiccSigned2.hashCc := error_injection.cc_error.invalid_cc;
+                } else {
+                    /* Generate random wrong CC hash */
+                    euiccSigned2.hashCc := f_rnd_octstring(32);  /* SHA256 is 32 bytes */
+                }
+            }
+        }
+    }
+    
+    /* Sign EUICCSigned2 */
+    var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
+    var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
+    var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+    
+    /* Apply signature corruption if needed */
+    if (ischosen(error_injection.sig_error) and error_injection.sig_error.corrupt_signature) {
+        euiccSignature2 := f_corrupt_signature(euiccSignature2);
+    }
+    
+    /* Create PrepareDownloadResponse */
+    var PrepareDownloadResponse prepareDownloadResponse := {
+        downloadResponseOk := {
+            euiccSigned2 := euiccSigned2,
+            euiccSignature2 := euiccSignature2
+        }
+    };
+    
+    /* Build the request */
+    var RemoteProfileProvisioningRequest getBppReq := {
+        getBoundProfilePackageRequest := {
+            transactionId := transactionId,
+            prepareDownloadResponse := prepareDownloadResponse
+        }
+    };
+    
+    /* Send request and expect error */
+    var DecodedRPPReponse_Wrap wrap := f_es9p_transceive_wrap(getBppReq);
+    
+    /* Validate error response */
+    if (not ispresent(wrap.err)) {
+        setverdict(fail, "Expected error response but got success");
+        return;
+    }
+    
+    f_validate_error_response(wrap.err, expected_subject_code, expected_reason_code, test_name);
+    
+    setverdict(pass);
+}
+
+private function f_TC_GetBoundProfilePackage_Error_Generic_Wrapper(charstring id) runs on smdpp_ConnHdlr {
+    f_TC_GetBoundProfilePackage_Error_Generic(
+        g_pars_smdpp.test_name,
+        g_pars_smdpp.expected_subject_code,
+        g_pars_smdpp.expected_reason_code,
+        g_pars_smdpp.gbpp_error_injection,
+        g_pars_smdpp.cc_required
+    );
 }
 
 /* Helper function to create authenticate client request */
@@ -3074,6 +3501,50 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error() runs on 
 	setverdict(pass);
 }
 
+/* Consolidated GetBoundProfilePackage error cases test */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
+    
+    /* Test 1: Invalid eUICC Signature */
+    f_init("Test 1: Invalid eUICC Signature");
+    pars := f_init_pars();
+    pars.gbpp_error_injection := { sig_error := { corrupt_signature := true } };
+    pars.test_name := "Invalid eUICC Signature";
+    pars.expected_subject_code := "8.1";
+    pars.expected_reason_code := "6.1";
+    pars.cc_required := false;
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Test 2: Unknown Transaction ID in JSON */
+    f_init("Test 2: Unknown Transaction ID in JSON");
+    pars := f_init_pars();
+    pars.gbpp_error_injection := { trans_error := { in_json := true, wrong_transaction_id := omit } };
+    pars.test_name := "Unknown Transaction ID in JSON";
+    pars.expected_subject_code := "8.10.1";
+    pars.expected_reason_code := "3.9";
+    pars.cc_required := false;
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Test 3: Unknown Transaction ID in ASN.1 */
+    f_init("Test 3: Unknown Transaction ID in ASN.1");
+    pars := f_init_pars();
+    pars.gbpp_error_injection := { trans_error := { in_json := false, wrong_transaction_id := omit } };
+    pars.test_name := "Unknown Transaction ID in ASN.1";
+    pars.expected_subject_code := "8.10.1";
+    pars.expected_reason_code := "3.9";
+    pars.cc_required := false;
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Note: Confirmation code tests would need server support to set ccRequiredFlag */
+    
+    setverdict(pass);
+}
+
 /* CancelSession Test Cases */
 
 testcase TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST() runs on MTC_CT {
@@ -3111,6 +3582,143 @@ testcase TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* Test invalid eUICC signature */
+testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidSignature() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(id);
+    
+    /* Run with signature corruption */
+    pars.error_injection := {
+        sig_error := { corrupt_signature := true }
+    };
+    pars.test_name := "Invalid eUICC Signature";
+    pars.expected_subject_code := "8.1";
+    pars.expected_reason_code := "6.1";
+    
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* Test unknown transaction ID in JSON */
+testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_UnknownTransactionId() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(id);
+    
+    /* Run with wrong transaction ID in JSON */
+    pars.error_injection := {
+        trans_error := { 
+            in_json := true,
+            wrong_transaction_id := omit
+        }
+    };
+    pars.test_name := "Unknown Transaction ID";
+    pars.expected_subject_code := "8.10.1";
+    pars.expected_reason_code := "3.9";
+    
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* Test invalid server challenge */
+testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidServerChallenge() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(id);
+    
+    /* Run with wrong server challenge */
+    pars.error_injection := {
+        challenge_error := { 
+            wrong_challenge := omit  /* Will generate random wrong challenge */
+        }
+    };
+    pars.test_name := "Invalid Server Challenge";
+    pars.expected_subject_code := "8.1";
+    pars.expected_reason_code := "6.1";
+    
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* Test transaction ID mismatch in ASN.1 */
+testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_TransactionIdMismatchASN1() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(id);
+    
+    /* Run with wrong transaction ID in ASN.1 structure */
+    pars.error_injection := {
+        trans_error := { 
+            in_json := false,  /* Error in ASN.1, not JSON */
+            wrong_transaction_id := omit
+        }
+    };
+    pars.test_name := "Transaction ID Mismatch in ASN.1";
+    pars.expected_subject_code := "8.1.1";
+    pars.expected_reason_code := "3.9";
+    
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* Consolidated AuthenticateClient error cases test */
+testcase TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
+    
+    /* Test 1: Invalid Signature */
+    f_init("Test 1: Invalid Signature");
+    pars := f_init_pars();
+    pars.error_injection := { sig_error := { corrupt_signature := true } };
+    pars.test_name := "Invalid eUICC Signature";
+    pars.expected_subject_code := "8.1";
+    pars.expected_reason_code := "6.1";
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Test 2: Unknown Transaction ID in JSON */
+    f_init("Test 2: Unknown Transaction ID");
+    pars := f_init_pars();
+    pars.error_injection := { trans_error := { in_json := true, wrong_transaction_id := omit } };
+    pars.test_name := "Unknown Transaction ID";
+    pars.expected_subject_code := "8.10.1";
+    pars.expected_reason_code := "3.9";
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Test 3: Invalid Server Challenge */
+    f_init("Test 3: Invalid Server Challenge");
+    pars := f_init_pars();
+    pars.error_injection := { challenge_error := { wrong_challenge := omit } };
+    pars.test_name := "Invalid Server Challenge";
+    pars.expected_subject_code := "8.1";
+    pars.expected_reason_code := "6.1";
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    /* Test 4: Transaction ID Mismatch in ASN.1 */
+    f_init("Test 4: Transaction ID Mismatch in ASN.1");
+    pars := f_init_pars();
+    pars.error_injection := { trans_error := { in_json := false, wrong_transaction_id := omit } };
+    pars.test_name := "Transaction ID Mismatch in ASN.1";
+    pars.expected_subject_code := "8.1.1";
+    pars.expected_reason_code := "3.9";
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+    
+    setverdict(pass);
+}
+
 control {
 	execute(TC_rsp_complete_flow());
 
@@ -3125,12 +3733,20 @@ control {
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_04_Invalid_euiccInfo1());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse());
+	
+	/* AuthenticateClient Error Tests */
+	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidSignature());
+	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_UnknownTransactionId());
+	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidServerChallenge());
+	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_TransactionIdMismatchASN1());
+	execute(TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases());
 
 	/* GetBoundProfilePackage Tests */
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal());
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge());
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge());
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error());
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases());
 
 	/* CancelSession Tests */
 	execute(TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST());

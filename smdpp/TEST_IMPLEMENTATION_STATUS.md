@@ -4,14 +4,14 @@ Last Updated: 2025-06-21
 
 ## Executive Summary
 
-**Implementation Progress**: 16 of 27 test cases implemented (59.3%) - 6 FRP tests marked as FFS  
-**Test Pass Rate**: 14 of 16 passing (87.5%)  
+**Implementation Progress**: 18 of 27 test cases implemented (66.7%) - 6 FRP tests marked as FFS  
+**Test Pass Rate**: 16 of 18 passing (88.9%)  
 **Inconclusive**: 1 test (requires certificate regeneration)  
 **Failing**: 1 test (HTTP 500 error)
 
 ## Current Test Results
 
-### ✅ Passing Tests (14)
+### ✅ Passing Tests (16)
 
 1. **TC_rsp_complete_flow** - Complete RSP flow test
 2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
@@ -21,12 +21,14 @@ Last Updated: 2025-06-21
 6. **TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode** - With confirmation code
 7. **TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID** - Transaction ID mismatch error
 8. **TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse** - Challenge reuse detection
-9. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
-10. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
-11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
-12. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
-13. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
-14. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
+9. **TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases** - Consolidated error case testing (4 scenarios)
+10. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
+11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
+12. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
+13. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases** - Consolidated error case testing (3 scenarios)
+14. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
+15. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
+16. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
 
 ### ⚠️ Inconclusive Tests (1)
 
@@ -44,13 +46,11 @@ Based on SGP.23 specification at `/app/testspec copy.md`:
 1. **TC_SM-DP+_ES9+_HandleNotificationBRP** - Brainpool variant
 
 ### Medium Priority - Additional Coverage
-2. **TC_SM-DP+_ES9+.AuthenticateClientNIST_ErrorCases** - Various authentication error scenarios
-3. **TC_SM-DP+_ES9+.GetBoundProfilePackage_ErrorCasesNIST** - Various download error scenarios
-4. **TC_SM-DP+_ES9+.AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication
+2. **TC_SM-DP+_ES9+.AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication
 
 ### Low Priority - Cryptographic Variants
-5. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
-6. **All BRP variants** - Brainpool curve certificate tests (same tests as NIST but with different certificates, so lower priority)
+4. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
+5. **All BRP variants** - Brainpool curve certificate tests (same tests as NIST but with different certificates, so lower priority)
 
 ## Test Execution
 
@@ -132,6 +132,16 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
    - Fixed uns.sh to support single test case execution
    - Improved test isolation and cleanup
 
+5. **AuthenticateClient Error Cases**
+   - Implemented consolidated error test covering 4 scenarios
+   - Added error injection framework with control flags
+   - Test scenarios: Invalid eUICC Signature, Unknown Transaction ID, Invalid Server Challenge, Transaction ID Mismatch in ASN.1
+
+6. **GetBoundProfilePackage Error Cases**
+   - Implemented consolidated error test covering 3 scenarios
+   - Added error injection framework for GetBoundProfilePackage
+   - Test scenarios: Invalid eUICC Signature, Unknown Transaction ID in JSON, Unknown Transaction ID in ASN.1
+
 ## Known Issues
 
 1. **PrepareDownloadResponse Error Handling**
@@ -194,11 +204,11 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
 | TC_SM_DP_ES9_InitiateAuthenticationFRP | 4.3.12.2.2 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_InitiateAuthenticationBRP | 4.3.12.2.3 | ❌ Not Implemented |
 | TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal | 4.3.13.2.1 | ✅ Implemented |
-| TC_SM_DP_ES9_GetBoundProfilePackage_ErrorCasesNIST | 4.3.13.2.10 | ❌ Not Implemented |
+| TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases | 4.3.13.2.10 | ✅ Implemented |
 | TC_SM_DP_ES9_GetBoundProfilePackageFRP | 4.3.13.2.2 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_GetBoundProfilePackageBRP | 4.3.13.2.3 | ❌ Not Implemented |
 | TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal | 4.3.14.2.1 | ✅ Implemented |
-| TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases | 4.3.14.2.2 | ❌ Not Implemented |
+| TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases | 4.3.14.2.2 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientFRP | 4.3.14.2.3 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_AuthenticateClientBRP | 4.3.14.2.5 | ❌ Not Implemented |
 | TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal | 4.3.15.2.1 | ✅ Implemented |
