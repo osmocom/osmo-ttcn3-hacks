@@ -77,9 +77,11 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
 
 	std::string caCertPath = "/etc/ssl/certs/ca-certificates.crt"; // Default CA certs on many Linux
 
-		// client->loadEUICCCertificate(euiccCertPath);
-		// client->loadEUICCKeyPair(euiccprivkeyPath);
-		// EUM certificate is now loaded from ./sgp26/EUM directory
+		// Load eUICC certificate and key pair
+		client->loadEUICCCertificate(euiccCertPath);
+		client->loadEUICCKeyPair(euiccprivkeyPath);
+		// Load EUM certificate from ./sgp26/EUM directory
+		client->loadEUMCertificate(eumCertPath);
 		client->loadEUMKeyPair(eumprivkeyPath);
 		client->setCACertPath(caCertPath);
 
