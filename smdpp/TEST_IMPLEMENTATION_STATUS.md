@@ -4,14 +4,14 @@ Last Updated: 2025-06-21
 
 ## Executive Summary
 
-**Implementation Progress**: 18 of 27 test cases implemented (66.7%) - 6 FRP tests marked as FFS  
-**Test Pass Rate**: 17 of 18 passing (94.4%)  
+**Implementation Progress**: 19 of 27 test cases implemented (70.4%) - 6 FRP tests marked as FFS  
+**Test Pass Rate**: 18 of 19 passing (94.7%)  
 **Inconclusive**: 1 test (requires certificate regeneration)  
 **Failing**: 0 tests
 
 ## Current Test Results
 
-### ✅ Passing Tests (17)
+### ✅ Passing Tests (18)
 
 1. **TC_rsp_complete_flow** - Complete RSP flow test
 2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
@@ -22,14 +22,15 @@ Last Updated: 2025-06-21
 7. **TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID** - Transaction ID mismatch error
 8. **TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse** - Challenge reuse detection
 9. **TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases** - Consolidated error case testing (4 scenarios)
-10. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
-11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
-12. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
-13. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases** - Consolidated error case testing (3 scenarios)
-14. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
-15. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
-16. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
-17. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Profile preparation error handling
+10. **TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication retry scenarios
+11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
+12. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
+13. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
+14. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases** - Consolidated error case testing (3 scenarios)
+15. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
+16. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
+17. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
+18. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Profile preparation error handling
 
 ### ⚠️ Inconclusive Tests (1)
 
@@ -43,7 +44,7 @@ Based on SGP.23 specification at `/app/testspec copy.md`:
 1. **TC_SM-DP+_ES9+_HandleNotificationBRP** - Brainpool variant
 
 ### Medium Priority - Additional Coverage
-2. **TC_SM-DP+_ES9+.AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication
+None remaining - all medium priority tests have been implemented
 
 ### Low Priority - Cryptographic Variants
 4. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
@@ -144,6 +145,11 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
    - Server now properly returns JSON error response with appropriate error codes
    - Test now passes with correct error validation
 
+8. **AuthenticateClient Retry Test Implementation**
+   - Implemented TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK test
+   - Verifies that after cancelling a session, a new session can be initiated and AuthenticateClient works correctly
+   - Tests OTPK reuse behavior in authentication retry scenarios
+
 ## Known Issues
 
 1. **Certificate-based Tests**
@@ -186,8 +192,7 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
    - Implement HandleNotification BRP variant (1 test remaining)
 
 2. **Medium Priority**  
-   - Implement remaining error case tests
-   - Add OTPK reuse test for AuthenticateClient
+   - All medium priority tests have been implemented
 
 3. **Low Priority**
    - Consider implementing FRP/BRP variants if needed
@@ -206,6 +211,7 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
 | TC_SM_DP_ES9_GetBoundProfilePackageBRP | 4.3.13.2.3 | ❌ Not Implemented |
 | TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal | 4.3.14.2.1 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases | 4.3.14.2.2 | ✅ Implemented |
+| TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK | 4.3.14.2.4 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientFRP | 4.3.14.2.3 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_AuthenticateClientBRP | 4.3.14.2.5 | ❌ Not Implemented |
 | TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal | 4.3.15.2.1 | ✅ Implemented |

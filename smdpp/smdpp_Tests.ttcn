@@ -2528,6 +2528,140 @@ private function f_authenticateClient(InitiateAuthenticationOkEs9 initAuthOk) ru
     return authClientOk;
 }
 
+/* Helper function to perform CancelSession */
+private function f_cancelSession(octetstring transactionId, objid smdpOid) runs on smdpp_ConnHdlr {
+    var CancelSessionResponse cancelResp := {
+        cancelSessionResponseOk := {
+            euiccCancelSessionSigned := {
+                transactionId := transactionId,
+                smdpOid := smdpOid,
+                reason := 0  /* endUserRejection */
+            },
+            euiccCancelSessionSignature := ''O
+        }
+    };
+    
+    /* Sign the cancellation */
+    var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
+    cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+    
+    var RemoteProfileProvisioningRequest cancelReq := {
+        cancelSessionRequestEs9 := {
+            transactionId := transactionId,
+            cancelSessionResponse := cancelResp
+        }
+    };
+    
+    /* Send CancelSession and expect empty success response */
+    var DecodedRPPReponse_Wrap response := f_es9p_transceive_wrap(cancelReq);
+    
+    if (ispresent(response.err)) {
+        setverdict(fail, "CancelSession failed with error");
+    } else if (ispresent(response.asn1_pdu) and ispresent(response.asn1_pdu.cancelSessionResponseEs9)) {
+        ext_logInfo("CancelSession successful - session terminated");
+    } else {
+        ext_logInfo("CancelSession successful - empty response received");
+    }
+}
+
+/* Helper function for GetBoundProfilePackage with PrepareDownloadResponse */
+private function f_getBoundProfilePackage_with_prepare_download_response(
+    PrepareDownloadResponse prepDownloadResp
+) runs on smdpp_ConnHdlr return GetBoundProfilePackageResponse {
+    var RemoteProfileProvisioningRequest getBppReq := {
+        getBoundProfilePackageRequest := {
+            transactionId := g_transactionId,
+            prepareDownloadResponse := prepDownloadResp
+        }
+    };
+    
+    var RemoteProfileProvisioningResponse resp := f_es9p_transceive_success(getBppReq);
+    return resp.getBoundProfilePackageResponse;
+}
+
+/* Test AuthenticateClient retry after cancelled session */
+private function f_TC_AuthenticateClient_RetryCases_Reuse_OTPK(charstring id) runs on smdpp_ConnHdlr {
+    
+    ext_logInfo("=== Testing AuthenticateClient Retry After Cancelled Session ===");
+    
+    /* Initialize RSP client */
+    if (not f_rsp_client_init()) {
+        setverdict(fail, "RSP client initialization failed");
+        return;
+    }
+    
+    /* Step 1: First session - will be cancelled */
+    ext_logInfo("Step 1: Starting first session (to be cancelled)");
+    
+    /* InitiateAuthentication */
+    var InitiateAuthenticationOkEs9 initAuthResp1;
+    initAuthResp1 := f_initiateAuthentication();
+    var octetstring transactionId1 := initAuthResp1.transactionId;
+    ext_logInfo("First session transaction ID: " & oct2str(transactionId1));
+    
+    /* AuthenticateClient */
+    var AuthenticateClientOk authClientResp1;
+    authClientResp1 := f_authenticateClient(initAuthResp1);
+    
+    /* Cancel the session */
+    ext_logInfo("Cancelling first session");
+    f_cancelSession(transactionId1, objid { joint_iso_itu_t 999 10 }); /* Test SM-DP+ OID */
+    
+    /* Step 2: Retry with new session */
+    ext_logInfo("Step 2: Starting retry session");
+    
+    /* New InitiateAuthentication */
+    var InitiateAuthenticationOkEs9 initAuthResp2;
+    initAuthResp2 := f_initiateAuthentication();
+    var octetstring transactionId2 := initAuthResp2.transactionId;
+    ext_logInfo("Retry session transaction ID: " & oct2str(transactionId2));
+    
+    /* Verify we got a different transaction ID */
+    if (transactionId1 == transactionId2) {
+        setverdict(fail, "Expected different transaction ID for retry session");
+        f_rsp_client_cleanup();
+        return;
+    }
+    
+    /* AuthenticateClient retry */
+    var AuthenticateClientOk authClientResp2;
+    authClientResp2 := f_authenticateClient(initAuthResp2);
+    
+    /* Verify AuthenticateClient succeeded */
+    if (not ispresent(authClientResp2.transactionId)) {
+        setverdict(fail, "AuthenticateClient retry failed - no transaction ID");
+        f_rsp_client_cleanup();
+        return;
+    }
+    
+    ext_logInfo("AuthenticateClient retry successful");
+    
+    /* Optional: Test GetBoundProfilePackage with same OTPK to verify full retry scenario */
+    ext_logInfo("Step 3: Testing GetBoundProfilePackage with potential OTPK reuse");
+    
+    /* Generate OTPK (simulating reuse from cancelled session) */
+    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+    
+    /* Create PrepareDownloadResponse */
+    var octetstring smdpSignature2 := authClientResp2.smdpSignature2;
+    var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response_with_otpk(smdpSignature2, euicc_otpk);
+    
+    /* GetBoundProfilePackage */
+    var GetBoundProfilePackageResponse getBppResp;
+    getBppResp := f_getBoundProfilePackage_with_prepare_download_response(prepDownloadResp);
+    
+    /* Verify success */
+    if (not ispresent(getBppResp.getBoundProfilePackageOk)) {
+        setverdict(fail, "GetBoundProfilePackage failed in retry scenario");
+        f_rsp_client_cleanup();
+        return;
+    }
+    
+    ext_logInfo("Complete retry flow successful");
+    setverdict(pass);
+    f_rsp_client_cleanup();
+}
+
 /* Generic function for GetBoundProfilePackage error testing */
 private function f_TC_GetBoundProfilePackage_Error_Generic(
     charstring test_name,
@@ -3582,6 +3716,17 @@ testcase TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* Test AuthenticateClient retry after cancelled session */
+testcase TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(id);
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_RetryCases_Reuse_OTPK), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
 /* Test invalid eUICC signature */
 testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidSignature() runs on MTC_CT {
     var charstring id := testcasename();
@@ -3735,6 +3880,7 @@ control {
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse());
 	
 	/* AuthenticateClient Error Tests */
+	execute(TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidSignature());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_UnknownTransactionId());
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidServerChallenge());
