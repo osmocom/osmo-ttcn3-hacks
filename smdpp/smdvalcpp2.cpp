@@ -1657,9 +1657,65 @@ public:
         return challenge;
     }
 
+    // Extract curve NID from any certificate
+    int getCertificateCurveNID(X509* cert) {
+        if (!cert) {
+            throw std::runtime_error("Certificate is null");
+        }
+
+        // Get the public key from the certificate
+        std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubkey(X509_get_pubkey(cert));
+        if (!pubkey) {
+            throw OpenSSLError("Failed to extract public key from certificate");
+        }
+
+        // Get the curve name from the public key
+        char curve_name[80];
+        size_t curve_name_len = sizeof(curve_name);
+        if (EVP_PKEY_get_utf8_string_param(pubkey.get(), OSSL_PKEY_PARAM_GROUP_NAME,
+                                          curve_name, sizeof(curve_name), &curve_name_len) != 1) {
+            throw OpenSSLError("Failed to get curve name from certificate");
+        }
+
+        // Map curve name to NID
+        std::string curve_str(curve_name);
+        int curve_nid;
+        
+        if (curve_str == "prime256v1" || curve_str == "P-256") {
+            curve_nid = NID_X9_62_prime256v1;
+        } else if (curve_str == "brainpoolP256r1") {
+            curve_nid = NID_brainpoolP256r1;
+        } else {
+            throw std::runtime_error("Unsupported curve in certificate: " + curve_str);
+        }
+
+        return curve_nid;
+    }
+
+    // Extract curve NID from eUICC certificate
+    int getEUICCCurveNID() {
+        if (!m_euiccCert) {
+            throw std::runtime_error("eUICC certificate not loaded");
+        }
+
+        int curve_nid = getCertificateCurveNID(m_euiccCert.get());
+        
+        if (curve_nid == NID_X9_62_prime256v1) {
+            LOG_INFO("eUICC certificate uses P-256 curve");
+        } else if (curve_nid == NID_brainpoolP256r1) {
+            LOG_INFO("eUICC certificate uses brainpoolP256r1 curve");
+        }
+
+        return curve_nid;
+    }
+
     // Generate eUICC one-time public key (OtPK)
     void generateEUICCOtpk() {
-        // Create EC key context for P-256 curve using OpenSSL 3.0+ API
+        // Get the curve from the loaded eUICC certificate
+        int curve_nid = getEUICCCurveNID();
+        std::string curve_name = (curve_nid == NID_X9_62_prime256v1) ? "P-256" : "brainpoolP256r1";
+
+        // Create EC key context using OpenSSL 3.0+ API
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
             pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
         if (!pctx) {
@@ -1671,9 +1727,9 @@ public:
             throw OpenSSLError("Failed to initialize key generation");
         }
 
-        // Set the curve to P-256 (prime256v1)
-        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx.get(), NID_X9_62_prime256v1) <= 0) {
-            throw OpenSSLError("Failed to set P-256 curve");
+        // Set the curve based on the eUICC certificate
+        if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx.get(), curve_nid) <= 0) {
+            throw OpenSSLError("Failed to set " + curve_name + " curve");
         }
 
         // Generate the key pair
@@ -1694,9 +1750,10 @@ public:
             throw OpenSSLError("Failed to get public key size");
         }
 
-        // For P-256: should be 65 bytes (0x04 + 32 bytes X + 32 bytes Y)
+        // Both P-256 and brainpoolP256r1 have 256-bit (32 byte) coordinates
+        // Uncompressed format: 0x04 + 32 bytes X + 32 bytes Y = 65 bytes
         if (pub_len != 65) {
-            throw OpenSSLError("Unexpected public key size for P-256");
+            throw OpenSSLError("Unexpected public key size for " + curve_name);
         }
 
         // Get the actual public key data
@@ -1706,7 +1763,7 @@ public:
             throw OpenSSLError("Failed to extract public key");
         }
 
-        LOG_INFO("Generated eUICC OtPK (P-256): " + HexUtil::bytesToHex(m_euiccOtpk));
+        LOG_INFO("Generated eUICC OtPK (" + curve_name + "): " + HexUtil::bytesToHex(m_euiccOtpk));
 
         // Verify the key format
         if (m_euiccOtpk[0] != 0x04) {
@@ -1721,6 +1778,10 @@ public:
         if (!m_euicc_ot_PrivateKey) {
             throw std::runtime_error("eUICC ephemeral private key not available");
         }
+
+        // Get the curve from the loaded eUICC certificate
+        int curve_nid = getEUICCCurveNID();
+        const char* curve_param_name = (curve_nid == NID_X9_62_prime256v1) ? "P-256" : "brainpoolP256r1";
 
         // Create EVP_PKEY for the other party's public key using OpenSSL 3.0+ API
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
@@ -1739,8 +1800,8 @@ public:
             throw OpenSSLError("Failed to create OSSL_PARAM_BLD");
         }
 
-        // Set the curve name (P-256)
-        if (!OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0)) {
+        // Set the curve name based on the eUICC certificate
+        if (!OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME, curve_param_name, 0)) {
             OSSL_PARAM_BLD_free(param_bld);
             throw OpenSSLError("Failed to set curve name");
         }
@@ -1867,6 +1928,48 @@ public:
     }
 
     std::vector<uint8_t> getCICertificate() {
+        // If no eUICC certificate is loaded, return the primary root CA
+        if (!m_euiccCert) {
+            if (m_rootCA) {
+                return CertificateUtil::certToDER(m_rootCA.get());
+            }
+            return std::vector<uint8_t>();
+        }
+
+        // Get the curve type from the eUICC certificate
+        int euicc_curve_nid = getEUICCCurveNID();
+
+        // Check if the primary root CA matches the eUICC curve type
+        if (m_rootCA) {
+            try {
+                int root_curve_nid = getCertificateCurveNID(m_rootCA.get());
+                if (root_curve_nid == euicc_curve_nid) {
+                    LOG_DEBUG("Primary root CA matches eUICC curve type");
+                    return CertificateUtil::certToDER(m_rootCA.get());
+                }
+            } catch (const std::exception& e) {
+                LOG_WARNING("Failed to get curve type from primary root CA: " + std::string(e.what()));
+            }
+        }
+
+        // Search for a matching root CA in the certificate pool
+        for (const auto& cert : m_certPool) {
+            // Check if this is a self-signed certificate (root CA)
+            if (X509_check_issued(cert.get(), cert.get()) == X509_V_OK) {
+                try {
+                    int cert_curve_nid = getCertificateCurveNID(cert.get());
+                    if (cert_curve_nid == euicc_curve_nid) {
+                        LOG_DEBUG("Found matching root CA in certificate pool for curve type");
+                        return CertificateUtil::certToDER(cert.get());
+                    }
+                } catch (const std::exception& e) {
+                    LOG_WARNING("Failed to get curve type from certificate: " + std::string(e.what()));
+                }
+            }
+        }
+
+        // If no matching root CA found, return the primary root CA as fallback
+        LOG_WARNING("No root CA found matching eUICC curve type, returning primary root CA");
         if (m_rootCA) {
             return CertificateUtil::certToDER(m_rootCA.get());
         }
