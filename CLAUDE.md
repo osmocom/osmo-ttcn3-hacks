@@ -134,6 +134,20 @@ The smdpp test suite implements a complete RSP protocol flow:
 - Common logging configuration in `Common.cfg`
 - Module parameters for specific test behavior
 
+## Critical Implementation Notes
+
+### Certificate Loading (CRITICAL)
+- **RSPClientRegistry MUST load both certificates AND key pairs**:
+  - `client->loadEUICCCertificate()` and `client->loadEUICCKeyPair()`
+  - `client->loadEUMCertificate()` and `client->loadEUMKeyPair()`
+- Missing certificate loading causes "TLV is not complete" BER decoding errors
+- Certificates are loaded from `./sgp26/` subdirectories
+
+### Port Handling
+- Use `CURLOPT_PORT` to set port separately, don't embed in URL
+- BRP tests run on port 8001, NIST tests on port 8000
+- Session databases use suffix: `sm-dp-sessions-NIST` and `sm-dp-sessions-BRP`
+
 ## Development Notes
 
 **Current Implementation Status**: **Complete and Working** ✅
@@ -151,6 +165,8 @@ When modifying tests:
 - Check session key derivation logs for S-ENC, S-MAC, and BSP key values
 - Verify Python server logs show proper BSP key derivation
 - Use `merged.log` for detailed test execution traces
+- For "TLV is not complete" errors, check certificate loading in RSPClientRegistry
+- BRP tests require special SSL/TLS configuration for Brainpool curves
 
 ## Additional Implementation Details
 
