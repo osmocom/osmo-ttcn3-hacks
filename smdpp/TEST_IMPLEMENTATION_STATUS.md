@@ -4,14 +4,14 @@ Last Updated: 2025-06-21
 
 ## Executive Summary
 
-**Implementation Progress**: 19 of 27 test cases implemented (70.4%) - 6 FRP tests marked as FFS  
-**Test Pass Rate**: 18 of 19 passing (94.7%)  
+**Implementation Progress**: 23 of 27 test cases implemented (85.2%) - 6 FRP tests marked as FFS  
+**Test Pass Rate**: 22 of 23 passing (95.7%)  
 **Inconclusive**: 1 test (requires certificate regeneration)  
 **Failing**: 0 tests
 
 ## Current Test Results
 
-### ✅ Passing Tests (18)
+### ✅ Passing Tests (22)
 
 1. **TC_rsp_complete_flow** - Complete RSP flow test
 2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
@@ -31,6 +31,10 @@ Last Updated: 2025-06-21
 16. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
 17. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
 18. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Profile preparation error handling
+19. **TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal** - Basic authentication initiation (BRP variant)
+20. **TC_SM_DP_ES9_AuthenticateClientBRP_01_Nominal** - Basic client authentication (BRP variant)
+21. **TC_SM_DP_ES9_GetBoundProfilePackageBRP_01_Nominal** - Basic profile download (BRP variant)
+22. **TC_rsp_complete_flow_BRP** - Complete RSP flow test (BRP variant)
 
 ### ⚠️ Inconclusive Tests (1)
 
@@ -47,8 +51,8 @@ Based on SGP.23 specification at `/app/testspec copy.md`:
 None remaining - all medium priority tests have been implemented
 
 ### Low Priority - Cryptographic Variants
-4. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
-5. **All BRP variants** - Brainpool curve certificate tests (same tests as NIST but with different certificates, so lower priority)
+2. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
+3. **Remaining BRP variants** - CancelSession BRP tests
 
 ## Test Execution
 
@@ -62,6 +66,14 @@ cd /app/tt-smdpp
 ```bash
 cd /app/tt-smdpp
 ./uns.sh smdpp_Tests.TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal
+```
+
+### Running BRP Tests
+**Note**: BRP tests require the server to be started in BRP mode. Run BRP tests separately:
+```bash
+cd /app/tt-smdpp
+# Run BRP tests individually with BRP server mode
+./uns.sh smdpp_Tests.TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal
 ```
 
 ### Viewing Results
@@ -150,6 +162,12 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
    - Verifies that after cancelling a session, a new session can be initiated and AuthenticateClient works correctly
    - Tests OTPK reuse behavior in authentication retry scenarios
 
+9. **BRP (Brainpool) Test Implementation**
+   - Implemented 4 BRP test variants: InitiateAuthentication, AuthenticateClient, GetBoundProfilePackage, and complete flow
+   - Tests use Brainpool P256r1 certificates instead of NIST P-256
+   - Server requires special BRP mode flag to select appropriate certificates
+   - All BRP tests pass successfully when run with BRP-enabled server
+
 ## Known Issues
 
 1. **Certificate-based Tests**
@@ -204,16 +222,16 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
 |-----------|------------------------|---------|
 | TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal | 4.3.12.2.1 | ✅ Implemented |
 | TC_SM_DP_ES9_InitiateAuthenticationFRP | 4.3.12.2.2 | 🚫 FFS - Not Applicable |
-| TC_SM_DP_ES9_InitiateAuthenticationBRP | 4.3.12.2.3 | ❌ Not Implemented |
+| TC_SM_DP_ES9_InitiateAuthenticationBRP | 4.3.12.2.3 | ✅ Implemented |
 | TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal | 4.3.13.2.1 | ✅ Implemented |
 | TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases | 4.3.13.2.10 | ✅ Implemented |
 | TC_SM_DP_ES9_GetBoundProfilePackageFRP | 4.3.13.2.2 | 🚫 FFS - Not Applicable |
-| TC_SM_DP_ES9_GetBoundProfilePackageBRP | 4.3.13.2.3 | ❌ Not Implemented |
+| TC_SM_DP_ES9_GetBoundProfilePackageBRP | 4.3.13.2.3 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal | 4.3.14.2.1 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases | 4.3.14.2.2 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK | 4.3.14.2.4 | ✅ Implemented |
 | TC_SM_DP_ES9_AuthenticateClientFRP | 4.3.14.2.3 | 🚫 FFS - Not Applicable |
-| TC_SM_DP_ES9_AuthenticateClientBRP | 4.3.14.2.5 | ❌ Not Implemented |
+| TC_SM_DP_ES9_AuthenticateClientBRP | 4.3.14.2.5 | ✅ Implemented |
 | TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal | 4.3.15.2.1 | ✅ Implemented |
 | TC_SM_DP_ES9_HandleNotificationFRP | 4.3.15.2.2 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_HandleNotificationBRP | 4.3.15.2.3 | ❌ Not Implemented |
@@ -223,3 +241,5 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
 | TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageFRP | 4.3.16.2.4 | 🚫 FFS - Not Applicable |
 | TC_SM_DP_ES9_CancelSession_After_AuthenticateClientBRP | 4.3.16.2.5 | ❌ Not Implemented |
 | TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageBRP | 4.3.16.2.6 | ❌ Not Implemented |
+| TC_rsp_complete_flow | N/A | ✅ Implemented |
+| TC_rsp_complete_flow_BRP | N/A | ✅ Implemented |

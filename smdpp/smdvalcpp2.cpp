@@ -1409,7 +1409,7 @@ public:
         try {
             // Basic CURL setup
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-            curl_easy_setopt(curl, CURLOPT_PORT, port);
+            // Don't set CURLOPT_PORT - the port is already included in the URL
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
@@ -1425,10 +1425,10 @@ public:
             curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, sslCtxFunction);
             curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, &ctxData);
 
-            curl_easy_setopt(curl, CURLOPT_CAINFO, nullptr); // Disable default CA bundle
-            curl_easy_setopt(curl, CURLOPT_CAPATH, nullptr);
+            // Don't disable the default CA bundle - our custom certs will be added to it
+            // This allows both system CAs and custom test certificates to work together
 
-            // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+            curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
             // Perform the request
             CURLcode res = curl_easy_perform(curl);

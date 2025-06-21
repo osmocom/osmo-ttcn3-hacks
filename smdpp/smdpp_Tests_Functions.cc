@@ -60,22 +60,26 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
     std::lock_guard<std::mutex> lock(m_mutex);
 
     try {
-        const std::vector<std::string> certPaths = { certPath };
-        const std::vector<std::string> nameFilters = { nameFilter };
+        // Include CertificateIssuer, EUM, and DPtls directories for complete chain and TLS
+        const std::vector<std::string> certPaths = { certPath, "./sgp26/EUM", "./sgp26/DPtls" };
+        const std::vector<std::string> nameFilters = { nameFilter, nameFilter, nameFilter };
 
         auto client = std::make_unique<RSPClient>(serverUrl, serverPort, certPaths, nameFilters);
 
-    std::string euiccCertPath = "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der";
-	std::string euiccprivkeyPath = "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem";
+    // Dynamically select certificate type based on nameFilter
+    std::string certType = (nameFilter == "BRP") ? "BRP" : "NIST";
+    
+    std::string euiccCertPath = "./sgp26/eUICC/CERT_EUICC_ECDSA_" + certType + ".der";
+	std::string euiccprivkeyPath = "./sgp26/eUICC/SK_EUICC_ECDSA_" + certType + ".pem";
 
-	std::string eumCertPath = "./sgp26/EUM/CERT_EUM_ECDSA_NIST.der";
-	std::string eumprivkeyPath = "./sgp26/EUM/SK_EUM_ECDSA_NIST.pem";
+	std::string eumCertPath = "./sgp26/EUM/CERT_EUM_ECDSA_" + certType + ".der";
+	std::string eumprivkeyPath = "./sgp26/EUM/SK_EUM_ECDSA_" + certType + ".pem";
 
 	std::string caCertPath = "/etc/ssl/certs/ca-certificates.crt"; // Default CA certs on many Linux
 
 		// client->loadEUICCCertificate(euiccCertPath);
 		// client->loadEUICCKeyPair(euiccprivkeyPath);
-		client->loadEUMCertificate(eumCertPath);
+		// EUM certificate is now loaded from ./sgp26/EUM directory
 		client->loadEUMKeyPair(eumprivkeyPath);
 		client->setCACertPath(caCertPath);
 

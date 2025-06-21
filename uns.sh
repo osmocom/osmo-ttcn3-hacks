@@ -20,13 +20,31 @@ QLIST="DEBUG_ENCDEC DEBUG_UNQUALIFIED PORTEVENT_MMRECV PORTEVENT_MMSEND PORTEVEN
 QVARS=$(for file in $QLIST; do printf " -ve %s" "$file"; done)
 
 
-CMDSTR="ip l s up lo; rm ${TESTP}/*log; ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 2>&1 > ${TESTP}/_pyserver.log &) ; sleep 1;"
+CMDSTR="ip l s up lo; rm ${TESTP}/*log;"
+# Start NIST server on port 8000
+CMDSTR+=" echo 'Starting SM-DP+ servers: NIST on port 8000, BRP on port 8001';"
+CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 2>&1 > ${TESTP}/_pyserver_nist.log & echo \$! > ${TESTP}/_nist_pid ) ;"
+# Start BRP server on port 8001
+CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool 2>&1 > ${TESTP}/_pyserver_brp.log & echo \$! > ${TESTP}/_brp_pid ) ;"
+CMDSTR+=" sleep 2;"
+# Set up cleanup trap to kill both servers
+CMDSTR+=" trap 'kill \$(cat ${TESTP}/_nist_pid 2>/dev/null) 2>/dev/null; kill \$(cat ${TESTP}/_brp_pid 2>/dev/null) 2>/dev/null' EXIT;"
 CMDSTR+="../start-testsuite.sh ${WHCIHT}_Tests ${WHCIHT}_Tests.cfg ${TEST_CASE} | grep -v ' DEBUG   ';"
+# Kill both servers after tests complete
+CMDSTR+="kill \$(cat ${TESTP}/_nist_pid 2>/dev/null) 2>/dev/null; kill \$(cat ${TESTP}/_brp_pid 2>/dev/null) 2>/dev/null;"
 CMDSTR+="ttcn3_logmerge smdp*log | grep "${QVARS}" > ${TESTP}/_merged.log;"
 #CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; rm ${TESTP}/_merged.log; sleep 2"
-CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; find ${TESTP} -iname '*log' -not -name 'merged.log' -and -not -iname '*pyserver.log' | xargs -n1 rm; sleep 1;"
-CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver.log  > ${TESTP}/pyserver.log;"
-CMDSTR+="rm ${TESTP}/_pyserver.log;"
+CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; find ${TESTP} -iname '*log' -not -name 'merged.log' -and -not -iname '*pyserver*.log' | xargs -n1 rm; sleep 1;"
+# Merge both server logs
+CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_nist.log > ${TESTP}/pyserver_nist.log 2>/dev/null || true;"
+CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_brp.log > ${TESTP}/pyserver_brp.log 2>/dev/null || true;"
+# Create combined pyserver.log for backward compatibility
+CMDSTR+="echo '=== NIST Server Log (port 8000) ===' > ${TESTP}/pyserver.log;"
+CMDSTR+="cat ${TESTP}/pyserver_nist.log >> ${TESTP}/pyserver.log 2>/dev/null || true;"
+CMDSTR+="echo '' >> ${TESTP}/pyserver.log;"
+CMDSTR+="echo '=== BRP Server Log (port 8001) ===' >> ${TESTP}/pyserver.log;"
+CMDSTR+="cat ${TESTP}/pyserver_brp.log >> ${TESTP}/pyserver.log 2>/dev/null || true;"
+CMDSTR+="rm -f ${TESTP}/_pyserver_*.log ${TESTP}/_*_pid;"
 
 
 # echo ${CMDSTR}
