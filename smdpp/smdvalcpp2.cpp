@@ -1409,7 +1409,7 @@ public:
         try {
             // Basic CURL setup
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-            // Don't set CURLOPT_PORT - the port is already included in the URL
+            curl_easy_setopt(curl, CURLOPT_PORT, port);
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
@@ -1428,7 +1428,7 @@ public:
             // Don't disable the default CA bundle - our custom certs will be added to it
             // This allows both system CAs and custom test certificates to work together
 
-            curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+            // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
             // Perform the request
             CURLcode res = curl_easy_perform(curl);
@@ -1993,9 +1993,8 @@ public:
             m_httpClient = std::make_unique<HttpClient>();
         }
 
-        // Build full URL
-        std::string url = "https://" + m_serverUrl + ":" +
-                         std::to_string(m_serverPort) + endpoint;
+        // Build full URL without port (port will be set via CURLOPT_PORT)
+        std::string url = "https://" + m_serverUrl + endpoint;
 
         HttpClient::ResponseData response;
 
