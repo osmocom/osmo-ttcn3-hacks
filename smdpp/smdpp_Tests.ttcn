@@ -181,6 +181,9 @@ external function ext_RSPClient_configureHttpClient(
 const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
 const charstring c_oid_rspRole_dp_pb := "2.23.146.1.2.1.5";
 
+/* ES9+ Path Constants */
+const charstring PATH_HANDLE_NOTIF := "/gsma/rsp2/es9plus/handleNotification";
+
 /* Protocol Operation IDs */
 const integer c_remoteOpId_installBoundProfilePackage := 1;
 
@@ -939,6 +942,161 @@ runs on smdpp_ConnHdlr return boolean {
     }
 
     return true;
+}
+
+/* Helper function to send HandleNotification requests */
+private function f_es9p_handleNotification(JSON_ES9p_HandleNotification handleNotifReq)
+runs on smdpp_ConnHdlr
+return JSON_ES9p_EmptyResponse {
+    var RemoteProfileProvisioningRequest asn1_req := {
+        handleNotification := {
+            pendingNotification := dec_PendingNotification(decode_base64(handleNotifReq.pendingNotification))
+        }
+    };
+    
+    /* Send request using existing infrastructure */
+    f_es9p_send_new(asn1_req);
+    
+    /* Receive response */
+    var integer http_status;
+    var charstring response_body := ext_RSPClient_sendHttpsPost(
+        g_rsp_client_handle,
+        g_last_es9p_endpoint,
+        g_last_es9p_request,
+        http_status
+    );
+    
+    /* HandleNotification returns 204 No Content on success */
+    if (http_status == 204) {
+        /* Success - create empty response with success header */
+        var JSON_ES9p_EmptyResponse empty_resp := {
+            header := {
+                functionExecutionStatus := {
+                    status := "Executed-Success",
+                    statusCodeData := omit
+                }
+            }
+        };
+        return empty_resp;
+    } else if (http_status != 200) {
+        setverdict(fail, "HTTP error response: " & int2str(http_status));
+        var JSON_ES9p_EmptyResponse empty;
+        return empty;
+    }
+    
+    /* For 200 response, decode JSON */
+    var JSON_ES9p_RemoteProfileProvisioningResponse json_resp;
+    json_resp := dec_JSON_ES9p_RemoteProfileProvisioningResponse(char2oct(response_body));
+    
+    if (ispresent(json_resp.emptyResponse)) {
+        return json_resp.emptyResponse;
+    } else {
+        setverdict(fail, "Unexpected response type for HandleNotification");
+        var JSON_ES9p_EmptyResponse empty;
+        return empty;
+    }
+}
+
+/* Helper function to send HandleNotification with ProfileInstallationResult */
+private function f_handleNotification(charstring transactionId, ProfileInstallationResult pir) runs on smdpp_ConnHdlr {
+    var PendingNotification pendingNotif := {
+        profileInstallationResult := pir
+    };
+    
+    var octetstring pendingNotifData := enc_PendingNotification(pendingNotif);
+    var charstring pendingNotifB64 := encode_base64(pendingNotifData);
+    
+    var JSON_ES9p_HandleNotification handleNotifReq := {
+        header := {
+            functionRequesterIdentifier := "TTCN3",
+            functionCallIdentifier := "testsuite"
+        },
+        pendingNotification := pendingNotifB64
+    };
+    
+    var JSON_ES9p_EmptyResponse emptyResp;
+    emptyResp := f_es9p_handleNotification(handleNotifReq);
+    
+    /* HandleNotification should return empty response with header */
+    if (ispresent(emptyResp.header)) {
+        if (ispresent(emptyResp.header.functionExecutionStatus)) {
+            if (ispresent(emptyResp.header.functionExecutionStatus.statusCodeData)) {
+                setverdict(fail, "HandleNotification failed with error: ", 
+                          emptyResp.header.functionExecutionStatus.statusCodeData.subjectCode, "/",
+                          emptyResp.header.functionExecutionStatus.statusCodeData.reasonCode);
+                return;
+            }
+        }
+        /* Success case - only header present without error */
+        ext_logInfo("HandleNotification successful");
+    } else {
+        setverdict(fail, "HandleNotification response missing header");
+    }
+}
+
+/* Helper function to create a ProfileInstallationResult */
+private function f_create_profile_installation_result(octetstring transactionId, 
+                                                    boolean success := true,
+                                                    template (omit) Iccid iccid_val := omit) 
+runs on smdpp_ConnHdlr return ProfileInstallationResult {
+    var NotificationMetadata notifMeta := {
+        seqNumber := 1,
+        profileManagementOperation := '00000001'B, /* notificationInstall - bit 0 set */
+        notificationAddress := g_pars_smdpp.smdp_server_url
+    };
+    
+    /* Add ICCID if provided */
+    if (ispresent(iccid_val)) {
+        notifMeta.iccid := valueof(iccid_val);
+    }
+    
+    var ProfileInstallationResultData pirData := {
+        transactionId := transactionId,
+        notificationMetadata := notifMeta,
+        smdpOid := objid { 2 999 10 } /* Test OID */
+    };
+    
+    /* Set result based on success flag */
+    if (success) {
+        pirData.finalResult := {
+            successResult := {
+                aid := 'A0000005591010FFFFFFFF8900001100'O, /* Test AID */
+                simaResponse := '9000'O /* Success response */
+            }
+        };
+    } else {
+        pirData.finalResult := {
+            errorResult := {
+                bppCommandId := 0, /* initialiseSecureChannel */
+                errorReason := 1, /* Test error */
+                simaResponse := '6A80'O /* Error response */
+            }
+        };
+    }
+    
+    /* For signing, we need to encode the ProfileInstallationResultData
+     * Since there's no direct encoder, we'll encode the full structure 
+     * and then extract the tagged data portion */
+    var ProfileInstallationResult temp_pir := {
+        profileInstallationResultData := pirData,
+        euiccSignPIR := ''O  /* Empty signature for encoding */
+    };
+    
+    /* Encode full structure to get properly tagged data */
+    var octetstring full_encoded := enc_ProfileInstallationResult(temp_pir);
+    
+    /* The structure is BF37[ProfileInstallationResultData, euiccSignPIR]
+     * We need to extract just the ProfileInstallationResultData part for signing
+     * For now, sign the complete ProfileInstallationResultData as it appears in the encoding */
+    /* TODO: This may need refinement based on exact signing requirements */
+    var octetstring euiccSignPIR := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, full_encoded);
+    
+    var ProfileInstallationResult pir := {
+        profileInstallationResultData := pirData,
+        euiccSignPIR := euiccSignPIR
+    };
+    
+    return pir;
 }
 
 
@@ -2662,6 +2820,88 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	setverdict(pass);
 }
 
+/* Test HandleNotification - Nominal case */
+private function f_TC_HandleNotification_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: HandleNotification - Nominal ===");
+	
+	/* Initialize RSP client */
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+	
+	/* Step 1: Complete a full RSP flow to have a valid transaction */
+	ext_logInfo("=== Step 1: InitiateAuthentication ===");
+	var RemoteProfileProvisioningRequest authRequest := f_create_initiate_authentication_request();
+	var RemoteProfileProvisioningResponse authResponse := f_es9p_transceive_success(authRequest);
+	
+	if (not f_validate_initiate_authentication_response(authResponse)) {
+		setverdict(fail, "InitiateAuthentication validation failed");
+		f_rsp_client_cleanup();
+		return;
+	}
+	
+	/* Extract transaction ID and server challenge */
+	g_transactionId := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.transactionId;
+	g_serverChallenge := authResponse.initiateAuthenticationResponse.initiateAuthenticationOk.serverSigned1.serverChallenge;
+	
+	ext_logInfo("=== Step 2: AuthenticateClient ===");
+	/* Prepare AuthenticateClient request */
+	var EUICCInfo2 euic2 := valueof(ts_EUICCInfo2);
+	euic2.euiccCiPKIdListForVerification := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	euic2.euiccCiPKIdListForSigning := {
+		ext_hexToBytes("F54172BDF98A95D65CBEB88A38A1C11D800A85C3"),
+		ext_hexToBytes("EE1F7178B70C23826CDCEA7BD28CEAB1874F552D")
+	};
+	
+	var CtxParams1 ctxpar := valueof(ts_ctxParams1);
+	ctxpar.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+	
+	var EuiccSigned1 euiccSig := {
+		transactionId := g_transactionId,
+		serverAddress := g_pars_smdpp.smdp_server_url,
+		serverChallenge := g_serverChallenge,
+		euiccInfo2 := euic2,
+		ctxParams1 := ctxpar
+	}
+	
+	var octetstring enc_euicc_tosign := enc_EuiccSigned1(euiccSig);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, enc_euicc_tosign);
+	var AuthenticateServerResponse authresp := {
+		authenticateResponseOk := {
+			euiccSigned1 := euiccSig,
+			euiccSignature1 := euiccSignature1,
+			euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
+			eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
+		}
+	}
+	
+	var RemoteProfileProvisioningRequest authClientReq := valueof(ts_authenticateClientRequest(
+		transactionId := g_transactionId, 
+		authenticateServerResponse := authresp
+	));
+	var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
+	var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
+	
+	ext_logInfo("=== Step 3: GetBoundProfilePackage ===");
+	var RemoteProfileProvisioningRequest packageRequest := f_create_get_bound_profile_package_request(authClientOk.smdpSignature2);
+	var RemoteProfileProvisioningResponse packageResponse := f_es9p_transceive_success(packageRequest);
+	
+	/* Step 4: Send ProfileInstallationResult notification */
+	ext_logInfo("=== Step 4: HandleNotification ===");
+	var Iccid testIccid := '8901000000123456789F'O;
+	var ProfileInstallationResult pir := f_create_profile_installation_result(g_transactionId, true, testIccid);
+	
+	f_handleNotification(oct2str(g_transactionId), pir);
+	
+	ext_logInfo("Test passed - HandleNotification nominal flow successful");
+	f_rsp_client_cleanup();
+	setverdict(pass);
+}
+
 /* ============================================================================
  * HELPER FUNCTIONS
  * ============================================================================ */
@@ -2858,6 +3098,19 @@ testcase TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST() runs on M
 	setverdict(pass);
 }
 
+/* HandleNotification Test Cases */
+
+testcase TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal() runs on MTC_CT {
+	var charstring id := testcasename();
+	var smdpp_ConnHdlrPars pars := f_init_pars();
+	var smdpp_ConnHdlr vc_conn;
+
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_HandleNotification_01_Nominal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute(TC_rsp_complete_flow());
 
@@ -2882,6 +3135,9 @@ control {
 	/* CancelSession Tests */
 	execute(TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST());
 	execute(TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST());
+	
+	/* HandleNotification Tests */
+	execute(TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal());
 }
 
 }

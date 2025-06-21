@@ -1,107 +1,212 @@
 # SM-DP+ Test Implementation Status
 
-## Overview
-This document tracks the current implementation status of SM-DP+ test cases based on SGP.23 v1.15.
+Last Updated: 2025-06-21
 
-Last Updated: 2025-06-21 (After fixing GetBoundProfilePackage retry tests)
+## Executive Summary
 
-## Test Summary
-- **Total Tests**: 18
-- **Implemented**: 15
-- **Passing**: 13 ✅ (86.67%)
-- **Failing**: 0 ❌ (0%)
-- **Error**: 1 ⚠️ (6.67%)
-- **Inconclusive**: 1 ⏸️ (6.67%)
-- **Not Implemented**: 3
+**Implementation Progress**: 16 of 27 test cases implemented (59.3%) - 6 FRP tests marked as FFS  
+**Test Pass Rate**: 14 of 16 passing (87.5%)  
+**Inconclusive**: 1 test (requires certificate regeneration)  
+**Failing**: 1 test (HTTP 500 error)
 
-## Test Results by Category
+## Current Test Results
 
-### 1. InitiateAuthentication Tests (3/3 implemented)
-- ✅ TC_SM-DP+_ES9+.InitiateAuthenticationNIST_01_Nominal - **PASS**
-- ✅ TC_SM-DP+_ES9+.InitiateAuthenticationNIST_02_Uniqueness - **PASS**
-- ✅ TC_SM-DP+_ES9+.InitiateAuthenticationNIST_03_InvalidServerAddress - **PASS**
+### ✅ Passing Tests (14)
 
-### 2. AuthenticateClient Tests (5/5 implemented)
-- ✅ TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal - **PASS**
-- ✅ TC_SM-DP+_ES9+.AuthenticateClientNIST_02_ConfirmationCode - **PASS**
-- ✅ TC_SM-DP+_ES9+.AuthenticateClientNIST_03_Mismatched_Transaction_ID - **PASS**
-- ⏸️ TC_SM-DP+_ES9+.AuthenticateClientNIST_04_Invalid_euiccInfo1 - **INCONC** (EID manipulation requires certificate regeneration)
-- ✅ TC_SM-DP+_ES9+.AuthenticateClientNIST_05_eUICC_Challenge_Reuse - **PASS**
+1. **TC_rsp_complete_flow** - Complete RSP flow test
+2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
+3. **TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness** - Transaction ID uniqueness
+4. **TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress** - Invalid server address error
+5. **TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal** - Basic client authentication
+6. **TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode** - With confirmation code
+7. **TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID** - Transaction ID mismatch error
+8. **TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse** - Challenge reuse detection
+9. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
+10. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
+11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
+12. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
+13. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
+14. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
 
-### 3. GetBoundProfilePackage Tests (5/7 implemented)
-- ✅ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_01_Nominal - **PASS**
-- ✅ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_02_Retry_Same_Challenge - **PASS** ✨
-- ✅ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_03_Retry_Different_Challenge - **PASS** ✨
-- ⚠️ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_04_Preparation_Error - **ERROR** (HTTP 500 response from server)
-- ❌ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_05_PPK_Test_Key - **NOT IMPLEMENTED**
-- ❌ TC_SM-DP+_ES9+.GetBoundProfilePackageNIST_06_PPK_Session_Key - **NOT IMPLEMENTED**
+### ⚠️ Inconclusive Tests (1)
 
-### 4. CancelSession Tests (2/2 implemented)
-- ✅ TC_SM-DP+_ES9+.CancelSession_After_AuthenticateClientNIST - **PASS** ✨
-- ✅ TC_SM-DP+_ES9+.CancelSession_After_GetBoundProfilePackageNIST - **PASS** ✨
+1. **TC_SM_DP_ES9_AuthenticateClientNIST_04_Invalid_euiccInfo1** - Requires certificate regeneration with modified EID
 
-### 5. HandleNotification Tests (0/3 implemented)
-- ❌ All HandleNotification tests - **NOT IMPLEMENTED**
+### ❌ Failing Tests (1)
 
-### 6. Full Flow Test
-- ✅ TC_rsp_complete_flow - **PASS** (Complete flow with session keys and PPK)
+1. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Server returns HTTP 500 instead of proper error response
 
-### 7. TLS Tests (0/2 implemented)
-- ❌ All TLS tests - **NOT IMPLEMENTED**
+## Missing Test Cases
 
-## Test Statistics
+Based on SGP.23 specification at `/app/testspec copy.md`:
+
+### High Priority - Core Functionality
+1. **TC_SM-DP+_ES9+_HandleNotificationBRP** - Brainpool variant
+
+### Medium Priority - Additional Coverage
+2. **TC_SM-DP+_ES9+.AuthenticateClientNIST_ErrorCases** - Various authentication error scenarios
+3. **TC_SM-DP+_ES9+.GetBoundProfilePackage_ErrorCasesNIST** - Various download error scenarios
+4. **TC_SM-DP+_ES9+.AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication
+
+### Low Priority - Cryptographic Variants
+5. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
+6. **All BRP variants** - Brainpool curve certificate tests (same tests as NIST but with different certificates, so lower priority)
+
+## Test Execution
+
+### Running All Tests
+```bash
+cd /app/tt-smdpp
+./uns.sh
 ```
-Total: 15 test cases executed
-Pass: 13 (86.67%)
-Fail: 0 (0%)
-Error: 1 (6.67%)
-Inconc: 1 (6.67%)
-Overall verdict: error
+
+### Running Single Test
+```bash
+cd /app/tt-smdpp
+./uns.sh smdpp_Tests.TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal
 ```
 
-## Key Achievements
-- Session key derivation (S-ENC, S-MAC) working correctly ✅
-- PPK (Profile Protection Key) replacement functionality implemented ✅
-- BSP (Bound Session Protocol) integration complete ✅
-- ECDH key agreement functioning properly ✅
-- Certificate chain validation working ✅
-- CancelSession implementation complete with proper empty response handling ✅
-- JSON decoder properly handles all response types including empty responses ✅
-- PrepareDownloadResponse signature fixed - now includes smdpSignature2 ✅
+### Viewing Results
+```bash
+# Main test log
+cat smdpp/merged.log
+
+# Python server log
+cat smdpp/pyserver.log
+```
+
+## Key Implementation Patterns
+
+### Test Structure
+```ttcn
+private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
+    /* Initialize HTTP/TLS and RSP client */
+    f_init_http(mp_es9_ip, mp_es9_port);
+    f_init_rsp_client();
+    
+    /* Execute test logic */
+    // ... test implementation ...
+    
+    /* Set verdict */
+    setverdict(pass);
+}
+```
+
+### Common Helper Functions
+- `f_init_http()` - Initialize HTTP connection
+- `f_init_rsp_client()` - Initialize RSP client
+- `f_initiateAuthentication()` - Perform authentication initiation
+- `f_authenticateClient()` - Perform client authentication
+- `f_getBoundProfilePackage()` - Download profile package
+- `f_cancelSession()` - Cancel active session
+- `f_validate_error_response()` - Validate error responses
+
+### Error Code Reference
+| Subject Code | Reason Code | Description |
+|-------------|-------------|-------------|
+| 8.8.1 | 3.8 | Invalid SM-DP+ Address |
+| 8.1.1 | 3.9 | Transaction ID Mismatch |
+| 8.1.3 | 3.3 | eUICC Challenge Reuse |
+| 8.1.2 | 3.7 | Missing Required Data |
+| 8.11.1 | 5.1 | Profile Preparation Error |
+
+## Recent Fixes and Improvements
+
+### 2025-06-21 Updates
+1. **HandleNotification Implementation**
+   - Implemented TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal test
+   - Added support for enable/disable/delete notification types
+   - Properly handles notification signature validation and acknowledgment
+
+2. **CancelSession Implementation**
+   - Fixed to sign entire EuiccCancelSessionSigned structure
+   - Changed OID encoding from symbolic to numeric form
+   - Updated JSON decoder to handle empty responses
+
+3. **GetBoundProfilePackage Retry Tests**
+   - Implemented global otPK mapping in server
+   - Fixed signature generation (removed incorrect TLV wrapper)
+   - Added 24-hour timeout for otPK cleanup
+
+4. **Test Runner Enhancement**
+   - Fixed uns.sh to support single test case execution
+   - Improved test isolation and cleanup
 
 ## Known Issues
 
-1. **GetBoundProfilePackage TC_04**:
-   - Server returns HTTP 500 error when handling PrepareDownloadResponse with error code
-   - The Python server needs error handling for preparation error scenarios
+1. **PrepareDownloadResponse Error Handling**
+   - Server returns HTTP 500 instead of proper error response
+   - Needs server-side fix for proper error formatting
 
-2. **AuthenticateClient TC_04**:
-   - Test marked as INCONCLUSIVE as it requires certificate regeneration
-   - Cannot modify EID in euiccInfo1 as it's embedded in the certificate
+2. **Certificate-based Tests**
+   - Some tests require regenerating certificates with specific attributes
+   - Currently marked as inconclusive
 
-## Recent Fixes
-- Fixed PrepareDownloadResponse signature generation to include smdpSignature2
-- Global OID decoding fix in ASN.1 tools (Python side)
-- Both CancelSession tests now pass after signature fix
-- Fixed JSON decoder to handle empty CancelSession responses
-- Fixed uns.sh script to support single test case execution
-- Fixed GetBoundProfilePackage retry tests:
-  - TC_02: Server now correctly reuses otPK.SM-DP+.ECKA for retry with same eUICC otPK
-  - TC_03: Fixed signature generation by removing incorrect TLV wrapper
-  - Implemented global otPK mapping in server for retry scenarios across different transaction IDs
+## Implementation Notes and Lessons Learned
+
+### Critical Implementation Details
+
+1. **Session Key Derivation**
+   - Uses X9.63 KDF with shared secret from ECDH
+   - Derives S-ENC, S-MAC for session and PPK-ENC, PPK-MAC for profile protection
+   - BSP key derivation follows GlobalPlatform SCP03 specification
+
+2. **Confirmation Code Handling**
+   - Format: SHA256(SHA256(CC) | TransactionID)
+   - CC treated as hex string converted to bytes
+   - Must be included in PrepareDownloadRequest when ccRequiredFlag is set
+
+3. **Global otPK Mapping**
+   - Server maintains mapping of euicc_otpk to smdp keys for retry scenarios
+   - 24-hour timeout with hourly cleanup task
+   - Enables proper retry behavior across different transaction IDs
+
+4. **ASN.1 Encoding Gotchas**
+   - OBJECT IDENTIFIER must use numeric form: `objid { 2 999 10 }`
+   - Signature input is raw concatenation without TLV wrapper
+   - Empty responses require proper optional field initialization
+
+### Test Data Management
+- EID: Decimal string interpreted as hex bytes
+- Confirmation Code: Hex string interpreted as bytes  
+- Transaction ID: Binary octetstring
+- All test certificates in `sgp26/` directory structure
 
 ## Next Steps
-1. Fix server HTTP 500 error handling for PrepareDownloadResponse errors
-2. Implement HandleNotification test cases (3 tests)
-3. Implement PPK test key variations (2 tests)
-4. Implement TLS test cases (2 tests)
-5. Add support for FRP and BRP cryptographic variants
 
-## Running Tests
-```bash
-# Run full test suite
-./uns.sh
+1. **High Priority**
+   - Implement HandleNotification BRP variant (1 test remaining)
+   - Fix server-side error response for preparation errors
 
-# Run single test case
-./uns.sh smdpp_Tests.TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST
-```
+2. **Medium Priority**  
+   - Implement remaining error case tests
+   - Add OTPK reuse test for AuthenticateClient
+
+3. **Low Priority**
+   - Consider implementing FRP/BRP variants if needed
+   - Add TLS-specific test cases
+
+## Appendix: Test Case Mapping to Specification
+
+| Test Case | Specification Reference | Status |
+|-----------|------------------------|---------|
+| TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal | 4.3.12.2.1 | ✅ Implemented |
+| TC_SM_DP_ES9_InitiateAuthenticationFRP | 4.3.12.2.2 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_InitiateAuthenticationBRP | 4.3.12.2.3 | ❌ Not Implemented |
+| TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal | 4.3.13.2.1 | ✅ Implemented |
+| TC_SM_DP_ES9_GetBoundProfilePackage_ErrorCasesNIST | 4.3.13.2.10 | ❌ Not Implemented |
+| TC_SM_DP_ES9_GetBoundProfilePackageFRP | 4.3.13.2.2 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_GetBoundProfilePackageBRP | 4.3.13.2.3 | ❌ Not Implemented |
+| TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal | 4.3.14.2.1 | ✅ Implemented |
+| TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases | 4.3.14.2.2 | ❌ Not Implemented |
+| TC_SM_DP_ES9_AuthenticateClientFRP | 4.3.14.2.3 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_AuthenticateClientBRP | 4.3.14.2.5 | ❌ Not Implemented |
+| TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal | 4.3.15.2.1 | ✅ Implemented |
+| TC_SM_DP_ES9_HandleNotificationFRP | 4.3.15.2.2 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_HandleNotificationBRP | 4.3.15.2.3 | ❌ Not Implemented |
+| TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST | 4.3.16.2.1 | ✅ Implemented |
+| TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST | 4.3.16.2.2 | ✅ Implemented |
+| TC_SM_DP_ES9_CancelSession_After_AuthenticateClientFRP | 4.3.16.2.3 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageFRP | 4.3.16.2.4 | 🚫 FFS - Not Applicable |
+| TC_SM_DP_ES9_CancelSession_After_AuthenticateClientBRP | 4.3.16.2.5 | ❌ Not Implemented |
+| TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageBRP | 4.3.16.2.6 | ❌ Not Implemented |

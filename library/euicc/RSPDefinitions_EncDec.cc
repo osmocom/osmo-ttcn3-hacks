@@ -380,4 +380,21 @@ EuiccCancelSessionSigned dec__EuiccCancelSessionSigned(const OCTETSTRING &stream
 	return msg;
 }
 
+OCTETSTRING enc__OtherSignedNotification(const OtherSignedNotification &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(OtherSignedNotification_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+OtherSignedNotification dec__OtherSignedNotification(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	OtherSignedNotification msg;
+	buf.put_os(stream);
+
+	msg.decode(OtherSignedNotification_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 }
