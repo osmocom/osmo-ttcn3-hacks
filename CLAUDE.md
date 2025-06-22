@@ -345,3 +345,11 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 
 ### MCP and LSP Global Effects
 - keep in mind that the mcp is the same for all languages, only the lsp behind it is different, so if you change it and then try to investigate a different language and the mcp behaves weird or unexpected it might be caused by your changes that had a global effect
+
+### Workers and Task Handling
+- Prefer parallel worker thingies if the problem is appropriate,  that means if the task is not too complicated.
+- You MUST use worker thingies to look at compiler output, log output, or test output, because it is a lot of data.
+- The only exception is that there must be a very good reason why you need to look at it yourself.
+
+### MCP Usage Guidelines
+- **make sure to prefer using the existing mcps that are available**
