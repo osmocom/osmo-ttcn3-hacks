@@ -1680,7 +1680,7 @@ public:
         // Map curve name to NID
         std::string curve_str(curve_name);
         int curve_nid;
-        
+
         if (curve_str == "prime256v1" || curve_str == "P-256") {
             curve_nid = NID_X9_62_prime256v1;
         } else if (curve_str == "brainpoolP256r1") {
@@ -1699,7 +1699,7 @@ public:
         }
 
         int curve_nid = getCertificateCurveNID(m_euiccCert.get());
-        
+
         if (curve_nid == NID_X9_62_prime256v1) {
             LOG_INFO("eUICC certificate uses P-256 curve");
         } else if (curve_nid == NID_brainpoolP256r1) {
@@ -2052,7 +2052,7 @@ private:
             }
 
             auto ski = CertificateUtil::getSubjectKeyIdentifier(scertdata);
-            LOG_INFO("----------- using cert with this SKI to verify sig: " + HexUtil::bytesToHex(ski));
+            LOG_DEBUG(" using cert with this SKI to verify sig: " + HexUtil::bytesToHex(ski));
 
             auto verifyResult = CertificateUtil::verify_TR031111(
                 signedData, std::vector<unsigned char>(signatureData, signatureData + signatureLen),
