@@ -1,58 +1,119 @@
 # SM-DP+ Test Implementation Status
 
-Last Updated: 2025-06-21
+Last Updated: 2025-06-23
 
 ## Executive Summary
 
-**Implementation Progress**: 23 of 27 test cases implemented (85.2%) - 6 FRP tests marked as FFS  
-**Test Pass Rate**: 22 of 23 passing (95.7%)  
+**Total Test Sequences in Spec**: ~90 test sequences across all test cases  
+**Implementation Progress**: ~35-40 sequences implemented (~40-45%)  
+**Test Pass Rate**: 28 of 29 implemented tests passing (96.6%)  
 **Inconclusive**: 1 test (requires certificate regeneration)  
 **Failing**: 0 tests
 
+Note: Previous count of "23 of 27" only considered main test cases, not individual test sequences within each case.
+
 ## Current Test Results
 
-### ✅ Passing Tests (22)
+### ✅ Passing Tests (28)
 
-1. **TC_rsp_complete_flow** - Complete RSP flow test
-2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
-3. **TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness** - Transaction ID uniqueness
-4. **TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress** - Invalid server address error
-5. **TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal** - Basic client authentication
-6. **TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode** - With confirmation code
-7. **TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID** - Transaction ID mismatch error
-8. **TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse** - Challenge reuse detection
-9. **TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases** - Consolidated error case testing (4 scenarios)
-10. **TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication retry scenarios
-11. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
-12. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
-13. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
-14. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases** - Consolidated error case testing (3 scenarios)
-15. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
-16. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
-17. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
-18. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Profile preparation error handling
-19. **TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal** - Basic authentication initiation (BRP variant)
-20. **TC_SM_DP_ES9_AuthenticateClientBRP_01_Nominal** - Basic client authentication (BRP variant)
-21. **TC_SM_DP_ES9_GetBoundProfilePackageBRP_01_Nominal** - Basic profile download (BRP variant)
-22. **TC_rsp_complete_flow_BRP** - Complete RSP flow test (BRP variant)
+#### InitiateAuthentication Tests (9 of 9 sequences implemented)
+1. **TC_SM_DP_ES9_InitiateAuthenticationNIST_01_Nominal** - Basic authentication initiation
+2. **TC_SM_DP_ES9_InitiateAuthenticationNIST_02_Uniqueness** - Transaction ID uniqueness
+3. **TC_SM_DP_ES9_InitiateAuthenticationNIST_03_InvalidServerAddress** - Invalid server address error
+4. **TC_SM_DP_ES9_InitiateAuthenticationNIST_04_UnsupportedPKID** - Unsupported Public Key Identifiers error
+5. **TC_SM_DP_ES9_InitiateAuthenticationNIST_05_UnsupportedVersion** - Unsupported specification version error
+6. **TC_SM_DP_ES9_InitiateAuthenticationNIST_06_UnavailableServerAuthCert** - Unavailable server auth certificate error*
+7. **TC_SM_DP_ES9_InitiateAuthenticationNIST_07_Nominal_v221** - Nominal with eUICC v2.2.1
+8. **TC_SM_DP_ES9_InitiateAuthenticationNIST_08_Nominal_v222** - Nominal with eUICC v2.2.2
+9. **TC_SM_DP_ES9_InitiateAuthenticationNIST_09_Nominal_v230** - Nominal with eUICC v2.3.0
+10. **TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal** - Basic authentication initiation (BRP variant)
+
+*Note: Test #06 accepts both error codes 8.8.2/3.1 and 8.8.4/3.7 due to conceptual issue in test design
+
+#### AuthenticateClient Tests (~7 of 21+ sequences implemented)
+11. **TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal** - Basic client authentication
+12. **TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode** - With confirmation code
+13. **TC_SM_DP_ES9_AuthenticateClientNIST_03_Mismatched_Transaction_ID** - Transaction ID mismatch error
+14. **TC_SM_DP_ES9_AuthenticateClientNIST_05_eUICC_Challenge_Reuse** - Challenge reuse detection
+15. **TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases** - Consolidated error case testing (4 scenarios)
+16. **TC_SM_DP_ES9_AuthenticateClient_RetryCases_Reuse_OTPK** - OTPK reuse in authentication retry scenarios
+17. **TC_SM_DP_ES9_AuthenticateClientBRP_01_Nominal** - Basic client authentication (BRP variant)
+
+#### GetBoundProfilePackage Tests (~6 of 20+ sequences implemented)
+18. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_01_Nominal** - Basic profile download
+19. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_02_Retry_Same_Challenge** - Retry with same challenge
+20. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge** - Retry with different challenge
+21. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error** - Profile preparation error handling
+22. **TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases** - Consolidated error case testing (3 scenarios)
+23. **TC_SM_DP_ES9_GetBoundProfilePackageBRP_01_Nominal** - Basic profile download (BRP variant)
+
+#### HandleNotification Tests (1 of 18 sequences implemented)
+24. **TC_SM_DP_ES9_HandleNotificationNIST_01_Nominal** - Profile enable/disable/delete notifications
+
+#### CancelSession Tests (2 of 20 sequences implemented)
+25. **TC_SM_DP_ES9_CancelSession_After_AuthenticateClientNIST** - Cancel after authentication
+26. **TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageNIST** - Cancel after profile download
+
+#### Complete Flow Tests
+27. **TC_rsp_complete_flow** - Complete RSP flow test
+28. **TC_rsp_complete_flow_BRP** - Complete RSP flow test (BRP variant)
 
 ### ⚠️ Inconclusive Tests (1)
 
 1. **TC_SM_DP_ES9_AuthenticateClientNIST_04_Invalid_euiccInfo1** - Requires certificate regeneration with modified EID
 
-## Missing Test Cases
+## Missing Test Sequences - Detailed Breakdown
 
-Based on SGP.23 specification at `/app/testspec copy.md`:
+Based on comprehensive analysis of SGP.23 specification:
 
-### High Priority - Core Functionality
-1. **TC_SM-DP+_ES9+_HandleNotificationBRP** - Brainpool variant
+### InitiateAuthentication (100% Complete - 9/9 sequences)
+✅ All test sequences implemented
 
-### Medium Priority - Additional Coverage
-None remaining - all medium priority tests have been implemented
+### AuthenticateClient (~33% Complete - ~7/21+ sequences)
+Missing sequences:
+- Test Sequences #03-21: Various SM-DS use cases, Activation Code use cases, and MatchingId variations
+- Most of the 21 error test sequences (only 4 implemented via consolidated test)
 
-### Low Priority - Cryptographic Variants
-2. **All FRP variants** - Marked as FFS (For Further Study) - not applicable for this version
-3. **Remaining BRP variants** - CancelSession BRP tests
+### GetBoundProfilePackage (~30% Complete - ~6/20+ sequences)
+Missing sequences:
+- Test Sequence #02: Using S-ENC and S-MAC with Confirmation Code
+- Test Sequence #03: Using PPK-ENC and PPK-MAC without Confirmation Code
+- Test Sequence #04: Using PPK-ENC and PPK-MAC with Confirmation Code
+- Test Sequence #05: Using S-ENC and S-MAC with Metadata split over 2 segments without CC
+- Test Sequence #06: Using PPK-ENC and PPK-MAC with Metadata split over 2 segments without CC
+- Most retry scenarios with PPK encryption
+- Error: Missing Confirmation Code (8.2.7/2.2)
+- Error: Refused Confirmation Code (8.2.7/3.8)
+
+### HandleNotification (6% Complete - 1/18 sequences)
+Missing sequences:
+- Test Sequence #02: Successful PIR, no install OtherSignedNotification and then Enable OtherSignedNotification
+- Test Sequences #03-18: Various PIR error scenarios including:
+  - Invalid Transaction ID
+  - PIR Error Reasons (incorrect input, invalid signature, unsupported values, etc.)
+  - Installation failures (ICCID exists, insufficient memory, interruption, etc.)
+- BRP variant
+
+### CancelSession (10% Complete - 2/20 sequences)
+Missing sequences:
+- Test Sequences #01-09 for CancelSession_After_AuthenticateClient (various cancellation reasons)
+- Test Sequences #01-11 for CancelSession_After_GetBoundProfilePackage (various cancellation reasons)
+- BRP variants for all CancelSession tests
+
+### TLS Server Authentication (0% Complete - 0/2 tests)
+- TC_SM-DP+_ES9+_Server_Authentication_for_HTTPS_EstablishmentNIST
+- TC_SM-DP+_ES9+_Server_Authentication_for_HTTPS_EstablishmentBRP
+
+## Key Implementation Gaps
+
+1. **PPK (Profile Protection Key) scenarios** - No tests with PPK-ENC/PPK-MAC implemented
+2. **Metadata segmentation** - No tests for profile metadata split across segments
+3. **Confirmation Code variations** - Limited CC test coverage
+4. **Error scenarios** - Most error test sequences not implemented
+5. **Retry scenarios** - Limited retry test coverage
+6. **SM-DS integration** - No SM-DS use case tests
+7. **Activation Code flows** - No activation code tests
+8. **TLS-specific tests** - No TLS authentication tests
 
 ## Test Execution
 
@@ -115,12 +176,30 @@ private function f_TC_TestName(charstring id) runs on smdpp_ConnHdlr {
 | Subject Code | Reason Code | Description |
 |-------------|-------------|-------------|
 | 8.8.1 | 3.8 | Invalid SM-DP+ Address |
+| 8.8.2 | 3.1 | None of the proposed Public Key Identifiers is supported by the SM-DP+ |
+| 8.8.3 | 3.1 | The Specification Version Number indicated by the eUICC is not supported by the SM-DP+ |
+| 8.8.4 | 3.7 | The SM-DP+ has no CERT.DPauth.SIG which chains to one of the CIs supported by the eUICC |
 | 8.1.1 | 3.9 | Transaction ID Mismatch |
 | 8.1.3 | 3.3 | eUICC Challenge Reuse |
 | 8.1.2 | 3.7 | Missing Required Data |
 | 8.11.1 | 5.1 | Profile Preparation Error |
 
 ## Recent Fixes and Improvements
+
+### 2025-06-23 Updates
+1. **InitiateAuthentication Test Completion**
+   - Implemented all 6 missing test sequences (#04-#09)
+   - Added error tests for unsupported PKIDs, unsupported specification versions
+   - Added nominal tests for different eUICC versions (v2.2.1, v2.2.2, v2.3.0)
+   - Fixed Python server to properly validate specification versions
+   - Fixed PKID validation order (signing PKIDs checked before verification PKIDs)
+   - Added note to test #06 explaining error code discrepancy
+
+2. **Comprehensive Test Analysis**
+   - Discovered that only ~40-45% of total test sequences are implemented
+   - Previous metrics counted main test cases, not individual sequences
+   - Created detailed breakdown of missing sequences by test category
+   - Merged TEST_IMPLEMENTATION_STATUS.md with MISSING_TEST_SEQUENCES.md
 
 ### 2025-06-21 Updates
 1. **HandleNotification Implementation**
