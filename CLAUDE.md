@@ -353,3 +353,6 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 
 ### MCP Usage Guidelines
 - **make sure to prefer using the existing mcps that are available**
+
+### Environment Sourcing
+- **you must source /app/env.sh to be able to use the ttcn3 compiler**

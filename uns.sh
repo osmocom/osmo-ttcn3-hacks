@@ -1,7 +1,5 @@
 #!/bin/bash
 
-export TTCN3_DIR="/usr"
-
 WHCIHT="smdpp"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PYSRVPATH=$(realpath ${SCRIPT_DIR}/../pysim)
@@ -34,7 +32,7 @@ CMDSTR+="../start-testsuite.sh ${WHCIHT}_Tests ${WHCIHT}_Tests.cfg ${TEST_CASE} 
 CMDSTR+="kill \$(cat ${TESTP}/_nist_pid 2>/dev/null) 2>/dev/null; kill \$(cat ${TESTP}/_brp_pid 2>/dev/null) 2>/dev/null;"
 CMDSTR+="ttcn3_logmerge smdp*log | grep "${QVARS}" > ${TESTP}/_merged.log;"
 #CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; rm ${TESTP}/_merged.log; sleep 2"
-CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; find ${TESTP} -iname '*log' -not -name 'merged.log' -and -not -iname '*pyserver*.log' | xargs -n1 rm; sleep 1;"
+CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; find ${TESTP} -iname '*log' -not -name 'merged.log' -and -not -iname '*pyserver*.log' | xargs -n1 rm; rm ./*stderr; sleep 1;"
 # Merge both server logs
 CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_nist.log > ${TESTP}/pyserver_nist.log 2>/dev/null || true;"
 CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_brp.log > ${TESTP}/pyserver_brp.log 2>/dev/null || true;"
