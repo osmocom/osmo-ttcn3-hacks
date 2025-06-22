@@ -72,7 +72,8 @@ if [ "x$USE_CCACHE" = "x1" ]; then
 	sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -D/' Makefile
 fi
 
-sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q -V 0 -n/' Makefile
+#COMPILER_FLAGS = -L  -w
+sed -i -e 's/^COMPILER_FLAGS = \(.*\)/& -q -V 0/' Makefile
 sed -i 's/@echo Creating dependency file for '\''$<'\''; /@/' Makefile
 sed -i 's/if $(CXX) $(LDFLAGS)/@if $(CXX) $(LDFLAGS)/g' Makefile
 sed -i 's/-$(RM)/-@$(RM)/g' Makefile
