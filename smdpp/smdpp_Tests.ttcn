@@ -1352,42 +1352,35 @@ function f_TC_InitiateAuth_03_InvalidServerAddress(charstring id) runs on smdpp_
 	setverdict(pass);
 }
 
-/* Test Cases for AuthenticateClient Operation */
+/* Helper functions for AuthenticateClient tests */
 
-// TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal
-function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
-	ext_logInfo("=== Test Case: AuthenticateClient - Nominal ===");
-
-	if (not f_rsp_client_init()) {
-		setverdict(fail, "RSP client initialization failed");
-		return;
-	}
-
-	/* Step 1: InitiateAuthentication */
+// Helper function to perform InitiateAuthentication and return server challenge
+function f_performInitiateAuthentication() runs on smdpp_ConnHdlr return octetstring {
 	ext_logInfo("Step 1: InitiateAuthentication");
 	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-
+	
 	if (not f_validate_initiate_authentication_response(initResp)) {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
-		return;
+		f_shutdown(__FILE__, __LINE__);
 	}
-
+	
 	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
 	g_transactionId := authOk.transactionId;
-	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
+	return authOk.serverSigned1.serverChallenge;
+}
 
-	/* Step 2: AuthenticateClient */
-	ext_logInfo("Step 2: AuthenticateClient");
-
+// Helper function to build AuthenticateClient request with optional matching ID
+function f_buildAuthenticateClientRequest(octetstring serverChallenge, charstring matchingId := "TS48v4_SAIP2.3_BERTLV") 
+runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
 	euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
-
+	
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-
+	ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
+	
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := g_transactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1395,16 +1388,16 @@ function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp_ConnHdl
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-
+	
 	/* Sign the data */
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
+	
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-	var RemoteProfileProvisioningRequest authReq := {
+	
+	return {
 		authenticateClientRequest := {
 			transactionId := g_transactionId,
 			authenticateServerResponse := {
@@ -1417,19 +1410,41 @@ function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp_ConnHdl
 			}
 		}
 	};
+}
 
-	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
-	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
-
-	/* Validate response */
+// Helper function to validate AuthenticateClient response
+function f_validateAuthenticateClientResponse(AuthenticateClientOk authClientOk) runs on smdpp_ConnHdlr {
 	if (authClientOk.transactionId != g_transactionId) {
 		setverdict(fail, "Transaction ID mismatch in response");
 		f_shutdown(__FILE__, __LINE__);
 	}
+}
+
+/* Test Cases for AuthenticateClient Operation */
+
+// TC_SM-DP+_ES9+.AuthenticateClientNIST_01_Nominal
+function f_TC_AuthenticateClient_01_Nominal(charstring id) runs on smdpp_ConnHdlr {
+	ext_logInfo("=== Test Case: AuthenticateClient - Nominal ===");
+
+	if (not f_rsp_client_init()) {
+		setverdict(fail, "RSP client initialization failed");
+		return;
+	}
+
+	/* Step 1: InitiateAuthentication */
+	var octetstring serverChallenge := f_performInitiateAuthentication();
+
+	/* Step 2: AuthenticateClient */
+	ext_logInfo("Step 2: AuthenticateClient");
+	var RemoteProfileProvisioningRequest authReq := f_buildAuthenticateClientRequest(serverChallenge);
+	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+	/* Validate response */
+	f_validateAuthenticateClientResponse(authClientOk);
 
 	/* Check ccRequiredFlag (should be false for nominal test) */
-	var SmdpSigned2 smdpSigned2 := authClientOk.smdpSigned2;
-	if (smdpSigned2.ccRequiredFlag) {
+	if (authClientOk.smdpSigned2.ccRequiredFlag) {
 		setverdict(fail, "Unexpected ccRequiredFlag set for nominal test");
 		f_shutdown(__FILE__, __LINE__);
 	}
@@ -1449,69 +1464,16 @@ function f_TC_AuthenticateClient_02_ConfirmationCode(charstring id) runs on smdp
 	}
 
 	/* Step 1: InitiateAuthentication */
-	ext_logInfo("Step 1: InitiateAuthentication");
-	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-
-	if (not f_validate_initiate_authentication_response(initResp)) {
-		setverdict(fail, "InitiateAuthentication validation failed");
-		f_rsp_client_cleanup();
-		return;
-	}
-
-	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
-	g_transactionId := authOk.transactionId;
-	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
+	var octetstring serverChallenge := f_performInitiateAuthentication();
 
 	/* Step 2: AuthenticateClient (expecting ccRequiredFlag) */
 	ext_logInfo("Step 2: AuthenticateClient with CC_REQUIRED_TEST matchingId");
-
-	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-	euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
-	euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
-
-	/* Use special matchingId that triggers confirmation code requirement */
-	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-	ctxParams.ctxParamsForCommonAuthentication.matchingId := "CC_REQUIRED_TEST";
-
-	var EuiccSigned1 euiccSigned1 := {
-		transactionId := g_transactionId,
-		serverAddress := g_pars_smdpp.smdp_server_url,
-		serverChallenge := serverChallenge,
-		euiccInfo2 := euiccInfo2,
-		ctxParams1 := ctxParams
-	};
-
-	/* Sign the data */
-	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-	/* Get certificates from RSP client */
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-	var RemoteProfileProvisioningRequest authReq := {
-		authenticateClientRequest := {
-			transactionId := g_transactionId,
-			authenticateServerResponse := {
-				authenticateResponseOk := {
-					euiccSigned1 := euiccSigned1,
-					euiccSignature1 := euiccSignature1,
-					euiccCertificate := g_euicc_cert,
-					eumCertificate := g_eum_cert
-				}
-			}
-		}
-	};
-
+	var RemoteProfileProvisioningRequest authReq := f_buildAuthenticateClientRequest(serverChallenge, "CC_REQUIRED_TEST");
 	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
 	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
 
 	/* Validate response */
-	if (authClientOk.transactionId != g_transactionId) {
-		setverdict(fail, "Transaction ID mismatch in response");
-		f_shutdown(__FILE__, __LINE__);
-	}
+	f_validateAuthenticateClientResponse(authClientOk);
 
 	/* Check ccRequiredFlag (should be true for this test) */
 	if (not authClientOk.smdpSigned2.ccRequiredFlag) {
