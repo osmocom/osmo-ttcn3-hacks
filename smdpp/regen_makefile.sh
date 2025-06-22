@@ -18,7 +18,7 @@ FILES="
 	PIPEasp_PT.cc
 	smdpp_Tests_Functions.cc
 "
-../regen-makefile.sh smdpp_Tests_Refactored.ttcn $FILES
+../regen-makefile.sh smdpp_Tests.ttcn $FILES
 
 # required for forkpty(3) used by PIPEasp
 #sed -i -e '/^LINUX_LIBS/ s/$/ -lcjson -lutil -lssl -lcrypto -lcurl/' Makefile
