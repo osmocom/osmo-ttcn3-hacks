@@ -337,3 +337,8 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 - Always run make clean first, there is no point running into the usual arcane debugger error all the time.
 ### Specification File Location
 - the full specification is available at `/app/sgp22_2.5.md` WARNING it is a very large file you must be selective when reading it
+### MCP Restart Guidelines
+- **you can't actually restart the mcp, you MUST tell the user to please restart it.**
+
+### dir change
+- cd to dirs might not work, try to use pushd and popd
