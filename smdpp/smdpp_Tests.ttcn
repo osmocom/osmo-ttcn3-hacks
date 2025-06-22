@@ -2485,6 +2485,51 @@ function f_authenticateClient(InitiateAuthenticationOkEs9 initAuthOk) runs on sm
     return authClientOk;
 }
 
+/* Helper function to perform AuthenticateClient with custom matching ID */
+function f_authenticateClient_withMatchingId(InitiateAuthenticationOkEs9 initAuthOk, charstring matchingId) runs on smdpp_ConnHdlr return AuthenticateClientOk {
+    /* Create EUICCInfo2 with PKIDs */
+    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+    euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
+    euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
+
+    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
+
+    var EuiccSigned1 euiccSigned1 := {
+        transactionId := g_transactionId,
+        serverAddress := g_pars_smdpp.smdp_server_url,
+        serverChallenge := g_serverChallenge,
+        euiccInfo2 := euiccInfo2,
+        ctxParams1 := ctxParams
+    };
+
+    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+
+    /* Get certificates from RSP client */
+    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
+    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+
+    var RemoteProfileProvisioningRequest authReq := {
+        authenticateClientRequest := {
+            transactionId := g_transactionId,
+            authenticateServerResponse := {
+                authenticateResponseOk := {
+                    euiccSigned1 := euiccSigned1,
+                    euiccSignature1 := euiccSignature1,
+                    euiccCertificate := g_euicc_cert,
+                    eumCertificate := g_eum_cert
+                }
+            }
+        }
+    };
+
+    var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+    var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+
+    return authClientOk;
+}
+
 /* Helper function to perform CancelSession */
 function f_cancelSession(octetstring transactionId, objid smdpOid) runs on smdpp_ConnHdlr {
     var CancelSessionResponse cancelResp := {
@@ -2643,9 +2688,8 @@ function f_TC_GetBoundProfilePackage_Error_Generic(
     /* Step 2: AuthenticateClient with ccRequiredFlag if needed */
     var AuthenticateClientOk authClientOk;
     if (cc_required) {
-        /* For confirmation code tests, we need to trigger ccRequiredFlag */
-        /* This would require server support - for now we just proceed normally */
-        authClientOk := f_authenticateClient(initAuthOk);
+        /* Use special matching ID to trigger ccRequiredFlag on server */
+        authClientOk := f_authenticateClient_withMatchingId(initAuthOk, "CC_REQUIRED_TEST");
     } else {
         authClientOk := f_authenticateClient(initAuthOk);
     }
@@ -2660,6 +2704,20 @@ function f_TC_GetBoundProfilePackage_Error_Generic(
         euiccOtpk := euicc_otpk,
         hashCc := omit  /* Default: no confirmation code */
     };
+
+    /* Check if server requires confirmation code */
+    var boolean server_requires_cc := authClientOk.smdpSigned2.ccRequiredFlag;
+
+    /* If server requires CC and no cc_error injection, compute valid hash */
+    if (server_requires_cc and not ischosen(error_injection.cc_error)) {
+        /* Set confirmation code and get hash */
+        var charstring confirmationCode := "12345678";  /* Default test code matching server */
+        var integer result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+        if (result == 0) {
+            euiccSigned2.hashCc := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+            ext_logInfo("Using confirmation code hash: " & oct2str(euiccSigned2.hashCc));
+        }
+    }
 
     /* Apply error injections */
     var octetstring transactionId := g_transactionId;
@@ -2683,7 +2741,7 @@ function f_TC_GetBoundProfilePackage_Error_Generic(
     }
 
     if (ischosen(error_injection.cc_error)) {
-        if (cc_required) {
+        if (server_requires_cc) {
             if (error_injection.cc_error.omit_cc) {
                 /* Omit confirmation code when required */
                 euiccSigned2.hashCc := omit;
@@ -3451,14 +3509,15 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error() runs on 
     f_run_test_case(testcasename(), refers(f_TC_GetBoundProfilePackage_04_Preparation_Error));
 }
 
-/* Consolidated GetBoundProfilePackage error cases test */
-testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases() runs on MTC_CT {
+/* Individual GetBoundProfilePackage error test cases */
+
+/* Test Case: Invalid eUICC Signature */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_InvalidSignature() runs on MTC_CT {
     var charstring id := testcasename();
     var smdpp_ConnHdlrPars pars;
     var smdpp_ConnHdlr vc_conn;
 
-    /* Test 1: Invalid eUICC Signature */
-    f_init("Test 1: Invalid eUICC Signature");
+    f_init("Invalid eUICC Signature");
     pars := f_init_pars();
     pars.gbpp_error_injection := { sig_error := { corrupt_signature := true } };
     pars.test_name := "Invalid eUICC Signature";
@@ -3467,9 +3526,15 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases() runs on MTC_CT {
     pars.cc_required := false;
     vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
     vc_conn.done;
+}
 
-    /* Test 2: Unknown Transaction ID in JSON */
-    f_init("Test 2: Unknown Transaction ID in JSON");
+/* Test Case: Unknown Transaction ID in JSON */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_UnknownTransactionIdJSON() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
+
+    f_init("Unknown Transaction ID in JSON");
     pars := f_init_pars();
     pars.gbpp_error_injection := { trans_error := { in_json := true, wrong_transaction_id := omit } };
     pars.test_name := "Unknown Transaction ID in JSON";
@@ -3478,9 +3543,15 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases() runs on MTC_CT {
     pars.cc_required := false;
     vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
     vc_conn.done;
+}
 
-    /* Test 3: Unknown Transaction ID in ASN.1 */
-    f_init("Test 3: Unknown Transaction ID in ASN.1");
+/* Test Case: Unknown Transaction ID in ASN.1 */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_UnknownTransactionIdASN1() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
+
+    f_init("Unknown Transaction ID in ASN.1");
     pars := f_init_pars();
     pars.gbpp_error_injection := { trans_error := { in_json := false, wrong_transaction_id := omit } };
     pars.test_name := "Unknown Transaction ID in ASN.1";
@@ -3489,10 +3560,42 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases() runs on MTC_CT {
     pars.cc_required := false;
     vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
     vc_conn.done;
+}
 
-    /* Note: Confirmation code tests would need server support to set ccRequiredFlag */
+/* Test Case: Missing Confirmation Code (8.2.7/2.2) */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_MissingConfirmationCode() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
 
-    setverdict(pass);
+    f_init("Missing Confirmation Code");
+    pars := f_init_pars();
+    /* Don't provide any confirmation code */
+    pars.gbpp_error_injection := { cc_error := { omit_cc := true, wrong_cc := false, invalid_cc := omit } };
+    pars.test_name := "Missing Confirmation Code";
+    pars.expected_subject_code := "8.2.7";
+    pars.expected_reason_code := "2.2";
+    pars.cc_required := true;
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
+    vc_conn.done;
+}
+
+/* Test Case: Refused Confirmation Code (8.2.7/3.8) */
+testcase TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_RefusedConfirmationCode() runs on MTC_CT {
+    var charstring id := testcasename();
+    var smdpp_ConnHdlrPars pars;
+    var smdpp_ConnHdlr vc_conn;
+
+    f_init("Refused Confirmation Code");
+    pars := f_init_pars();
+    /* Provide wrong confirmation code */
+    pars.gbpp_error_injection := { cc_error := { omit_cc := false, wrong_cc := true, invalid_cc := omit } };
+    pars.test_name := "Refused Confirmation Code";
+    pars.expected_subject_code := "8.2.7";
+    pars.expected_reason_code := "3.8";
+    pars.cc_required := true;
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_Error_Generic_Wrapper), pars);
+    vc_conn.done;
 }
 
 /* CancelSession Test Cases */
@@ -3699,7 +3802,7 @@ control {
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_InvalidServerChallenge());
 	/* SGP.23 Section 4.3.14.2.2 Test Sequence #4 - Transaction ID mismatch in ASN.1 */
 	execute(TC_SM_DP_ES9_AuthenticateClientNIST_Error_TransactionIdMismatchASN1());
-	/* SGP.23 Section 4.3.14.2.2 - Consolidated error cases */
+
 
 	/* GetBoundProfilePackage Tests */
 	/* SGP.23 Section 4.3.13.2.1 Test Sequence #01 */
@@ -3710,8 +3813,17 @@ control {
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_03_Retry_Different_Challenge());
 	/* SGP.23 Section 4.3.13.2.10 - Error cases */
 	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_04_Preparation_Error());
-	/* SGP.23 Section 4.3.13.2.10 - Consolidated error cases */
-	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_ErrorCases());
+	/* SGP.23 Section 4.3.13.2.10 - Individual error cases */
+	/* Test Sequence #02: Error - Invalid eUICC Signature (8.1/6.1) */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_InvalidSignature());
+	/* Test Sequence #03: Error - Unknown Transaction ID in JSON (8.10.1/3.9) */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_UnknownTransactionIdJSON());
+	/* Test Sequence #03: Error - Unknown Transaction ID in ASN.1 (8.10.1/3.9) */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_UnknownTransactionIdASN1());
+	/* Test Sequence #04: Error - Missing Confirmation Code (8.2.7/2.2) */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_MissingConfirmationCode());
+	/* Test Sequence #05: Error - Refused Confirmation Code (8.2.7/3.8) */
+	execute(TC_SM_DP_ES9_GetBoundProfilePackageNIST_Error_RefusedConfirmationCode());
 
 	/* CancelSession Tests */
 	/* SGP.23 Section 4.3.16.2.1 - Cancel after AuthenticateClient */
