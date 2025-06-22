@@ -1371,9 +1371,12 @@ function f_performInitiateAuthentication() runs on smdpp_ConnHdlr return octetst
 	return authOk.serverSigned1.serverChallenge;
 }
 
-// Helper function to build AuthenticateClient request with optional matching ID
-function f_buildAuthenticateClientRequest(octetstring serverChallenge, charstring matchingId := "TS48v4_SAIP2.3_BERTLV") 
-runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
+// Helper function to build AuthenticateClient request with optional matching ID and error injection
+function f_buildAuthenticateClientRequest(
+	octetstring serverChallenge, 
+	charstring matchingId := "TS48v4_SAIP2.3_BERTLV",
+	template (omit) octetstring transactionIdOverride := omit  // For error injection - omit means use correct ID
+) runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
 	euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
@@ -1381,8 +1384,17 @@ runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
 	
+	/* Use override transaction ID if provided, otherwise use the correct one */
+	var octetstring actualTransactionId := g_transactionId;
+	if (not isvalue(transactionIdOverride)) {
+		/* transactionIdOverride is omit - use the correct transaction ID */
+	} else {
+		/* Use the provided override */
+		actualTransactionId := valueof(transactionIdOverride);
+	}
+	
 	var EuiccSigned1 euiccSigned1 := {
-		transactionId := g_transactionId,
+		transactionId := actualTransactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
 		serverChallenge := serverChallenge,
 		euiccInfo2 := euiccInfo2,
@@ -1399,7 +1411,7 @@ runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	
 	return {
 		authenticateClientRequest := {
-			transactionId := g_transactionId,
+			transactionId := g_transactionId,  /* Always use correct ID in outer structure */
 			authenticateServerResponse := {
 				authenticateResponseOk := {
 					euiccSigned1 := euiccSigned1,
@@ -1496,61 +1508,17 @@ function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring id) run
 	}
 
 	/* Step 1: InitiateAuthentication */
-	ext_logInfo("Step 1: InitiateAuthentication");
-	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
-	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-
-	if (not f_validate_initiate_authentication_response(initResp)) {
-		setverdict(fail, "InitiateAuthentication validation failed");
-		f_rsp_client_cleanup();
-		return;
-	}
-
-	var InitiateAuthenticationOkEs9 authOk := initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
-	g_transactionId := authOk.transactionId;
-	var octetstring serverChallenge := authOk.serverSigned1.serverChallenge;
+	var octetstring serverChallenge := f_performInitiateAuthentication();
 
 	/* Step 2: AuthenticateClient with mismatched transaction ID */
 	ext_logInfo("Step 2: AuthenticateClient with wrong transaction ID in signed data");
 
 	var octetstring wrongTransactionId := f_rnd_octstring(16);  /* Random wrong ID */
-
-	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-	euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
-	euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
-
-	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-
-	var EuiccSigned1 euiccSigned1 := {
-		transactionId := wrongTransactionId,  /* Wrong transaction ID */
-		serverAddress := g_pars_smdpp.smdp_server_url,
-		serverChallenge := serverChallenge,
-		euiccInfo2 := euiccInfo2,
-		ctxParams1 := ctxParams
-	};
-
-	/* Sign the data */
-	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-	/* Get certificates from RSP client */
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-	var RemoteProfileProvisioningRequest authReq := {
-		authenticateClientRequest := {
-			transactionId := g_transactionId,  /* Correct transaction ID in outer structure */
-			authenticateServerResponse := {
-				authenticateResponseOk := {
-					euiccSigned1 := euiccSigned1,  /* But wrong ID in signed data */
-					euiccSignature1 := euiccSignature1,
-					euiccCertificate := g_euicc_cert,
-					eumCertificate := g_eum_cert
-				}
-			}
-		}
-	};
+	var RemoteProfileProvisioningRequest authReq := f_buildAuthenticateClientRequest(
+		serverChallenge, 
+		"TS48v4_SAIP2.3_BERTLV", 
+		wrongTransactionId  /* Inject wrong transaction ID */
+	);
 
 	/* Expect error: Subject Code 8.1.1, Reason Code 3.9 */
 	var JSON_ESx_FunctionExecutionStatusCodeData errorData := f_es9p_transceive_error(authReq);
@@ -1623,45 +1591,15 @@ function f_TC_AuthenticateClient_05_eUICC_Challenge_Reuse(charstring id) runs on
 	}
 
 	var InitiateAuthenticationOkEs9 authOk1 := initResp1.initiateAuthenticationResponse.initiateAuthenticationOk;
+	g_transactionId := authOk1.transactionId;  /* Set global transaction ID */
 
 	/* Complete first session with AuthenticateClient */
 	ext_logInfo("Step 2: Complete first session with AuthenticateClient");
 
-	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-	euiccInfo2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
-	euiccInfo2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
-
-	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-
-	var EuiccSigned1 euiccSigned1 := {
-		transactionId := authOk1.transactionId,
-		serverAddress := g_pars_smdpp.smdp_server_url,
-		serverChallenge := authOk1.serverSigned1.serverChallenge,
-		euiccInfo2 := euiccInfo2,
-		ctxParams1 := ctxParams
-	};
-
-	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-	/* Get certificates from RSP client */
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-	var RemoteProfileProvisioningRequest authReq := {
-		authenticateClientRequest := {
-			transactionId := authOk1.transactionId,
-			authenticateServerResponse := {
-				authenticateResponseOk := {
-					euiccSigned1 := euiccSigned1,
-					euiccSignature1 := euiccSignature1,
-					euiccCertificate := g_euicc_cert,
-					eumCertificate := g_eum_cert
-				}
-			}
-		}
-	};
+	var RemoteProfileProvisioningRequest authReq := f_buildAuthenticateClientRequest(
+		authOk1.serverSigned1.serverChallenge
+		/* Default parameters: matching ID = "TS48v4_SAIP2.3_BERTLV", transactionIdOverride = omit */
+	);
 
 	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
 
