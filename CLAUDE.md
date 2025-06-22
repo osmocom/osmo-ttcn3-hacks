@@ -342,3 +342,6 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 
 ### dir change
 - cd to dirs might not work, try to use pushd and popd
+
+### MCP and LSP Global Effects
+- keep in mind that the mcp is the same for all languages, only the lsp behind it is different, so if you change it and then try to investigate a different language and the mcp behaves weird or unexpected it might be caused by your changes that had a global effect
