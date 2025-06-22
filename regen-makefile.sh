@@ -87,3 +87,22 @@ sed -i 's/$(CXX) -c/@$(CXX) -c/g' Makefile
 # sed -i '/^[[:space:]]*$(CXX)/ s/^/@/' Makefile
 # sed -i '/^[[:space:]]*\$(CXX)/ {s/^\([[:space:]]*\)@\?\(\$(CXX)\)/\1@\2/}' Makefile
 
+# This target rebuilds the project with bear to capture compilation commands for generating compile_commands.json
+cat >> Makefile << 'EOF'
+
+# Generate compile_commands.json using bear
+.PHONY: bear
+bear: clean
+	@echo "Generating compile_commands.json with bear..."
+	@if which bear >/dev/null 2>&1; then \
+		make clean && $(MAKE) compile && bear -- $(MAKE) -j10; \
+		echo "compile_commands.json generated successfully"; \
+	else \
+		echo "ERROR: bear is not installed. Install it with your package manager."; \
+		echo "  Debian/Ubuntu: sudo apt-get install bear"; \
+		echo "  Arch Linux: sudo pacman -S bear"; \
+		echo "  macOS: brew install bear"; \
+		exit 1; \
+	fi
+EOF
+

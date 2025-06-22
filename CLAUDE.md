@@ -25,6 +25,10 @@ cd smdpp; ./regen_makefile.sh # Generate Makefile with proper dependencies
 # Full clean build (recommended)
 cd smdpp; make clean; make compile; make -j
 
+# Generate compile_commands.json for language servers and IDEs
+cd smdpp; make bear              # Full clean build with bear
+cd smdpp; make bear-incremental  # Update compile_commands.json without clean
+
 ```
 
 **⚠️ Important Build Notes**:
