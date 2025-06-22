@@ -526,18 +526,18 @@ runs on smdpp_ConnHdlr return boolean {
 /* Helper function that performs InitiateAuthentication and validates the response
  * Returns the InitiateAuthenticationOkEs9 data on success, fails the test on error
  */
-function f_initiate_authentication_and_validate() 
+function f_initiate_authentication_and_validate()
 runs on smdpp_ConnHdlr return InitiateAuthenticationOkEs9 {
 	ext_logInfo("Step: InitiateAuthentication");
 	var RemoteProfileProvisioningRequest initReq := f_create_initiate_authentication_request();
 	var RemoteProfileProvisioningResponse initResp := f_es9p_transceive_success(initReq);
-	
+
 	if (not f_validate_initiate_authentication_response(initResp)) {
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
 		f_shutdown(__FILE__, __LINE__);
 	}
-	
+
 	return initResp.initiateAuthenticationResponse.initiateAuthenticationOk;
 }
 
@@ -900,6 +900,60 @@ function f_get_certificate_pair() runs on smdpp_ConnHdlr return CertificatePair 
 		euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
 		eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
 	};
+}
+
+/* Helper function to corrupt a signature */
+
+/* Helper function to sign EuiccSigned1 data */
+function f_sign_euicc_signed1(EuiccSigned1 euiccSigned1) runs on smdpp_ConnHdlr return octetstring {
+    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
+    return ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+}
+
+/* Helper function to build complete AuthenticateClient request */
+function f_build_authenticate_client_request(
+    EuiccSigned1 euiccSigned1,
+    octetstring euiccSignature1
+) runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
+    /* Get certificates using the existing helper */
+    var CertificatePair certs := f_get_certificate_pair();
+    
+    return {
+        authenticateClientRequest := {
+            transactionId := g_transactionId,
+            authenticateServerResponse := {
+                authenticateResponseOk := {
+                    euiccSigned1 := euiccSigned1,
+                    euiccSignature1 := euiccSignature1,
+                    euiccCertificate := certs.euicc_cert,
+                    eumCertificate := certs.eum_cert
+                }
+            }
+        }
+    };
+}
+
+/* Consolidated helper for standard AuthenticateClient flow */
+function f_perform_authenticate_client_standard(
+    charstring matchingId := "TS48v4_SAIP2.3_BERTLV"
+) runs on smdpp_ConnHdlr return AuthenticateClientOk {
+    /* Create EUICCInfo2 with PKIDs */
+    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+    f_set_euicc_pkids(euiccInfo2);
+    
+    /* Create context parameters */
+    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
+    
+    /* Create and sign EuiccSigned1 */
+    var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
+    var octetstring euiccSignature1 := f_sign_euicc_signed1(euiccSigned1);
+    
+    /* Build and send request */
+    var RemoteProfileProvisioningRequest authReq := f_build_authenticate_client_request(euiccSigned1, euiccSignature1);
+    var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
+    
+    return authResp.authenticateClientResponseEs9.authenticateClientOk;
 }
 
 /* Helper function to corrupt a signature */
@@ -1417,16 +1471,16 @@ function f_performInitiateAuthentication() runs on smdpp_ConnHdlr return octetst
 
 // Helper function to build AuthenticateClient request with optional matching ID and error injection
 function f_buildAuthenticateClientRequest(
-	octetstring serverChallenge, 
+	octetstring serverChallenge,
 	charstring matchingId := "TS48v4_SAIP2.3_BERTLV",
 	template (omit) octetstring transactionIdOverride := omit  // For error injection - omit means use correct ID
 ) runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	f_set_euicc_pkids(euiccInfo2);
-	
+
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
-	
+
 	/* Use override transaction ID if provided, otherwise use the correct one */
 	var octetstring actualTransactionId := g_transactionId;
 	if (not isvalue(transactionIdOverride)) {
@@ -1435,7 +1489,7 @@ function f_buildAuthenticateClientRequest(
 		/* Use the provided override */
 		actualTransactionId := valueof(transactionIdOverride);
 	}
-	
+
 	var EuiccSigned1 euiccSigned1 := {
 		transactionId := actualTransactionId,
 		serverAddress := g_pars_smdpp.smdp_server_url,
@@ -1443,15 +1497,15 @@ function f_buildAuthenticateClientRequest(
 		euiccInfo2 := euiccInfo2,
 		ctxParams1 := ctxParams
 	};
-	
+
 	/* Sign the data */
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
 	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-	
+
 	/* Get certificates from RSP client */
 	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
 	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-	
+
 	return {
 		authenticateClientRequest := {
 			transactionId := g_transactionId,  /* Always use correct ID in outer structure */
@@ -1558,8 +1612,8 @@ function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring id) run
 
 	var octetstring wrongTransactionId := f_rnd_octstring(16);  /* Random wrong ID */
 	var RemoteProfileProvisioningRequest authReq := f_buildAuthenticateClientRequest(
-		serverChallenge, 
-		"TS48v4_SAIP2.3_BERTLV", 
+		serverChallenge,
+		"TS48v4_SAIP2.3_BERTLV",
 		wrongTransactionId  /* Inject wrong transaction ID */
 	);
 
@@ -1809,38 +1863,7 @@ function f_TC_GetBoundProfilePackage_01_Nominal(charstring id) runs on smdpp_Con
 
 	/* Step 2: AuthenticateClient */
 	ext_logInfo("Step 2: AuthenticateClient");
-
-	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-	f_set_euicc_pkids(euiccInfo2);
-
-	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-	ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-
-	var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
-
-	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-	/* Get certificates from RSP client */
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-	var RemoteProfileProvisioningRequest authReq := {
-		authenticateClientRequest := {
-			transactionId := g_transactionId,
-			authenticateServerResponse := {
-				authenticateResponseOk := {
-					euiccSigned1 := euiccSigned1,
-					euiccSignature1 := euiccSignature1,
-					euiccCertificate := g_euicc_cert,
-					eumCertificate := g_eum_cert
-				}
-			}
-		}
-	};
-
-	var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
-	var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
+	var AuthenticateClientOk authClientOk := f_perform_authenticate_client_standard();
 
 	/* Step 3: GetBoundProfilePackage */
 	ext_logInfo("Step 3: GetBoundProfilePackage");
@@ -2291,78 +2314,12 @@ function f_initiateAuthentication() runs on smdpp_ConnHdlr return InitiateAuthen
 
 /* Helper function to perform AuthenticateClient */
 function f_authenticateClient(InitiateAuthenticationOkEs9 initAuthOk) runs on smdpp_ConnHdlr return AuthenticateClientOk {
-    /* Create EUICCInfo2 with PKIDs */
-    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-    f_set_euicc_pkids(euiccInfo2);
-
-    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-    ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
-
-    var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
-
-    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-    /* Get certificates from RSP client */
-    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-    var RemoteProfileProvisioningRequest authReq := {
-        authenticateClientRequest := {
-            transactionId := g_transactionId,
-            authenticateServerResponse := {
-                authenticateResponseOk := {
-                    euiccSigned1 := euiccSigned1,
-                    euiccSignature1 := euiccSignature1,
-                    euiccCertificate := g_euicc_cert,
-                    eumCertificate := g_eum_cert
-                }
-            }
-        }
-    };
-
-    var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
-    var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
-
-    return authClientOk;
+    return f_perform_authenticate_client_standard();
 }
 
 /* Helper function to perform AuthenticateClient with custom matching ID */
 function f_authenticateClient_withMatchingId(InitiateAuthenticationOkEs9 initAuthOk, charstring matchingId) runs on smdpp_ConnHdlr return AuthenticateClientOk {
-    /* Create EUICCInfo2 with PKIDs */
-    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
-    f_set_euicc_pkids(euiccInfo2);
-
-    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-    ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
-
-    var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
-
-    var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
-
-    /* Get certificates from RSP client */
-    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
-
-    var RemoteProfileProvisioningRequest authReq := {
-        authenticateClientRequest := {
-            transactionId := g_transactionId,
-            authenticateServerResponse := {
-                authenticateResponseOk := {
-                    euiccSigned1 := euiccSigned1,
-                    euiccSignature1 := euiccSignature1,
-                    euiccCertificate := g_euicc_cert,
-                    eumCertificate := g_eum_cert
-                }
-            }
-        }
-    };
-
-    var RemoteProfileProvisioningResponse authResp := f_es9p_transceive_success(authReq);
-    var AuthenticateClientOk authClientOk := authResp.authenticateClientResponseEs9.authenticateClientOk;
-
-    return authClientOk;
+    return f_perform_authenticate_client_standard(matchingId);
 }
 
 /* Helper function to perform CancelSession */
