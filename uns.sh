@@ -18,7 +18,7 @@ QLIST="DEBUG_ENCDEC DEBUG_UNQUALIFIED PORTEVENT_MMRECV PORTEVENT_MMSEND PORTEVEN
 QVARS=$(for file in $QLIST; do printf " -ve %s" "$file"; done)
 
 
-CMDSTR="ip l s up lo; rm ${TESTP}/*log;"
+CMDSTR="export TTCN3_DIR=/app/titan; export TITAN_LIBRARY_PATH=/app/titan/lib; export TTCN3_BIN_DIR=/app/titan/bin; export PATH=/app/titan/bin:\$PATH; ip l s up lo; rm ${TESTP}/*log;"
 # Start NIST server on port 8000
 CMDSTR+=" echo 'Starting SM-DP+ servers: NIST on port 8000, BRP on port 8001';"
 CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 2>&1 > ${TESTP}/_pyserver_nist.log & echo \$! > ${TESTP}/_nist_pid ) ;"

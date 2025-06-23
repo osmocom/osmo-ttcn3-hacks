@@ -34,11 +34,13 @@ def generate_euicc_cert_with_different_eid():
     # Load eUICC private key
     euicc_key = load_private_key_from_file('./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem')
     
-    # Create subject with DIFFERENT EID - change last digits from 1235 to 1299
+    # Create subject with DIFFERENT EID PREFIX - outside EUM's permitted range
+    # EUM permits only EIDs starting with 89049032
+    # We'll use a different prefix: 89049033 (just increment the last digit)
     subject = x509.Name([
         x509.NameAttribute(NameOID.COUNTRY_NAME, "ES"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "RSP Test EUM"),
-        x509.NameAttribute(NameOID.SERIAL_NUMBER, "89049032123451234512345678901299"),  # Different EID!
+        x509.NameAttribute(NameOID.SERIAL_NUMBER, "89049033123451234512345678901234"),  # Different prefix!
         x509.NameAttribute(NameOID.COMMON_NAME, "Test eUICC Invalid EID"),
     ])
     
@@ -93,9 +95,10 @@ def generate_euicc_cert_with_different_eid():
     with open(output_path, "wb") as f:
         f.write(certificate.public_bytes(serialization.Encoding.DER))
     
-    print(f"Generated test eUICC certificate with different EID")
-    print(f"Original EID: 89049032123451234512345678901235")
-    print(f"Test EID:     89049032123451234512345678901299")
+    print(f"Generated test eUICC certificate with EID outside EUM's permitted range")
+    print(f"EUM permits prefix: 89049032")
+    print(f"Test EID uses:      89049033 (outside permitted range)")
+    print(f"Full test EID:      89049033123451234512345678901234")
     print(f"Saved to: {output_path}")
     
     # Also save as PEM for inspection

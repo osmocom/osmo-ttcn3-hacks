@@ -356,3 +356,6 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 
 ### Environment Sourcing
 - **you must source /app/env.sh to be able to use the ttcn3 compiler**
+
+## Markdown Grep Notes
+- note the issue when grepping markdown files: the md files have slashes to escape stuff, so if you grep, you need double slashes to escape that.
