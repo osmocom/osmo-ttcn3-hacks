@@ -268,6 +268,48 @@ INTEGER ext__RSPClient__loadEUICCKeyPair(const INTEGER& clientHandle,
     }
 }
 
+INTEGER ext__RSPClient__loadEUMCertificate(const INTEGER& clientHandle,
+                                          const CHARSTRING& eumCertPath) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        std::string certPath = charstring_to_string(eumCertPath);
+        client->loadEUMCertificate(certPath);
+
+        return INTEGER(0);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__loadEUMCertificate failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
+}
+
+INTEGER ext__RSPClient__loadEUMKeyPair(const INTEGER& clientHandle,
+                                      const CHARSTRING& eumPrivateKeyPath) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        std::string keyPath = charstring_to_string(eumPrivateKeyPath);
+        client->loadEUMKeyPair(keyPath);
+
+        return INTEGER(0);
+    } catch (const std::exception& e) {
+        LOG_ERROR("ext__RSPClient__loadEUMKeyPair failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
+}
+
 
 /* Challenge Generation and Session Management */
 OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle) {
