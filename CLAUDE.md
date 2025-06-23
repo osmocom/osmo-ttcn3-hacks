@@ -357,5 +357,8 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 ### Environment Sourcing
 - **you must source /app/env.sh to be able to use the ttcn3 compiler**
 
-## Markdown Grep Notes
-- note the issue when grepping markdown files: the md files have slashes to escape stuff, so if you grep, you need double slashes to escape that.
+# Markdown Grep Notes
+- you **MUST** use proper escaping when reading markdown files.
+- this fails: grep "INVALID\_MATCHING\_ID" testspec.md
+- this fails, too: grep "INVALID\\_MATCHING\\_ID" testspec.md
+- but this works: grep "INVALID\\\_MATCHING\\\_ID" testspec.md
