@@ -385,9 +385,9 @@ When searching in markdown files, you **MUST** use proper escaping:
 - Markdown files contain backslashes as part of their formatting
 - To search for escaped characters in markdown, you need **4 backslashes** in grep
 - This is because: grep needs 2 backslashes to produce 1 literal backslash, and you need 2 literal backslashes to match the markdown escape sequence
-```
-
-## Memory Notes
 
 ### Test Case Validation
 - test cases marked as VOID do not exist and should be ignored
+
+### looking up what test do and how they work
+- read `/app/tt-smdpp/TESTSPEC_TOOL_GUIDE.md`
