@@ -77,7 +77,7 @@ else
     source /app/env.sh
     export TITAN_LIBRARY_PATH=/app/titan/lib
     TEST_LIST=$(cd ${TESTP} && LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD:$TITAN_LIBRARY_PATH" ./smdpp_Tests -l 2>/dev/null | grep -v ".control$")
-    
+
     if [ -n "$TEST_PATTERN" ]; then
         TEST_LIST=$(echo "$TEST_LIST" | grep "$TEST_PATTERN")
     fi
@@ -112,71 +112,83 @@ run_test_in_namespace() {
     local test_num="$2"
     local ns_name="smdpp_test_${test_num}_$$"
     local test_log_dir="${RUN_DIR}/test_${test_num}"
-    
+
     mkdir -p "$test_log_dir"
-    
+
     # Create status file
     echo "RUNNING" > "${test_log_dir}/status"
     echo "$test_name" > "${test_log_dir}/test_name"
-    
+
     # In concise mode, don't show starting message for tests
     if [ "$CONCISE_MODE" -eq 0 ]; then
         echo "[Test $test_num] Starting: $test_name"
     fi
-    
+
     # Build command string for this test
     local QLIST="DEBUG_ENCDEC DEBUG_UNQUALIFIED PORTEVENT_MMRECV PORTEVENT_MMSEND PORTEVENT_MQUEUE PARALLEL_PTC PORTEVENT_STATE EXECUTOR_ WARNING_UNQUALIFIED PORTEVENT_UNQUALIFIED PARALLEL_UNQUALIFIED"
     local QVARS=$(for file in $QLIST; do printf " -ve %s" "$file"; done)
-    
+
     local CMDSTR="export TTCN3_DIR=/app/titan; export TITAN_LIBRARY_PATH=/app/titan/lib; export TTCN3_BIN_DIR=/app/titan/bin; export PATH=/app/titan/bin:\$PATH;"
+    
+    # Mount a new tmpfs for this namespace to ensure isolation
+    CMDSTR+=" mount -t tmpfs tmpfs /tmp;"
+    
+    # Add random startup delay to prevent race conditions
+    CMDSTR+=" sleep 0.\$((RANDOM % 500 + 100));"  # 0.1-0.6 second random delay
+
     CMDSTR+=" cd ${TESTP}; ip l s up lo;"
-    
-    # Clear any existing log files for this test  
+
+    # Clear any existing log files for this test
     CMDSTR+=" rm -f ${WHCIHT}_Tests*.log *.stderr 2>/dev/null;"
+
+    # Start NIST server with unique log and in-memory storage for concurrency
+    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 --in-memory 2>&1 > ${test_log_dir}/pyserver_nist.log & echo \$! > ${test_log_dir}/nist_pid ) ;"
     
-    # Start NIST server with unique log
-    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 2>&1 > ${test_log_dir}/pyserver_nist.log & echo \$! > ${test_log_dir}/nist_pid ) ;"
-    
-    # Start BRP server with unique log
-    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool 2>&1 > ${test_log_dir}/pyserver_brp.log & echo \$! > ${test_log_dir}/brp_pid ) ;"
-    
-    CMDSTR+=" sleep 1;"
-    
+    # Start BRP server with unique log and in-memory storage for concurrency
+    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool --in-memory 2>&1 > ${test_log_dir}/pyserver_brp.log & echo \$! > ${test_log_dir}/brp_pid ) ;"
+
+    CMDSTR+=" sleep 2;"
+
     # Set up cleanup trap
     CMDSTR+=" trap 'kill \$(cat ${test_log_dir}/nist_pid 2>/dev/null) 2>/dev/null; kill \$(cat ${test_log_dir}/brp_pid 2>/dev/null) 2>/dev/null' EXIT;"
-    
+
     # Run the specific test
     CMDSTR+=" ../start-testsuite.sh ${WHCIHT}_Tests ${WHCIHT}_Tests.cfg ${test_name} > ${test_log_dir}/test_output.log 2>&1;"
     CMDSTR+=" TEST_RESULT=\$?;"
-    
+
     # Kill servers
     CMDSTR+=" kill \$(cat ${test_log_dir}/nist_pid 2>/dev/null) 2>/dev/null;"
     CMDSTR+=" kill \$(cat ${test_log_dir}/brp_pid 2>/dev/null) 2>/dev/null;"
-    
+
     # Process logs
     CMDSTR+=" ttcn3_logmerge ${WHCIHT}_Tests*.log 2>/dev/null | grep "${QVARS}" > ${test_log_dir}/_merged.log;"
     CMDSTR+=" ttcn3_logformat ${test_log_dir}/_merged.log > ${test_log_dir}/merged.log 2>/dev/null;"
-    
+
     # Clean up test directory logs
     CMDSTR+=" rm -f ${WHCIHT}_Tests*.log *.stderr ${test_log_dir}/_*.log ${test_log_dir}/*_pid;"
-    
+
     # Clean Python server logs
     CMDSTR+=" grep -v 'DEBUG:pySim.esim.saip' ${test_log_dir}/pyserver_nist.log > ${test_log_dir}/pyserver_nist_clean.log 2>/dev/null || true;"
     CMDSTR+=" grep -v 'DEBUG:pySim.esim.saip' ${test_log_dir}/pyserver_brp.log > ${test_log_dir}/pyserver_brp_clean.log 2>/dev/null || true;"
     CMDSTR+=" mv ${test_log_dir}/pyserver_nist_clean.log ${test_log_dir}/pyserver_nist.log 2>/dev/null || true;"
     CMDSTR+=" mv ${test_log_dir}/pyserver_brp_clean.log ${test_log_dir}/pyserver_brp.log 2>/dev/null || true;"
-    
-    # Extract pass/fail from test output
-    CMDSTR+=" if grep -q 'verdict: pass' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'PASSED' > ${test_log_dir}/status;"
-    CMDSTR+=" elif grep -q 'verdict: fail' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'FAILED' > ${test_log_dir}/status;"
-    CMDSTR+=" elif [ \$TEST_RESULT -eq 0 ]; then echo 'PASSED' > ${test_log_dir}/status;"
-    CMDSTR+=" else echo 'FAILED' > ${test_log_dir}/status; fi;"
-    
+
+    # Write status file from within namespace - use a temp file approach
+    CMDSTR+=" STATUS_FILE=\$(mktemp);"
+    CMDSTR+=" if grep -q 'Test case.*finished.*Verdict: pass' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'PASSED' > \$STATUS_FILE;"
+    CMDSTR+=" elif grep -q 'Test case.*finished.*Verdict: fail' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'FAILED' > \$STATUS_FILE;"
+    CMDSTR+=" elif grep -q 'Test case.*finished.*Verdict: inconc' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'INCONC' > \$STATUS_FILE;"
+    CMDSTR+=" elif grep -q 'Test case.*finished.*Verdict: error' ${test_log_dir}/test_output.log 2>/dev/null; then echo 'ERROR' > \$STATUS_FILE;"
+    CMDSTR+=" elif [ \$TEST_RESULT -eq 0 ]; then echo 'PASSED' > \$STATUS_FILE;"
+    CMDSTR+=" else echo 'FAILED' > \$STATUS_FILE; fi;"
+    CMDSTR+=" cat \$STATUS_FILE > ${test_log_dir}/status 2>/dev/null || echo 'Could not write status file';"
+    CMDSTR+=" rm -f \$STATUS_FILE;"
+
     # Run in namespace (remove -w flag as it expects a directory)
     unshare -UpmniCTfr -- sh -c "${CMDSTR}" 2>&1 | tee "${test_log_dir}/namespace.log" > /dev/null
-    
+
     local status=$(cat "${test_log_dir}/status" 2>/dev/null || echo "UNKNOWN")
-    
+
     # In concise mode, only show non-passing tests
     if [ "$CONCISE_MODE" -eq 1 ] && [ "$status" = "PASSED" ]; then
         # Silent for passing tests in concise mode
@@ -185,6 +197,10 @@ run_test_in_namespace() {
         echo "[Test $test_num] Completed: $test_name - $status"
     fi
 }
+
+# Export function and variables needed when running in subshells
+export -f run_test_in_namespace
+export CONCISE_MODE WHCIHT SCRIPT_DIR PYSRVPATH TESTP RUN_DIR
 
 # Job control for parallel execution
 echo "Starting parallel test execution..."
@@ -222,10 +238,10 @@ wait_for_job_slot() {
 # Start tests
 for test_name in $TEST_LIST; do
     wait_for_job_slot
-    
+
     ((test_num++))
     run_test_in_namespace "$test_name" "$test_num" &
-    
+
     job_pids+=($!)
     job_tests+=("$test_name")
     job_nums+=($test_num)
@@ -262,6 +278,8 @@ SUMMARY_FILE="${RUN_DIR}/summary.txt"
 PASSED=0
 FAILED=0
 UNKNOWN=0
+ERROR=0
+INCONC=0
 
 # Collect results
 for test_dir in "${RUN_DIR}"/test_*; do
@@ -269,15 +287,17 @@ for test_dir in "${RUN_DIR}"/test_*; do
         test_num=$(basename "$test_dir" | cut -d_ -f2)
         test_name=$(cat "$test_dir/test_name" 2>/dev/null || echo "UNKNOWN")
         status=$(cat "$test_dir/status" 2>/dev/null || echo "UNKNOWN")
-        
+
         # In concise mode, only add non-passing tests to summary
         if [ "$CONCISE_MODE" -eq 0 ] || [ "$status" != "PASSED" ]; then
             printf "%-80s %s\n" "$test_name" "$status" >> "$SUMMARY_FILE"
         fi
-        
+
         case "$status" in
             PASSED) ((PASSED++)) ;;
             FAILED) ((FAILED++)) ;;
+            INCONC) ((INCONC++)) ;;
+            ERROR) ((ERROR++)) ;;
             *) ((UNKNOWN++)) ;;
         esac
     fi
@@ -286,9 +306,11 @@ done
 {
     echo ""
     echo "Summary:"
-    echo "  Passed:  $PASSED"
-    echo "  Failed:  $FAILED"
-    echo "  Unknown: $UNKNOWN"
+    echo "  Passed:       $PASSED"
+    echo "  Failed:       $FAILED"
+    echo "  Error:        $ERROR"
+    echo "  Inconclusive: $INCONC"
+    echo "  Unknown:      $UNKNOWN"
     echo ""
     echo "Detailed logs available in: $RUN_DIR"
 } >> "$SUMMARY_FILE"

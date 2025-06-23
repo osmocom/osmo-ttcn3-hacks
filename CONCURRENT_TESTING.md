@@ -40,6 +40,7 @@ The `uns-concurrent.sh` script enables parallel execution of SM-DP+ tests to sig
 - **Option Order**: Options like `-j` must come before `-t`
 - **Resource Usage**: Each concurrent test spawns 2 Python servers, so adjust concurrency based on available resources
 - **Port Isolation**: Network namespaces allow all tests to use the same ports (8000/8001)
+- **In-Memory Database**: Uses in-memory session storage to avoid file locking issues
 
 ## Log Structure
 
@@ -92,6 +93,8 @@ grep FAILED smdpp/latest_concurrent_run/summary.txt
 
 - Uses `unshare` to create isolated network namespaces
 - Each namespace gets its own loopback interface
-- Python servers use separate session databases (`sm-dp-sessions-NIST`, `sm-dp-sessions-BRP`)
+- Python servers use **in-memory session storage** (`--in-memory` flag) to avoid database locking issues
 - Log merging preserves TTCN-3 formatting while filtering noise
 - Bash job control manages parallel execution without external dependencies
+- Build output is quieted by prefixing ttcn3_compiler commands with `@`
+- Verdict detection looks for the FINAL test verdict line to handle tests with multiple intermediate verdicts

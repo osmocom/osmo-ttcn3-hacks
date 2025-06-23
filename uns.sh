@@ -20,10 +20,10 @@ QVARS=$(for file in $QLIST; do printf " -ve %s" "$file"; done)
 
 CMDSTR="export TTCN3_DIR=/app/titan; export TITAN_LIBRARY_PATH=/app/titan/lib; export TTCN3_BIN_DIR=/app/titan/bin; export PATH=/app/titan/bin:\$PATH; ip l s up lo; rm ${TESTP}/*log;"
 # Start NIST server on port 8000
-CMDSTR+=" echo 'Starting SM-DP+ servers: NIST on port 8000, BRP on port 8001';"
-CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 2>&1 > ${TESTP}/_pyserver_nist.log & echo \$! > ${TESTP}/_nist_pid ) ;"
+CMDSTR+=" echo 'Starting SM-DP+ servers: NIST on port 8000, BRP on port 8001 (with in-memory session storage)';"
+CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 --in-memory 2>&1 > ${TESTP}/_pyserver_nist.log & echo \$! > ${TESTP}/_nist_pid ) ;"
 # Start BRP server on port 8001
-CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool 2>&1 > ${TESTP}/_pyserver_brp.log & echo \$! > ${TESTP}/_brp_pid ) ;"
+CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool --in-memory 2>&1 > ${TESTP}/_pyserver_brp.log & echo \$! > ${TESTP}/_brp_pid ) ;"
 CMDSTR+=" sleep 1;"
 # Set up cleanup trap to kill both servers
 CMDSTR+=" trap 'kill \$(cat ${TESTP}/_nist_pid 2>/dev/null) 2>/dev/null; kill \$(cat ${TESTP}/_brp_pid 2>/dev/null) 2>/dev/null' EXIT;"
