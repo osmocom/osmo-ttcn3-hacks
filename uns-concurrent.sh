@@ -141,10 +141,10 @@ run_test_in_namespace() {
     CMDSTR+=" rm -f ${WHCIHT}_Tests*.log *.stderr 2>/dev/null;"
 
     # Start NIST server with unique log and in-memory storage for concurrency
-    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 --in-memory 2>&1 > ${test_log_dir}/pyserver_nist.log & echo \$! > ${test_log_dir}/nist_pid ) ;"
+    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -t -H 127.0.0.1 -p 8000 --in-memory 2>&1 > ${test_log_dir}/pyserver_nist.log & echo \$! > ${test_log_dir}/nist_pid ) ;"
 
     # Start BRP server with unique log and in-memory storage for concurrency
-    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool --in-memory 2>&1 > ${test_log_dir}/pyserver_brp.log & echo \$! > ${test_log_dir}/brp_pid ) ;"
+    CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -t -H 127.0.0.1 -p 8001 --brainpool --in-memory 2>&1 > ${test_log_dir}/pyserver_brp.log & echo \$! > ${test_log_dir}/brp_pid ) ;"
 
     CMDSTR+=" sleep 2;"
 
