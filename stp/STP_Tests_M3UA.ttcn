@@ -1655,6 +1655,90 @@ testcase TC_clnt_sctp_adm_shutdown() runs on RAW_M3UA_CT {
 	f_clear_m3ua();
 }
 
+/* Test AS Loadsharing, (distributing traffic within linksets/ASs of a combined linkset).
+ * STP routing table is configured with 1 combined linkset towards PC 99 mask /14 with 2
+ * AS routes ("as-LS0-0", "as-LS0-1") with same priority, each using 1 ASP ("asp-LS0-0-0",
+ * "asp-LS0-1-0").  Hence, traffic towards PC 99 received at asp-sender should be routed
+ * in loadshare fashion between those 2 AS/ASPs.
+ */
+testcase TC_combinedlset_loadshare() runs on RAW_M3UA_CT {
+	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-LS0-0-0", "asp-LS0-1-0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 rctx_receiver2 := int2oct(m3ua_configs[2].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(99, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, rctx_sender);
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_override, rctx_receiver);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+	}
+
+	/* activate the second 'receiver' side ASP+AS */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_override, rctx_receiver);
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 20;
+	const integer NUM_SLS := 16; /* SLS in ITU is 4 bits. */
+	var integer num_rx_1 := 0;
+	var integer num_rx_2 := 0;
+	var Integers sls_num_rx_1 := {};
+	var Integers sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring_rnd_len(100);
+		var template (value) M3UA_Protocol_Data tx_pd;
+		var template (present) M3UA_Protocol_Data rx_pd;
+		/* Distribute traffic over ASPs based on SLS, since OPC is always the same.
+		 * SLS in ITU is 4 bits. */
+		var OCT1 sls := int2oct(i mod 16, 1);
+		tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, sls, data);
+		rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, sls, data);
+		f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+		alt {
+		[] as_count_rx_sls(1, tr_M3UA_DATA(rctx_receiver, rx_pd), sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(2, tr_M3UA_DATA(rctx_receiver2, rx_pd), sls_num_rx_2, num_rx_2);
+		}
+	}
+
+	/* Make sure traffic was sent over both ASPs and that it was distributed: */
+	if (num_rx_1 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 1st ASP!");
+	}
+	if (num_rx_2 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 2nd ASP!");
+	}
+	if (num_rx_1 + num_rx_2 != 2*iter_per_asp) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx ", num_rx_1 + num_rx_2 ," packets in total vs exp ", 2*iter_per_asp));
+	}
+
+	/* Check that a given SLS is not forwarded to both ASPs: */
+	for (i := 0; i < NUM_SLS; i := i+1) {
+		if (sls_num_rx_1[i] > 0 and sls_num_rx_2[i] > 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx packets for SLS ", i, " in both ASPs!"));
+		}
+
+	}
+	setverdict(pass);
+
+	f_clear_m3ua();
+}
+
 control {
 	/* M3UA Tests */
 	execute( TC_connect_asp_up() );
@@ -1671,6 +1755,7 @@ control {
 	execute( TC_tmt_broadcast() );
 	execute( TC_act_rctx_data_no_rctx() );
 	execute( TC_m3ua_sctp_srv_adm_shutdown() );
+	execute( TC_combinedlset_loadshare() );
 
 	/* M3UA RKM tests */
 	execute( TC_rkm_reg_static_notpermitted() );
