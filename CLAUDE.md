@@ -357,8 +357,20 @@ self.cleanup_task.start(3600)  # Hourly cleanup
 ### Environment Sourcing
 - **you must source /app/env.sh to be able to use the ttcn3 compiler**
 
-# Markdown Grep Notes
-- you **MUST** use proper escaping when reading markdown files.
-- this fails: grep "INVALID\_MATCHING\_ID" testspec.md
-- this fails, too: grep "INVALID\\_MATCHING\\_ID" testspec.md
-- but this works: grep "INVALID\\\_MATCHING\\\_ID" testspec.md
+## Markdown Grep and Escaping Guidelines
+When searching in markdown files, you **MUST** use proper escaping:
+
+### Underscore Escaping
+- this fails: `grep "INVALID\_MATCHING\_ID" testspec.md`
+- this fails, too: `grep "INVALID\\_MATCHING\\_ID" testspec.md`
+- but this works: `grep "INVALID\\\\_MATCHING\\\\_ID" testspec.md` (4 backslashes!)
+
+### Period/Dot Escaping in Section Numbers
+- Searching for section 4.3.14 requires escaping the dots:
+- this fails: `grep "4.3.14" testspec.md`
+- this works: `grep "4\\\\.3\\\\.14" testspec.md` (4 backslashes per dot!)
+
+### General Rule
+- Markdown files contain backslashes as part of their formatting
+- To search for escaped characters in markdown, you need **4 backslashes** in grep
+- This is because: grep needs 2 backslashes to produce 1 literal backslash, and you need 2 literal backslashes to match the markdown escape sequence
