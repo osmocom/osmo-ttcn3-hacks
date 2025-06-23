@@ -80,6 +80,9 @@ sed -i 's/-$(RM)/-@$(RM)/g' Makefile
 sed -i 's/$(CXX) -shared -o/@$(CXX) -shared -o/g' Makefile
 sed -i 's/$(CXX) -c/@$(CXX) -c/g' Makefile
 
+# Silence ttcn3_compiler output
+sed -i 's/\$(TTCN3_DIR)\/bin\/ttcn3_compiler/@\$(TTCN3_DIR)\/bin\/ttcn3_compiler/g' Makefile
+
 
 
 
