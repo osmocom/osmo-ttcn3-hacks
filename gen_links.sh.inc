@@ -44,4 +44,6 @@ ignore_pp_results() {
 		ttcn_file="$(echo $pp | sed 's/pp$//')"
 		echo "$ttcn_file" >> .gitignore
 	done
+	echo 'concurrent_run_*' >> .gitignore
+	echo 'latest_concurrent_run*' >> .gitignore
 }

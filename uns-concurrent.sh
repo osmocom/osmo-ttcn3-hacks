@@ -12,6 +12,7 @@ CONCURRENCY=4  # Default concurrent tests
 RUN_ALL=0
 TEST_PATTERN=""
 TEST_LIST_ARG=""
+CONCISE_MODE=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         -j|--jobs)
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
             TEST_PATTERN="$2"
             shift 2
             ;;
+        -c|--concise)
+            CONCISE_MODE=1
+            shift
+            ;;
         -t|--tests)
             # Allow space-separated list of specific tests
             shift
@@ -38,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -j, --jobs N      Run N tests concurrently (default: 4)"
             echo "  -a, --all         Run all tests"
             echo "  -p, --pattern PAT Run tests matching pattern"
+            echo "  -c, --concise     Only show failed/unknown tests (hide passing)"
             echo "  -t, --tests       Run specific tests (space-separated list)"
             echo "  -h, --help        Show this help"
             echo ""
@@ -45,6 +51,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 -a -j 8                                      # Run all tests with 8 concurrent jobs"
             echo "  $0 -p AuthenticateClient -j 4                  # Run all matching tests with concurrency 4"
             echo "  $0 -j 2 -t TEST1 TEST2                          # Run specific tests with concurrency 2"
+            echo "  $0 -a -c                                        # Run all tests, only show failures"
             echo ""
             echo "Notes:"
             echo "  - Using -p automatically runs matching tests (no need for -a)"
@@ -112,7 +119,10 @@ run_test_in_namespace() {
     echo "RUNNING" > "${test_log_dir}/status"
     echo "$test_name" > "${test_log_dir}/test_name"
     
-    echo "[Test $test_num] Starting: $test_name"
+    # In concise mode, don't show starting message for tests
+    if [ "$CONCISE_MODE" -eq 0 ]; then
+        echo "[Test $test_num] Starting: $test_name"
+    fi
     
     # Build command string for this test
     local QLIST="DEBUG_ENCDEC DEBUG_UNQUALIFIED PORTEVENT_MMRECV PORTEVENT_MMSEND PORTEVENT_MQUEUE PARALLEL_PTC PORTEVENT_STATE EXECUTOR_ WARNING_UNQUALIFIED PORTEVENT_UNQUALIFIED PARALLEL_UNQUALIFIED"
@@ -166,11 +176,21 @@ run_test_in_namespace() {
     unshare -UpmniCTfr -- sh -c "${CMDSTR}" 2>&1 | tee "${test_log_dir}/namespace.log" > /dev/null
     
     local status=$(cat "${test_log_dir}/status" 2>/dev/null || echo "UNKNOWN")
-    echo "[Test $test_num] Completed: $test_name - $status"
+    
+    # In concise mode, only show non-passing tests
+    if [ "$CONCISE_MODE" -eq 1 ] && [ "$status" = "PASSED" ]; then
+        # Silent for passing tests in concise mode
+        :
+    else
+        echo "[Test $test_num] Completed: $test_name - $status"
+    fi
 }
 
 # Job control for parallel execution
 echo "Starting parallel test execution..."
+if [ "$CONCISE_MODE" -eq 1 ]; then
+    echo "(Concise mode: only showing failed/unknown tests)"
+fi
 echo ""
 
 # Arrays to track jobs
@@ -231,6 +251,9 @@ SUMMARY_FILE="${RUN_DIR}/summary.txt"
     echo "================================"
     echo "Total tests: $TOTAL_TESTS"
     echo "Concurrency: $CONCURRENCY"
+    if [ "$CONCISE_MODE" -eq 1 ]; then
+        echo "Mode: Concise (showing only failed/unknown tests)"
+    fi
     echo ""
     echo "Results:"
     echo "--------"
@@ -247,7 +270,10 @@ for test_dir in "${RUN_DIR}"/test_*; do
         test_name=$(cat "$test_dir/test_name" 2>/dev/null || echo "UNKNOWN")
         status=$(cat "$test_dir/status" 2>/dev/null || echo "UNKNOWN")
         
-        printf "%-80s %s\n" "$test_name" "$status" >> "$SUMMARY_FILE"
+        # In concise mode, only add non-passing tests to summary
+        if [ "$CONCISE_MODE" -eq 0 ] || [ "$status" != "PASSED" ]; then
+            printf "%-80s %s\n" "$test_name" "$status" >> "$SUMMARY_FILE"
+        fi
         
         case "$status" in
             PASSED) ((PASSED++)) ;;

@@ -11,6 +11,7 @@ The `uns-concurrent.sh` script enables parallel execution of SM-DP+ tests to sig
 - **Dedicated Servers**: Each test gets its own NIST and BRP Python servers
 - **Organized Logging**: All logs are organized by test in timestamped directories
 - **Summary Reports**: Automatic generation of test results summary
+- **Concise Mode**: Option to only show failed/unknown tests for cleaner output
 
 ## Usage
 
@@ -26,6 +27,9 @@ The `uns-concurrent.sh` script enables parallel execution of SM-DP+ tests to sig
 
 # Run tests matching a pattern (automatically runs them)
 ./uns-concurrent.sh -p AuthenticateClient -j 6
+
+# Run tests in concise mode (only show failures)
+./uns-concurrent.sh -a -c -j 8
 
 # Run specific tests
 ./uns-concurrent.sh -j 2 -t smdpp_Tests.TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal smdpp_Tests.TC_SM_DP_ES9_AuthenticateClientNIST_02_ConfirmationCode
