@@ -491,6 +491,17 @@ class ProfileManager:
                 'cc_attempts': 0,
                 'associated_eid': '89888888888888888888888888888888',
                 'expiration': None
+            },
+            'MATCHING_ID_1': {
+                'matchingId': 'MATCHING_ID_1',
+                'confirmationCode': None,
+                'iccid': '8900000000000000017F',
+                'profileName': 'Test Activation Code Profile',
+                'state': 'released',
+                'download_attempts': 0,
+                'cc_attempts': 0,
+                'associated_eid': '89049032123451234512345678901235',
+                'expiration': None
             }
         }
     
@@ -540,6 +551,17 @@ class ProfileManager:
                 'cc_attempts': 0,
                 'associated_eid': '89777777777777777777777777777777',
                 'expiration': None
+            },
+            'MATCHING_ID_EVENT': {
+                'matchingId': 'MATCHING_ID_EVENT',
+                'confirmationCode': None,
+                'iccid': '8900000000000000018F',
+                'profileName': 'Test Event-based Profile',
+                'state': 'released',
+                'download_attempts': 0,
+                'cc_attempts': 0,
+                'associated_eid': '89049032123451234512345678901235',
+                'expiration': None
             }
         }
     
@@ -554,9 +576,16 @@ class ProfileManager:
                 'download_attempts': 0,
                 'cc_attempts': 0,
                 'expiration': None
+            },
+            '89049032123451234512345678901235': {
+                'confirmationCode': None,
+                'iccid': '8900000000000000016F',
+                'profileName': 'Test Certificate EID Profile',
+                'state': 'released',
+                'download_attempts': 0,
+                'cc_attempts': 0,
+                'expiration': None
             }
-            # Test certificate EID profile commented out per test requirements
-            # '89049032123451234512345678901235': { ... }
         }
     
     def find_profile(self, matchingId: Optional[str], eid: str) -> Tuple[Optional[Dict], str]:

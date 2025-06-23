@@ -73,7 +73,6 @@ if [ -n "$TEST_LIST_ARG" ]; then
     TEST_LIST="$TEST_LIST_ARG"
 else
     # Get list of all tests
-    echo "Getting test list..."
     source /app/env.sh
     export TITAN_LIBRARY_PATH=/app/titan/lib
     TEST_LIST=$(cd ${TESTP} && LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD:$TITAN_LIBRARY_PATH" ./smdpp_Tests -l 2>/dev/null | grep -v ".control$")
@@ -129,10 +128,10 @@ run_test_in_namespace() {
     local QVARS=$(for file in $QLIST; do printf " -ve %s" "$file"; done)
 
     local CMDSTR="export TTCN3_DIR=/app/titan; export TITAN_LIBRARY_PATH=/app/titan/lib; export TTCN3_BIN_DIR=/app/titan/bin; export PATH=/app/titan/bin:\$PATH;"
-    
+
     # Mount a new tmpfs for this namespace to ensure isolation
     CMDSTR+=" mount -t tmpfs tmpfs /tmp;"
-    
+
     # Add random startup delay to prevent race conditions
     CMDSTR+=" sleep 0.\$((RANDOM % 500 + 100));"  # 0.1-0.6 second random delay
 
@@ -143,7 +142,7 @@ run_test_in_namespace() {
 
     # Start NIST server with unique log and in-memory storage for concurrency
     CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8000 --in-memory 2>&1 > ${test_log_dir}/pyserver_nist.log & echo \$! > ${test_log_dir}/nist_pid ) ;"
-    
+
     # Start BRP server with unique log and in-memory storage for concurrency
     CMDSTR+=" ( cd ${PYSRVPATH}; python3 -u ./osmo-smdpp.py -H 127.0.0.1 -p 8001 --brainpool --in-memory 2>&1 > ${test_log_dir}/pyserver_brp.log & echo \$! > ${test_log_dir}/brp_pid ) ;"
 
@@ -249,7 +248,6 @@ for test_name in $TEST_LIST; do
 done
 
 # Wait for all remaining jobs
-echo ""
 echo "Waiting for all tests to complete..."
 for pid in "${job_pids[@]}"; do
     if [ -n "$pid" ]; then
@@ -257,7 +255,6 @@ for pid in "${job_pids[@]}"; do
     fi
 done
 
-echo ""
 echo "All tests completed. Generating summary..."
 
 # Generate summary report
