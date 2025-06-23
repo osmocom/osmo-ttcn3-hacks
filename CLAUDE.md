@@ -391,3 +391,105 @@ When searching in markdown files, you **MUST** use proper escaping:
 
 ### looking up what test do and how they work
 - read `/app/tt-smdpp/TESTSPEC_TOOL_GUIDE.md`
+
+## Enhanced Testspec Analysis Tools
+
+### Enhanced Structured Markdown Tool
+For efficient analysis of testspec.md, use the enhanced tool at `/app/tools/enhanced_structured_md_tool.py`:
+
+#### Range Extraction (MOST USEFUL for error analysis)
+```bash
+# Get all AuthenticateClientNIST error test sequences in one command
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command extract-range \
+  --start-pattern "Test Sequence #1 Error: Invalid EUM Certificate" \
+  --end-pattern "Test Sequence #21" \
+  --format summary
+
+# Get all GetBoundProfilePackage error cases  
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command extract-range \
+  --start-pattern "Test Sequence #01 Error: Invalid eUICC Signature" \
+  --end-pattern "Test Sequence #06 VOID" \
+  --format table
+```
+
+#### Multi-Pattern Search
+```bash
+# Search for multiple error types at once
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command search \
+  --query "Invalid EUM Certificate,Invalid eUICC Certificate,Invalid eUICC Signature" \
+  --multi-pattern --format table
+```
+
+#### Regex Search for Complex Patterns
+```bash
+# Find all error test sequences with regex
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command search \
+  --query "Test Sequence #\\d+ Error:.*Certificate" \
+  --regex --format consolidated
+
+# Find all Subject Code patterns
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command search \
+  --query "Subject Code \\d+\\.\\d+" \
+  --regex --format table
+```
+
+#### Section Extraction
+```bash
+# Extract complete test case sections
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command extract-section \
+  --section "4.3.14.2.2" \
+  --format summary
+
+# Extract InitiateAuthentication section
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command extract-section \
+  --section "4.3.12" \
+  --format text
+```
+
+#### Error Code Analysis  
+```bash
+# Find all SGP.23 error codes in a specific section
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command search-error-codes \
+  --section "4.3.14.2.2" \
+  --format table
+
+# Find all error codes related to certificates
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
+  --command search-error-codes \
+  --format table | grep -E "(8\.1\.|Certificate)"
+```
+
+#### Output Formats
+- `--format table` - Clean tabular view (best for error codes)
+- `--format summary` - Just line numbers and matches
+- `--format consolidated` - Groups by section context  
+- `--format text` - Full context with surrounding lines
+- `--format json` - Structured data for scripting
+
+#### When to Use Each Approach
+- **Range extraction**: When you need all test sequences between two points (most common)
+- **Multi-pattern search**: When looking for several related error types
+- **Regex search**: When you need complex pattern matching
+- **Section extraction**: When you need a complete test case section
+- **Error code search**: When analyzing SGP.23 error response patterns
+
+#### Advantages over Original Tool
+- **1 command instead of 5+** for getting all error test sequences
+- **No risk of missing sequences** - range extraction gets everything
+- **Table format** shows clear overview of error codes and sections
+- **Consolidated format** groups related errors by section hierarchy
+- **Section context** always available for understanding test location
+
+### Original Testspec Tool (for simple searches)
+Still available at `/app/tools/structured_md_tool.py` for basic searches:
+```bash
+python3 /app/tools/structured_md_tool.py /app/testspec.md --command search --query "4.3.14.2.2" --context 20
+```
