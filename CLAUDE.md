@@ -47,14 +47,23 @@ cd smdpp; make bear-incremental  # Update compile_commands.json without clean
 
 ```bash
 # From the root tt-smdpp directory
-./uns.sh  # Runs in isolated namespace with Python server (MUST BE USED)
+./uns.sh  # Runs all tests sequentially (MUST BE USED for single test runs)
+
+# Run a specific test
+./uns.sh smdpp_Tests.TC_SM_DP_ES9_AuthenticateClientNIST_01_Nominal
+
+# For faster parallel execution (new!)
+./uns-concurrent.sh -a -j 8                    # Run all tests with 8 concurrent jobs
+./uns-concurrent.sh -p AuthenticateClient -j 4 # Run tests matching pattern
 ```
 
 **Test Execution Notes**:
-- **Always use `./uns.sh` for smdpp tests** - it provides isolated network namespace and Python server
+- **Always use `./uns.sh` for single test execution** - it provides isolated network namespace and Python server
+- **Use `./uns-concurrent.sh` for running multiple tests** - runs tests in parallel for faster execution
 - The Python SM-DP+ server is automatically started and configured
-- Test typically takes 2-5 seconds to complete
+- Single test typically takes 2-5 seconds to complete
 - Final verdict should be: **pass** ✅
+- See `CONCURRENT_TESTING.md` for details on parallel test execution
 
 ### Log Files and Debugging
 
