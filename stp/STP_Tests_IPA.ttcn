@@ -425,8 +425,8 @@ runs on IPA_CT {
 						 "ipa-asp-loadshare-receiver1" };
 	var IpaConfigs ipa_configs := ipa_build_configs(asps);
 	if (unknwon_dynamic_asp) {
-		ipa_configs[0].local_port := 3010;
-		ipa_configs[1].local_port := 3011;
+		ipa_configs[0].local_port := 9998;
+		ipa_configs[1].local_port := 9999;
 	}
 
 	f_init_ipa(ipa_configs := ipa_configs);
@@ -526,6 +526,114 @@ testcase TC_tmt_loadshare_sls() runs on IPA_CT {
 /* test "traffic-mode loadshare" behavior, with "accept-asp-connections dynamic-permitted" and clients from unknown ASPs */
 testcase TC_unknown_client_dynamic_tmt_loadshare() runs on IPA_CT {
 	f_tc_tmt_loadshare_sls(true);
+}
+
+/* Test AS Loadsharing, (distributing traffic within linksets/ASs of a combined linkset).
+ * STP routing table is configured with 1 combined linkset towards PC 32 mask /14 with 2
+ * AS routes ("ipa-as-LS0-0", "ipa-as-LS0-1") with same priority, each using 1
+ * ASP ("ipa-asp-LS0-0-0", "ipa-asp-LS0-1-0").
+ * We take advantage of the fact that AS "ipa-as-loadshare-receiver" is never used
+ * to transmit in other tests and use it here for the routing of its configured
+ * "point-code override dpc 32" towards the "ipa-as-LS0-{0,1}" in the STP config.
+ */
+private function f_tc_combinedlset_loadshare(boolean unknown_dynamic_asp)
+runs on IPA_CT {
+	var integer i;
+
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-loadshare-receiver0",
+						 "ipa-asp-loadshare-receiver1",
+						 "ipa-asp-LS0-0-0",
+						 "ipa-asp-LS0-1-0" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	if (unknown_dynamic_asp) {
+		ipa_configs[0].local_port := 9998;
+		ipa_configs[1].local_port := 9999;
+	}
+
+	f_init_ipa(ipa_configs := ipa_configs);
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_connect_ipa(0);
+	/* activate the first 'receiver' side ASP */
+	f_connect_ipa(2);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, 2);
+	}
+
+	/* activate the second 'receiver' side ASP */
+	f_connect_ipa(3);
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 20;
+	const integer NUM_SLS := 16; /* SLS in ITU is 4 bits. */
+	var integer num_rx_1 := 0;
+	var integer num_rx_2 := 0;
+	var Integers sls_num_rx_1 := {};
+	var Integers sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < iter_per_asp; i := i+1) {
+		var octetstring data := f_SCCP_UDT();
+		f_IPA_send(0, data);
+		alt {
+		[] as_count_rx_sls(2, data, sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(3, data, sls_num_rx_2, num_rx_2);
+		}
+	}
+
+	/* All traffic should still be sent to the same receiver, since
+	 * OPC+DPC+SLS cannot change in IPA ASPs.
+	 * However, depending on how the SLS seed tables were allocated, it can
+	 * be that STP was routing through Alternative Route and now that the
+	 * 2nd receiver is up it is now routing to it (Normal Route). Account
+	 * for both scenarios. */
+	if (not ((num_rx_1 == iter_per_asp and num_rx_2 == 0) or (num_rx_2 == iter_per_asp and num_rx_1 == 0))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected all traffic through same receiver!");
+	}
+
+
+	/* activate the second 'sender' side ASP */
+	f_connect_ipa(1);
+
+	num_rx_1 := 0;
+	num_rx_2 := 0;
+	sls_num_rx_1 := {};
+	sls_num_rx_2 := {};
+	for (i := 0; i < NUM_SLS; i := i + 1) {
+		sls_num_rx_1 := sls_num_rx_1 & {0};
+		sls_num_rx_2 := sls_num_rx_2 & {0};
+	}
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_SCCP_UDT();
+		f_IPA_send(i mod 2, data);
+		alt {
+		[] as_count_rx_sls(2, data, sls_num_rx_1, num_rx_1);
+		[] as_count_rx_sls(3, data, sls_num_rx_2, num_rx_2);
+		}
+	}
+	/* Make sure traffic was sent over both ASPs and that it was distributed: */
+	if (num_rx_1 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 1st ASP!");
+	}
+	if (num_rx_2 == 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Rx 0 packets in 2nd ASP!");
+	}
+	if (num_rx_1 + num_rx_2 != 2*iter_per_asp) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx ", num_rx_1 + num_rx_2 ," packets in total vs exp ", 2*iter_per_asp));
+	}
+	setverdict(pass);
+}
+testcase TC_combinedlset_loadshare() runs on IPA_CT {
+	f_tc_combinedlset_loadshare(false);
+}
+/* same as above, with "accept-asp-connections dynamic-permitted" and clients from unknown ASPs */
+testcase TC_unknown_client_dynamic_combinedlset_loadshare() runs on IPA_CT {
+	f_tc_combinedlset_loadshare(true);
 }
 
 private function f_IPA_ping(integer idx) runs on IPA_CT
@@ -641,6 +749,8 @@ control {
 	execute( TC_tmt_loadshare_roundrobin() );
 	execute( TC_tmt_loadshare_sls() );
 	execute( TC_unknown_client_dynamic_tmt_loadshare() );
+	execute( TC_combinedlset_loadshare() );
+	execute( TC_unknown_client_dynamic_combinedlset_loadshare() );
 
 	execute( TC_beat() );
 	execute( TC_beat_timeout() );
