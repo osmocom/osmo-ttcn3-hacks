@@ -117,7 +117,7 @@ def clone_project(project):
     if testenv.args.binary_repo.endswith(":latest"):
         ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True, no_podman=True)
         tags = []
-        pattern = re.compile("^\d+\.\d+\.\d+$")
+        pattern = re.compile("^\\d+\\.\\d+\\.\\d+$")
         for line in ls_remote.stdout.split("\n"):
             if "refs/tags/" in line:
                 tag = line.split("refs/tags/")[1].split("^")[0]
