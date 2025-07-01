@@ -493,3 +493,120 @@ Still available at `/app/tools/structured_md_tool.py` for basic searches:
 ```bash
 python3 /app/tools/structured_md_tool.py /app/testspec.md --command search --query "4.3.14.2.2" --context 20
 ```
+
+## SGP.22 Specification Analysis Tool
+
+### Specification Analyzer (spec_analyzer.py)
+For analyzing the SGP.22 specification document and extracting function definitions, data structures, and error codes:
+
+**Note**: If you get import errors, the dependencies may need to be installed. The tool will show which paths it tried.
+
+#### Basic Usage
+```bash
+# Show specification summary
+python3 /app/tools/spec_analyzer.py /app/sgp22_2.5.md --command summary
+
+# List all functions
+python3 /app/tools/spec_analyzer.py /app/sgp22_2.5.md --command functions
+
+# List functions for specific interface
+python3 /app/tools/spec_analyzer.py /app/sgp22_2.5.md --command functions --interface ES9+
+
+# Get details about a specific function
+python3 /app/tools/spec_analyzer.py /app/sgp22_2.5.md --command details --function AuthenticateClient
+
+# Search for error codes or specific content
+python3 /app/tools/spec_analyzer.py /app/sgp22_2.5.md --command search --query "8.2.7" --format text
+```
+
+#### When to Use
+- **Finding error code definitions**: Search for subject/reason codes like "8.1.1" or "3.8"
+- **Understanding function interfaces**: Get complete function definitions from SGP.22
+- **Protocol flow analysis**: Extract function requirements and data structures
+- **Cross-referencing**: Find where specific elements are defined in the spec
+
+## TTCN-3 MCP Tool Usage
+
+### TTCN-3 Code Analysis Tool
+For analyzing TTCN-3 test code, finding symbols, and understanding test structure:
+
+#### Direct JSON-RPC Usage
+```bash
+# Parse file and get statistics
+echo '{"jsonrpc":"2.0","id":1,"method":"parse_file","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null
+
+# List all symbols in a file
+echo '{"jsonrpc":"2.0","id":1,"method":"list_symbols","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_type":"testcase"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null
+
+# Get source code of a specific function
+echo '{"jsonrpc":"2.0","id":1,"method":"get_symbol_source","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_name":"f_authenticateClient"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null | jq -r '.result.source'
+
+# Find references to a symbol
+echo '{"jsonrpc":"2.0","id":1,"method":"find_references","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_name":"g_transactionId"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null
+```
+
+#### Symbol Types
+- `"function"` - Private/public functions
+- `"testcase"` - Test case definitions
+- `"template"` - Message templates
+- `"type"` - Type definitions
+- `"module"` - Module declarations
+
+#### Common Usage Patterns
+```bash
+# Find where a test function is implemented
+echo '{"jsonrpc":"2.0","id":1,"method":"find_definition","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_name":"TC_SM_DP_ES9_AuthenticateClientNIST_Error_14_UnmatchedEID_DefaultDP"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null
+
+# Get the actual test implementation
+echo '{"jsonrpc":"2.0","id":1,"method":"get_symbol_source","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_name":"f_TC_AuthenticateClient_Error_14_UnmatchedEID_DefaultDP"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null | jq -r '.result.source'
+
+# Find all test cases matching a pattern
+echo '{"jsonrpc":"2.0","id":1,"method":"list_symbols","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_type":"testcase"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null | jq -r '.result.symbols.testcases[].name' | grep -i error
+```
+
+#### Tips for TTCN-3 MCP
+- Always pipe stderr to /dev/null to get clean JSON output
+- Use jq to extract specific fields from the JSON response
+- The tool preserves exact source formatting including comments
+- For test cases, look for both the testcase declaration and the implementing function (usually f_TC_*)
+- Symbol names are case-sensitive
+
+## Tool Selection Guidelines
+
+### When to Use Each Tool
+
+1. **Testspec Tool (enhanced_structured_md_tool.py)**
+   - Finding test sequences and their expected behavior
+   - Understanding error scenarios and expected error codes
+   - Extracting test case requirements and initial conditions
+   - Getting all error cases for a specific operation
+
+2. **Specification Analyzer (spec_analyzer.py)**
+   - Looking up error code meanings (subject and reason codes)
+   - Understanding protocol function definitions
+   - Finding data structure definitions
+   - Analyzing interface specifications
+
+3. **TTCN-3 MCP Tool**
+   - Navigating test implementation code
+   - Finding where specific tests are implemented
+   - Understanding test function relationships
+   - Extracting actual test logic and error injection methods
+
+### Common Workflows
+
+#### Analyzing a Failing Test
+1. Use TTCN-3 MCP to find the test implementation
+2. Use Testspec tool to find what the test expects
+3. Use Spec analyzer to understand error code meanings
+4. Compare implementation vs. specification vs. test expectations
+
+#### Understanding Error Codes
+1. Use Testspec tool to find which test expects the error
+2. Use Spec analyzer to find the error code definition
+3. Use TTCN-3 MCP to see how the test validates the error
+
+#### Adding New Tests
+1. Use Testspec tool to find similar test patterns
+2. Use TTCN-3 MCP to find existing implementations to copy
+3. Use Spec analyzer to ensure correct protocol usage
