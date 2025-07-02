@@ -1,6 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -38,7 +37,6 @@ cd smdpp; make bear-incremental  # Update compile_commands.json without clean
 - Build process can take a few seconds for full clean builds
 
 **⚠️ Important Implementation Notes**:
-- Always clean before make, because not doing that produces weird errors like smdpp_Tests_part_5.cc:364:15: error: 'init_ttcn3_debugger' is not a member of 'smdpp__Tests and those are a waste of time fixed by clean builds.
 - ** c++ functions used by ttcn3 always have two underscores in the name, example:**
 - ttcn3: external function ext_logInfo(charstring xmessage);
 - c++: void ext__logInfo(const CHARSTRING& message)
@@ -125,9 +123,7 @@ The smdpp test suite implements a complete RSP protocol flow:
 ### Key Dependencies
 
 - OpenSSL for cryptographic operations
-- libcjson/jansson for JSON parsing
 - libcurl for HTTP client operations
-- Test certificates in `sgp26/` directory
 
 ## Test Execution Environment
 - **Always use `./uns.sh` for smdpp test execution** (required for proper operation)
@@ -143,7 +139,6 @@ The smdpp test suite implements a complete RSP protocol flow:
 ## Important Configuration
 
 - SSL/TLS certificates configured in test `.cfg` files
-- HTTP debugging controlled via `smdpp_Tests.default`
 - Common logging configuration in `Common.cfg`
 - Module parameters for specific test behavior
 
@@ -157,9 +152,7 @@ The smdpp test suite implements a complete RSP protocol flow:
 - Certificates are loaded from `./sgp26/` subdirectories
 
 ### Port Handling
-- Use `CURLOPT_PORT` to set port separately, don't embed in URL
 - BRP tests run on port 8001, NIST tests on port 8000
-- Session databases use suffix: `sm-dp-sessions-NIST` and `sm-dp-sessions-BRP`
 
 ## Development Notes
 
@@ -183,11 +176,10 @@ When modifying tests:
 ## Known Limitations
 
 ### BRP (Brainpool) Tests
-**BRP tests are incompatible with TLS 1.3** - This is a fundamental protocol limitation:
+**BRP tests are incompatible with TLS 1.3 in openssl < 3.2** - This is a fundamental protocol limitation:
 - TLS 1.3 (RFC 8446) only supports specific curves: secp256r1, secp384r1, secp521r1, x25519, x448
-- Brainpool curves (brainpoolP256r1, etc.) are NOT supported in TLS 1.3
-- Since TLS >= 1.3 is required, BRP tests cannot function
-- This is not fixable through patches or configuration changes
+- Brainpool curves (brainpoolP256r1, etc.) are NOT supported in TLS 1.3 with openssl < 3.2
+- openssl >= 3.2 is available
 
 ## Additional Implementation Details
 
@@ -229,8 +221,6 @@ Test cases in `/app/testspec.md` follow SGP.23 v1.15 standard:
 - Always use task workers to run the full test suite so you don't pollute your context
 - Always make a plan, and use tasks and worker thingies to preserve your context, because this codebase is large.
 
-### Testspec File Locations
-- Full path of testspec: `/app/testspec.md`
 
 ### Test Case Analysis Reference
 - Take note of previous test case analysis at `/app/tt-smdpp/smdpp/TEST_CASE_ANALYSIS.md` - reference this file for specific test case numbers and details to help locate and understand specific test scenarios
@@ -285,20 +275,6 @@ Instead of implementing individual test cases for each error scenario:
 - Use descriptive logging to identify which scenario is running
 - Example: `TC_SM_DP_ES9_AuthenticateClientNIST_ErrorCases` covers 4 error scenarios
 
-## HTTP Response Handling
-
-### HTTP 204 No Content
-HandleNotification endpoint returns HTTP 204 with no body on success:
-```ttcn
-} else if (resp.response.statuscode == 204) {
-    /* HTTP 204 No Content - success with no body */
-    es9p_resp.emptyResponse := {
-        header := { functionExecutionStatus := { status := "Executed-Success" } }
-    };
-    es9p_resp.err := omit;
-    return es9p_resp;
-}
-```
 
 ## Certificate and Cryptographic Variants
 
@@ -312,16 +288,6 @@ HandleNotification endpoint returns HTTP 204 with no body on success:
 - **Signature Concatenation**: Raw concatenation without TLV wrappers
 - **Order Matters**: eUICC data first, then SM-DP+ signature
 
-## Error Validation Pattern
-Centralize error validation for consistency:
-```ttcn
-private function f_validate_error_response(
-    JSON_ESx_FunctionExecutionStatusCodeData errorData,
-    charstring expected_subject_code,
-    charstring expected_reason_code,
-    charstring test_description
-)
-```
 
 ## Python Server State Management
 For retry scenarios, the server maintains global state:
@@ -482,12 +448,6 @@ python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
 - **Section extraction**: When you need a complete test case section
 - **Error code search**: When analyzing SGP.23 error response patterns
 
-#### Advantages over Original Tool
-- **1 command instead of 5+** for getting all error test sequences
-- **No risk of missing sequences** - range extraction gets everything
-- **Table format** shows clear overview of error codes and sections
-- **Consolidated format** groups related errors by section hierarchy
-- **Section context** always available for understanding test location
 
 ### Original Testspec Tool (for simple searches)
 Still available at `/app/tools/structured_md_tool.py` for basic searches:
@@ -573,6 +533,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"list_symbols","params":{"file_path":"/ap
 - The tool preserves exact source formatting including comments
 - For test cases, look for both the testcase declaration and the implementing function (usually f_TC_*)
 - Symbol names are case-sensitive
+- **JSON paths differ by method**: `find_definition` uses `.result.definition.position.line`, not `.result.line`
+- do not immediately fall back to grep or sed if the tool fails, make sure you are not using it wrong first.
 
 #### Comparing Testspec vs Implementation
 ```bash
