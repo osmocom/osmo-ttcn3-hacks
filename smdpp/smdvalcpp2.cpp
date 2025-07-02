@@ -6,9 +6,6 @@
  * protocol implementation according to GSMA SGP.22 specifications.
  * ============================================================================ */
 
-// ============================================================================
-// STANDARD LIBRARY HEADERS
-// ============================================================================
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -27,16 +24,12 @@
 #include <string>
 #include <vector>
 
-// ============================================================================
-// EXTERNAL C LIBRARY HEADERS
-// ============================================================================
+
 extern "C" {
-// System headers
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
-// OpenSSL headers - Core
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
 #include <openssl/bio.h>
@@ -50,47 +43,30 @@ extern "C" {
 #include <openssl/param_build.h>
 #include <openssl/core_names.h>
 
-// OpenSSL headers - Cryptographic operations
 #include <openssl/cmac.h>
 #include <openssl/ec.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
 
-// OpenSSL headers - X.509 certificate handling
 #include <openssl/safestack.h>
 #include <openssl/stack.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 
-// External libraries
 #include <curl/curl.h>
-#include <cJSON.h>
 
 }
 
-// ============================================================================
-// PROJECT HEADERS
-// ============================================================================
+
 #include "logger.h"
 #include "helpers.h"
-
-// ============================================================================
-// NAMESPACE: RspCrypto
-// ============================================================================
 namespace RspCrypto {
 
-// ============================================================================
-// CLASS: CertificateUtil
-// Provides comprehensive X.509 certificate handling utilities
-// ============================================================================
+
 class CertificateUtil {
 public:
-    // ========================================================================
-    // CERTIFICATE INFORMATION EXTRACTION
-    // ========================================================================
 
-    // Extract EID (eUICC ID) from certificate subject
     static std::string getEID(X509 *cert) {
         X509_NAME *subject = X509_get_subject_name(cert);
         if (!subject) {
@@ -119,21 +95,13 @@ public:
         return std::string(reinterpret_cast<const char *>(str_data), str_len);
     }
 
-    // Extract subject name from certificate
     static std::string getSubjectName(X509 *cert) {
         char subjectName[256];
         X509_NAME_oneline(X509_get_subject_name(cert), subjectName, sizeof(subjectName));
         return std::string(subjectName);
     }
 
-    // Extract issuer name from certificate
-    static std::string getIssuerName(X509 *cert) {
-        char issuerName[256];
-        X509_NAME_oneline(X509_get_issuer_name(cert), issuerName, sizeof(issuerName));
-        return std::string(issuerName);
-    }
 
-    // Extract Subject Key Identifier from certificate
     static std::vector<uint8_t> getSubjectKeyIdentifier(X509 *cert) {
         std::vector<uint8_t> ski;
 
@@ -143,7 +111,6 @@ public:
             if (ext) {
                 ASN1_OCTET_STRING *ext_data = X509_EXTENSION_get_data(ext);
 
-                // Parse the SKI value (handle ASN.1 encoding)
                 const unsigned char *p = ext_data->data;
                 long xlen = ext_data->length;
                 int tag, xclass;
@@ -158,7 +125,6 @@ public:
         return ski;
     }
 
-    // Extract Authority Key Identifier from certificate
     static std::vector<uint8_t> getAuthorityKeyIdentifier(X509 *cert) {
         std::vector<uint8_t> aki;
 
@@ -182,28 +148,6 @@ public:
         return aki;
     }
 
-    // ========================================================================
-    // CERTIFICATE LOADING AND CONVERSION
-    // ========================================================================
-
-    // Load certificate from PEM string
-    static std::unique_ptr<X509, X509Deleter> loadCertFromPEM(const std::string &pemData) {
-        BIO *bio = BIO_new_mem_buf(pemData.c_str(), -1);
-        if (!bio) {
-            throw OpenSSLError("Failed to create BIO for certificate");
-        }
-
-        X509 *cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-        BIO_free(bio);
-
-        if (!cert) {
-            throw OpenSSLError("Failed to parse PEM certificate");
-        }
-
-        return std::unique_ptr<X509, X509Deleter>(cert);
-    }
-
-    // Load certificate from DER data
     static std::unique_ptr<X509, X509Deleter> loadCertFromDER(const std::vector<uint8_t> &derData) {
         const unsigned char *p = derData.data();
         X509 *cert = d2i_X509(nullptr, &p, derData.size());
@@ -215,7 +159,6 @@ public:
         return std::unique_ptr<X509, X509Deleter>(cert);
     }
 
-    // Load certificate chain from file
     static std::vector<std::unique_ptr<X509, X509Deleter>> loadCertificateChain(const std::string &filename) {
         std::vector<std::unique_ptr<X509, X509Deleter>> chain;
 
@@ -242,7 +185,6 @@ public:
             BIO_free(bio);
         }
 
-        // Check if any certificates were loaded
         if (chain.empty()) {
             throw std::runtime_error("No certificates found in file: " + filename);
         }
@@ -250,24 +192,6 @@ public:
         return chain;
     }
 
-    // Convert X509 to PEM format
-    static std::string certToPEM(X509 *cert) {
-        BIO *bio = BIO_new(BIO_s_mem());
-        if (!bio) {
-            throw OpenSSLError("Failed to create BIO for certificate conversion");
-        }
-
-        PEM_write_bio_X509(bio, cert);
-        BUF_MEM *bufferPtr;
-        BIO_get_mem_ptr(bio, &bufferPtr);
-
-        std::string pem(bufferPtr->data, bufferPtr->length);
-        BIO_free(bio);
-
-        return pem;
-    }
-
-    // Convert X509 to DER format
     static std::vector<uint8_t> certToDER(X509 *cert) {
         BIO *bio = BIO_new(BIO_s_mem());
         if (!bio) {
@@ -285,190 +209,12 @@ public:
         return der;
     }
 
-    // ========================================================================
-    // CERTIFICATE VALIDATION
-    // ========================================================================
-
-    // Check if certificate is expired
-    static bool isExpired(X509 *cert) {
-        return (X509_cmp_current_time(X509_get_notAfter(cert)) <= 0);
-    }
-
-    // Check if certificate is not yet valid
-    static bool isNotYetValid(X509 *cert) {
-        return (X509_cmp_current_time(X509_get_notBefore(cert)) >= 0);
-    }
-
-    // Print detailed certificate information
-    static void printCertificateDetails(X509 *cert) {
-        // Get basic certificate information
-        char subjectName[256];
-        char issuerName[256];
-        X509_NAME_oneline(X509_get_subject_name(cert), subjectName, sizeof(subjectName));
-        X509_NAME_oneline(X509_get_issuer_name(cert), issuerName, sizeof(issuerName));
-
-        // Get validity period
-        ASN1_TIME *notBefore = X509_get_notBefore(cert);
-        ASN1_TIME *notAfter = X509_get_notAfter(cert);
-
-        // Convert ASN1_TIME to readable format
-        BIO *bio = BIO_new(BIO_s_mem());
-        BUF_MEM *bptr;
-
-        // Format start date
-        BIO_reset(bio);
-        ASN1_TIME_print(bio, notBefore);
-        BIO_get_mem_ptr(bio, &bptr);
-        std::string startDate(bptr->data, bptr->length);
-
-        // Format end date
-        BIO_reset(bio);
-        ASN1_TIME_print(bio, notAfter);
-        BIO_get_mem_ptr(bio, &bptr);
-        std::string endDate(bptr->data, bptr->length);
-        BIO_free(bio);
-
-        // Get certificate identifiers
-        auto ski = getSubjectKeyIdentifier(cert);
-        auto aki = getAuthorityKeyIdentifier(cert);
-
-        // Print all details
-        LOG_INFO("Certificate Details:");
-        LOG_INFO("  Subject: " + std::string(subjectName));
-        LOG_INFO("  Issuer:  " + std::string(issuerName));
-        LOG_INFO("  Valid:   " + startDate + " to " + endDate);
-        LOG_INFO("  SKI:     " + HexUtil::bytesToHex(ski));
-        LOG_INFO("  AKI:     " + HexUtil::bytesToHex(aki));
-
-        // Check if self-signed
-        if (X509_check_issued(cert, cert) == X509_V_OK) {
-            LOG_INFO("  Note:    Self-signed (Root) certificate");
-        }
-    }
-
-    // ========================================================================
-    // CERTIFICATE CHAIN OPERATIONS
-    // ========================================================================
-
-    // Find issuer certificate using AKI/SKI matching
-    static X509 *findIssuerCertificate(X509 *cert, const std::vector<X509 *> &certPool) {
-        // Try AKI/SKI match first
-        auto aki = getAuthorityKeyIdentifier(cert);
-        if (!aki.empty()) {
-            for (auto candidate : certPool) {
-                auto ski = getSubjectKeyIdentifier(candidate);
-                if (!ski.empty() && ski == aki) {
-                    LOG_DEBUG("Found issuer by SKI match: " + getSubjectName(candidate));
-                    return candidate;
-                }
-            }
-        }
-
-        // Fall back to subject/issuer name match
-        X509_NAME *issuerName = X509_get_issuer_name(cert);
-        for (auto candidate : certPool) {
-            X509_NAME *subjectName = X509_get_subject_name(candidate);
-            if (X509_NAME_cmp(subjectName, issuerName) == 0) {
-                LOG_DEBUG("Found issuer by subject name match: " + getSubjectName(candidate));
-                return candidate;
-            }
-        }
-
-        return nullptr;
-    }
-
-    // Build certificate chain using AKI/SKI or issuer/subject matching
-    static STACK_OF(X509) *buildCertificateChain(X509 *cert, const std::vector<X509 *> &certPool,
-                                                 bool verbose = false) {
-        STACK_OF(X509) *chain = sk_X509_new_null();
-        if (!chain) {
-            throw OpenSSLError("Failed to create certificate stack");
-        }
-
-        if (verbose) {
-            LOG_INFO("Building certificate chain starting with:");
-            printCertificateDetails(cert);
-        }
-
-        X509 *current = cert;
-        std::set<std::string> visited; // Prevent cycles
-
-        while (current) {
-            // Skip the first certificate (target) - we'll add it externally
-            if (current != cert) {
-                // Add certificate to the chain
-                if (sk_X509_push(chain, X509_dup(current)) == 0) {
-                    sk_X509_pop_free(chain, X509_free);
-                    throw OpenSSLError("Failed to add certificate to chain");
-                }
-            }
-
-            // Check if this is a self-signed certificate (root)
-            if (X509_check_issued(current, current) == X509_V_OK) {
-                if (verbose) {
-                    LOG_INFO("Reached root certificate: " + getSubjectName(current));
-                }
-                break;
-            }
-
-            // Track visited certificates to prevent loops
-            std::string subject = getSubjectName(current);
-            if (visited.find(subject) != visited.end()) {
-                LOG_WARNING("Certificate chain contains a cycle at: " + subject);
-                break;
-            }
-            visited.insert(subject);
-
-            // Find the issuer
-            X509 *issuer = findIssuerCertificate(current, certPool);
-            if (!issuer) {
-                LOG_WARNING("Could not find issuer for: " + subject);
-                break;
-            }
-
-            // Print validation link
-            if (verbose) {
-                auto currentSKI = getSubjectKeyIdentifier(current);
-                auto issuerSKI = getSubjectKeyIdentifier(issuer);
-                auto currentAKI = getAuthorityKeyIdentifier(current);
-                auto issuerAKI = getAuthorityKeyIdentifier(issuer);
-
-                LOG_INFO("Certificate validation link:");
-                LOG_INFO("  Subject: " + getSubjectName(current));
-                LOG_INFO("  AKI:     " + HexUtil::bytesToHex(currentAKI));
-                LOG_INFO("  SKI:     " + HexUtil::bytesToHex(currentSKI));
-                LOG_INFO("  ↓");
-                LOG_INFO("  Issuer:  " + getSubjectName(issuer));
-                LOG_INFO("  AKI:     " + HexUtil::bytesToHex(issuerAKI));
-                LOG_INFO("  SKI:     " + HexUtil::bytesToHex(issuerSKI));
-
-                // Verify AKI/SKI match
-                if (!currentAKI.empty() && !issuerSKI.empty()) {
-                    if (currentAKI == issuerSKI) {
-                        LOG_INFO("  Match:   AKI and SKI match ✓");
-                    } else {
-                        LOG_WARNING("  Match:   AKI and SKI DO NOT match ✗");
-                    }
-                } else {
-                    LOG_WARNING("  Match:   Cannot verify - missing AKI or SKI");
-                }
-                LOG_INFO(""); // Empty line for readability
-            }
-
-            // Move up the chain
-            current = issuer;
-        }
-
-        return chain;
-    }
-
-    // Enhanced certificate chain verification with proper trust model
     static bool verifyCertificateChainDynamic(X509 *cert, const std::vector<X509 *> &certPool,
                                               X509 *rootCA = nullptr, bool verbose = false) {
         LOG_INFO("Verifying certificate chain...");
         LOG_INFO("Target certificate: " + getSubjectName(cert));
 
-        // Create certificate store for trusted roots only
+        // certificate store for trusted roots only
         std::unique_ptr<X509_STORE, X509_STORE_Deleter> store(X509_STORE_new());
         if (!store) {
             throw OpenSSLError("Failed to create X509_STORE");
@@ -484,7 +230,6 @@ public:
             }
         } else {
             // If no root CA provided, find self-signed certificates in the pool
-            // WARNING: This should only be used in test environments
             LOG_WARNING("No explicit root CA provided - searching for self-signed certificates");
             for (auto candidate : certPool) {
                 if (X509_check_issued(candidate, candidate) == X509_V_OK) {
@@ -505,7 +250,7 @@ public:
         }
 
         // Build untrusted chain from cert pool (excluding the root if it's in there)
-        // IMPORTANT: We create a custom deleter that only frees the stack, not the certificates
+        // IMPORTANT: custom deleter that only frees the stack, not the certificates
         auto stack_only_deleter = [](STACK_OF(X509)* stack) {
             if (stack) {
                 sk_X509_free(stack);  // This only frees the stack structure, not the contents
@@ -536,22 +281,18 @@ public:
             LOG_INFO("Untrusted chain contains " + std::to_string(sk_X509_num(untrusted_chain.get())) + " certificates");
         }
 
-        // Create verification context
         std::unique_ptr<X509_STORE_CTX, X509_STORE_CTX_Deleter> ctx(X509_STORE_CTX_new());
         if (!ctx) {
             throw OpenSSLError("Failed to create X509_STORE_CTX");
         }
 
-        // Initialize with trust store, target cert, and untrusted chain
         if (X509_STORE_CTX_init(ctx.get(), store.get(), cert, untrusted_chain.get()) != 1) {
             throw OpenSSLError("Failed to initialize X509_STORE_CTX");
         }
 
-        // Set verification flags
         unsigned long flags = X509_V_FLAG_CHECK_SS_SIGNATURE;
         X509_STORE_CTX_set_flags(ctx.get(), flags);
 
-        // Set up verification callback
         X509_STORE_CTX_set_verify_cb(ctx.get(), [](int ok, X509_STORE_CTX *ctx) -> int {
             if (!ok) {
                 int error = X509_STORE_CTX_get_error(ctx);
@@ -568,13 +309,12 @@ public:
                         LOG_INFO("Processing certificate with name constraint abuse: " + std::string(subject_buf));
                     }
 
-                    return 1; // Accept - SGP.22 specific handling
+                    return 1;
                 }
             }
             return ok; // Use default behavior for other errors
         });
 
-        // Perform verification
         int result = X509_verify_cert(ctx.get());
 
         if (result != 1) {
@@ -595,7 +335,6 @@ public:
 
         LOG_INFO("Certificate verification successful");
 
-        // Print the verified chain if verbose
         if (verbose) {
             STACK_OF(X509) *verified_chain = X509_STORE_CTX_get1_chain(ctx.get());
             if (verified_chain) {
@@ -611,11 +350,6 @@ public:
         return true;
     }
 
-    // ========================================================================
-    // CERTIFICATE DIRECTORY OPERATIONS
-    // ========================================================================
-
-    // Find certificate files in directory with optional filters
     static std::vector<std::filesystem::path> find_cert_files(const std::filesystem::path &root_path,
                                                              const std::vector<std::string> &name_filters = {}) {
         std::vector<std::filesystem::path> result;
@@ -659,7 +393,6 @@ public:
         return result;
     }
 
-    // Load certificates from a directory
     static std::vector<std::unique_ptr<X509, X509Deleter>>
     loadCertificatesFromDirectory(const std::string &directory, const std::vector<std::string> &name_filters) {
         std::vector<std::unique_ptr<X509, X509Deleter>> certificates;
@@ -671,14 +404,12 @@ public:
             auto fpath = entry.string();
 
             try {
-                // Handle PEM files
                 if (ext == ".pem" || ext == ".crt") {
                     auto fileCerts = loadCertificateChain(entry);
                     for (auto &cert : fileCerts) {
                         certificates.push_back(std::move(cert));
                     }
                 }
-                // Handle DER files
                 else if (ext == ".der") {
                     FILE *file = fopen(fpath.c_str(), "rb");
                     if (!file) {
@@ -709,18 +440,13 @@ public:
                     }
                 }
             } catch (const std::exception &e) {
-                // Silent error handling - already logged in called functions
+                // already logged in called functions
             }
         }
 
         return certificates;
     }
 
-    // ========================================================================
-    // KEY AND CERTIFICATE LOADING UTILITIES
-    // ========================================================================
-
-    // Load certificate from file
     static void xx_loadCertificate(const std::string &certPath, const std::string &typeName,
                                   std::unique_ptr<X509, X509Deleter> &certStorage) {
         try {
@@ -739,7 +465,6 @@ public:
         }
     }
 
-    // Load private key from file
     static void xx_loadPrivateKey(const std::string &keyPath, const std::string &typeName,
                                  std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &keyStorage) {
         try {
@@ -773,7 +498,6 @@ public:
         }
     }
 
-    // Load public key from file
     static bool xx_loadPublicKey(const std::string &pubKeyPath, const std::string &typeName,
                                 std::vector<uint8_t> &publicKeyStorage) {
         try {
@@ -807,11 +531,8 @@ public:
                 return false;
             }
 
-            // Extract public key data using OpenSSL 3.0+ API
-            // Get the public key as an octet string directly
             size_t pub_len = 0;
 
-            // First get the size needed
             if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                                nullptr, 0, &pub_len) != 1) {
                 LOG_WARNING("Failed to get public key size from " + typeName +
@@ -819,7 +540,6 @@ public:
                 return false;
             }
 
-            // Allocate and get the actual public key data
             publicKeyStorage.resize(pub_len);
             if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                                publicKeyStorage.data(), pub_len, &pub_len) != 1) {
@@ -839,23 +559,19 @@ public:
         }
     }
 
-    // Generate public key from private key
     static void xx_generatePublicKeyFromPrivate(const std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &privateKey,
                                                const std::string &typeName, std::vector<uint8_t> &publicKeyStorage) {
         if (!privateKey) {
             throw std::runtime_error("No " + typeName + " private key available for public key generation");
         }
 
-        // Using OpenSSL 3.0+ API to get public key from private key
         size_t pub_len = 0;
 
-        // First get the size needed
         if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            nullptr, 0, &pub_len) != 1) {
             throw OpenSSLError("Failed to get public key size from " + typeName + " private key");
         }
 
-        // Allocate and get the actual public key data
         publicKeyStorage.resize(pub_len);
         if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            publicKeyStorage.data(), pub_len, &pub_len) != 1) {
@@ -866,48 +582,9 @@ public:
                       " bytes)");
     }
 
-    // Load complete key set (certificate, private key, public key)
-    static void xx_loadCompleteKeySet(const std::string &certPath, const std::string &privKeyPath,
-                                     const std::string &pubKeyPath, const std::string &typeName,
-                                     std::unique_ptr<X509, X509Deleter> &certStorage,
-                                     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &privKeyStorage,
-                                     std::vector<uint8_t> &pubKeyStorage) {
-        // Load certificate
-        xx_loadCertificate(certPath, typeName, certStorage);
-
-        // Load private key
-        xx_loadPrivateKey(privKeyPath, typeName, privKeyStorage);
-
-        // Try to load public key from file, generate from private key if that fails
-        if (!xx_loadPublicKey(pubKeyPath, typeName, pubKeyStorage)) {
-            xx_generatePublicKeyFromPrivate(privKeyStorage, typeName, pubKeyStorage);
-        }
-    }
-
-    // Overload for cases where you only have cert and private key paths
-    static void xx_loadCompleteKeySet(const std::string &certPath, const std::string &privKeyPath,
-                                     const std::string &typeName, std::unique_ptr<X509, X509Deleter> &certStorage,
-                                     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &privKeyStorage,
-                                     std::vector<uint8_t> &pubKeyStorage) {
-        // Load certificate
-        xx_loadCertificate(certPath, typeName, certStorage);
-
-        // Load private key
-        xx_loadPrivateKey(privKeyPath, typeName, privKeyStorage);
-
-        // Generate public key from private key
-        xx_generatePublicKeyFromPrivate(privKeyStorage, typeName, pubKeyStorage);
-    }
-
-    // ========================================================================
-    // RSP-SPECIFIC CERTIFICATE OPERATIONS
-    // ========================================================================
-
-    // Parse permitted EINs from EUM certificate
     static std::vector<std::string> parse_permitted_eins_from_cert(X509 *cert) {
         std::vector<std::string> permitted_iins;
 
-        // Check certificate variant
         bool is_old_variant = false;
         int pos = X509_get_ext_by_NID(cert, NID_certificate_policies, -1);
         if (pos >= 0) {
@@ -964,11 +641,11 @@ public:
                 const unsigned char *p = ext_data->data;
                 long remaining = ext_data->length;
 
-                // Parse SEQUENCE OF PrintableString
+                // SEQUENCE OF PrintableString
                 int tag, xclass;
                 long xlen;
 
-                // Get the SEQUENCE tag
+                // SEQUENCE tag
                 ASN1_get_object(&p, &xlen, &tag, &xclass, remaining);
                 if (tag == V_ASN1_SEQUENCE) {
                     remaining = xlen;
@@ -992,7 +669,6 @@ public:
         return permitted_iins;
     }
 
-    // Get permitted EINs as comma-separated string
     static std::string getPermittedEINs(const std::vector<uint8_t>& eumCertData) {
         try {
             auto cert = loadCertFromDER(eumCertData);
@@ -1012,7 +688,6 @@ public:
         }
     }
 
-    // Validate EID against EUM certificate permitted EINs
     static bool validateEIDRange(const std::string& eid, const std::vector<uint8_t>& eumCertData) {
         try {
             auto eumCert = loadCertFromDER(eumCertData);
@@ -1042,12 +717,10 @@ public:
         }
     }
 
-    // Check if certificate has a specific RSP role OID
     static bool hasRSPRole(const std::vector<uint8_t>& certData, const std::string& roleOid) {
         try {
             auto cert = loadCertFromDER(certData);
 
-            // Check certificate policies for RSP role
             int pos = X509_get_ext_by_NID(cert.get(), NID_certificate_policies, -1);
             if (pos < 0) return false;
 
@@ -1075,7 +748,6 @@ public:
         }
     }
 
-    // Get curve OID from certificate public key
     static std::string getCurveOID(const std::vector<uint8_t>& certData) {
         try {
             auto cert = loadCertFromDER(certData);
@@ -1119,11 +791,11 @@ public:
         }
     }
 
-    // Check if two EC public keys are ECDH compatible (same curve)
+    // ECDH compatible (same curve)
     static bool verifyECDHCompatible(const std::vector<uint8_t>& pubKey1,
                                     const std::vector<uint8_t>& pubKey2) {
         try {
-            // Both should be uncompressed EC points (starting with 0x04)
+            // Both should be uncompressed EC points starting with 0x04
             if (pubKey1.empty() || pubKey2.empty() || pubKey1[0] != 0x04 || pubKey2[0] != 0x04) {
                 LOG_ERROR("Invalid EC public key format");
                 return false;
@@ -1149,11 +821,6 @@ public:
         }
     }
 
-    // ========================================================================
-    // SIGNATURE OPERATIONS
-    // ========================================================================
-
-    // Convert BSI TR-03111 signature format to DER
     static std::vector<uint8_t> convertBSI_TR03111_to_DER(const std::vector<uint8_t> &bsi_signature) {
         if (bsi_signature.size() != 64) {
             std::cerr << "Invalid BSI TR-03111 signature size: " << bsi_signature.size() << std::endl;
@@ -1169,11 +836,9 @@ public:
             return {};
         }
 
-        // Convert 32-byte values to BIGNUM
         BN_bin2bn(bsi_signature.data(), 32, r);
         BN_bin2bn(bsi_signature.data() + 32, 32, s);
 
-        // Create ECDSA_SIG structure
         ECDSA_SIG *ecdsa_sig = ECDSA_SIG_new();
         if (!ecdsa_sig) {
             BN_free(r);
@@ -1183,7 +848,6 @@ public:
 
         ECDSA_SIG_set0(ecdsa_sig, r, s);
 
-        // Convert to DER format
         int der_len = i2d_ECDSA_SIG(ecdsa_sig, nullptr);
         if (der_len <= 0) {
             ECDSA_SIG_free(ecdsa_sig);
@@ -1199,14 +863,12 @@ public:
         return der_signature;
     }
 
-    // Convert DER signature format to BSI TR-03111
     static std::vector<uint8_t> convertDER_to_BSI_TR03111(const std::vector<uint8_t> &der_signature) {
         if (der_signature.empty()) {
             std::cerr << "Empty DER signature" << std::endl;
             return {};
         }
 
-        // Parse DER signature
         const unsigned char *der_ptr = der_signature.data();
         ECDSA_SIG *ecdsa_sig = d2i_ECDSA_SIG(nullptr, &der_ptr, der_signature.size());
 
@@ -1215,7 +877,6 @@ public:
             return {};
         }
 
-        // Extract r and s values
         const BIGNUM *r, *s;
         ECDSA_SIG_get0(ecdsa_sig, &r, &s);
 
@@ -1224,13 +885,11 @@ public:
             return {};
         }
 
-        // Convert BIGNUMs to 32-byte arrays
         std::vector<uint8_t> bsi_signature(64, 0);
 
         int r_len = BN_num_bytes(r);
         int s_len = BN_num_bytes(s);
 
-        // BSI TR-03111 expects exactly 32 bytes for each component
         if (r_len > 32 || s_len > 32) {
             std::cerr << "BIGNUM values too large for BSI TR-03111 format" << std::endl;
             ECDSA_SIG_free(ecdsa_sig);
@@ -1250,7 +909,6 @@ public:
         return bsi_signature;
     }
 
-    // Verify signature in BSI TR-03111 format
     static bool verify_TR031111(const std::vector<uint8_t> &message, const std::vector<uint8_t> &bsi_signature,
                                EVP_PKEY *publicKey) {
         std::vector<uint8_t> der_signature = convertBSI_TR03111_to_DER(bsi_signature);
@@ -1275,30 +933,23 @@ public:
             return false;
         }
 
-        // Verify signature
         int result = EVP_DigestVerifyFinal(mdctx.get(), der_signature.data(), der_signature.size());
 
         return result == 1;
     }
 };
 
-// ============================================================================
-// CLASS: HttpClient
-// Provides HTTP/HTTPS client functionality for SM-DP+ server communication
-// ============================================================================
 class HttpClient {
 public:
     HttpClient() {
-        // Initialize libcurl globally - should be called once per application
+        // should be called once per application
         curl_global_init(CURL_GLOBAL_DEFAULT);
     }
 
     ~HttpClient() {
-        // Clean up libcurl
         curl_global_cleanup();
     }
 
-    // Structure to store response data
     struct ResponseData {
         std::string body;
         long statusCode;
@@ -1306,7 +957,6 @@ public:
     };
 
 private:
-    // Callback function for writing response data
     static size_t writeCallback(void *contents, size_t size, size_t nmemb, void *userp) {
         size_t realSize = size * nmemb;
         auto *response = static_cast<std::string *>(userp);
@@ -1314,7 +964,6 @@ private:
         return realSize;
     }
 
-    // Callback function for writing header data
     static size_t headerCallback(void *contents, size_t size, size_t nmemb, void *userp) {
         size_t realSize = size * nmemb;
         auto *headers = static_cast<std::string *>(userp);
@@ -1322,7 +971,6 @@ private:
         return realSize;
     }
 
-    // Custom SSL context for certificate verification
     struct SslCtxData {
         X509_STORE *store;
         std::vector<X509 *> *certPool;
@@ -1330,7 +978,6 @@ private:
         std::string errorMessage;
     };
 
-    // Get common name from X509_NAME
     static std::string get_cn_name(X509_NAME *const name) {
         int idx = -1;
         unsigned char *utf8 = NULL;
@@ -1355,7 +1002,6 @@ private:
         return retstr;
     }
 
-    // Set up custom certificate verification for CURL
     static CURLcode sslCtxFunction(CURL *curl, SSL_CTX *sslCtx, void *arg) {
         SslCtxData *ctxData = static_cast<SslCtxData *>(arg);
         SSL_CTX *ctx = (SSL_CTX *)sslCtx;
@@ -1378,14 +1024,12 @@ private:
             }
         }
 
-        // Turn on verification
         SSL_CTX_set_verify(sslCtx, SSL_VERIFY_PEER, nullptr);
 
         return CURLE_OK;
     }
 
 public:
-    // Perform HTTPS request with custom certificate verification
     ResponseData postJsonWithCustomVerification(const std::string &url, unsigned int port,
                                                const std::string &jsonData, X509_STORE *store,
                                                std::vector<X509 *> &certPool) {
@@ -1396,12 +1040,10 @@ public:
             throw std::runtime_error("Failed to initialize CURL");
         }
 
-        // Set up headers for JSON request
         struct curl_slist *headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
         headers = curl_slist_append(headers, "Accept: application/json");
 
-        // Set up certificate verification data
         SslCtxData ctxData = {
             .store = store, .certPool = &certPool, .verifyResult = false, .errorMessage = ""
         };
@@ -1425,30 +1067,25 @@ public:
             curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, sslCtxFunction);
             curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, &ctxData);
 
-            // Don't disable the default CA bundle - our custom certs will be added to it
+            // Don't disable the default CA bundle - custom certs will be added to it
             // This allows both system CAs and custom test certificates to work together
 
             // curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 
-            // Perform the request
             CURLcode res = curl_easy_perform(curl);
 
-            // Check for errors
             if (res != CURLE_OK) {
                 throw std::runtime_error(std::string("CURL request failed: ") +
                                          curl_easy_strerror(res));
             }
 
-            // Get the status code
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.statusCode);
 
-            // Clean up
             curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
 
             return response;
         } catch (...) {
-            // Clean up on exception
             curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
             throw;
@@ -1456,11 +1093,6 @@ public:
     }
 };
 
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-// Compute confirmation code hash according to SGP.22 specification
 // Hashed Confirmation Code = SHA256(SHA256(Confirmation Code) | TransactionID)
 static std::vector<uint8_t> computeConfirmationCodeHash(
     const std::string& confirmationCode,
@@ -1476,29 +1108,21 @@ static std::vector<uint8_t> computeConfirmationCodeHash(
         }
     }
 
-    // Step 1: SHA256(Confirmation Code)
     unsigned char firstHash[SHA256_DIGEST_LENGTH];
     SHA256(ccBytes.data(), ccBytes.size(), firstHash);
 
-    // Step 2: Concatenate SHA256(CC) with TransactionID
     std::vector<uint8_t> concatenated;
     concatenated.insert(concatenated.end(), firstHash, firstHash + SHA256_DIGEST_LENGTH);
     concatenated.insert(concatenated.end(), transactionId.begin(), transactionId.end());
 
-    // Step 3: SHA256(SHA256(CC) | TransactionID)
     unsigned char finalHash[SHA256_DIGEST_LENGTH];
     SHA256(concatenated.data(), concatenated.size(), finalHash);
 
     return std::vector<uint8_t>(finalHash, finalHash + SHA256_DIGEST_LENGTH);
 }
 
-// ============================================================================
-// CLASS: RSPClient
-// Main RSP client implementation for Remote SIM Provisioning operations
-// ============================================================================
 class RSPClient {
 public:
-    // Constructor
     RSPClient(const std::string &serverUrl, const unsigned int serverPort,
               const std::vector<std::string> &certPath,
               const std::vector<std::string> &name_filters = {})
@@ -1511,7 +1135,6 @@ public:
                 if (isDirectory) {
                     LOG_DEBUG("Loading certificates from directory: " + cpath);
 
-                    // Load all certificates from the directory
                     auto certs = CertificateUtil::loadCertificatesFromDirectory(cpath, name_filters);
                     LOG_DEBUG("Loaded " + std::to_string(certs.size()) + " certificates");
 
@@ -1539,7 +1162,7 @@ public:
                         LOG_WARNING("No root CA found in directory");
                     }
                 } else {
-                    // Original behavior - load certificate chain from file
+                    // load certificate chain from single file
                     LOG_INFO("Loading certificates from file: " + cpath);
                     auto caChain = CertificateUtil::loadCertificateChain(cpath);
 
@@ -1557,7 +1180,7 @@ public:
                             LOG_INFO("Loaded intermediate CA: " +
                                          CertificateUtil::getSubjectName(cert.get()));
 
-                            // Also add intermediates to certificate pool for compatibility
+                            // add intermediates to certificate pool for compatibility
                             m_certPool.push_back(std::unique_ptr<X509, X509Deleter>(
                                 X509_dup(cert.get())));
                         }
@@ -1574,20 +1197,13 @@ public:
         // OpenSSL 3.0+ handles cleanup automatically
     }
 
-    // ========================================================================
-    // PUBLIC INTERFACE - CERTIFICATE AND KEY MANAGEMENT
-    // ========================================================================
-
-    // Set the path to CA certificates for system verification
     void setCACertPath(const std::string &path) {
         m_caCertPath = path;
     }
 
-    // Load eUICC certificate
     void loadEUICCCertificate(const std::string &euiccCertPath) {
         CertificateUtil::xx_loadCertificate(euiccCertPath, "eUICC", m_euiccCert);
 
-        // EUICC-specific operations
         try {
             m_EID = CertificateUtil::getEID(m_euiccCert.get());
             LOG_INFO("Using EID from certificate: " + m_EID);
@@ -1601,54 +1217,32 @@ public:
         }
     }
 
-    // Load eUICC key pair
     void loadEUICCKeyPair(const std::string &euiccPrivateKeyPath, const std::string &euiccPublicKeyPath = "") {
         CertificateUtil::xx_loadPrivateKey(euiccPrivateKeyPath, "eUICC", m_euiccPrivateKey);
 
         if (!euiccPublicKeyPath.empty() &&
             CertificateUtil::xx_loadPublicKey(euiccPublicKeyPath, "eUICC", m_euiccPublicKeyData)) {
-            // Successfully loaded public key from file
             return;
         }
 
-        // Generate public key from private key
         CertificateUtil::xx_generatePublicKeyFromPrivate(m_euiccPrivateKey, "eUICC", m_euiccPublicKeyData);
     }
 
-    // Load EUM certificate
     void loadEUMCertificate(const std::string &eumCertPath) {
         CertificateUtil::xx_loadCertificate(eumCertPath, "EUM", m_eumCert);
     }
 
-    // Load EUM key pair
     void loadEUMKeyPair(const std::string &eumPrivateKeyPath, const std::string &eumPublicKeyPath = "") {
         CertificateUtil::xx_loadPrivateKey(eumPrivateKeyPath, "EUM", m_eumPrivateKey);
 
         if (!eumPublicKeyPath.empty() &&
             CertificateUtil::xx_loadPublicKey(eumPublicKeyPath, "EUM", m_eumPublicKeyData)) {
-            // Successfully loaded public key from file
             return;
         }
 
-        // Generate public key from private key
         CertificateUtil::xx_generatePublicKeyFromPrivate(m_eumPrivateKey, "EUM", m_eumPublicKeyData);
     }
 
-    // Generic complete key set loader
-    void loadAnyCompleteKeySet(const std::string &certPath, const std::string &privKeyPath,
-                               const std::string &pubKeyPath, const std::string &typeName,
-                               std::unique_ptr<X509, X509Deleter> &certStorage,
-                               std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &privKeyStorage,
-                               std::vector<uint8_t> &pubKeyStorage) {
-        CertificateUtil::xx_loadCompleteKeySet(certPath, privKeyPath, pubKeyPath, typeName,
-                                              certStorage, privKeyStorage, pubKeyStorage);
-    }
-
-    // ========================================================================
-    // PUBLIC INTERFACE - CRYPTOGRAPHIC OPERATIONS
-    // ========================================================================
-
-    // Generate a random challenge (16 bytes)
     std::vector<uint8_t> generateChallenge() {
         std::vector<uint8_t> challenge(16);
         if (RAND_bytes(challenge.data(), challenge.size()) != 1) {
@@ -1657,19 +1251,16 @@ public:
         return challenge;
     }
 
-    // Extract curve NID from any certificate
     int getCertificateCurveNID(X509* cert) {
         if (!cert) {
             throw std::runtime_error("Certificate is null");
         }
 
-        // Get the public key from the certificate
         std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubkey(X509_get_pubkey(cert));
         if (!pubkey) {
             throw OpenSSLError("Failed to extract public key from certificate");
         }
 
-        // Get the curve name from the public key
         char curve_name[80];
         size_t curve_name_len = sizeof(curve_name);
         if (EVP_PKEY_get_utf8_string_param(pubkey.get(), OSSL_PKEY_PARAM_GROUP_NAME,
@@ -1677,7 +1268,6 @@ public:
             throw OpenSSLError("Failed to get curve name from certificate");
         }
 
-        // Map curve name to NID
         std::string curve_str(curve_name);
         int curve_nid;
 
@@ -1692,7 +1282,6 @@ public:
         return curve_nid;
     }
 
-    // Extract curve NID from eUICC certificate
     int getEUICCCurveNID() {
         if (!m_euiccCert) {
             throw std::runtime_error("eUICC certificate not loaded");
@@ -1709,42 +1298,33 @@ public:
         return curve_nid;
     }
 
-    // Generate eUICC one-time public key (OtPK)
     void generateEUICCOtpk() {
-        // Get the curve from the loaded eUICC certificate
         int curve_nid = getEUICCCurveNID();
         std::string curve_name = (curve_nid == NID_X9_62_prime256v1) ? "P-256" : "brainpoolP256r1";
 
-        // Create EC key context using OpenSSL 3.0+ API
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
             pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
         if (!pctx) {
             throw OpenSSLError("Failed to create EVP_PKEY_CTX");
         }
 
-        // Initialize key generation
         if (EVP_PKEY_keygen_init(pctx.get()) <= 0) {
             throw OpenSSLError("Failed to initialize key generation");
         }
 
-        // Set the curve based on the eUICC certificate
         if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx.get(), curve_nid) <= 0) {
             throw OpenSSLError("Failed to set " + curve_name + " curve");
         }
 
-        // Generate the key pair
         EVP_PKEY *pkey_raw = nullptr;
         if (EVP_PKEY_keygen(pctx.get(), &pkey_raw) <= 0) {
             throw OpenSSLError("Failed to generate EC key pair");
         }
 
-        // Store the private key for later use in key agreement
         m_euicc_ot_PrivateKey.reset(pkey_raw);
 
-        // Get the public key in uncompressed format
         size_t pub_len = 0;
 
-        // First get the size needed
         if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            nullptr, 0, &pub_len) != 1) {
             throw OpenSSLError("Failed to get public key size");
@@ -1756,7 +1336,6 @@ public:
             throw OpenSSLError("Unexpected public key size for " + curve_name);
         }
 
-        // Get the actual public key data
         m_euiccOtpk.resize(pub_len);
         if (EVP_PKEY_get_octet_string_param(m_euicc_ot_PrivateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
                                            m_euiccOtpk.data(), pub_len, &pub_len) != 1) {
@@ -1765,7 +1344,6 @@ public:
 
         LOG_INFO("Generated eUICC OtPK (" + curve_name + "): " + HexUtil::bytesToHex(m_euiccOtpk));
 
-        // Verify the key format
         if (m_euiccOtpk[0] != 0x04) {
             throw std::runtime_error("Invalid public key format - expected uncompressed point");
         }
@@ -1773,17 +1351,14 @@ public:
         LOG_DEBUG("Public key format verified - uncompressed EC point");
     }
 
-    // Compute ECDH shared secret
     std::vector<uint8_t> computeECDHSharedSecret(const std::vector<uint8_t> &otherPublicKey) {
         if (!m_euicc_ot_PrivateKey) {
             throw std::runtime_error("eUICC ephemeral private key not available");
         }
 
-        // Get the curve from the loaded eUICC certificate
         int curve_nid = getEUICCCurveNID();
         const char* curve_param_name = (curve_nid == NID_X9_62_prime256v1) ? "P-256" : "brainpoolP256r1";
 
-        // Create EVP_PKEY for the other party's public key using OpenSSL 3.0+ API
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
             pctx(EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr), EVP_PKEY_CTX_free);
         if (!pctx) {
@@ -1794,19 +1369,16 @@ public:
             throw OpenSSLError("Failed to initialize fromdata");
         }
 
-        // Build OSSL_PARAM array for the public key
         OSSL_PARAM_BLD *param_bld = OSSL_PARAM_BLD_new();
         if (!param_bld) {
             throw OpenSSLError("Failed to create OSSL_PARAM_BLD");
         }
 
-        // Set the curve name based on the eUICC certificate
         if (!OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME, curve_param_name, 0)) {
             OSSL_PARAM_BLD_free(param_bld);
             throw OpenSSLError("Failed to set curve name");
         }
 
-        // Set the public key
         if (!OSSL_PARAM_BLD_push_octet_string(param_bld, OSSL_PKEY_PARAM_PUB_KEY,
                                              otherPublicKey.data(), otherPublicKey.size())) {
             OSSL_PARAM_BLD_free(param_bld);
@@ -1831,7 +1403,6 @@ public:
 
         std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> other_pkey(other_pkey_raw);
 
-        // Perform ECDH using EVP_PKEY_derive
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>
             derive_ctx(EVP_PKEY_CTX_new(m_euicc_ot_PrivateKey.get(), nullptr), EVP_PKEY_CTX_free);
         if (!derive_ctx) {
@@ -1846,26 +1417,22 @@ public:
             throw OpenSSLError("Failed to set peer key");
         }
 
-        // Determine shared secret length
         size_t secret_len = 0;
         if (EVP_PKEY_derive(derive_ctx.get(), nullptr, &secret_len) <= 0) {
             throw OpenSSLError("Failed to get shared secret length");
         }
 
-        // Perform the derivation
         std::vector<uint8_t> shared_secret(secret_len);
         if (EVP_PKEY_derive(derive_ctx.get(), shared_secret.data(), &secret_len) <= 0) {
             throw OpenSSLError("ECDH computation failed");
         }
 
-        // Resize to actual length (should be the same)
         shared_secret.resize(secret_len);
 
         LOG_INFO("Computed ECDH shared secret: " + HexUtil::bytesToHex(shared_secret));
         return shared_secret;
     }
 
-    // Sign data with eUICC private key
     std::vector<uint8_t> signDataWithEUICC(const std::vector<uint8_t> &dataToSign) {
         if (!m_euiccPrivateKey) {
             throw std::runtime_error("eUICC private key not available for signing");
@@ -1874,7 +1441,6 @@ public:
         return CertificateUtil::convertDER_to_BSI_TR03111(rv);
     }
 
-    // Verify server signature (with DER certificate data)
     bool verifyServerSignature(const std::vector<uint8_t> &serverSigned1,
                               const std::vector<uint8_t> &serverSignature1,
                               const std::vector<uint8_t> &derDataServerCert) {
@@ -1882,7 +1448,6 @@ public:
         return verifyServerSignature(serverSigned1, serverSignature1, serverCert.get());
     }
 
-    // Set confirmation code (calculates hash according to SGP.22)
     void setConfirmationCode(const std::string &confirmationCode) {
         m_confirmationCode = confirmationCode;
         if (!m_transactionId.empty()) {
@@ -1893,7 +1458,6 @@ public:
         }
     }
 
-    // Set transaction ID (needed for confirmation code hash)
     void setTransactionId(const std::vector<uint8_t> &transactionId) {
         m_transactionId = transactionId;
         LOG_INFO("Set transaction ID: " + HexUtil::bytesToHex(transactionId));
@@ -1904,20 +1468,14 @@ public:
         }
     }
 
-    // Get computed confirmation code hash
     std::vector<uint8_t> getConfirmationCodeHash() const {
         return m_confirmationCodeHash;
     }
 
-    // Set confirmation code hash directly (for backwards compatibility)
     void setConfirmationCodeHash(const std::vector<uint8_t> &hash) {
         m_confirmationCodeHash = hash;
         LOG_INFO("Set confirmation code hash directly: " + HexUtil::bytesToHex(hash));
     }
-
-    // ========================================================================
-    // PUBLIC INTERFACE - CERTIFICATE GETTERS
-    // ========================================================================
 
     std::vector<uint8_t> getEUMCertificate() {
         return CertificateUtil::certToDER(m_eumCert.get());
@@ -1936,10 +1494,8 @@ public:
             return std::vector<uint8_t>();
         }
 
-        // Get the curve type from the eUICC certificate
         int euicc_curve_nid = getEUICCCurveNID();
 
-        // Check if the primary root CA matches the eUICC curve type
         if (m_rootCA) {
             try {
                 int root_curve_nid = getCertificateCurveNID(m_rootCA.get());
@@ -1981,33 +1537,25 @@ public:
     }
 
 private:
-    // ========================================================================
-    // PRIVATE METHODS
-    // ========================================================================
 
-    // Sign data with a specific key
     std::vector<uint8_t> signDataWithKey(const std::vector<uint8_t> &dataToSign, EVP_PKEY* pkey) {
         if (dataToSign.empty()) {
             throw std::runtime_error("Data to sign is empty");
         }
 
-        // Create signature context
         std::unique_ptr<EVP_MD_CTX, EVP_MD_CTX_Deleter> mdctx(EVP_MD_CTX_new());
         if (!mdctx) {
             throw OpenSSLError("Failed to create signature context");
         }
 
-        // Initialize signing with SHA256
         if (EVP_DigestSignInit(mdctx.get(), nullptr, EVP_sha256(), nullptr, pkey) != 1) {
             throw OpenSSLError("Failed to initialize signature operation");
         }
 
-        // Update with data to be signed
         if (EVP_DigestSignUpdate(mdctx.get(), dataToSign.data(), dataToSign.size()) != 1) {
             throw OpenSSLError("Failed to update signature");
         }
 
-        // Get signature length
         size_t sigLen;
         if (EVP_DigestSignFinal(mdctx.get(), nullptr, &sigLen) != 1) {
             throw OpenSSLError("Failed to determine signature length");
@@ -2017,7 +1565,6 @@ private:
             throw std::runtime_error("signature length is zero");
         }
 
-        // Create signature
         std::vector<uint8_t> signature(sigLen);
         if (EVP_DigestSignFinal(mdctx.get(), signature.data(), &sigLen) != 1) {
             throw OpenSSLError("Failed to create signature");
@@ -2030,11 +1577,10 @@ private:
         return signature;
     }
 
-    // Verify server signature
     bool verifyServerSignature(const std::vector<uint8_t> &signedData,
                               const std::vector<uint8_t> &signature, X509* scertdata) {
         try {
-            // Handle special prefix in serverSignature1 based on SGP.22 spec
+            // Handle prefix in serverSignature1 based on SGP.22 spec
             const unsigned char *signatureData = signature.data();
             size_t signatureLen = signature.size();
 
@@ -2045,7 +1591,6 @@ private:
                 signatureLen -= 3;
             }
 
-            // Extract public key from server certificate
             std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubkey(X509_get_pubkey(scertdata));
             if (!pubkey) {
                 throw OpenSSLError("Failed to extract public key from certificate");
@@ -2077,36 +1622,28 @@ private:
     }
 
 public:
-    // ========================================================================
-    // HTTP CLIENT METHODS
-    // ========================================================================
 
-    // Configure HTTP client settings
     void configureHttpClient(bool useCustomTlsCert, const std::string& customTlsCertPath = "") {
         m_useCustomTlsCert = useCustomTlsCert;
         m_customTlsCertPath = customTlsCertPath;
     }
 
-    // Send HTTPS POST request and return response body
     std::string sendHttpsPost(const std::string& endpoint,
                              const std::string& body,
                              int& httpStatusCode) {
-        // Initialize HTTP client if not already done
         if (!m_httpClient) {
             m_httpClient = std::make_unique<HttpClient>();
         }
 
-        // Build full URL without port (port will be set via CURLOPT_PORT)
+        // full URL without port (port set via CURLOPT_PORT)
         std::string url = "https://" + m_serverUrl + endpoint;
 
         HttpClient::ResponseData response;
 
         if (m_useCustomTlsCert) {
-            // Load custom TLS certificate if path provided
             if (!m_customTlsCertPath.empty()) {
                 try {
                     auto tlsCerts = CertificateUtil::loadCertificateChain(m_customTlsCertPath);
-                    // Add to cert pool for verification
                     for (auto& cert : tlsCerts) {
                         m_certPool.push_back(std::move(cert));
                     }
@@ -2116,19 +1653,15 @@ public:
                 }
             }
 
-            // Convert unique_ptr vector to raw pointer vector for HttpClient
             std::vector<X509*> rawCertPool;
             for (const auto& cert : m_certPool) {
                 rawCertPool.push_back(cert.get());
             }
 
-            // Use custom certificate verification with our cert store
             response = m_httpClient->postJsonWithCustomVerification(
                 url, m_serverPort, body, nullptr, rawCertPool
             );
         } else {
-            // For public CA mode, we would need to implement a new method in HttpClient
-            // For now, use the existing method with empty cert pool
             std::vector<X509*> emptyCertPool;
             response = m_httpClient->postJsonWithCustomVerification(
                 url, m_serverPort, body, nullptr, emptyCertPool
@@ -2144,21 +1677,14 @@ public:
         return response.body;
     }
 
-    // ========================================================================
-    // MEMBER VARIABLES
-    // ========================================================================
-
-    // Server configuration
     std::string m_serverUrl;
     unsigned int m_serverPort;
 
-    // Certificate storage
     std::unique_ptr<X509, X509Deleter> m_rootCA;
     std::vector<std::unique_ptr<X509, X509Deleter>> m_intermediateCA;
     std::unique_ptr<X509, X509Deleter> m_serverCert;
     std::vector<std::unique_ptr<X509, X509Deleter>> m_certPool;
 
-    // eUICC data
     std::vector<uint8_t> m_euiccSKI; // eUICC SKI for PKIDs
     std::string m_EID; // eUICC ID
     std::unique_ptr<X509, X509Deleter> m_euiccCert; // eUICC certificate
@@ -2167,18 +1693,15 @@ public:
     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> m_euicc_ot_PrivateKey; // One-time private key
     std::vector<uint8_t> m_euiccOtpk; // One-time public key from eUICC
 
-    // EUM data
     std::unique_ptr<X509, X509Deleter> m_eumCert; // EUM certificate
     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> m_eumPrivateKey; // EUM private key for signing
     std::vector<uint8_t> m_eumPublicKeyData; // EUM public key data
 
-    // Other data
     std::string m_confirmationCode; // Confirmation code (PIN)
     std::vector<uint8_t> m_confirmationCodeHash; // Computed confirmation code hash
     std::vector<uint8_t> m_transactionId; // Transaction ID for hash computation
     std::string m_caCertPath = ""; // Path to system CA certificates
 
-    // HTTP client
     std::unique_ptr<HttpClient> m_httpClient;
     bool m_useCustomTlsCert = true; // Flag for custom vs public CA
     std::string m_customTlsCertPath; // Path to custom TLS certificate
