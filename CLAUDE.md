@@ -327,13 +327,14 @@ private function f_validate_error_response(
 For retry scenarios, the server maintains global state:
 ```python
 # Global mapping for retry scenarios
-self.otpk_mapping = {}  # Maps euicc_otpk -> (smdp_ot, smdp_otpk, timestamp)
-self.otpk_timeout = 86400  # 24 hours
-
-# Cleanup task using Twisted
-self.cleanup_task = task.LoopingCall(self.cleanup_expired_otpk_mappings)
-self.cleanup_task.start(3600)  # Hourly cleanup
+self.otpk_mapping = {}  # Maps euicc_otpk -> (smdp_ot, smdp_otpk) for retry scenarios
 ```
+
+**Test Mode**: When running tests with `./uns.sh`, the Python server automatically starts with the `--test` flag, which:
+- Enables built-in test profiles for testing (EID1, EID2, etc.)
+- Configures default profiles for Default SM-DP+ address use cases
+- Sets up test Activation Codes and SMDS profiles
+- Uses separate session databases for NIST and BRP tests
 
 ## Memory Notes
 
@@ -406,7 +407,7 @@ python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
   --end-pattern "Test Sequence #21" \
   --format summary
 
-# Get all GetBoundProfilePackage error cases  
+# Get all GetBoundProfilePackage error cases
 python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
   --command extract-range \
   --start-pattern "Test Sequence #01 Error: Invalid eUICC Signature" \
@@ -453,7 +454,7 @@ python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
   --format text
 ```
 
-#### Error Code Analysis  
+#### Error Code Analysis
 ```bash
 # Find all SGP.23 error codes in a specific section
 python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
@@ -470,7 +471,7 @@ python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md \
 #### Output Formats
 - `--format table` - Clean tabular view (best for error codes)
 - `--format summary` - Just line numbers and matches
-- `--format consolidated` - Groups by section context  
+- `--format consolidated` - Groups by section context
 - `--format text` - Full context with surrounding lines
 - `--format json` - Structured data for scripting
 
@@ -500,6 +501,8 @@ python3 /app/tools/structured_md_tool.py /app/testspec.md --command search --que
 For analyzing the SGP.22 specification document and extracting function definitions, data structures, and error codes:
 
 **Note**: If you get import errors, the dependencies may need to be installed. The tool will show which paths it tried.
+
+**Case Sensitivity**: The spec analyzer queries are case-sensitive. To search case-insensitively, use grep with -i flag on the output.
 
 #### Basic Usage
 ```bash
@@ -570,6 +573,20 @@ echo '{"jsonrpc":"2.0","id":1,"method":"list_symbols","params":{"file_path":"/ap
 - The tool preserves exact source formatting including comments
 - For test cases, look for both the testcase declaration and the implementing function (usually f_TC_*)
 - Symbol names are case-sensitive
+
+#### Comparing Testspec vs Implementation
+```bash
+# List all implemented test cases
+echo '{"jsonrpc":"2.0","id":1,"method":"list_symbols","params":{"file_path":"/app/tt-smdpp/smdpp/smdpp_Tests.ttcn","symbol_type":"testcase"}}' | /app/ttcn3-mcp/ttcn3-mcp 2>/dev/null | jq -r '.result.symbols.testcases[].name' | sort > implemented_tests.txt
+
+# Extract test cases from testspec
+python3 /app/tools/enhanced_structured_md_tool.py /app/testspec.md --command search --query "^TC_SM-DP\\+_" --regex --format summary | grep -oE 'TC_[A-Za-z0-9_+.-]+' | sort -u > testspec_tests.txt
+
+# Compare to find missing tests
+comm -23 testspec_tests.txt implemented_tests.txt > missing_tests.txt
+```
+
+**Important Discovery**: The JSON-RPC based TTCN-3 MCP tool at `/app/ttcn3-mcp/ttcn3-mcp` is the correct tool for analyzing TTCN-3 code. Do NOT use the C++ MCP server tool - they serve different purposes.
 
 ## Tool Selection Guidelines
 
