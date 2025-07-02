@@ -184,6 +184,17 @@ type enumerated RetryOTPKMode {
     RETRY_OMIT_OTPK             /* Omit eUICC OTPK (force server to generate new) */
 }
 
+/* Cancel session reason codes per SGP.22 */
+type enumerated CancelSessionReason {
+    CSR_END_USER_REJECTION (0),     /* End user rejected */
+    CSR_END_USER_POSTPONED (1),     /* End user postponed */
+    CSR_TIMEOUT (2),                /* Timeout occurred */
+    CSR_PPR_NOT_ALLOWED (3),        /* PPR not allowed */
+    CSR_METADATA_MISMATCH (4),      /* Metadata mismatch */
+    CSR_LOAD_BPP_ERROR (5),         /* Load BPP execution error */
+    CSR_UNDEFINED_REASON (127)      /* Undefined reason */
+}
+
 /* Parameters for GetBoundProfilePackage test cases */
 type record GetBPPTestParams {
     charstring testName,
@@ -2497,10 +2508,9 @@ private function f_TC_AuthenticateClient_RetryCases_Reuse_OTPK(charstring id) ru
     f_rsp_client_cleanup();
 }
 
-/* GetBoundProfilePackage Retry Test Functions */
-
-private function f_perform_initial_session_and_cancel()
-runs on smdpp_ConnHdlr return octetstring {
+private function f_perform_session_through_getBoundProfilePackage(
+    charstring matchingId := "TS48v4_SAIP2.3_BERTLV"
+) runs on smdpp_ConnHdlr return GetBoundProfilePackageOk {
     var InitiateAuthenticationOkEs9 authOk := f_initiate_authentication_and_validate();
 
     var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
@@ -2516,17 +2526,24 @@ runs on smdpp_ConnHdlr return octetstring {
     };
 
     var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
-    var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+    return packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+}
 
+private function f_perform_initial_session_and_cancel(
+    CancelSessionReason reason := CSR_END_USER_POSTPONED
+) runs on smdpp_ConnHdlr return octetstring {
+    /* Perform session setup through GetBoundProfilePackage */
+    var GetBoundProfilePackageOk packageOk := f_perform_session_through_getBoundProfilePackage();
     var octetstring smdp_otpk := packageOk.boundProfilePackage.initialiseSecureChannelRequest.smdpOtpk;
     ext_logInfo("Initial SM-DP+ otPK: " & oct2str(smdp_otpk));
 
+    /* Cancel the session */
     var CancelSessionResponse cancelResp := {
         cancelSessionResponseOk := {
             euiccCancelSessionSigned := {
                 transactionId := g_transactionId,
                 smdpOid := objid { 2 999 10 },
-                reason := 1  /* Postponed */
+                reason := enum2int(reason)
             },
             euiccCancelSessionSignature := ''O
         }
@@ -2934,55 +2951,44 @@ private function f_TC_CancelSession_After_AuthenticateClient_05_Undefined_Reason
 	f_TC_CancelSession_After_AuthenticateClient_Generic(id, 127, "Undefined Reason");
 }
 
-/* Generic function for CancelSession testing after GetBoundProfilePackage */
 private function f_TC_CancelSession_After_GetBoundProfilePackage_Generic(
     charstring id,
-    integer reason,
-    charstring reason_name
+    CancelSessionReason reason
 ) runs on smdpp_ConnHdlr {
 	if (not f_rsp_client_init()) {
 		setverdict(fail, "RSP client initialization failed");
 		return;
 	}
 
-	/* Perform InitiateAuthentication */
-	var InitiateAuthenticationOkEs9 authOk := f_initiate_authentication_and_validate();
+	ext_logInfo("=== Steps 1-3: InitiateAuth, AuthenticateClient, GetBoundProfilePackage ===");
+	var GetBoundProfilePackageOk packageOk := f_perform_session_through_getBoundProfilePackage();
 
-	/* Perform AuthenticateClient */
-	ext_logInfo("=== Step 2: AuthenticateClient ===");
-	var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
-	var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
-	var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
+	/* Get reason name for logging */
+	var charstring reason_name;
+	select (reason) {
+		case (CSR_END_USER_REJECTION) { reason_name := "End User Rejection"; }
+		case (CSR_END_USER_POSTPONED) { reason_name := "End User Postponed"; }
+		case (CSR_TIMEOUT) { reason_name := "Timeout"; }
+		case (CSR_PPR_NOT_ALLOWED) { reason_name := "PPR Not Allowed"; }
+		case (CSR_METADATA_MISMATCH) { reason_name := "Metadata Mismatch"; }
+		case (CSR_LOAD_BPP_ERROR) { reason_name := "Load BPP Execution Error"; }
+		case (CSR_UNDEFINED_REASON) { reason_name := "Undefined Reason"; }
+		case else { reason_name := "Unknown Reason"; }
+	}
 
-	/* Perform GetBoundProfilePackage */
-	ext_logInfo("=== Step 3: GetBoundProfilePackage ===");
-	var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response(authClientOk.smdpSignature2);
-	var RemoteProfileProvisioningRequest packageReq := {
-		getBoundProfilePackageRequest := {
-			transactionId := g_transactionId,
-			prepareDownloadResponse := prepDownloadResp
-		}
-	};
-
-	var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
-	var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
-
-	/* Create CancelSession request after GetBoundProfilePackage */
 	ext_logInfo("=== Step 4: CancelSession after GetBoundProfilePackage - " & reason_name & " ===");
 
-	/* The actual OID from cert is "2.999.10" */
 	var CancelSessionResponse cancelResp := {
 		cancelSessionResponseOk := {
 			euiccCancelSessionSigned := {
 				transactionId := g_transactionId,
 				smdpOid := objid { 2 999 10 },  /* SM-DP+ OID: 2.999.10 */
-				reason := reason
+				reason := enum2int(reason)
 			},
 			euiccCancelSessionSignature := ''O
 		}
 	};
 
-	/* Sign the cancellation - must sign the entire EuiccCancelSessionSigned structure */
 	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
 	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
 
