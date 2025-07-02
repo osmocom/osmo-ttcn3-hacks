@@ -5,6 +5,7 @@
 #include <memory>
 #include <map>
 #include <mutex>
+#include <functional>
 
 #include <iostream>
 #include <cstring>
@@ -12,19 +13,31 @@
 
 #include <TTCN3.hh>
 #include "smdpp_Tests.hh"
-#include "smdvalcpp2.cpp" // Your existing RSP implementation
+#include "smdvalcpp2.cpp"
 #include "bsp_crypto.cpp"
-
-
-// Include BSP crypto implementation
-#include "bsp_crypto.h"
 
 
 using namespace RspCrypto;
 
-
 namespace smdpp__Tests {
 
+static std::vector<uint8_t> octetstring_to_bytes(const OCTETSTRING& octetstr) {
+    const unsigned char* data = static_cast<const unsigned char*>(octetstr);
+    int length = octetstr.lengthof();
+    return std::vector<uint8_t>(data, data + length);
+}
+
+static OCTETSTRING bytes_to_octetstring(const std::vector<uint8_t>& bytes) {
+    return OCTETSTRING(bytes.size(), bytes.data());
+}
+
+static std::string charstring_to_string(const CHARSTRING& charstr) {
+    return std::string(static_cast<const char*>(charstr));
+}
+
+static CHARSTRING string_to_charstring(const std::string& str) {
+    return CHARSTRING(str.c_str());
+}
 
 class RSPClientRegistry {
 public:
@@ -126,36 +139,123 @@ void RSPClientRegistry::destroyAllClients() {
     m_clients.clear();
 }
 
-/* ============================================================================
- * UTILITY FUNCTIONS FOR TYPE CONVERSION
- * ============================================================================ */
 
-static std::vector<uint8_t> octetstring_to_bytes(const OCTETSTRING& octetstr) {
-    const unsigned char* data = static_cast<const unsigned char*>(octetstr);
-    int length = octetstr.lengthof();
-    return std::vector<uint8_t>(data, data + length);
+template<void (RspCrypto::RSPClient::*LoaderFunc)(const std::string&)>
+INTEGER client_loader(const INTEGER& clientHandle, const char* func_name,
+                     const CHARSTRING& path) {
+    try {
+        int handle = static_cast<int>(clientHandle);
+        RspCrypto::RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            LOG_ERROR(std::string("Invalid RSP client handle: ") + std::to_string(handle));
+            return INTEGER(-1);
+        }
+
+        std::string pathStr = charstring_to_string(path);
+        (client->*LoaderFunc)(pathStr);
+
+        return INTEGER(0);
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string(func_name) + " failed: " + std::string(e.what()));
+        return INTEGER(-1);
+    }
 }
 
-static OCTETSTRING bytes_to_octetstring(const std::vector<uint8_t>& bytes) {
-    return OCTETSTRING(bytes.size(), bytes.data());
+template<typename ReturnType, typename Func>
+ReturnType with_client(const INTEGER& clientHandle, const char* func_name,
+                      const ReturnType& error_value, Func&& func) {
+    return safe_execute(func_name, error_value, [&]() {
+        int handle = static_cast<int>(clientHandle);
+        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+
+        if (!client) {
+            throw std::runtime_error("Invalid RSP client handle: " + std::to_string(handle));
+        }
+
+        return func(client);
+    });
 }
 
-static std::string charstring_to_string(const CHARSTRING& charstr) {
-    return std::string(static_cast<const char*>(charstr));
+template<typename ReturnType, typename TTCNType, ReturnType (RspCrypto::RSPClient::*GetterFunc)()>
+TTCNType client_getter(const INTEGER& clientHandle, const char* func_name,
+                      const TTCNType& error_value,
+                      std::function<TTCNType(const ReturnType&)> converter) {
+    return with_client(clientHandle, func_name, error_value,
+        [&](RSPClient* client) {
+            ReturnType result = (client->*GetterFunc)();
+            return converter(result);
+        });
 }
 
-static CHARSTRING string_to_charstring(const std::string& str) {
-    return CHARSTRING(str.c_str());
+template<typename ReturnType, typename TTCNType, ReturnType (RspCrypto::RSPClient::*GetterFunc)() const>
+TTCNType client_getter_const(const INTEGER& clientHandle, const char* func_name,
+                            const TTCNType& error_value,
+                            std::function<TTCNType(const ReturnType&)> converter) {
+    return with_client(clientHandle, func_name, error_value,
+        [&](RSPClient* client) {
+            ReturnType result = (client->*GetterFunc)();
+            return converter(result);
+        });
 }
 
-/* ============================================================================
- * TTCN-3 EXTERNAL FUNCTION IMPLEMENTATIONS
- * ============================================================================ */
+template<typename InputType, typename CppType, void (RspCrypto::RSPClient::*SetterFunc)(const CppType&)>
+INTEGER client_setter(const INTEGER& clientHandle, const char* func_name,
+                     const InputType& value,
+                     std::function<CppType(const InputType&)> converter) {
+    return with_client(clientHandle, func_name, INTEGER(-1),
+        [&](RSPClient* client) {
+            (client->*SetterFunc)(converter(value));
+            return INTEGER(0);
+        });
+}
 
-/* RSP Client Management */
+template<typename ReturnType, typename Func>
+ReturnType safe_execute(const char* func_name, const ReturnType& error_value, Func&& func) {
+    try {
+        return func();
+    } catch (const std::exception& e) {
+        LOG_ERROR(std::string(func_name) + " failed: " + std::string(e.what()));
+        return error_value;
+    }
+}
+
+template<typename Func>
+OCTETSTRING cert_octetstring_wrapper(const char* func_name, Func&& func) {
+    return safe_execute(func_name, OCTETSTRING(0, nullptr), [&]() {
+        std::vector<uint8_t> result = func();
+        return bytes_to_octetstring(result);
+    });
+}
+
+template<typename Func>
+CHARSTRING cert_string_wrapper(const char* func_name, Func&& func) {
+    return safe_execute(func_name, CHARSTRING(""), [&]() {
+        std::string result = func();
+        return string_to_charstring(result);
+    });
+}
+
+template<typename Func>
+BOOLEAN cert_bool_wrapper(const char* func_name, Func&& func) {
+    return safe_execute(func_name, BOOLEAN(false), [&]() {
+        bool result = func();
+        return BOOLEAN(result);
+    });
+}
+
+template<void (*LogFunc)(const std::string&, const char*, int)>
+void log_wrapper(const char* func_name, const CHARSTRING& message) {
+    try {
+        LogFunc(charstring_to_string(message), __FILE__, __LINE__);
+    } catch (const std::exception& e) {
+        std::cerr << func_name << " failed: " << e.what() << std::endl;
+    }
+}
+
 INTEGER ext__RSPClient__create(const CHARSTRING& serverUrl, const INTEGER& serverPort,
                               const CHARSTRING& certPath, const CHARSTRING& nameFilter) {
-    try {
+    return safe_execute("ext_RSPClient_create", INTEGER(-1), [&]() -> INTEGER {
         std::string url = charstring_to_string(serverUrl);
         unsigned int port = static_cast<unsigned int>(static_cast<int>(serverPort));
         std::string certDir = charstring_to_string(certPath);
@@ -163,95 +263,49 @@ INTEGER ext__RSPClient__create(const CHARSTRING& serverUrl, const INTEGER& serve
 
         int handle = RSPClientRegistry::getInstance().createClient(url, port, certDir, filter);
         return INTEGER(handle);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__create failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    });
 }
 
 INTEGER ext__RSPClient__destroy(const INTEGER& clientHandle) {
-    try {
+    return safe_execute("ext_RSPClient_destroy", INTEGER(-1), [&]() -> INTEGER {
         int handle = static_cast<int>(clientHandle);
         bool success = RSPClientRegistry::getInstance().destroyClient(handle);
         return INTEGER(success ? 0 : -1);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__destroy failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    });
+}
+
+INTEGER ext__RSPClient__destroyAll() {
+    return safe_execute("ext_RSPClient_destroyAll", INTEGER(-1), [&]() -> INTEGER {
+        RSPClientRegistry::getInstance().destroyAllClients();
+        return INTEGER(0);
+    });
 }
 
 OCTETSTRING ext__RSPClient__getEUMCertificate(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        std::vector<uint8_t> cert = client->getEUMCertificate();
-
-        return bytes_to_octetstring(cert);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter<std::vector<uint8_t>, OCTETSTRING, &RSPClient::getEUMCertificate>(
+        clientHandle, "ext__RSPClient__getEUMCertificate", OCTETSTRING(), bytes_to_octetstring);
 }
 
 OCTETSTRING ext__RSPClient__getEUICCCertificate(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        std::vector<uint8_t> cert = client->getEUICCCertificate();
-
-        return bytes_to_octetstring(cert);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectKeyIdentifier failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter<std::vector<uint8_t>, OCTETSTRING, &RSPClient::getEUICCCertificate>(
+        clientHandle, "ext__RSPClient__getEUICCCertificate", OCTETSTRING(), bytes_to_octetstring);
 }
 
 OCTETSTRING ext__RSPClient__getCICertificate(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> cert = client->getCICertificate();
-
-        return bytes_to_octetstring(cert);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getCICertificate failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter<std::vector<uint8_t>, OCTETSTRING, &RSPClient::getCICertificate>(
+        clientHandle, "ext__RSPClient__getCICertificate", OCTETSTRING(), bytes_to_octetstring);
 }
 
 
 INTEGER ext__RSPClient__loadEUICCCertificate(const INTEGER& clientHandle,
                                             const CHARSTRING& euiccCertPath) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::string certPath = charstring_to_string(euiccCertPath);
-        client->loadEUICCCertificate(certPath);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__loadEUICCCertificate failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    return client_loader<&RSPClient::loadEUICCCertificate>(
+        clientHandle, "ext__RSPClient__loadEUICCCertificate", euiccCertPath);
 }
 
 INTEGER ext__RSPClient__loadEUICCKeyPair(const INTEGER& clientHandle,
                                         const CHARSTRING& euiccPrivateKeyPath) {
-    try {
+    return safe_execute("ext_RSPClient_loadEUICCKeyPair", INTEGER(-1), [&]() -> INTEGER {
         int handle = static_cast<int>(clientHandle);
         RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
 
@@ -264,15 +318,18 @@ INTEGER ext__RSPClient__loadEUICCKeyPair(const INTEGER& clientHandle,
         client->loadEUICCKeyPair(keyPath);
 
         return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__loadEUICCKeyPair failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    });
 }
 
 INTEGER ext__RSPClient__loadEUMCertificate(const INTEGER& clientHandle,
                                           const CHARSTRING& eumCertPath) {
-    try {
+    return client_loader<&RSPClient::loadEUMCertificate>(
+        clientHandle, "ext__RSPClient__loadEUMCertificate", eumCertPath);
+}
+
+INTEGER ext__RSPClient__loadEUMKeyPair(const INTEGER& clientHandle,
+                                      const CHARSTRING& eumPrivateKeyPath) {
+    return safe_execute("ext_RSPClient_loadEUMKeyPair", INTEGER(-1), [&]() -> INTEGER {
         int handle = static_cast<int>(clientHandle);
         RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
 
@@ -281,310 +338,158 @@ INTEGER ext__RSPClient__loadEUMCertificate(const INTEGER& clientHandle,
             return INTEGER(-1);
         }
 
-        std::string certPath = charstring_to_string(eumCertPath);
-        client->loadEUMCertificate(certPath);
+        std::string keyPath = charstring_to_string(eumPrivateKeyPath);
+        client->loadEUMKeyPair(keyPath);
 
         return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__loadEUMCertificate failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    });
 }
 
-/* Challenge Generation and Session Management */
+INTEGER ext__RSPClient__setCACertPath(const INTEGER& clientHandle,
+                                     const CHARSTRING& caCertPath) {
+    return client_loader<&RSPClient::setCACertPath>(
+        clientHandle, "ext__RSPClient__setCACertPath", caCertPath);
+}
+
 OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> challenge = client->generateChallenge();
-        return bytes_to_octetstring(challenge);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__generateChallenge failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter<std::vector<uint8_t>, OCTETSTRING, &RSPClient::generateChallenge>(
+        clientHandle,
+        "ext__RSPClient__generateChallenge",
+        OCTETSTRING(0, nullptr),
+        bytes_to_octetstring
+    );
 }
 
-/* Cryptographic Operations */
 OCTETSTRING ext__RSPClient__signDataWithEUICC(const INTEGER& clientHandle,
                                              const OCTETSTRING& dataToSign) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> data = octetstring_to_bytes(dataToSign);
-        std::vector<uint8_t> signature = client->signDataWithEUICC(data);
-
-        return bytes_to_octetstring(signature);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__signDataWithEUICC failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return with_client(clientHandle, "ext__RSPClient__signDataWithEUICC",
+                      OCTETSTRING(0, nullptr),
+        [&](RSPClient* client) {
+            std::vector<uint8_t> data = octetstring_to_bytes(dataToSign);
+            std::vector<uint8_t> signature = client->signDataWithEUICC(data);
+            return bytes_to_octetstring(signature);
+        });
 }
 
 OCTETSTRING ext__RSPClient__generateEUICCOtpk(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        client->generateEUICCOtpk();
-        std::vector<uint8_t> data = client->getEUICCOtpk();
-        return bytes_to_octetstring(data);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__generateEUICCOtpk failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return with_client(clientHandle, "ext__RSPClient__generateEUICCOtpk",
+                      OCTETSTRING(0, nullptr),
+        [&](RSPClient* client) {
+            client->generateEUICCOtpk();
+            std::vector<uint8_t> data = client->getEUICCOtpk();
+            return bytes_to_octetstring(data);
+        });
 }
 
 OCTETSTRING ext__RSPClient__getEUICCOtpk(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> data = client->getEUICCOtpk();
-        return bytes_to_octetstring(data);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__generateEUICCOtpk failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter<std::vector<uint8_t>, OCTETSTRING, &RSPClient::getEUICCOtpk>(
+        clientHandle,
+        "ext__RSPClient__getEUICCOtpk",
+        OCTETSTRING(0, nullptr),
+        bytes_to_octetstring
+    );
 }
 
 INTEGER ext__RSPClient__setConfirmationCode(const INTEGER& clientHandle,
                                            const CHARSTRING& confirmationCode) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::string code = charstring_to_string(confirmationCode);
-        client->setConfirmationCode(code);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__setConfirmationCode failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    return client_setter<CHARSTRING, std::string, &RSPClient::setConfirmationCode>(
+        clientHandle, "ext__RSPClient__setConfirmationCode", confirmationCode, charstring_to_string);
 }
 
 INTEGER ext__RSPClient__setTransactionId(const INTEGER& clientHandle,
                                         const OCTETSTRING& transactionId) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::vector<uint8_t> tidVec = octetstring_to_bytes(transactionId);
-        client->setTransactionId(tidVec);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__setTransactionId failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    return client_setter<OCTETSTRING, std::vector<uint8_t>, &RSPClient::setTransactionId>(
+        clientHandle, "ext__RSPClient__setTransactionId", transactionId, octetstring_to_bytes);
 }
 
 OCTETSTRING ext__RSPClient__getConfirmationCodeHash(const INTEGER& clientHandle) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return OCTETSTRING(0, nullptr);
-        }
-
-        std::vector<uint8_t> hash = client->getConfirmationCodeHash();
-        return bytes_to_octetstring(hash);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__getConfirmationCodeHash failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+    return client_getter_const<std::vector<uint8_t>, OCTETSTRING, &RSPClient::getConfirmationCodeHash>(
+        clientHandle, "ext__RSPClient__getConfirmationCodeHash", OCTETSTRING(), bytes_to_octetstring);
 }
 
 INTEGER ext__RSPClient__setConfirmationCodeHash(const INTEGER& clientHandle,
                                                const OCTETSTRING& hash) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::vector<uint8_t> hashVec = octetstring_to_bytes(hash);
-        client->setConfirmationCodeHash(hashVec);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__setConfirmationCodeHash failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    return client_setter<OCTETSTRING, std::vector<uint8_t>, &RSPClient::setConfirmationCodeHash>(
+        clientHandle, "ext__RSPClient__setConfirmationCodeHash", hash, octetstring_to_bytes);
 }
 
 BOOLEAN ext__RSPClient__verifyServerSignature(const INTEGER& clientHandle, const OCTETSTRING& serverSigned, const OCTETSTRING& serverSignature1, const OCTETSTRING& serverCert) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return BOOLEAN(false);
-        }
-
-        std::vector<uint8_t> ss1 = octetstring_to_bytes(serverSigned);
-        std::vector<uint8_t> ssi = octetstring_to_bytes(serverSignature1);
-        std::vector<uint8_t> scd = octetstring_to_bytes(serverCert);
-
-        auto rv = client->verifyServerSignature(ss1, ssi, scd);
-        return BOOLEAN(rv);
-
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__isExpired failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+    return with_client(clientHandle, "ext__RSPClient__verifyServerSignature", BOOLEAN(false),
+        [&](RSPClient* client) {
+            bool result = client->verifyServerSignature(
+                octetstring_to_bytes(serverSigned),
+                octetstring_to_bytes(serverSignature1),
+                octetstring_to_bytes(serverCert));
+            return BOOLEAN(result);
+        });
 }
 
 CHARSTRING ext__CertificateUtil__getEID(const OCTETSTRING& certData) {
-    try {
+    return cert_string_wrapper("ext__CertificateUtil__getEID", [&]() {
         std::vector<uint8_t> der = octetstring_to_bytes(certData);
         auto cert = CertificateUtil::loadCertFromDER(der);
-        std::string eid = CertificateUtil::getEID(cert.get());
-        return string_to_charstring(eid);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getEID failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
+        return CertificateUtil::getEID(cert.get());
+    });
 }
 
 BOOLEAN ext__CertificateUtil__validateEIDRange(const CHARSTRING& eid, const OCTETSTRING& eumCertData) {
-    try {
+    return cert_bool_wrapper("ext__CertificateUtil__validateEIDRange", [&]() {
         std::string eidStr = charstring_to_string(eid);
         std::vector<uint8_t> eumDer = octetstring_to_bytes(eumCertData);
-
-        // This is a thin wrapper - the actual logic is in CertificateUtil::validateEIDRange
-        bool result = CertificateUtil::validateEIDRange(eidStr, eumDer);
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__validateEIDRange failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+        return CertificateUtil::validateEIDRange(eidStr, eumDer);
+    });
 }
 
-// Verify certificate has correct RSP role OID
 BOOLEAN ext__CertificateUtil__hasRSPRole(const OCTETSTRING& certData, const CHARSTRING& roleOid) {
-    try {
+    return cert_bool_wrapper("ext__CertificateUtil__hasRSPRole", [&]() {
         std::vector<uint8_t> der = octetstring_to_bytes(certData);
         std::string expectedOid = charstring_to_string(roleOid);
-
-        // This is a thin wrapper - the actual logic is in CertificateUtil::hasRSPRole
-        bool result = CertificateUtil::hasRSPRole(der, expectedOid);
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__hasRSPRole failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+        return CertificateUtil::hasRSPRole(der, expectedOid);
+    });
 }
 
 CHARSTRING ext__CertificateUtil__getPermittedEINs(const OCTETSTRING& eumCertData) {
-    try {
+    return cert_string_wrapper("ext__CertificateUtil__getPermittedEINs", [&]() {
         std::vector<uint8_t> der = octetstring_to_bytes(eumCertData);
-
-        // This is a thin wrapper - the actual logic is in CertificateUtil::getPermittedEINs
-        std::string result = CertificateUtil::getPermittedEINs(der);
-        return string_to_charstring(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getPermittedEINs failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
+        return CertificateUtil::getPermittedEINs(der);
+    });
 }
 
 BOOLEAN ext__CertificateUtil__verifyECDHCompatible(const OCTETSTRING& pubKey1,
                                                    const OCTETSTRING& pubKey2) {
-    try {
+    return cert_bool_wrapper("ext__CertificateUtil__verifyECDHCompatible", [&]() {
         std::vector<uint8_t> key1 = octetstring_to_bytes(pubKey1);
         std::vector<uint8_t> key2 = octetstring_to_bytes(pubKey2);
-
-        // This is a thin wrapper - the actual logic is in CertificateUtil::verifyECDHCompatible
-        bool result = CertificateUtil::verifyECDHCompatible(key1, key2);
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__verifyECDHCompatible failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+        return CertificateUtil::verifyECDHCompatible(key1, key2);
+    });
 }
 
-// Fix the external function to use the actual implementation:
 OCTETSTRING ext__RSPClient__computeSharedSecret(const INTEGER& clientHandle,
                                                 const OCTETSTRING& otherPublicKey) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+    return with_client(clientHandle, "ext__RSPClient__computeSharedSecret",
+                      OCTETSTRING(0, nullptr),
+        [&](RSPClient* client) {
+            std::vector<uint8_t> otherPubKey = octetstring_to_bytes(otherPublicKey);
+            std::vector<uint8_t> sharedSecret = client->computeECDHSharedSecret(otherPubKey);
 
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle");
-            return OCTETSTRING(0, nullptr);
-        }
+            LOG_DEBUG("ECDH shared secret computed: " + HexUtil::bytesToHex(sharedSecret));
 
-        std::vector<uint8_t> otherPubKey = octetstring_to_bytes(otherPublicKey);
-        std::vector<uint8_t> sharedSecret = client->computeECDHSharedSecret(otherPubKey);
-
-        LOG_DEBUG("ECDH shared secret computed: " + HexUtil::bytesToHex(sharedSecret));
-
-        return bytes_to_octetstring(sharedSecret);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__computeSharedSecret failed: " + std::string(e.what()));
-        return OCTETSTRING(0, nullptr);
-    }
+            return bytes_to_octetstring(sharedSecret);
+        });
 }
 
 
 CHARSTRING ext__CertificateUtil__getCurveOID(const OCTETSTRING& certData) {
-    try {
+    return cert_string_wrapper("ext__CertificateUtil__getCurveOID", [&]() {
         std::vector<uint8_t> der = octetstring_to_bytes(certData);
-
-        // This is a thin wrapper - the actual logic is in CertificateUtil::getCurveOID
-        std::string result = CertificateUtil::getCurveOID(der);
-        return string_to_charstring(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getCurveOID failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
+        return CertificateUtil::getCurveOID(der);
+    });
 }
 
 BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& cert,
                                                           const CHARSTRING& certPoolDir,
                                                           const OCTETSTRING& rootCA) {
-    try {
+    return cert_bool_wrapper("ext__CertificateUtil__verifyCertificateChainDynamic", [&]() {
         std::vector<uint8_t> certDer = octetstring_to_bytes(cert);
         std::string poolDir = charstring_to_string(certPoolDir);
         std::vector<uint8_t> rootDer = octetstring_to_bytes(rootCA);
@@ -598,20 +503,15 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainDynamic(const OCTETSTRING& c
             certPoolRaw.push_back(c.get());
         }
 
-        bool result = CertificateUtil::verifyCertificateChainDynamic(
+        return CertificateUtil::verifyCertificateChainDynamic(
             certObj.get(), certPoolRaw, rootObj.get(), false); // verbose=false
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__verifyCertificateChainDynamic failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+    });
 }
 
 BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTETSTRING& cert,
                                                                    const OCTETSTRING& intermediateCert,
                                                                    const OCTETSTRING& rootCA) {
-    try {
+    return cert_bool_wrapper("ext__CertificateUtil__verifyCertificateChainWithIntermediate", [&]() {
         std::vector<uint8_t> certDer = octetstring_to_bytes(cert);
         std::vector<uint8_t> intermediateDer = octetstring_to_bytes(intermediateCert);
         std::vector<uint8_t> rootDer = octetstring_to_bytes(rootCA);
@@ -623,63 +523,21 @@ BOOLEAN ext__CertificateUtil__verifyCertificateChainWithIntermediate(const OCTET
         // Create a certificate pool containing just the intermediate certificate
         std::vector<X509*> certPool = { intermediateObj.get() };
 
-        bool result = CertificateUtil::verifyCertificateChainDynamic(
+        return CertificateUtil::verifyCertificateChainDynamic(
             certObj.get(), certPool, rootObj.get(), false); // verbose=false
-
-        return BOOLEAN(result);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__verifyCertificateChainWithIntermediate failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
-BOOLEAN ext__CertificateUtil__verify_TR031111(const OCTETSTRING& message,
-                                             const OCTETSTRING& bsiSignature,
-                                             const OCTETSTRING& publicKey) {
-    try {
-        std::vector<uint8_t> msg = octetstring_to_bytes(message);
-        std::vector<uint8_t> sig = octetstring_to_bytes(bsiSignature);
-        std::vector<uint8_t> pubkey = octetstring_to_bytes(publicKey);
-
-        // This would need proper implementation with EVP_PKEY conversion
-        return BOOLEAN(false);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__verify_TR031111 failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
+    });
 }
 
 void ext__logInfo(const CHARSTRING& message) {
-    try {
-        std::string msg = charstring_to_string(message);
-        Logger::info(msg);
-        return;
-    } catch (const std::exception& e) {
-        std::cerr << "ext__logInfo failed: " << e.what() << std::endl;
-        return;
-    }
+    log_wrapper<Logger::info>("ext__logInfo", message);
 }
 
 void ext__logError(const CHARSTRING& message) {
-    try {
-        std::string msg = charstring_to_string(message);
-        Logger::error(msg);
-        return;
-    } catch (const std::exception& e) {
-        std::cerr << "ext__logError failed: " << e.what() << std::endl;
-        return;
-    }
+    log_wrapper<Logger::error>("ext__logError", message);
 }
 
 void ext__logDebug(const CHARSTRING& message) {
-    try {
-        std::string msg = charstring_to_string(message);
-        Logger::debug(msg);
-        return;
-    } catch (const std::exception& e) {
-        std::cerr << "ext__logDebug failed: " << e.what() << std::endl;
-        return;
-    }
+    log_wrapper<Logger::debug>("ext__logDebug", message);
 }
 
 
@@ -691,8 +549,17 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
     const CHARSTRING& eid,
     const OCTETSTRING& encodedBoundProfilePackage
 ) {
-    try {
-        // Convert TTCN-3 types to C++ vectors
+    auto makeErrorResult = []() {
+        ProcessedBoundProfilePackage error_result;
+        error_result.configureIsdp() = OCTETSTRING(0, nullptr);
+        error_result.storeMetadata() = OCTETSTRING(0, nullptr);
+        error_result.hasReplaceSessionKeys() = BOOLEAN(false);
+        error_result.profileData() = OCTETSTRING(0, nullptr);
+        return error_result;
+    };
+
+    return safe_execute("ext__BSP__processBoundProfilePackage", makeErrorResult(),
+        [&]() {
         std::vector<uint8_t> sharedSecretVec = octetstring_to_bytes(sharedSecret);
         std::vector<uint8_t> hostIdVec = octetstring_to_bytes(hostId);
 
@@ -720,7 +587,6 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
         LOG_DEBUG("EID (converted): " + HexUtil::bytesToHex(eidVec));
         LOG_DEBUG("Processing BoundProfilePackage of size: " + std::to_string(bppData.size()));
 
-        // Process the entire BoundProfilePackage
         auto result = bsp.process_bound_profile_package(bppData);
 
         // Convert result back to TTCN-3
@@ -744,88 +610,44 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
 
         return ttcn_result;
 
-    } catch (const std::exception& e) {
-        LOG_ERROR("BSP processing failed: " + std::string(e.what()));
-        // Return empty result on error
-        ProcessedBoundProfilePackage error_result;
-        error_result.configureIsdp() = OCTETSTRING(0, nullptr);
-        error_result.storeMetadata() = OCTETSTRING(0, nullptr);
-        error_result.hasReplaceSessionKeys() = BOOLEAN(false);
-        error_result.profileData() = OCTETSTRING(0, nullptr);
-        return error_result;
-    }
+        });
 }
 
-// HTTP client function wrapper
 CHARSTRING ext__RSPClient__sendHttpsPost(
     const INTEGER& clientHandle,
     const CHARSTRING& endpoint,
     const CHARSTRING& body,
     INTEGER& statusCode
 ) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
+    statusCode = INTEGER(0);
 
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            statusCode = 0;
-            return CHARSTRING("");
-        }
-
-        // Convert TTCN-3 types to C++
-        std::string endpointStr = charstring_to_string(endpoint);
-        std::string bodyStr = charstring_to_string(body);
-
-        // Send HTTP request
-        int httpStatus = 0;
-        std::string response = client->sendHttpsPost(endpointStr, bodyStr, httpStatus);
-
-        // Set output status code
-        statusCode = httpStatus;
-
-        // Return response body as CHARSTRING
-        return CHARSTRING(response.c_str());
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__sendHttpsPost failed: " + std::string(e.what()));
-        statusCode = 0;
-        return CHARSTRING("");
-    }
+    return with_client(clientHandle, "ext__RSPClient__sendHttpsPost", CHARSTRING(""),
+        [&](RSPClient* client) {
+            int httpStatus = 0;
+            std::string response = client->sendHttpsPost(
+                charstring_to_string(endpoint),
+                charstring_to_string(body),
+                httpStatus);
+            statusCode = INTEGER(httpStatus);
+            return string_to_charstring(response);
+        });
 }
 
-// Configure HTTP client settings
 INTEGER ext__RSPClient__configureHttpClient(
     const INTEGER& clientHandle,
     const BOOLEAN& useCustomTlsCert,
     const CHARSTRING& customTlsCertPath
 ) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        // Convert TTCN-3 types to C++
-        bool useCustomCert = useCustomTlsCert;
-        std::string certPath = charstring_to_string(customTlsCertPath);
-
-        // Configure HTTP client
-        client->configureHttpClient(useCustomCert, certPath);
-
-        LOG_DEBUG("Configured HTTP client - custom TLS cert: " +
-                 std::string(useCustomCert ? "true" : "false") +
-                 (certPath.empty() ? "" : " (" + certPath + ")"));
-
-        return INTEGER(0);
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__configureHttpClient failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
+    return with_client(clientHandle, "ext__RSPClient__configureHttpClient", INTEGER(-1),
+        [&](RSPClient* client) {
+            bool useCustomCert = static_cast<bool>(useCustomTlsCert);
+            std::string certPath = charstring_to_string(customTlsCertPath);
+            client->configureHttpClient(useCustomCert, certPath);
+            LOG_DEBUG("Configured HTTP client - custom TLS cert: " +
+                     std::string(useCustomCert ? "true" : "false") +
+                     (certPath.empty() ? "" : " (" + certPath + ")"));
+            return INTEGER(0);
+        });
 }
 
 }
