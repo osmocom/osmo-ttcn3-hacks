@@ -68,7 +68,7 @@ int RSPClientRegistry::createClient(const std::string& serverUrl, unsigned int s
 
     // Dynamically select certificate type based on nameFilter
     std::string certType = (nameFilter == "BRP") ? "BRP" : "NIST";
-    
+
     std::string euiccCertPath = "./sgp26/eUICC/CERT_EUICC_ECDSA_" + certType + ".der";
 	std::string euiccprivkeyPath = "./sgp26/eUICC/SK_EUICC_ECDSA_" + certType + ".pem";
 
@@ -289,28 +289,6 @@ INTEGER ext__RSPClient__loadEUMCertificate(const INTEGER& clientHandle,
     }
 }
 
-INTEGER ext__RSPClient__loadEUMKeyPair(const INTEGER& clientHandle,
-                                      const CHARSTRING& eumPrivateKeyPath) {
-    try {
-        int handle = static_cast<int>(clientHandle);
-        RSPClient* client = RSPClientRegistry::getInstance().getClient(handle);
-
-        if (!client) {
-            LOG_ERROR("Invalid RSP client handle: " + std::to_string(handle));
-            return INTEGER(-1);
-        }
-
-        std::string keyPath = charstring_to_string(eumPrivateKeyPath);
-        client->loadEUMKeyPair(keyPath);
-
-        return INTEGER(0);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__RSPClient__loadEUMKeyPair failed: " + std::string(e.what()));
-        return INTEGER(-1);
-    }
-}
-
-
 /* Challenge Generation and Session Management */
 OCTETSTRING ext__RSPClient__generateChallenge(const INTEGER& clientHandle) {
     try {
@@ -516,28 +494,6 @@ BOOLEAN ext__CertificateUtil__validateEIDRange(const CHARSTRING& eid, const OCTE
         return BOOLEAN(result);
     } catch (const std::exception& e) {
         LOG_ERROR("ext__CertificateUtil__validateEIDRange failed: " + std::string(e.what()));
-        return BOOLEAN(false);
-    }
-}
-
-BOOLEAN ext__CertificateUtil__hasPolicyOID(const OCTETSTRING& certData, const CHARSTRING& oidStr) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-        auto cert = CertificateUtil::loadCertFromDER(der);
-        std::string oid = charstring_to_string(oidStr);
-
-        // Check certificate policies extension
-        int pos = X509_get_ext_by_NID(cert.get(), NID_certificate_policies, -1);
-        if (pos < 0) return BOOLEAN(false);
-
-        X509_EXTENSION *ext = X509_get_ext(cert.get(), pos);
-        if (!ext) return BOOLEAN(false);
-
-        // Parse and check policies (simplified - would need proper ASN.1 parsing)
-        // For now, return true if extension exists
-        return BOOLEAN(true);
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__hasPolicyOID failed: " + std::string(e.what()));
         return BOOLEAN(false);
     }
 }
@@ -804,93 +760,6 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
     }
 }
 
-ProcessedBoundProfilePackage ext__BSP__processSegments(
-    const OCTETSTRING& sharedSecret,
-    const INTEGER& keyType,
-    const INTEGER& keyLength,
-    const OCTETSTRING& hostId,
-    const CHARSTRING& eid,
-    const OCTETSTRING& firstSequenceOf87,
-    const OCTETSTRING& sequenceOf88,
-    const OCTETSTRING& secondSequenceOf87,
-    const OCTETSTRING& sequenceOf86
-) {
-    try {
-        // Convert TTCN-3 types to C++ vectors
-        std::vector<uint8_t> sharedSecretVec = octetstring_to_bytes(sharedSecret);
-        std::vector<uint8_t> hostIdVec = octetstring_to_bytes(hostId);
-
-        std::string eidStr = charstring_to_string(eid);
-        std::vector<uint8_t> eidVec;
-        for (size_t i = 0; i < eidStr.length(); i += 2) {
-            std::string hexByte = eidStr.substr(i, 2);
-            uint8_t byte = static_cast<uint8_t>(std::stoi(hexByte, nullptr, 16));
-            eidVec.push_back(byte);
-        }
-
-        // Convert segments
-        std::vector<uint8_t> firstSeq87Vec = octetstring_to_bytes(firstSequenceOf87);
-        std::vector<uint8_t> seq88Vec = octetstring_to_bytes(sequenceOf88);
-        std::vector<uint8_t> secondSeq87Vec = octetstring_to_bytes(secondSequenceOf87);
-        std::vector<uint8_t> seq86Vec = octetstring_to_bytes(sequenceOf86);
-
-        // Derive BSP session keys using X9.63 KDF (from_kdf)
-        auto bsp = BspCryptoNS::BspCrypto::from_kdf(
-            sharedSecretVec,
-            static_cast<uint8_t>(keyType.get_long_long_val()),
-            static_cast<uint8_t>(keyLength.get_long_long_val()),
-            hostIdVec,
-            eidVec
-        );
-
-        LOG_INFO("BSP session keys derived successfully");
-        LOG_INFO("Processing BoundProfilePackage segments");
-        LOG_INFO("firstSequenceOf87 size: " + std::to_string(firstSeq87Vec.size()));
-        LOG_INFO("sequenceOf88 size: " + std::to_string(seq88Vec.size()));
-        LOG_INFO("secondSequenceOf87 size: " + std::to_string(secondSeq87Vec.size()));
-        LOG_INFO("sequenceOf86 size: " + std::to_string(seq86Vec.size()));
-
-        // Process segments using the 4-parameter version
-        auto result = bsp.process_bound_profile_package(
-            firstSeq87Vec,
-            seq88Vec,
-            secondSeq87Vec,
-            seq86Vec
-        );
-
-        // Convert result back to TTCN-3
-        ProcessedBoundProfilePackage ttcn_result;
-        ttcn_result.configureIsdp() = bytes_to_octetstring(result.configureIsdp);
-        ttcn_result.storeMetadata() = bytes_to_octetstring(result.storeMetadata);
-        ttcn_result.hasReplaceSessionKeys() = BOOLEAN(result.hasReplaceSessionKeys);
-        ttcn_result.profileData() = bytes_to_octetstring(result.profileData);
-
-        if (result.hasReplaceSessionKeys) {
-            ttcn_result.ppkEnc() = bytes_to_octetstring(result.replaceSessionKeys.ppkEnc);
-            ttcn_result.ppkMac() = bytes_to_octetstring(result.replaceSessionKeys.ppkCmac);
-            ttcn_result.ppkInitialMCV() = bytes_to_octetstring(result.replaceSessionKeys.initialMacChainingValue);
-            LOG_INFO("ReplaceSessionKeys present - PPK will be used for profile decryption");
-        }
-
-        LOG_INFO("BoundProfilePackage segments processed successfully");
-        LOG_INFO("ConfigureISDP size: " + std::to_string(result.configureIsdp.size()));
-        LOG_INFO("StoreMetadata size: " + std::to_string(result.storeMetadata.size()));
-        LOG_INFO("Profile data size: " + std::to_string(result.profileData.size()));
-
-        return ttcn_result;
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("BSP segment processing failed: " + std::string(e.what()));
-        // Return empty result on error
-        ProcessedBoundProfilePackage error_result;
-        error_result.configureIsdp() = OCTETSTRING(0, nullptr);
-        error_result.storeMetadata() = OCTETSTRING(0, nullptr);
-        error_result.hasReplaceSessionKeys() = BOOLEAN(false);
-        error_result.profileData() = OCTETSTRING(0, nullptr);
-        return error_result;
-    }
-}
-
 // HTTP client function wrapper
 CHARSTRING ext__RSPClient__sendHttpsPost(
     const INTEGER& clientHandle,
@@ -962,102 +831,5 @@ INTEGER ext__RSPClient__configureHttpClient(
         return INTEGER(-1);
     }
 }
-
-CHARSTRING ext__CertificateUtil__getSubjectAltNameOID(const OCTETSTRING& certData) {
-    try {
-        std::vector<uint8_t> der = octetstring_to_bytes(certData);
-
-        // Load certificate
-        const uint8_t* p = der.data();
-        X509* cert = d2i_X509(nullptr, &p, der.size());
-        if (!cert) {
-            LOG_ERROR("Failed to parse certificate");
-            return CHARSTRING("");
-        }
-        std::unique_ptr<X509, decltype(&X509_free)> cert_ptr(cert, X509_free);
-
-        // Get Subject Alternative Name extension
-        GENERAL_NAMES* san = static_cast<GENERAL_NAMES*>(
-            X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
-        if (!san) {
-            LOG_ERROR("No Subject Alternative Name extension found");
-            return CHARSTRING("");
-        }
-        std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> san_ptr(san, GENERAL_NAMES_free);
-
-        // Look for registered ID (OID) in SAN
-        for (int i = 0; i < sk_GENERAL_NAME_num(san); i++) {
-            GENERAL_NAME* gen = sk_GENERAL_NAME_value(san, i);
-            if (gen->type == GEN_RID) {  // Registered ID
-                ASN1_OBJECT* oid = gen->d.registeredID;
-                char oid_str[256];
-                OBJ_obj2txt(oid_str, sizeof(oid_str), oid, 1);  // 1 = numerical form
-                LOG_INFO("Found Subject Alternative Name OID: " + std::string(oid_str));
-                return string_to_charstring(oid_str);
-            }
-        }
-
-        LOG_ERROR("No registered ID found in Subject Alternative Name");
-        return CHARSTRING("");
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectAltNameOID failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
-CHARSTRING ext__CertificateUtil__getSubjectAltNameOIDFromFile(const CHARSTRING& certPath) {
-    try {
-        std::string path = charstring_to_string(certPath);
-
-        // Read certificate file
-        std::ifstream file(path, std::ios::binary);
-        if (!file) {
-            LOG_ERROR("Failed to open certificate file: " + path);
-            return CHARSTRING("");
-        }
-
-        std::vector<uint8_t> der((std::istreambuf_iterator<char>(file)),
-                                 std::istreambuf_iterator<char>());
-
-        // Load certificate
-        const uint8_t* p = der.data();
-        X509* cert = d2i_X509(nullptr, &p, der.size());
-        if (!cert) {
-            LOG_ERROR("Failed to parse certificate from file: " + path);
-            return CHARSTRING("");
-        }
-        std::unique_ptr<X509, decltype(&X509_free)> cert_ptr(cert, X509_free);
-
-        // Get Subject Alternative Name extension
-        GENERAL_NAMES* san = static_cast<GENERAL_NAMES*>(
-            X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
-        if (!san) {
-            LOG_ERROR("No Subject Alternative Name extension found in certificate: " + path);
-            return CHARSTRING("");
-        }
-        std::unique_ptr<GENERAL_NAMES, decltype(&GENERAL_NAMES_free)> san_ptr(san, GENERAL_NAMES_free);
-
-        // Look for registered ID (OID) in SAN
-        for (int i = 0; i < sk_GENERAL_NAME_num(san); i++) {
-            GENERAL_NAME* gen = sk_GENERAL_NAME_value(san, i);
-            if (gen->type == GEN_RID) {  // Registered ID
-                ASN1_OBJECT* oid = gen->d.registeredID;
-                char oid_str[256];
-                OBJ_obj2txt(oid_str, sizeof(oid_str), oid, 1);  // 1 = numerical form
-                LOG_INFO("Found Subject Alternative Name OID in " + path + ": " + std::string(oid_str));
-                return string_to_charstring(oid_str);
-            }
-        }
-
-        LOG_ERROR("No registered ID found in Subject Alternative Name for certificate: " + path);
-        return CHARSTRING("");
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("ext__CertificateUtil__getSubjectAltNameOIDFromFile failed: " + std::string(e.what()));
-        return CHARSTRING("");
-    }
-}
-
 
 }
