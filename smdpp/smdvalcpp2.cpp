@@ -1889,7 +1889,7 @@ public:
             m_confirmationCodeHash = computeConfirmationCodeHash(m_confirmationCode, m_transactionId);
             LOG_INFO("Set confirmation code, computed hash: " + HexUtil::bytesToHex(m_confirmationCodeHash));
         } else {
-            LOG_WARNING("Cannot compute confirmation code hash - transaction ID not set");
+            LOG_ERROR("Cannot compute confirmation code hash - transaction ID not set");
         }
     }
 
