@@ -65,6 +65,58 @@ namespace RspCrypto {
 
 
 class CertificateUtil {
+private:
+    static std::unique_ptr<BIO, BIODeleter> readFileToBIO(const std::string& filePath) {
+        std::ifstream file(filePath);
+        if (!file) {
+            throw std::runtime_error("Failed to open file: " + filePath);
+        }
+
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        std::unique_ptr<BIO, BIODeleter> bio(BIO_new_mem_buf(content.c_str(), -1));
+        if (!bio) {
+            throw OpenSSLError("Failed to create BIO from file content");
+        }
+
+        return bio;
+    }
+
+    static std::vector<uint8_t> extractPublicKeyData(EVP_PKEY* key) {
+        size_t pub_len = 0;
+        if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+                                           nullptr, 0, &pub_len) != 1) {
+            throw OpenSSLError("Failed to get public key size");
+        }
+
+        std::vector<uint8_t> publicKeyData(pub_len);
+        if (EVP_PKEY_get_octet_string_param(key, OSSL_PKEY_PARAM_PUB_KEY,
+                                           publicKeyData.data(), pub_len, &pub_len) != 1) {
+            throw OpenSSLError("Failed to extract public key");
+        }
+
+        return publicKeyData;
+    }
+
+    static std::vector<uint8_t> getCertificateExtension(X509* cert, int nid) {
+        int loc = X509_get_ext_by_NID(cert, nid, -1);
+        if (loc < 0) {
+            return std::vector<uint8_t>();
+        }
+
+        X509_EXTENSION *ext = X509_get_ext(cert, loc);
+        if (!ext) {
+            return std::vector<uint8_t>();
+        }
+
+        ASN1_OCTET_STRING *ext_data = X509_EXTENSION_get_data(ext);
+        if (!ext_data) {
+            return std::vector<uint8_t>();
+        }
+
+        return std::vector<uint8_t>(ASN1_STRING_get0_data(ext_data),
+                                    ASN1_STRING_get0_data(ext_data) + ASN1_STRING_length(ext_data));
+    }
+
 public:
 
     static std::string getEID(X509 *cert) {
@@ -103,46 +155,34 @@ public:
 
 
     static std::vector<uint8_t> getSubjectKeyIdentifier(X509 *cert) {
-        std::vector<uint8_t> ski;
-
-        int loc = X509_get_ext_by_NID(cert, NID_subject_key_identifier, -1);
-        if (loc >= 0) {
-            X509_EXTENSION *ext = X509_get_ext(cert, loc);
-            if (ext) {
-                ASN1_OCTET_STRING *ext_data = X509_EXTENSION_get_data(ext);
-
-                const unsigned char *p = ext_data->data;
-                long xlen = ext_data->length;
-                int tag, xclass;
-
-                ASN1_get_object(&p, &xlen, &tag, &xclass, ext_data->length);
-
-                // Copy the raw SKI value
-                ski.assign(p, p + xlen);
-            }
+        auto ext_data = getCertificateExtension(cert, NID_subject_key_identifier);
+        if (ext_data.empty()) {
+            return std::vector<uint8_t>();
         }
 
-        return ski;
+        const unsigned char *p = ext_data.data();
+        long xlen = ext_data.size();
+        int tag, xclass;
+
+        ASN1_get_object(&p, &xlen, &tag, &xclass, ext_data.size());
+
+        return std::vector<uint8_t>(p, p + xlen);
     }
 
     static std::vector<uint8_t> getAuthorityKeyIdentifier(X509 *cert) {
+        auto ext_data = getCertificateExtension(cert, NID_authority_key_identifier);
+        if (ext_data.empty()) {
+            return std::vector<uint8_t>();
+        }
+
+        // AKI is more complex, need to extract keyid
+        const unsigned char *p = ext_data.data();
+        AUTHORITY_KEYID *akid = d2i_AUTHORITY_KEYID(NULL, &p, ext_data.size());
+
         std::vector<uint8_t> aki;
-
-        int loc = X509_get_ext_by_NID(cert, NID_authority_key_identifier, -1);
-        if (loc >= 0) {
-            X509_EXTENSION *ext = X509_get_ext(cert, loc);
-            if (ext) {
-                ASN1_OCTET_STRING *ext_data = X509_EXTENSION_get_data(ext);
-
-                // AKI is more complex, we need to extract keyid
-                const unsigned char *p = ext_data->data;
-                AUTHORITY_KEYID *akid = d2i_AUTHORITY_KEYID(NULL, &p, ext_data->length);
-
-                if (akid && akid->keyid) {
-                    aki.assign(akid->keyid->data, akid->keyid->data + akid->keyid->length);
-                    AUTHORITY_KEYID_free(akid);
-                }
-            }
+        if (akid && akid->keyid) {
+            aki.assign(akid->keyid->data, akid->keyid->data + akid->keyid->length);
+            AUTHORITY_KEYID_free(akid);
         }
 
         return aki;
@@ -472,18 +512,7 @@ public:
                 throw std::runtime_error(typeName + " private key file not found: " + keyPath);
             }
 
-            std::ifstream keyFile(keyPath);
-            if (!keyFile) {
-                throw std::runtime_error("Failed to open " + typeName +
-                                         " private key file: " + keyPath);
-            }
-
-            std::string keyStr((std::istreambuf_iterator<char>(keyFile)), std::istreambuf_iterator<char>());
-            std::unique_ptr<BIO, BIODeleter> keyBio(BIO_new_mem_buf(keyStr.c_str(), -1));
-
-            if (!keyBio) {
-                throw OpenSSLError("Failed to create BIO for " + typeName + " private key");
-            }
+            auto keyBio = readFileToBIO(keyPath);
 
             keyStorage.reset(PEM_read_bio_PrivateKey(keyBio.get(), nullptr, nullptr, nullptr));
             if (!keyStorage) {
@@ -507,21 +536,7 @@ public:
                 return false;
             }
 
-            std::ifstream keyFile(pubKeyPath);
-            if (!keyFile) {
-                LOG_WARNING("Failed to open " + typeName + " public key file: " + pubKeyPath +
-                                " (will generate from private key)");
-                return false;
-            }
-
-            std::string keyStr((std::istreambuf_iterator<char>(keyFile)), std::istreambuf_iterator<char>());
-            std::unique_ptr<BIO, BIODeleter> keyBio(BIO_new_mem_buf(keyStr.c_str(), -1));
-
-            if (!keyBio) {
-                LOG_WARNING("Failed to create BIO for " + typeName +
-                                " public key (will generate from private key)");
-                return false;
-            }
+            auto keyBio = readFileToBIO(pubKeyPath);
 
             std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> pubKey(
                 PEM_read_bio_PUBKEY(keyBio.get(), nullptr, nullptr, nullptr));
@@ -531,24 +546,9 @@ public:
                 return false;
             }
 
-            size_t pub_len = 0;
+            publicKeyStorage = extractPublicKeyData(pubKey.get());
 
-            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
-                                               nullptr, 0, &pub_len) != 1) {
-                LOG_WARNING("Failed to get public key size from " + typeName +
-                                " file (will generate from private key)");
-                return false;
-            }
-
-            publicKeyStorage.resize(pub_len);
-            if (EVP_PKEY_get_octet_string_param(pubKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
-                                               publicKeyStorage.data(), pub_len, &pub_len) != 1) {
-                LOG_WARNING("Failed to extract public key data from " + typeName +
-                                " file (will generate from private key)");
-                return false;
-            }
-
-            LOG_INFO("Loaded " + typeName + " public key from file (" + std::to_string(pub_len) +
+            LOG_INFO("Loaded " + typeName + " public key from file (" + std::to_string(publicKeyStorage.size()) +
                          " bytes)");
             return true;
 
@@ -565,20 +565,9 @@ public:
             throw std::runtime_error("No " + typeName + " private key available for public key generation");
         }
 
-        size_t pub_len = 0;
+        publicKeyStorage = extractPublicKeyData(privateKey.get());
 
-        if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
-                                           nullptr, 0, &pub_len) != 1) {
-            throw OpenSSLError("Failed to get public key size from " + typeName + " private key");
-        }
-
-        publicKeyStorage.resize(pub_len);
-        if (EVP_PKEY_get_octet_string_param(privateKey.get(), OSSL_PKEY_PARAM_PUB_KEY,
-                                           publicKeyStorage.data(), pub_len, &pub_len) != 1) {
-            throw OpenSSLError("Failed to extract public key from " + typeName + " private key");
-        }
-
-        LOG_DEBUG("Generated " + typeName + " public key from private key (" + std::to_string(pub_len) +
+        LOG_DEBUG("Generated " + typeName + " public key from private key (" + std::to_string(publicKeyStorage.size()) +
                       " bytes)");
     }
 
@@ -1202,7 +1191,7 @@ public:
     }
 
     void loadEUICCCertificate(const std::string &euiccCertPath) {
-        CertificateUtil::xx_loadCertificate(euiccCertPath, "eUICC", m_euiccCert);
+        loadCertificate(euiccCertPath, "eUICC", m_euiccCert);
 
         try {
             m_EID = CertificateUtil::getEID(m_euiccCert.get());
@@ -1218,29 +1207,17 @@ public:
     }
 
     void loadEUICCKeyPair(const std::string &euiccPrivateKeyPath, const std::string &euiccPublicKeyPath = "") {
-        CertificateUtil::xx_loadPrivateKey(euiccPrivateKeyPath, "eUICC", m_euiccPrivateKey);
-
-        if (!euiccPublicKeyPath.empty() &&
-            CertificateUtil::xx_loadPublicKey(euiccPublicKeyPath, "eUICC", m_euiccPublicKeyData)) {
-            return;
-        }
-
-        CertificateUtil::xx_generatePublicKeyFromPrivate(m_euiccPrivateKey, "eUICC", m_euiccPublicKeyData);
+        loadKeyPair(euiccPrivateKeyPath, euiccPublicKeyPath, "eUICC",
+                    m_euiccPrivateKey, m_euiccPublicKeyData);
     }
 
     void loadEUMCertificate(const std::string &eumCertPath) {
-        CertificateUtil::xx_loadCertificate(eumCertPath, "EUM", m_eumCert);
+        loadCertificate(eumCertPath, "EUM", m_eumCert);
     }
 
     void loadEUMKeyPair(const std::string &eumPrivateKeyPath, const std::string &eumPublicKeyPath = "") {
-        CertificateUtil::xx_loadPrivateKey(eumPrivateKeyPath, "EUM", m_eumPrivateKey);
-
-        if (!eumPublicKeyPath.empty() &&
-            CertificateUtil::xx_loadPublicKey(eumPublicKeyPath, "EUM", m_eumPublicKeyData)) {
-            return;
-        }
-
-        CertificateUtil::xx_generatePublicKeyFromPrivate(m_eumPrivateKey, "EUM", m_eumPublicKeyData);
+        loadKeyPair(eumPrivateKeyPath, eumPublicKeyPath, "EUM",
+                    m_eumPrivateKey, m_eumPublicKeyData);
     }
 
     std::vector<uint8_t> generateChallenge() {
@@ -1537,6 +1514,24 @@ public:
     }
 
 private:
+    void loadCertificate(const std::string &certPath, const std::string &certType,
+                        std::unique_ptr<X509, X509Deleter> &certStorage) {
+        CertificateUtil::xx_loadCertificate(certPath, certType, certStorage);
+    }
+
+    void loadKeyPair(const std::string &privateKeyPath, const std::string &publicKeyPath,
+                     const std::string &keyType,
+                     std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter> &privateKeyStorage,
+                     std::vector<uint8_t> &publicKeyStorage) {
+        CertificateUtil::xx_loadPrivateKey(privateKeyPath, keyType, privateKeyStorage);
+
+        if (!publicKeyPath.empty() &&
+            CertificateUtil::xx_loadPublicKey(publicKeyPath, keyType, publicKeyStorage)) {
+            return;
+        }
+
+        CertificateUtil::xx_generatePublicKeyFromPrivate(privateKeyStorage, keyType, publicKeyStorage);
+    }
 
     std::vector<uint8_t> signDataWithKey(const std::vector<uint8_t> &dataToSign, EVP_PKEY* pkey) {
         if (dataToSign.empty()) {
