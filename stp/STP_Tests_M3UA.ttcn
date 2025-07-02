@@ -73,6 +73,7 @@ type component RAW_M3UA_CT extends Test_CT {
 	port M3UA_CODEC_PT M3UA[MAX_NR_M3UA];
 	var M3uaConfigs g_m3ua_configs;
 	var integer g_m3ua_conn_id[MAX_NR_M3UA];
+	var boolean g_iut_supports_rfc666_4_5_1_duna_after_act := true; /* RFC4666 4.5.1 */
 }
 
 friend function f_m3ua_get_config_idx(charstring asp_name) runs on RAW_M3UA_CT return integer {
@@ -336,6 +337,9 @@ runs on RAW_M3UA_CT {
 
 	f_init_common();
 
+	/* Set always to true once libosmo-sigtran > 2.1.0 is released: */
+	g_iut_supports_rfc666_4_5_1_duna_after_act := Misc_Helpers.f_osmo_repo_is("nightly");
+
 	if (not istemplatekind(m3ua_configs, "omit")) {
 		g_m3ua_configs := valueof(m3ua_configs);
 	} else {
@@ -459,7 +463,8 @@ friend function f_M3UA_asp_inact(integer idx, template (omit) OCT4 rctx := omit)
 friend function f_M3UA_asp_up_act(integer idx, template (omit) M3UA_Traffic_Mode_Type tmt := omit,
 				   template (omit) OCT4 rctx := omit,
 				   template (omit) OCT2 ntfy_after_up := c_M3UA_ST_I_AS_INACTIVE,
-				   template (omit) OCT2 ntfy_after_act := c_M3UA_ST_I_AS_ACTIVE)
+				   template (omit) OCT2 ntfy_after_act := c_M3UA_ST_I_AS_ACTIVE,
+				   template (omit) boolean exp_duna_after_act := omit /* auto */)
 runs on RAW_M3UA_CT {
 	f_M3UA_asp_up(idx, omit);
 	if (not istemplatekind(ntfy_after_up, "omit")) {
@@ -468,6 +473,20 @@ runs on RAW_M3UA_CT {
 	f_M3UA_asp_act(idx, tmt, rctx);
 	if (not istemplatekind(ntfy_after_act, "omit")) {
 		f_M3UA_exp(idx, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, ntfy_after_act, *));
+	}
+	if (g_iut_supports_rfc666_4_5_1_duna_after_act) {
+		var boolean exp_duna;
+		if (istemplatekind(exp_duna_after_act, "omit")) {
+			/* By default, we expect to receive RFC4666 4.5.1 DUNA
+			 * if AS becomes active, since at that time SG expects us
+			 * to not know current state of other AS destinations. */
+			exp_duna := not istemplatekind(ntfy_after_act, "omit") and valueof(ntfy_after_act) == c_M3UA_ST_I_AS_ACTIVE;
+		} else {
+			exp_duna := valueof(exp_duna_after_act);
+		}
+		if (exp_duna) {
+			f_M3UA_exp(idx, tr_M3UA_DUNA);
+		}
 	}
 }
 
@@ -1010,8 +1029,9 @@ testcase TC_rkm_unreg_registered() runs on RAW_M3UA_CT {
 testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
 	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
-	var OCT3 dpc := int2oct(123, 3);
+	var OCT3 dpcA := int2oct(123, 3);
 	var OCT4 rctxA := int2oct(1234, 4);
+	var OCT3 dpcB := int2oct(m3ua_configs[0].point_code, 4); // must match config
 	var OCT4 rctxB := int2oct(m3ua_configs[0].routing_ctx, 4); // must match config
 
 	f_init_common();
@@ -1019,7 +1039,7 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	f_init_m3ua(m3ua_configs := m3ua_configs);
 
 	/* first register the routing key */
-	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpc, rctx:=rctxA, ntfy_after_reg := omit);
+	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpcA, rctx:=rctxA, ntfy_after_reg := omit);
 
 	/* then activate the ASP, this turns the 2 AS (one for each rctx, 1234 and default 1023)
 	 * INACTIVE, handle the 2 NOTIFY manually afterwards: */
@@ -1028,9 +1048,15 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, (rctxA & rctxB, rctxB & rctxA)));
 	f_M3UA_asp_act(0, omit, rctxB);
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, (rctxA & rctxB, rctxB & rctxA)));
-	f_M3UA_exp(0, tr_M3UA_DAVA({*}, rctxA));
+	f_M3UA_exp(0, tr_M3UA_DAVA({ts_M3UA_PC(oct2int(dpcB))}, rctxA));
+	if (g_iut_supports_rfc666_4_5_1_duna_after_act) {
+		f_M3UA_exp(0, tr_M3UA_DUNA({*}, rctxB));
+	}
 	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, (rctxA & rctxB, rctxB & rctxA)));
-	f_M3UA_exp(0, tr_M3UA_DAVA({*}, rctxB));
+	f_M3UA_exp(0, tr_M3UA_DAVA({ts_M3UA_PC(oct2int(dpcA))}, rctxB));
+	if (g_iut_supports_rfc666_4_5_1_duna_after_act) {
+		f_M3UA_exp(0, tr_M3UA_DUNA({*}, rctxA));
+	}
 
 	/* then try to de-register -> ERR_ASP_ACTIVE */
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctxA)));
