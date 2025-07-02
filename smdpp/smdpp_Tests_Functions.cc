@@ -16,11 +16,13 @@
 #include "bsp_crypto.cpp"
 
 
+// Include BSP crypto implementation
+#include "bsp_crypto.h"
+
+
 using namespace RspCrypto;
 
-/* ============================================================================
- * RSP CLIENT REGISTRY IMPLEMENTATION
- * ============================================================================ */
+
 namespace smdpp__Tests {
 
 
@@ -680,12 +682,6 @@ void ext__logDebug(const CHARSTRING& message) {
     }
 }
 
-}
-
-// Include BSP crypto implementation
-#include "bsp_crypto.h"
-
-namespace smdpp__Tests {
 
 ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(
     const OCTETSTRING& sharedSecret,
