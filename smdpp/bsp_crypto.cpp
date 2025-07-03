@@ -1,7 +1,12 @@
-/* ============================================================================
- * BSP Crypto Implementation File
- * Extracted from bsp_python_bindings.cpp for TTCN-3 integration
- * ============================================================================ */
+/* BSP Crypto Implementation File
+ *
+ * Author: Eric Wild <ewild@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 
 #include "bsp_crypto.h"
 #include <iostream>

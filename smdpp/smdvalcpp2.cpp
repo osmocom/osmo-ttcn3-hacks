@@ -1,10 +1,12 @@
-/* ============================================================================
- * RSP Cryptographic Operations Implementation
- * File: smdvalcpp2.cpp
+/* RSP Cryptographic Operations Implementation
  *
- * This file provides cryptographic operations for Remote SIM Provisioning (RSP)
- * protocol implementation according to GSMA SGP.22 specifications.
- * ============================================================================ */
+ * Author: Eric Wild <ewild@sysmocom.de> / sysmocom - s.f.m.c. GmbH
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 
 #include <algorithm>
 #include <chrono>
