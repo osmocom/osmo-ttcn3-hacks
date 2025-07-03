@@ -95,11 +95,11 @@ ASN1_ITEM_TEMPLATE_END(BoundProfilePackage_tagged)
 IMPLEMENT_ASN1_FUNCTIONS(BoundProfilePackage_tagged)
 
 // Custom deleter implementations
-void BoundProfilePackage_tagged_Deleter::operator()(BoundProfilePackage_tagged *ss1) const {
+	void BoundProfilePackage_tagged_Deleter::operator()(BoundProfilePackage_tagged * ss1) const {
     BoundProfilePackage_tagged_free(ss1);
 }
 
-void ReplaceSessionKeysRequest_outer_Deleter::operator()(ReplaceSessionKeysRequest_outer *ss1) const {
+void ReplaceSessionKeysRequest_outer_Deleter::operator()(ReplaceSessionKeysRequest_outer* ss1) const {
     ReplaceSessionKeysRequest_outer_free(ss1);
 }
 
@@ -110,8 +110,7 @@ void ReplaceSessionKeysRequest_outer_Deleter::operator()(ReplaceSessionKeysReque
 }
 
 // BspCrypto implementation
-BspCrypto::BspCrypto(const std::vector<uint8_t>& s_enc_key,
-          const std::vector<uint8_t>& s_mac_key,
+BspCrypto::BspCrypto(const std::vector<uint8_t>& s_enc_key, const std::vector<uint8_t>& s_mac_key,
           const std::vector<uint8_t>& initial_mcv)
     : s_enc(s_enc_key), s_mac(s_mac_key), mac_chain(initial_mcv), block_number(1) {
     assert(s_enc.size() == AES_KEY_SIZE);
@@ -119,21 +118,20 @@ BspCrypto::BspCrypto(const std::vector<uint8_t>& s_enc_key,
     assert(mac_chain.size() == AES_BLOCK_SIZE);
 }
 
-std::vector<uint8_t> BspCrypto::compute_cmac(const std::vector<uint8_t>& key,
-                                         const std::vector<uint8_t>& data,
+std::vector<uint8_t> BspCrypto::compute_cmac(const std::vector<uint8_t>& key, const std::vector<uint8_t>& data,
                                          size_t output_size) {
-    EVP_MAC *mac = EVP_MAC_fetch(nullptr, "CMAC", nullptr);
-    if (!mac) throw std::runtime_error("Failed to fetch CMAC implementation");
+	EVP_MAC* mac = EVP_MAC_fetch(nullptr, "CMAC", nullptr);
+	if (!mac)
+		throw std::runtime_error("Failed to fetch CMAC implementation");
 
     EVP_MAC_CTX_unique_ptr mac_ctx(EVP_MAC_CTX_new(mac));
     EVP_MAC_free(mac);
-    if (!mac_ctx) throw std::runtime_error("Failed to create MAC context");
+	if (!mac_ctx)
+		throw std::runtime_error("Failed to create MAC context");
 
     // Set up parameters for CMAC with AES-128-CBC
-    OSSL_PARAM params[] = {
-        OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER, (char*)"AES-128-CBC", 0),
-        OSSL_PARAM_construct_end()
-    };
+	OSSL_PARAM params[] = { OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_CIPHER, (char*)"AES-128-CBC", 0),
+				OSSL_PARAM_construct_end() };
 
     if (EVP_MAC_init(mac_ctx.get(), key.data(), key.size(), params) != 1) {
         throw std::runtime_error("Failed to init MAC");
@@ -153,10 +151,8 @@ std::vector<uint8_t> BspCrypto::compute_cmac(const std::vector<uint8_t>& key,
     return output;
 }
 
-std::vector<uint8_t> BspCrypto::aes_cipher_operation(const std::vector<uint8_t>& input,
-                                         const std::vector<uint8_t>& key,
-                                         const std::vector<uint8_t>& iv,
-                                         bool encrypt) {
+std::vector<uint8_t> BspCrypto::aes_cipher_operation(const std::vector<uint8_t>& input, const std::vector<uint8_t>& key,
+						     const std::vector<uint8_t>& iv, bool encrypt) {
     if (key.size() != AES_KEY_SIZE) {
         throw std::runtime_error("Invalid key size");
     }
@@ -165,7 +161,8 @@ std::vector<uint8_t> BspCrypto::aes_cipher_operation(const std::vector<uint8_t>&
     }
 
     EVP_CIPHER_CTX_unique_ptr ctx(EVP_CIPHER_CTX_new());
-    if (!ctx) throw std::runtime_error("Failed to create cipher context");
+	if (!ctx)
+		throw std::runtime_error("Failed to create cipher context");
 
     const EVP_CIPHER* cipher = EVP_aes_128_cbc();
 
@@ -229,11 +226,11 @@ std::vector<uint8_t> BspCrypto::aes_cipher_operation(const std::vector<uint8_t>&
 
 std::vector<uint8_t> BspCrypto::encode_bertlv_length(size_t length) {
     if (length < 0x80) {
-        return {static_cast<uint8_t>(length)};
+		return { static_cast<uint8_t>(length) };
     } else if (length < 0x100) {
-        return {0x81, static_cast<uint8_t>(length)};
+		return { 0x81, static_cast<uint8_t>(length) };
     } else if (length < 0x10000) {
-        return {0x82, static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length & 0xFF)};
+		return { 0x82, static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length & 0xFF) };
     } else {
         throw std::runtime_error("Length too large for BERTLV encoding");
     }
@@ -247,33 +244,35 @@ void BspCrypto::print_hex(const std::string& label, const std::vector<uint8_t>& 
     std::cout << std::dec << std::endl;
 }
 
-void BspCrypto::print_hex(const char *label, const unsigned char *data, int len) {
-    const std::vector<uint8_t> t = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data+len);
+void BspCrypto::print_hex(const char* label, const unsigned char* data, int len) {
+	const std::vector<uint8_t> t = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len);
     const std::string l = std::string("").assign(label);
     print_hex(l, t);
 }
 
 std::pair<size_t, size_t> BspCrypto::parse_bertlv_length(const std::vector<uint8_t>& data, size_t offset) {
-    if (offset >= data.size()) throw std::runtime_error("Invalid length offset");
+	if (offset >= data.size())
+		throw std::runtime_error("Invalid length offset");
 
     uint8_t first_byte = data[offset];
     if (first_byte < 0x80) {
-        return {first_byte, offset + 1};
+		return { first_byte, offset + 1 };
     } else if (first_byte == 0x81) {
-        if (offset + 1 >= data.size()) throw std::runtime_error("Invalid length encoding");
-        return {data[offset + 1], offset + 2};
+		if (offset + 1 >= data.size())
+			throw std::runtime_error("Invalid length encoding");
+		return { data[offset + 1], offset + 2 };
     } else if (first_byte == 0x82) {
-        if (offset + 2 >= data.size()) throw std::runtime_error("Invalid length encoding");
+		if (offset + 2 >= data.size())
+			throw std::runtime_error("Invalid length encoding");
         size_t length = (data[offset + 1] << 8) | data[offset + 2];
-        return {length, offset + 3};
+		return { length, offset + 3 };
     } else {
         throw std::runtime_error("Unsupported length encoding");
     }
 }
 
 std::vector<uint8_t> BspCrypto::x963_kdf_sha256(const std::vector<uint8_t>& shared_secret,
-                                            const std::vector<uint8_t>& shared_info,
-                                            size_t output_length) {
+						const std::vector<uint8_t>& shared_info, size_t output_length) {
     std::vector<uint8_t> output;
     output.reserve(output_length);
 
@@ -307,21 +306,20 @@ std::vector<uint8_t> BspCrypto::x963_kdf_sha256(const std::vector<uint8_t>& shar
     return output;
 }
 
-BspCrypto BspCrypto::from_kdf(const std::vector<uint8_t>& shared_secret,
-                          uint8_t key_type, uint8_t key_length,
-                          const std::vector<uint8_t>& host_id,
-                          const std::vector<uint8_t>& eid) {
-
+BspCrypto BspCrypto::from_kdf(const std::vector<uint8_t>& shared_secret, uint8_t key_type, uint8_t key_length,
+			      const std::vector<uint8_t>& host_id, const std::vector<uint8_t>& eid) {
     // shared_info: key_type || key_length || len(host_id) || host_id || len(eid) || eid
     std::vector<uint8_t> shared_info;
     shared_info.push_back(key_type);
     shared_info.push_back(key_length);
 
-    if (host_id.size() > 255) throw std::runtime_error("Host ID too long");
+	if (host_id.size() > 255)
+		throw std::runtime_error("Host ID too long");
     shared_info.push_back(static_cast<uint8_t>(host_id.size()));
     shared_info.insert(shared_info.end(), host_id.begin(), host_id.end());
 
-    if (eid.size() > 255) throw std::runtime_error("EID too long");
+	if (eid.size() > 255)
+		throw std::runtime_error("EID too long");
     shared_info.push_back(static_cast<uint8_t>(eid.size()));
     shared_info.insert(shared_info.end(), eid.begin(), eid.end());
 
@@ -353,7 +351,7 @@ std::vector<uint8_t> BspCrypto::add_padding(const std::vector<uint8_t>& data) {
     return padded;
 }
 
-std::vector<uint8_t> BspCrypto::remove_padding(const std::vector<uint8_t> &data) {
+std::vector<uint8_t> BspCrypto::remove_padding(const std::vector<uint8_t>& data) {
   if (data.empty())
     return data;
 
@@ -366,7 +364,6 @@ std::vector<uint8_t> BspCrypto::remove_padding(const std::vector<uint8_t> &data)
     return std::vector<uint8_t>(data.begin(), data.begin() + last_nonzero);
   }
   return data;
-
 }
 
 std::vector<uint8_t> BspCrypto::aes_encrypt(const std::vector<uint8_t>& plaintext) {
@@ -375,7 +372,8 @@ std::vector<uint8_t> BspCrypto::aes_encrypt(const std::vector<uint8_t>& plaintex
     return aes_cipher_operation(padded, s_enc, icv, true);
 }
 
-std::vector<uint8_t> BspCrypto::aes_decrypt_with_icv(const std::vector<uint8_t>& ciphertext, const std::vector<uint8_t>& icv) {
+std::vector<uint8_t> BspCrypto::aes_decrypt_with_icv(const std::vector<uint8_t>& ciphertext,
+						     const std::vector<uint8_t>& icv) {
     auto decrypted = aes_cipher_operation(ciphertext, s_enc, icv, false);
     return remove_padding(decrypted);
 }
@@ -391,9 +389,9 @@ std::vector<uint8_t> BspCrypto::generate_icv_for_block(uint32_t block_num) {
 }
 
 std::vector<uint8_t> BspCrypto::verify_and_decrypt_helper(const std::vector<uint8_t>& segment,
-                                               const std::vector<uint8_t>& mac_chain_to_use,
-                                               bool decrypt) {
-    if (segment.size() < 3) throw std::runtime_error("Segment too small");
+							  const std::vector<uint8_t>& mac_chain_to_use, bool decrypt) {
+	if (segment.size() < 3)
+		throw std::runtime_error("Segment too small");
 
     uint8_t tag = segment[0];
     auto [length, length_end] = parse_bertlv_length(segment, 1);
@@ -408,7 +406,8 @@ std::vector<uint8_t> BspCrypto::verify_and_decrypt_helper(const std::vector<uint
 
     size_t payload_length = length - MAC_LENGTH;
     std::vector<uint8_t> payload(segment.begin() + length_end, segment.begin() + length_end + payload_length);
-    std::vector<uint8_t> received_mac(segment.begin() + length_end + payload_length, segment.begin() + length_end + length);
+	std::vector<uint8_t> received_mac(segment.begin() + length_end + payload_length,
+					  segment.begin() + length_end + length);
 
     size_t lcc = payload.size() + MAC_LENGTH;
     std::vector<uint8_t> temp_data;
@@ -498,7 +497,7 @@ BspCrypto::ReplaceSessionKeysRequest BspCrypto::parse_replace_session_keys(const
         throw std::runtime_error("Empty ReplaceSessionKeysRequest data");
     }
 
-    const unsigned char *p = data.data();
+	const unsigned char* p = data.data();
 
     RPK_ptr rsk_asn1(d2i_ReplaceSessionKeysRequest_outer(nullptr, &p, static_cast<int>(data.size())));
 
@@ -543,17 +542,14 @@ BspCrypto BspCrypto::from_replace_session_keys(const ReplaceSessionKeysRequest& 
     return BspCrypto(rsk.ppkEnc, rsk.ppkCmac, rsk.initialMacChainingValue);
 }
 
-
 void BspCrypto::reset(const std::vector<uint8_t>& initial_mcv) {
     mac_chain = initial_mcv;
     block_number = 1;
 }
 
-std::vector<uint8_t> BspCrypto::generate_replace_session_keys_data(
-    const std::vector<uint8_t>& ppk_enc,
+std::vector<uint8_t> BspCrypto::generate_replace_session_keys_data(const std::vector<uint8_t>& ppk_enc,
     const std::vector<uint8_t>& ppk_mac,
-    const std::vector<uint8_t>& initial_mcv
-) {
+								   const std::vector<uint8_t>& initial_mcv) {
     if (ppk_enc.size() != 16 || ppk_mac.size() != 16 || initial_mcv.size() != 16) {
         throw std::runtime_error("All PPK components must be 16 bytes");
     }
@@ -613,9 +609,7 @@ std::vector<std::vector<uint8_t>> BspCrypto::mac_only_seg(uint8_t tag, const std
     return segments;
 }
 
-BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
-    const std::vector<uint8_t>& allofit
-) {
+BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(const std::vector<uint8_t>& allofit) {
     BppProcessingResult result;
     auto p = allofit.data();
     BPP_ptr bpp(d2i_BoundProfilePackage_tagged(nullptr, &p, allofit.size()));
@@ -626,30 +620,29 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
     }
 
     // all mandatory
-    if (bpp->firstSequenceOf87 == nullptr ||bpp->sequenceOf88 == nullptr || bpp->sequenceOf86 == nullptr ) {
+	if (bpp->firstSequenceOf87 == nullptr || bpp->sequenceOf88 == nullptr || bpp->sequenceOf86 == nullptr) {
             std::cout << "Malformed BoundProfilePackage" << std::endl;
             return result;
     }
 
     result.hasReplaceSessionKeys = bpp->secondSequenceOf87 != nullptr;
 
-
-    unsigned char *encoded = nullptr;
-    ASN1_OCTET_STRING *elem = nullptr;
+	unsigned char* encoded = nullptr;
+	ASN1_OCTET_STRING* elem = nullptr;
     int len = 0;
 
     // Step 1: Decrypt ConfigureISDP with session keys
     std::cout << "Step 1: Decrypting ConfigureISDP with session keys..." << std::endl;
     elem = sk_ASN1_OCTET_STRING_value(bpp->firstSequenceOf87, 0);
     len = i2d_ASN1_OCTET_STRING_TAG7(elem, &encoded);
-    result.configureIsdp = decrypt_and_verify({encoded, encoded + len}, true);
+	result.configureIsdp = decrypt_and_verify({ encoded, encoded + len }, true);
     ossl_free_reset(encoded);
 
     // Step 2: Verify StoreMetadata with session keys (MAC-only)
     std::cout << "Step 2: Verifying StoreMetadata with session keys (MAC-only)..." << std::endl;
     elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf88, 0);
     len = i2d_ASN1_OCTET_STRING_TAG8(elem, &encoded);
-    result.storeMetadata = decrypt_and_verify({encoded, encoded + len}, false);
+	result.storeMetadata = decrypt_and_verify({ encoded, encoded + len }, false);
     ossl_free_reset(encoded);
 
     // Step 3: If present, decrypt ReplaceSessionKeys with session keys
@@ -658,7 +651,7 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
 
         elem = sk_ASN1_OCTET_STRING_value(bpp->secondSequenceOf87, 0);
         len = i2d_ASN1_OCTET_STRING_TAG7(elem, &encoded);
-        auto rsk_data = decrypt_and_verify({encoded, encoded + len}, true);
+		auto rsk_data = decrypt_and_verify({ encoded, encoded + len }, true);
         result.replaceSessionKeys = parse_replace_session_keys(rsk_data);
         ossl_free_reset(encoded);
 
@@ -670,16 +663,16 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
         print_hex("PPK-MAC", result.replaceSessionKeys.ppkCmac);
         print_hex("PPK Initial MCV", result.replaceSessionKeys.initialMacChainingValue);
 
-        std::cout << "Step 5: Decrypting profile data with PPK keys..."<< std::endl;
+		std::cout << "Step 5: Decrypting profile data with PPK keys..." << std::endl;
         int num = sk_ASN1_OCTET_STRING_num(bpp->sequenceOf86);
         for (int i = 0; i < num; i++) {
             elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf86, i);
             len = i2d_ASN1_OCTET_STRING_TAG6(elem, &encoded);
-            auto rv = ppk_bsp.decrypt_and_verify({encoded, encoded + len}, true);
+			auto rv = ppk_bsp.decrypt_and_verify({ encoded, encoded + len }, true);
             result.profileData.insert(result.profileData.end(), rv.begin(), rv.end());
             ossl_free_reset(encoded);
         }
-        std::cout << "Step 5: "<< num << " profile chunks verified and decrypted"<< std::endl;
+		std::cout << "Step 5: " << num << " profile chunks verified and decrypted" << std::endl;
 
     } else {
         // No ReplaceSessionKeys - decrypt profile data with session keys
@@ -688,21 +681,21 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
         for (int i = 0; i < num; i++) {
             elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf86, 0);
             len = i2d_ASN1_OCTET_STRING_TAG6(elem, &encoded);
-            auto rv = decrypt_and_verify({encoded, encoded + len}, true);
+			auto rv = decrypt_and_verify({ encoded, encoded + len }, true);
             result.profileData.insert(result.profileData.end(), rv.begin(), rv.end());
             ossl_free_reset(encoded);
         }
-        std::cout << "Step 3: "<< num << " profile chunks verified and decrypted"<< std::endl;
+		std::cout << "Step 3: " << num << " profile chunks verified and decrypted" << std::endl;
     }
 
     return result;
 }
 
 BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(
-    const std::vector<uint8_t>& firstSequenceOf87,  // ConfigureISDP
-    const std::vector<uint8_t>& sequenceOf88,       // StoreMetadata
+	const std::vector<uint8_t>& firstSequenceOf87, // ConfigureISDP
+	const std::vector<uint8_t>& sequenceOf88, // StoreMetadata
     const std::vector<uint8_t>& secondSequenceOf87, // ReplaceSessionKeys (optional)
-    const std::vector<uint8_t>& sequenceOf86        // Profile data
+	const std::vector<uint8_t>& sequenceOf86 // Profile data
 ) {
     BppProcessingResult result;
     result.hasReplaceSessionKeys = !secondSequenceOf87.empty();

@@ -53,21 +53,17 @@ extern "C" {
 
 #include <curl/curl.h>
 #include <openssl/types.h>
-
 }
 
-namespace RspCrypto
-{
+namespace RspCrypto {
 class SMDPResponseGenerator;
 class SMDPResponseValidator;
 
-// Enhanced Logger class with filename and line number information
 class Logger {
     public:
 	enum class Level { DEBUG, INFO, WARNING, ERROR };
 
-	static void log(Level level, const std::string &message, const char *filename = nullptr, int line = 0)
-	{
+	static void log(Level level, const std::string& message, const char* filename = nullptr, int line = 0) {
 		auto now = std::chrono::system_clock::now();
 		auto time = std::chrono::system_clock::to_time_t(now);
 
@@ -94,7 +90,7 @@ class Logger {
 		// Add filename and line information if provided
 		if (filename) {
 			// Extract just the base filename without the full path
-			const char *base_filename = strrchr(filename, '/');
+			const char* base_filename = strrchr(filename, '/');
 			if (!base_filename) {
 				base_filename = strrchr(filename, '\\'); // For Windows paths
 			}
@@ -108,24 +104,19 @@ class Logger {
 		std::cout << ss.str() << std::endl;
 	}
 
-	// Helper methods with filename and line support
-	static void debug(const std::string &message, const char *filename = nullptr, int line = 0)
-	{
+	static void debug(const std::string& message, const char* filename = nullptr, int line = 0) {
 		log(Level::DEBUG, message, filename, line);
 	}
 
-	static void info(const std::string &message, const char *filename = nullptr, int line = 0)
-	{
+	static void info(const std::string& message, const char* filename = nullptr, int line = 0) {
 		log(Level::INFO, message, filename, line);
 	}
 
-	static void warning(const std::string &message, const char *filename = nullptr, int line = 0)
-	{
+	static void warning(const std::string& message, const char* filename = nullptr, int line = 0) {
 		log(Level::WARNING, message, filename, line);
 	}
 
-	static void error(const std::string &message, const char *filename = nullptr, int line = 0)
-	{
+	static void error(const std::string& message, const char* filename = nullptr, int line = 0) {
 		log(Level::ERROR, message, filename, line);
 	}
 };
@@ -136,22 +127,19 @@ class Logger {
 #define LOG_WARNING(message) Logger::warning(message, __FILE__, __LINE__)
 #define LOG_ERROR(message) Logger::error(message, __FILE__, __LINE__)
 
-// Class for OpenSSL error handling
 class OpenSSLError : public std::runtime_error {
     public:
-	OpenSSLError(const std::string &message) : std::runtime_error(message + getOpenSSLErrors())
-	{
+	OpenSSLError(const std::string& message) : std::runtime_error(message + getOpenSSLErrors()) {
 	}
 
     private:
-	static std::string getOpenSSLErrors()
-	{
+	static std::string getOpenSSLErrors() {
 		std::stringstream ss;
 		unsigned long err;
 
 		ss << " - OpenSSL Errors: ";
 		while ((err = ERR_get_error()) != 0) {
-			char *err_str = ERR_error_string(err, nullptr);
+			char* err_str = ERR_error_string(err, nullptr);
 			ss << err_str << "; ";
 		}
 
@@ -162,8 +150,7 @@ class OpenSSLError : public std::runtime_error {
 class OpenSSLErrorHandler {
     public:
 	// Get detailed error information from OpenSSL error queue
-	static std::string getLastError()
-	{
+	static std::string getLastError() {
 		std::stringstream errorStream;
 		unsigned long errorCode;
 
@@ -171,12 +158,12 @@ class OpenSSLErrorHandler {
 			char errorBuffer[256];
 			ERR_error_string_n(errorCode, errorBuffer, sizeof(errorBuffer));
 
-			const char *library = ERR_lib_error_string(errorCode);
+			const char* library = ERR_lib_error_string(errorCode);
 
 #if OPENSSL_VERSION_NUMBER < 0x30000000
-			const char *function = ERR_func_error_string(errorCode);
+			const char* function = ERR_func_error_string(errorCode);
 #endif
-			const char *reason = ERR_reason_error_string(errorCode);
+			const char* reason = ERR_reason_error_string(errorCode);
 
 			errorStream << "OpenSSL Error:\n";
 			errorStream << "  Code: 0x" << std::hex << errorCode << std::dec << "\n";
@@ -192,9 +179,7 @@ class OpenSSLErrorHandler {
 		return errorStream.str();
 	}
 
-	// Get SSL-specific error with context
-	static std::string getSSLError(SSL *ssl, int result)
-	{
+	static std::string getSSLError(SSL* ssl, int result) {
 		int sslError = SSL_get_error(ssl, result);
 		std::stringstream errorStream;
 
@@ -203,7 +188,6 @@ class OpenSSLErrorHandler {
 		errorStream << "  SSL error code: " << sslError << "\n";
 		errorStream << "  SSL error type: " << getSSLErrorType(sslError) << "\n";
 
-		// Add OpenSSL error queue information
 		std::string queueErrors = getLastError();
 		if (!queueErrors.empty()) {
 			errorStream << "\nError Queue:\n" << queueErrors;
@@ -212,13 +196,11 @@ class OpenSSLErrorHandler {
 		return errorStream.str();
 	}
 
-	// Get certificate verification error
-	static std::string getCertificateError(long verifyResult)
-	{
+	static std::string getCertificateError(long verifyResult) {
 		std::stringstream errorStream;
 
 		if (verifyResult != X509_V_OK) {
-			const char *errorString = X509_verify_cert_error_string(verifyResult);
+			const char* errorString = X509_verify_cert_error_string(verifyResult);
 			errorStream << "Certificate Verification Error:\n";
 			errorStream << "  Code: " << verifyResult << "\n";
 			errorStream << "  Description: " << (errorString ? errorString : "unknown") << "\n";
@@ -227,9 +209,7 @@ class OpenSSLErrorHandler {
 		return errorStream.str();
 	}
 
-	// Pretty print all SSL errors with context
-	static void printSSLErrors(const std::string &context = "")
-	{
+	static void printSSLErrors(const std::string& context = "") {
 		if (!context.empty()) {
 			std::cerr << "=== " << context << " ===" << std::endl;
 		}
@@ -243,8 +223,7 @@ class OpenSSLErrorHandler {
 	}
 
     private:
-	static std::string getSSLErrorType(int sslError)
-	{
+	static std::string getSSLErrorType(int sslError) {
 		switch (sslError) {
 		case SSL_ERROR_NONE:
 			return "SSL_ERROR_NONE - No error";
@@ -270,4 +249,4 @@ class OpenSSLErrorHandler {
 	}
 };
 
-}
+} // namespace RspCrypto
