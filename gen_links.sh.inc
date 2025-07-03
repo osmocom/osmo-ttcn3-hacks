@@ -23,7 +23,7 @@ rm -f .gitignore
 gen_link() {
 	src="$1"
 	f="$2"
-	echo "Linking $f"
+#	echo "Linking $f"
 	ln -sf "$src" "$f"
 	echo "$f" >> .gitignore
 }
@@ -44,4 +44,6 @@ ignore_pp_results() {
 		ttcn_file="$(echo $pp | sed 's/pp$//')"
 		echo "$ttcn_file" >> .gitignore
 	done
+	echo 'concurrent_run_*' >> .gitignore
+	echo 'latest_concurrent_run*' >> .gitignore
 }

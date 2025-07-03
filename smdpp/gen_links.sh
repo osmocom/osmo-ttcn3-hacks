@@ -12,11 +12,6 @@ DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
 FILES="Abstract_Socket.cc Abstract_Socket.hh "
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
-FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn "
-FILES+="HTTPmsg_Types.ttcn"
-gen_links $DIR $FILES
-
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
 FILES="Socket_API_Definitions.ttcn"
 gen_links $DIR $FILES
@@ -41,7 +36,6 @@ gen_links $DIR $FILES
 
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
-FILES+="HTTP_Server_Emulation.ttcn HTTP_Adapter.ttcn"
 gen_links $DIR $FILES
 
 ignore_pp_results

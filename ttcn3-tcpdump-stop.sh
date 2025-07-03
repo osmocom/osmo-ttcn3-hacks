@@ -61,7 +61,7 @@ prev_count=-1
 count=$(stat --format="%s" "$TTCN3_PCAP_PATH/$TESTCASE.pcap")
 while [ $count -gt $prev_count ] && [ $i -lt 2 ]
 do
-	echo "Waiting for packet dumper to finish... $i (prev_count=$prev_count, count=$count)"
+	# echo "Waiting for packet dumper to finish... $i (prev_count=$prev_count, count=$count)"
 	sleep 1
 	prev_count=$count
 	count=$(stat --format="%s" "$TTCN3_PCAP_PATH/$TESTCASE.pcap")
