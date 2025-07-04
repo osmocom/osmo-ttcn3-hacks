@@ -73,7 +73,10 @@ def parse_args():
     sub_run = sub.add_parser("run", help="build components and run a testsuite")
 
     group = sub_run.add_argument_group("testsuite options")
-    group.add_argument("testsuite", help="a directory in osmo-ttcn3-hacks.git (msc, bsc, mgw, ...)")
+    group.add_argument(
+        "testsuite",
+        help="a directory in osmo-ttcn3-hacks.git (msc, bsc, mgw, ...)",
+    )
     group.add_argument(
         "-t",
         "--test",
@@ -85,8 +88,17 @@ def parse_args():
         action="append",
         help="which testenv.cfg to use (supports * wildcards via fnmatch)",
     )
-    group.add_argument("-i", "--io-uring", action="store_true", help="set LIBOSMO_IO_BACKEND=IO_URING")
-    group.add_argument("-T", "--titan-version", help="which eclipse-titan version to use")
+    group.add_argument(
+        "-i",
+        "--io-uring",
+        action="store_true",
+        help="set LIBOSMO_IO_BACKEND=IO_URING",
+    )
+    group.add_argument(
+        "-T",
+        "--titan-version",
+        help="which eclipse-titan version to use",
+    )
 
     group = sub_run.add_argument_group("source/binary options", "All components are built from source by default.")
     group.add_argument(
@@ -147,10 +159,19 @@ def parse_args():
         " repository ending in :latest is set"
         " or --latest is used.",
     )
-    group.add_argument("--latest", action="store_true", help="use latest configs")
+    group.add_argument(
+        "--latest",
+        action="store_true",
+        help="use latest configs",
+    )
 
     group = sub_run.add_argument_group("podman options", "All components are run directly on the host by default.")
-    group.add_argument("-p", "--podman", action="store_true", help="run all components inside podman")
+    group.add_argument(
+        "-p",
+        "--podman",
+        action="store_true",
+        help="run all components inside podman",
+    )
     group.add_argument(
         "-d",
         "--distro",
@@ -165,7 +186,11 @@ def parse_args():
     )
 
     group = sub_run.add_argument_group("output options")
-    group.add_argument("-l", "--log-dir", help="log here instead of a random dir in /tmp")
+    group.add_argument(
+        "-l",
+        "--log-dir",
+        help="log here instead of a random dir in /tmp",
+    )
     group.add_argument(
         "-n",
         "--no-tee",
