@@ -56,6 +56,8 @@ def init_env():
         else:
             make_dir = os.path.join(testenv.args.cache, "host", "make")
         make_dir += str(make_dir_version)
+        if testenv.args.asan:
+            make_dir += "-asan"
         env_extra["OSMO_DEV_MAKE_DIR"] = make_dir
 
     if testenv.args.kernel == "debian":

@@ -113,6 +113,12 @@ def parse_args():
         help="number of jobs to run simultaneously (default: nproc)",
         type=int,
     )
+    group.add_argument(
+        "-a",
+        "--asan",
+        action="store_true",
+        help="pass --enable-sanitize to Osmocom configure scripts",
+    )
 
     group = sub_run.add_argument_group("exit options", "When and how testenv should exit when done.")
     group = group.add_mutually_exclusive_group()
@@ -228,6 +234,11 @@ def parse_args():
 def verify_args_run():
     if args.action != "run":
         return
+
+    if args.binary_repo and args.asan:
+        raise NoTraceException(
+            "--binary-repo cannot be used with --asan, consider using '--binary-repo osmocom:nightly:asan' instead"
+        )
 
     if args.binary_repo and not args.podman:
         raise NoTraceException("--binary-repo requires --podman")

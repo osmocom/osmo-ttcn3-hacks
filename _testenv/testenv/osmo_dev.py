@@ -58,6 +58,8 @@ def init():
         return
 
     extra_opts = []
+    if testenv.args.asan:
+        extra_opts += ["sanitize.opts"]
     if testenv.args.jobs:
         extra_opts += [f"-j{testenv.args.jobs}"]
 
@@ -73,6 +75,7 @@ def init():
         "--no-ldconfig",
         "--src-dir",
         testenv.src_dir,
+        "--autoreconf-in-src-copy",
         "default.opts",
         "ccache.opts",
         "gtp_linux.opts",
@@ -85,7 +88,6 @@ def init():
         "no_systemd.opts",
         "werror.opts",
         os.path.join(testenv.data_dir, "osmo-dev/testenv.opts"),
-        "--autoreconf-in-src-copy",
     ] + extra_opts
 
     cwd = get_osmo_dev_dir()
