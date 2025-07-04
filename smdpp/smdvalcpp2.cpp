@@ -1060,7 +1060,7 @@ class HttpClient {
 			curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response.headers);
 
 			// Enable SSL verification
-			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 
 			// Use our custom SSL context function and data
