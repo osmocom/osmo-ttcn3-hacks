@@ -228,6 +228,7 @@ modulepar {
 
 function MSC_UnitdataCallback(RANAP_PDU ranap) runs on RAN_Emulation_CT return template RANAP_PDU {
 	// TODO: Actually implement unitdata handling
+	log("MSC_UnitdataCallback: Ignoring RANAP msg: ", ranap);
 	return omit;
 }
 
@@ -264,10 +265,12 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr, PFCP_ConnHdlr {
 
 	var MGCP_Emulation_CT vc_MGCP;
 	port TELNETasp_PT HNBGWVTY;
+	port TELNETasp_PT STPVTY;
 	var StatsD_Checker_CT vc_STATSD;
 	var PFCP_Emulation_CT vc_PFCP;
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard := 45.0;
+	var float g_statd_timeout := 5.0;
 
 	/* The cnlink type 'msc' or 'sgsn', to be used in CTRL commands to obtain counters */
 	var charstring g_ctr_cn_node_name;
@@ -296,6 +299,22 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 	map(self:HNBGWVTY, system:HNBGWVTY);
 	f_vty_set_prompts(HNBGWVTY);
 	f_vty_transceive(HNBGWVTY, "enable");
+}
+
+private function f_init_vty_stp() runs on test_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
+}
+
+private function f_vty_stp_hnbgw_asp_cmd(charstring cmd) runs on test_CT
+{
+	var charstring asp_node := "asp hnbgw0-0 2906 2905 m3ua";
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
 }
 
 function f_init_mgcp(charstring id) runs on test_CT {
@@ -484,7 +503,7 @@ function f_init(charstring id := "HNBGW", float guard_timeout := 45.0, integer n
 
 	vc_mutex_disp := f_MutexDisp_start();
 
-	f_init_statsd("VirtHNBGW", vc_STATSD, mp_local_statsd_ip, mp_local_statsd_port);
+	f_init_statsd("VirtHNBGW", vc_STATSD, mp_local_statsd_ip, mp_local_statsd_port, g_statd_timeout);
 	f_init_vty("VirtHNBGW");
 	f_ipa_ctrl_start_client(mp_hnbgw_ip, mp_hnbgw_ctrl_port);
 
@@ -2490,7 +2509,13 @@ testcase TC_mscpool_no_allow_attach_valid_nri() runs on test_CT {
 	f_shutdown_helper();
 }
 
-/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable, immediately mark the CN link as unusable. */
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the CN link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by locally dropping the
+ * SCTP assoc at the virtual MSC (TTCN3). When STP osmo-hnbgw finds out about
+ * the SCTP conn STP<->MSC going down, it will send an M3UA DUNA to the IUT
+ * (HNBGW) which should then generate an N-PCSTATE.ind.
+ */
 testcase TC_mscpool_sccp_n_pcstate_detaches_cnlink() runs on test_CT {
 	f_TC_cnpool_sccp_n_pcstate_detaches_cnlink(ps_domain := false);
 }
@@ -2701,6 +2726,70 @@ testcase TC_sgsnpool_L3Compl_no_cn() runs on test_CT {
 	f_TC_cnpool_L3Compl_no_cn(ps_domain := true);
 }
 
+/* When a peer point-code gets an SCCP N-PCSTATE saying it is unreachable,
+ * immediately mark the CN link as unusable.
+ * In this scenario, the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the HNBGW, which will close the SCTP assoc between
+ * itself and IUT (HNBGW), which should then generate an N-PCSTATE.ind.
+ */
+function f_TC_stat_stp_sctp_disconnected_UnitdataCallback(RANAP_PDU ranap) runs on RAN_Emulation_CT return template RANAP_PDU {
+	if (match(ranap, tr_RANAP_Reset)) {
+		log("Answering RESET with RESET-ACK: ", ranap);
+		return valueof(ts_RANAP_ResetAck(ranap.initiatingMessage.value_.Reset.protocolIEs[1].value_.cN_DomainIndicator));
+	}
+	return omit;
+}
+testcase TC_stat_stp_sctp_disconnected() runs on test_CT
+{
+	var ConnHdlr vc_conn;
+
+	g_num_hnbs := 1;
+	g_statd_timeout := 15.0;
+	g_ran_ops.ranap_unitdata_cb := refers(f_TC_stat_stp_sctp_disconnected_UnitdataCallback);
+	f_init(nr_msc := 1, nr_sgsn := 1);
+	f_init_vty_stp();
+	f_sleep(1.0);
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_reset();
+
+	/* Expect stats to be 0 */
+	var charstring msc0_prefix := mp_statsd_prefix & "msc.0.";
+	var charstring sgsn0_prefix := mp_statsd_prefix & "sgsn.0.";
+	var StatsDExpects expect_connected := {
+		{name := msc0_prefix & "connected", mtype := "g", min := 1, max := 1},
+		{name := sgsn0_prefix & "connected", mtype := "g", min := 1, max := 1}
+	};
+	var StatsDExpects expect_disconnected := {
+		{name := msc0_prefix & "connected", mtype := "g", min := 0, max := 0},
+		{name := sgsn0_prefix & "connected", mtype := "g", min := 0, max := 0}
+	};
+	f_statsd_expect(expect_connected);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assignment), f_TestHdlrParams(3));
+	vc_conn.done;
+
+	f_logp(HNBGWVTY, "Shutting down HNBGW ASP in STP");
+	f_vty_stp_hnbgw_asp_cmd("shutdown");
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_disconnected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	f_logp(HNBGWVTY, "Restarting HNBGW ASP in STP");
+	f_vty_stp_hnbgw_asp_cmd("no shutdown");
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_rab_assignment), f_TestHdlrParams(4));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -2767,6 +2856,13 @@ control {
 
 	execute(TC_second_rab_assignment());
 	execute(TC_hnb_reregister_reuse_sctp_assoc());
+
+	/* This "nightly" if can be removed once libosmo-sigtran (osmo-stp) > 2.1.0 is released.
+	 * Currently released osmo-stp 2.1.0 ends up in in broken AS-ACTIVE+ASP-DOWN state when
+	 * restarting the ASP after exiting the related asp node through VTY: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute(TC_stat_stp_sctp_disconnected());
+	}
 
 	/* Run at the end since it messes with the SCCP config */
 	execute( TC_apply_sccp() );
