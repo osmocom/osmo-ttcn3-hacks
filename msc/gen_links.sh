@@ -103,6 +103,7 @@ FILES+="SMPP_CodecPort.ttcn SMPP_CodecPort_CtrlFunct.ttcn SMPP_CodecPort_CtrlFun
 FILES+="SS_Templates.ttcn SCCP_Templates.ttcn USSD_Helpers.ttcn "
 FILES+="SGsAP_Templates.ttcn SGsAP_CodecPort.ttcn SGsAP_CodecPort_CtrlFunct.ttcn SGsAP_CodecPort_CtrlFunctDef.cc SGsAP_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="SCTP_Templates.ttcn "
+FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
 gen_links $DIR $FILES
 
 gen_links_finish

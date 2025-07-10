@@ -23,6 +23,7 @@ FILES="
 	SGsAP_CodecPort_CtrlFunctDef.cc
 	SMPP_CodecPort_CtrlFunctDef.cc
 	SMPP_EncDec.cc
+	StatsD_CodecPort_CtrlFunctdef.cc
 	SS_EncDec.cc
 	TCCConversion.cc
 	TCCEncoding.cc
@@ -41,6 +42,7 @@ CPPFLAGS_TTCN3="
 	-DRAN_EMULATION_CTRL
 	-DRAN_EMULATION_MGCP
 	-DRAN_EMULATION_RANAP
+	-DSTATSD_HAVE_VTY
 	-DUSE_MTP3_DISTRIBUTOR
 "
 

@@ -9,6 +9,7 @@
     * SMPP (emulates ESME side)
     * VTY
     * CTRL
+    * StatsD
 
 {% dot msc_tests.svg
 digraph G {
@@ -21,6 +22,7 @@ digraph G {
   ATS -> MSC [label="SMPP",style="dashed"];
   ATS -> MSC [label="CTRL"];
   ATS -> MSC [label="VTY"];
+  MSC -> ATS [label="StatsD"];
   MSC -> ATS [label="GSUP"];
   MSC -> ATS [label="MGCP"];
   ATS -> STP [label="A BSSAP\nSCCP/M3UA"];
