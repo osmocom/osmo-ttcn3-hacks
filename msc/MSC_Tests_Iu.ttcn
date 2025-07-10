@@ -12,6 +12,7 @@ module MSC_Tests_Iu {
 
 import from General_Types all;
 import from Osmocom_Types all;
+import from Misc_Helpers all;
 
 import from BSC_ConnectionHandler all;
 import from MSC_Tests all;
@@ -29,7 +30,10 @@ import from MobileL3_SMS_Types all;
 import from L3_Templates all;
 import from L3_Common all;
 
-
+import from StatsD_Types all;
+import from StatsD_CodecPort all;
+import from StatsD_CodecPort_CtrlFunct all;
+import from StatsD_Checker all;
 
 testcase TC_iu_lu_imsi_reject() runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
@@ -593,6 +597,54 @@ testcase TC_iu_lu_and_expire_while_paging() runs on MTC_CT {
 	vc_conn.done;
 }
 
+testcase TC_stat_rnc_sctp_disconnected() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	var BSC_ConnHdlrPars pars;
+	var charstring msc_stats_prefix := f_msc_stats_prefix();
+
+	var StatsDExpects expect_connected := {
+		{name := msc_stats_prefix & "ran_peers.total", mtype := "g", min := 3, max := 3},
+		{name := msc_stats_prefix & "ran_peers.active", mtype := "g", min := 3, max := 3}
+	};
+	var StatsDExpects expect_disconnected := {
+		{name := msc_stats_prefix & "ran_peers.total", mtype := "g", min := 3, max := 3},
+		{name := msc_stats_prefix & "ran_peers.active", mtype := "g", min := 0, max := 0}
+	};
+
+	g_statd_timeout := 15.0;
+	f_init(3);
+	f_init_vty_stp();
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_reset();
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	pars := f_init_pars(1, ran_idx := 2, ran_is_geran := false);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_lu_and_mt_sms), pars);
+	vc_conn.done;
+
+	f_logp(MSCVTY, "Shutting down MSC ASP in STP");
+	f_vty_stp_msc_asp_cmd("shutdown");
+
+	/* Wait for AS PENDING->INACTIVE transition (T(r) timeout after 2000msec): */
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_disconnected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	f_logp(MSCVTY, "Restarting MSC ASP in STP");
+	f_vty_stp_msc_asp_cmd("no shutdown");
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	pars := f_init_pars(2, ran_idx := 2, ran_is_geran := false);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_lu_and_mt_sms), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute( TC_iu_lu_imsi_reject() );
 	execute( TC_iu_lu_imsi_timeout_gsup() );
@@ -664,6 +716,13 @@ control {
 
 	/* Run this last: at the time of writing this test crashes the MSC */
 	execute( TC_mo_cc_iu_release() );
+
+	/* This "nightly" if can be removed once libosmo-sigtran (osmo-stp) > 2.1.0 is released.
+	 * Currently released osmo-stp 2.1.0 ends up in in broken AS-ACTIVE+ASP-DOWN state when
+	 * restarting the ASP after exiting the related asp node through VTY: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_stat_rnc_sctp_disconnected() );
+	}
 }
 
 

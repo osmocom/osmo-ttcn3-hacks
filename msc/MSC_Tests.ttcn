@@ -110,8 +110,10 @@ type component MTC_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr {
 
 	/* only to get events from IPA underneath GSUP */
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
-	/* VTY to MSC */
+	/* VTY to MSC: */
 	port TELNETasp_PT MSCVTY;
+	/* VTY to STP: */
+	port TELNETasp_PT STPVTY;
 
 	/* StatsD */
 	var StatsD_Checker_CT vc_STATSD;
@@ -315,6 +317,34 @@ function f_init_gsup(charstring id) runs on MTC_CT {
 	}
 }
 
+friend function f_init_vty_stp() runs on MTC_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
+}
+
+friend function f_vty_stp_msc_asp_cmd(charstring cmd) runs on MTC_CT
+{
+	var charstring asp_name;
+	var charstring loc_port;
+	var charstring rem_port;
+	var charstring asp_proto;
+	if (mp_bssap_cfg[0].transport == BSSAP_TRANSPORT_AoIP) {
+		asp_name := "msc0-0";
+		loc_port := int2str(1905);
+		rem_port := int2str(2905);
+		asp_proto := "m3ua";
+	} else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "osmo-stp not used in SCCPLite!");
+	}
+	var charstring asp_node := "asp " & asp_name & " " & loc_port & " " & rem_port & " " & asp_proto;
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
+}
+
 function f_init(integer num_bsc := 1, boolean sgsap := false, boolean gsup := true, boolean osmux := false) runs on MTC_CT {
 
 	if (g_initialized == true) {
@@ -498,6 +528,12 @@ function f_start_handler(void_fn fn, integer imsi_suffix, integer ran_idx := 0, 
 runs on MTC_CT return BSC_ConnHdlr {
 	return f_start_handler_with_pars(fn, f_init_pars(imsi_suffix, ran_idx := ran_idx, ran_is_geran := ran_is_geran, use_osmux := use_osmux, verify_cell_id := verify_cell_id));
 }
+
+friend function f_msc_stats_prefix() return charstring
+{
+	return mp_statsd_prefix & "net.0.msc.";
+}
+
 
 private function f_tc_lu_imsi_noauth_tmsi(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
 	f_init_handler(pars);
@@ -2464,6 +2500,7 @@ friend function f_tc_lu_and_mt_sms(charstring id, BSC_ConnHdlrPars pars) runs on
 	f_mt_sms(spars);
 
 	f_expect_clear();
+	f_ran_unregister_imsi(g_pars.imsi);
 }
 testcase TC_lu_and_mt_sms() runs on MTC_CT {
 	var BSC_ConnHdlrPars pars;
@@ -3525,6 +3562,8 @@ private function f_tc_smpp_mt_sms(charstring id, BSC_ConnHdlrPars pars) runs on 
 
 	/* then test the transaction mode */
 	f_smpp_mt_sms(spars, true);
+
+	f_ran_unregister_imsi(g_pars.imsi);
 }
 testcase TC_smpp_mt_sms() runs on MTC_CT {
 	var BSC_ConnHdlr vc_conn;
@@ -7594,6 +7633,83 @@ testcase TC_lu_and_mo_call_reass_for_mt_codec() runs on MTC_CT {
 	vc_conn.done;
 }
 
+/* When the last local IPA/SCTP link/ASP is terminated, last AS goes inactive
+ * and a SCCP N-PCSTATE.ind (unavailable) should arrive to upper layers.
+ * As a result, osmo-msc should immediately mark the ran_peer as unusable.
+ * In AoIP, the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the MSC, which will close the SCTP assoc between
+ * itself and IUT (MSC), which should then generate an N-PCSTATE.ind.
+ */
+friend function f_tc_mt_sms(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var SmsParameters spars := valueof(t_SmsPars);
+
+	f_init_handler(pars);
+
+	/* register an 'expect' for given IMSI (+TMSI) */
+	f_ran_register_imsi(g_pars.imsi, g_pars.tmsi);
+
+	f_vty_sms_send(hex2str(pars.imsi), "2342", "Hello SMS");
+
+	/* MSC->BSC: expect PAGING from MSC. We can't match on specific TMSI
+	because it was provided in a previous first vc_conn in test during 1st LU. */
+	f_expect_paging_tmsi(?);
+
+	/* Establish DTAP / BSSAP / SCCP connection */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+
+	spars.tp.ud := 'C8329BFD064D9B53'O;
+	f_mt_sms(spars);
+
+	f_expect_clear();
+	f_ran_unregister_imsi(g_pars.imsi);
+}
+testcase TC_stat_bsc_sctp_disconnected() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	var BSC_ConnHdlrPars pars;
+	var charstring msc_stats_prefix := f_msc_stats_prefix();
+
+	var StatsDExpects expect_connected := {
+		{name := msc_stats_prefix & "ran_peers.total", mtype := "g", min := 1, max := 1},
+		{name := msc_stats_prefix & "ran_peers.active", mtype := "g", min := 1, max := 1}
+	};
+	var StatsDExpects expect_disconnected := {
+		{name := msc_stats_prefix & "ran_peers.total", mtype := "g", min := 1, max := 1},
+		{name := msc_stats_prefix & "ran_peers.active", mtype := "g", min := 0, max := 0}
+	};
+
+	g_statd_timeout := 15.0;
+	f_init();
+	f_init_vty_stp();
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_reset();
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	pars := f_init_pars(1);
+	vc_conn := f_start_handler_with_pars(refers(f_tc_lu_and_mt_sms), pars);
+	vc_conn.done;
+
+	f_logp(MSCVTY, "Shutting down MSC ASP in STP");
+	f_vty_stp_msc_asp_cmd("shutdown");
+
+	/* Wait for AS PENDING->INACTIVE transition (T(r) timeout after 2000msec): */
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_disconnected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	f_logp(MSCVTY, "Restarting MSC ASP in STP");
+	f_vty_stp_msc_asp_cmd("no shutdown");
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	vc_conn := f_start_handler_with_pars(refers(f_tc_mt_sms), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute( TC_cr_before_reset() );
 	execute( TC_lu_imsi_noauth_tmsi() );
@@ -7787,6 +7903,13 @@ control {
 	execute( TC_lu_and_mt_csd() );
 
 	execute( TC_lu_and_mo_call_reass_for_mt_codec() );
+
+	/* This "nightly" if can be removed once libosmo-sigtran (osmo-stp) > 2.1.0 is released.
+	 * Currently released osmo-stp 2.1.0 ends up in in broken AS-ACTIVE+ASP-DOWN state when
+	 * restarting the ASP after exiting the related asp node through VTY: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_stat_bsc_sctp_disconnected() );
+	}
 }
 
 
