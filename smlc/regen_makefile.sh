@@ -16,6 +16,7 @@ FILES="
 	RTP_EncDec.cc
 	SCTPasp_PT.cc
 	SDP_EncDec.cc
+	StatsD_CodecPort_CtrlFunctdef.cc
 	TCCConversion.cc
 	TCCInterface.cc
 	TELNETasp_PT.cc
@@ -29,6 +30,7 @@ CPPFLAGS_TTCN3="
 	-DRAN_EMULATION_BSSAP
 	-DRAN_EMULATION_MGCP
 	-DRAN_EMULATION_CTRL
+	-DSTATSD_HAVE_VTY
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
