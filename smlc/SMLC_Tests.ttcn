@@ -64,6 +64,7 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr {
 	port BSSAP_LE_CODEC_PT BSSAP_LE;
 
 	port TELNETasp_PT SMLCVTY;
+	port TELNETasp_PT STPVTY;
 
 	/* StatsD */
 	var StatsD_Checker_CT vc_STATSD;
@@ -205,6 +206,31 @@ function f_init_vty(charstring id := "foo") runs on test_CT {
 	f_vty_transceive(SMLCVTY, "enable");
 	f_cs7_inst_0_cfg(SMLCVTY, {"sccp-timer ias " & int2str(g_smlc_sccp_timer_ias),
 			  "sccp-timer iar " & int2str(g_smlc_sccp_timer_iar)});
+}
+
+private function f_init_vty_stp() runs on test_CT {
+	if (STPVTY.checkstate("Mapped")) {
+		/* skip initialization if already executed once */
+		return;
+	}
+	map(self:STPVTY, system:STPVTY);
+	f_vty_set_prompts(STPVTY, prompt_prefix := "OsmoSTP");
+	f_vty_transceive(STPVTY, "enable");
+}
+
+private function f_vty_stp_smlc_asp_cmd(charstring cmd) runs on test_CT
+{
+	var charstring asp_name := "smlc0-0";
+	var charstring loc_port := int2str(2905);
+	var charstring rem_port := int2str(2905);
+	var charstring asp_proto := "m3ua";
+	var charstring asp_node := "asp " & asp_name & " " & loc_port & " " & rem_port & " " & asp_proto;
+	f_vty_config2(STPVTY, {"cs7 instance 0", asp_node}, cmd);
+}
+
+private function f_smlc_stats_prefix() return charstring
+{
+	return mp_statsd_prefix & "smlc.0.";
 }
 
 type function void_fn(charstring id) runs on BSC_ConnHdlr;
@@ -495,12 +521,77 @@ testcase TC_smlc_location_request_bsslap_abort() runs on test_CT {
 	vc_conn.done;
 }
 
+/* When the last local SCTP link/ASP is terminated, last AS goes inactive
+ * and a SCCP N-PCSTATE.ind (unavailable) should arrive to upper layers.
+ * As a result, osmo-smlc should immediately mark the ran_peer as unusable.
+ * In Lb, the SCCP N-PCSTATE is triggered by instructing the STP to
+ * shutdown the ASP serving the SMLC, which will close the SCTP assoc between
+ * itself and IUT (SMLC), which should then generate an N-PCSTATE.ind.
+ */
+testcase TC_stat_bsc_sctp_disconnected() runs on test_CT {
+	var BSC_ConnHdlr vc_conn;
+	var TestHdlrParams pars := f_gen_test_hdlr_pars();
+
+	var charstring smlc_stats_prefix := f_smlc_stats_prefix();
+
+	var StatsDExpects expect_connected := {
+		{name := smlc_stats_prefix & "lb_peers.total", mtype := "g", min := 1, max := 1},
+		{name := smlc_stats_prefix & "lb_peers.active", mtype := "g", min := 1, max := 1}
+	};
+	var StatsDExpects expect_disconnected := {
+		{name := smlc_stats_prefix & "lb_peers.total", mtype := "g", min := 1, max := 1},
+		{name := smlc_stats_prefix & "lb_peers.active", mtype := "g", min := 0, max := 0}
+	};
+
+	g_statd_timeout := 15.0;
+	f_init();
+	f_init_vty_stp();
+	f_sleep(1.0);
+
+	pars.sccp_addr_bsc := g_bssap_le[0].sccp_addr_own;
+	pars.sccp_addr_smlc := g_bssap_le[0].sccp_addr_peer;
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_reset();
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_with_ta_l3), pars);
+	vc_conn.done;
+
+	f_logp(SMLCVTY, "Shutting down SMLC ASP in STP");
+	f_vty_stp_smlc_asp_cmd("shutdown");
+
+	/* Wait for AS PENDING->INACTIVE transition (T(r) timeout after 2000msec): */
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_disconnected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	f_logp(SMLCVTY, "Restarting SMLC ASP in STP");
+	f_vty_stp_smlc_asp_cmd("no shutdown");
+
+	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+	f_statsd_expect(expect_connected, wait_converge := true);
+	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	vc_conn := f_start_handler(refers(f_tc_smlc_location_request_with_ta_l3), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
 	execute( TC_smlc_location_request_with_ta_l3() );
 	execute( TC_smlc_location_request_without_ta_l3() );
 	execute( TC_smlc_location_request_bsslap_reset() );
 	execute( TC_smlc_location_request_bsslap_abort() );
 	execute( TC_smlc_location_request_abort() );
+
+	/* This "nightly" if can be removed once libosmo-sigtran (osmo-stp) > 2.1.0 is released.
+	 * Currently released osmo-stp 2.1.0 ends up in in broken AS-ACTIVE+ASP-DOWN state when
+	 * restarting the ASP after exiting the related asp node through VTY: */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		execute( TC_stat_bsc_sctp_disconnected() );
+	}
 }
 
 }
