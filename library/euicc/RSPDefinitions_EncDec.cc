@@ -397,4 +397,21 @@ OtherSignedNotification dec__OtherSignedNotification(const OCTETSTRING &stream) 
 	return msg;
 }
 
+OCTETSTRING enc__NotificationMetadata(const NotificationMetadata &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(NotificationMetadata_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+NotificationMetadata dec__NotificationMetadata(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	NotificationMetadata msg;
+	buf.put_os(stream);
+
+	msg.decode(NotificationMetadata_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 }
