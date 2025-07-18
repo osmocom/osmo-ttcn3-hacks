@@ -62,7 +62,7 @@ def check_programs():
 
             if program == "ttcn3_compiler":
                 logging.error("  Install eclipse-titan, e.g. from osmocom:latest:")
-                logging.error("  https://osmocom.org/projects/cellular-infrastructure/wiki/Latest_Builds")
+                logging.error("  https://osmocom.org/projects/cellular-infrastructure/wiki/Binary_Packages")
             abort = True
 
     if abort:
