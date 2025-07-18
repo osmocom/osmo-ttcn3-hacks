@@ -18,7 +18,6 @@ def check_programs():
         programs += [
             "buildah",
             "podman",
-            "rsync",
         ]
     else:
         programs += [
@@ -31,6 +30,7 @@ def check_programs():
             "gcc",
             "make",
             "pkg-config",
+            "rsync",
             "setcap",
             "ttcn3_compiler",
             "wget",
@@ -43,10 +43,6 @@ def check_programs():
                 "gzip",
                 "lddtree",
                 "qemu-system-x86_64",
-            ]
-        if not testenv.args.binary_repo:
-            programs += [
-                "rsync",
             ]
 
     abort = False
