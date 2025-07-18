@@ -29,12 +29,12 @@ def loop_continue_cond(loop_count):
 
 
 def run():
+    testenv.requirements.check()
     testenv.testenv_cfg.init()
 
     if not testenv.args.binary_repo:
         testenv.osmo_dev.check_init_needed()
 
-    testenv.requirements.check()
     testenv.podman_install.init()
     testenv.cmd.init_env()
     testenv.testdir.init()
