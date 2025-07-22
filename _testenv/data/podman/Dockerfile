@@ -126,11 +126,12 @@ RUN	wget https://github.com/erlang/rebar3/releases/download/3.24.0/rebar3 -O /us
 ENV	USE_CCACHE=0
 
 # Binary-only transcoding library for RANAP/RUA/HNBAP to work around TITAN only implementing BER
+ENV	LIBFFTRANSCODE_VERSION="0.6"
 RUN	set -x && \
 	export DPKG_ARCH="$(dpkg --print-architecture)" && \
-	wget https://ftp.osmocom.org/binaries/libfftranscode/libfftranscode0_0.5_${DPKG_ARCH}.deb && \
-	wget https://ftp.osmocom.org/binaries/libfftranscode/libfftranscode-dev_0.5_${DPKG_ARCH}.deb && \
-	dpkg -i ./libfftranscode0_0.5_${DPKG_ARCH}.deb ./libfftranscode-dev_0.5_${DPKG_ARCH}.deb && \
+	wget https://ftp.osmocom.org/binaries/libfftranscode/libfftranscode0_${LIBFFTRANSCODE_VERSION}_${DPKG_ARCH}.deb && \
+	wget https://ftp.osmocom.org/binaries/libfftranscode/libfftranscode-dev_${LIBFFTRANSCODE_VERSION}_${DPKG_ARCH}.deb && \
+	dpkg -i ./libfftranscode0_${LIBFFTRANSCODE_VERSION}_${DPKG_ARCH}.deb ./libfftranscode-dev_${LIBFFTRANSCODE_VERSION}_${DPKG_ARCH}.deb && \
 	apt-get install --fix-broken && \
 	rm libfftranscode*.deb
 
