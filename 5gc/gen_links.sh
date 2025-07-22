@@ -78,7 +78,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Na
 FILES+="SCTP_Templates.ttcn "
 FILES+="DNS_Helpers.ttcn "
 FILES+="NGAP_CodecPort.ttcn NGAP_CodecPort_CtrlFunctDef.cc NGAP_CodecPort_CtrlFunct.ttcn NGAP_Functions.ttcn NGAP_Emulation.ttcn "
-FILES+="NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
+FILES+="NG_NAS_Osmo_Types.ttcn NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
 FILES+="NG_CryptoFunctionDefs.cc NG_CryptoFunctions.ttcn "
 gen_links $DIR $FILES
 

@@ -19,6 +19,8 @@ import from Misc_Helpers all;
 import from Osmocom_Types all;
 import from GSM_Types all;
 
+import from DNS_Helpers all;
+
 import from Milenage_Functions all;
 
 import from NGAP_PDU_Descriptions all;
@@ -62,6 +64,8 @@ modulepar {
 	octetstring mp_usim_key := '762a2206fe0b4151ace403c86a11e479'O;
 	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
 	uint24_t mp_tac := 1;
+	charstring mp_apn := "internet";
+	charstring mp_local_gtpu_ip := "127.0.0.1";
 }
 
 /* parameters of emulated gNB / ng-eNB */
@@ -77,7 +81,11 @@ type record UeParams {
 	HEX16n imeisv,
 	octetstring usim_key,
 	octetstring usim_opc,
-	charstring ue_ip,
+	charstring ran_gtpu_ip,
+	OCT4 ran_gtpu_teid,
+	charstring cn_gtpu_ip optional,
+	OCT4 cn_gtpu_teid optional,
+	charstring ue_ip optional,
 	OCT32 kausf optional,
 	OCT32 kseaf optional,
 	OCT32 kamf optional
@@ -89,7 +97,11 @@ template (value) UeParams ts_UeParams(integer imsi_suffix) :=
 	imeisv := f_rnd_imeisv(),
 	usim_key := mp_usim_key,
 	usim_opc := mp_usim_opc,
-	ue_ip := "192.168.123.50",
+	ran_gtpu_ip := mp_local_gtpu_ip,
+	ran_gtpu_teid := int2oct(imsi_suffix, 4),
+	cn_gtpu_ip := omit,
+	cn_gtpu_teid := omit,
+	ue_ip := omit,
 	kausf := omit,
 	kseaf := omit,
 	kamf := omit
@@ -321,7 +333,6 @@ private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHd
 	var NG_NAS_DL_Message_Type rx_nas;
 	var template (present) NAS_KeySetIdentifier kset_id := f_tr_ConnHdlr_kset_id();
 	[] NGAP.receive(cr_NG_AUTHENTICATION_REQUEST) -> value rx_nas {
-		log("Rx NAS message: ", rx_nas);
 		var integer ret;
 		var integer my_sqn := 0; /* TODO: move to a ConnHdlr state attribute? */
 		var OCT16 rand := bit2oct(rx_nas.authentication_Request.rand.randValue);
@@ -383,7 +394,6 @@ private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
 					      ngiaCap := '40'O /* ONLY NIA1 supported */);
 
 	[] NGAP.receive(cr_NG_SECURITY_MODE_COMMAND(p_UECap := ue_sec_cap)) -> value rx_nas {
-		log("Rx inner NAS: ", rx_nas);
 		/* Configure integrity protection: */
 		cfg := {
 			set_nas_alg_int := NG_NAS_ALG_IP_NIA1
@@ -415,6 +425,99 @@ private altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
 	[] NGAP.receive(cr_NG_CONFIGURATION_UPDATE_COMMAND) -> value rx_nas {
 		NGAP.send(cs_NG_CONFIGURATION_UPDATE_COMPLETE);
 	}
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_setup_item(PDUSessionResourceSetupItemCxtReq req) runs on ConnHdlr return PDUSessionResourceSetupItemCxtRes
+{
+	var PDUSessionResourceSetupItemCxtRes resp;
+	var octetstring setup_trans_enc;
+	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+	var template (value) UPTransportLayerInformation utla;
+	var template (value) QosFlowPerTNLInformation qos;
+
+	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
+	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
+	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
+		if (setup_req_transf.protocolIEs[i].id == id_UL_NGU_UP_TNLInformation) {
+			var UPTransportLayerInformation utli := setup_req_transf.protocolIEs[i].value_.uPTransportLayerInformation;
+			g_pars.ue_pars.cn_gtpu_ip := f_inet_ntoa(bit2oct(utli.gTPTunnel.transportLayerAddress));
+			g_pars.ue_pars.cn_gtpu_teid := utli.gTPTunnel.gTP_TEID;
+		}
+	}
+
+	/* Prepare Response for it: */
+	utla := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.ran_gtpu_ip)),
+					p_gtp_teid := g_pars.ue_pars.ran_gtpu_teid));
+	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(1) });
+	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
+	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
+	resp := valueof(m_pDUSessionResourceSetupItemCxtRes(req.pDUSessionID, setup_trans_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_setup_list(PDUSessionResourceSetupListCxtReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListCxtRes
+{
+	var PDUSessionResourceSetupListCxtRes li_resp;
+	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
+		var PDUSessionResourceSetupItemCxtRes it_resp;
+		it_resp := f_pdu_handle_session_resource_setup_item(li_req[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+private altstep as_ngap_handle_InitialCtxReq_withPDUSessionList() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+
+	[] NGAP.receive(mw_ngap_initMsg(mw_n2_InitialContextSetupRequest_withPDUSessionList)) -> value rx_ngap {
+		var AMF_UE_NGAP_ID amf_id := valueof(f_NGAP_get_AMF_UE_NGAP_ID(rx_ngap));
+		var RAN_UE_NGAP_ID ran_id := valueof(f_NGAP_get_RAN_UE_NGAP_ID(rx_ngap));
+		var InitialContextSetupRequest ctx_setup_req := rx_ngap.initiatingMessage.value_.initialContextSetupRequest;
+		var PDUSessionResourceSetupListCxtRes resources;
+
+		for (var integer i := 0; i < lengthof(ctx_setup_req.protocolIEs); i := i + 1) {
+			if (ctx_setup_req.protocolIEs[i].id != id_PDUSessionResourceSetupListCxtReq) {
+				continue;
+			}
+			var PDUSessionResourceSetupListCxtReq li := ctx_setup_req.protocolIEs[i].value_.pDUSessionResourceSetupListCxtReq;
+			resources := f_pdu_handle_session_resource_setup_list(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_InitialContextSetupResponse(amf_id, ran_id, resources)));
+	}
+}
+
+private function f_pdu_sess_establish() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV('01'O), '01'O,
+							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
+							      p_PDU_SessionType := cs_PDU_SessionTypeTV('001'B), /* IPv4 */
+							      p_SSC_Mode := cs_SSC_ModeTV('001'B));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV('01'O),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(mp_apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_InitialCtxReq_withPDUSessionList();
+
+	/* PDU Session Establishment Accept: This DL NAS arrives contained in InitialCtxReq handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	g_pars.ue_pars.ue_ip := f_inet_ntoa(inner_nas.pdu_Session_Establishment_Accept.pduAddress.adressInfo);
+	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.cn_gtpu_teid);
+	log("5GC assigned UE IP address: ", g_pars.ue_pars.ue_ip);
 }
 
 private function f_register() runs on ConnHdlr {
@@ -454,8 +557,7 @@ private function f_register() runs on ConnHdlr {
 
 	as_ngap_handle_configuration_update();
 
-	/* TODO: PDU session establishment request */
-	f_sleep(5.0);
+	f_pdu_sess_establish();
 }
 
 /* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
