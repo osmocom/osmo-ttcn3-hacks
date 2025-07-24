@@ -55,10 +55,6 @@ DIR=$BASEDIR/titan.ProtocolModules.GTPv2_v13.7.0/src
 FILES="GTPv2_Types.ttcn"
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/osmo-uecups/ttcn3
-FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
-gen_links $DIR $FILES
-
 DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
 FILES="DIAMETER_EncDec.cc"
 gen_links $DIR $FILES

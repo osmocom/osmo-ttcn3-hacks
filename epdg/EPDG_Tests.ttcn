@@ -24,9 +24,10 @@ import from DIAMETER_ts29_272_Templates all;
 import from DIAMETER_ts29_273_Templates all;
 import from DIAMETER_Emulation all;
 
-import from GTPv1U_CodecPort all;
 import from GTPU_Types all;
+import from GTPv1U_CodecPort all;
 import from GTPv1U_Templates all;
+import from GTPv1U_Emulation all;
 
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
@@ -90,7 +91,10 @@ type component MTC_CT {
 	port IPA_CTRL_PT GSUP_IPA_EVENT;
 
 	var GTPv2_Emulation_CT vc_GTP2;
-	port GTP2EM_PT TEID0;
+	port GTP2EM_PT TEIC0;
+
+	var GTPv1U_Emulation_CT vc_GTP1U;
+	port GTP1UEM_PT TEID0;
 
 	port Coord_PT COORD;
 
@@ -133,7 +137,7 @@ function f_diam_connhldr_ct_main(hexstring imsi) runs on DIAMETER_ConnHdlr_CT {
 	}
 }
 
-type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_ConnHdlr {
+type component EPDG_ConnHdlr extends DIAMETER_ConnHdlr, GSUP_ConnHdlr, GTP2_ConnHdlr, GTP1U_ConnHdlr {
 	var EPDG_ConnHdlrPars g_pars;
 
 	port DIAMETER_Conn_PT SWx;
@@ -298,22 +302,32 @@ private function f_init_diameter(charstring id) runs on MTC_CT {
 	f_sleep(int2float(mp_diam_watchdog_initial_wait_sec));
 }
 
-private function f_init_gtp(charstring id) runs on MTC_CT {
+private function f_init_gtp2c(charstring id) runs on MTC_CT {
 	var Gtp2EmulationCfg cfg := {
 		gtpc_bind_ip := mp_s2b_local_ip,
 		gtpc_bind_port := mp_s2b_local_port,
 		gtpc_remote_ip := mp_s2b_remote_ip,
 		gtpc_remote_port := mp_s2b_remote_port,
+		sgw_role := false
+	};
+
+	vc_GTP2 := GTPv2_Emulation_CT.create(id & "-GTPv2C");
+	map(vc_GTP2:GTP2C, system:GTP2C);
+	connect(vc_GTP2:TEIC0, self:TEIC0);
+	vc_GTP2.start(GTPv2_Emulation.main(cfg));
+}
+
+private function f_init_gtp1u(charstring id) runs on MTC_CT {
+	var Gtp1uEmulationCfg cfg := {
 		gtpu_bind_ip := mp_upf_gtpu_local_ip,
 		gtpu_bind_port := GTP1U_PORT,
-		sgw_role := false,
 		use_gtpu_daemon := false /* TODO: maybe use, set to true */
 	};
 
-	vc_GTP2 := GTPv2_Emulation_CT.create(id & "-GTPV2");
-	map(vc_GTP2:GTP2C, system:GTP2C);
-	connect(vc_GTP2:TEID0, self:TEID0);
-	vc_GTP2.start(GTPv2_Emulation.main(cfg));
+	vc_GTP1U := GTPv1U_Emulation_CT.create(id & "-GTPv1U");
+	map(vc_GTP1U:GTP1U, system:GTP1U);
+	connect(vc_GTP1U:TEID0, self:TEID0);
+	vc_GTP1U.start(GTPv1U_Emulation.main(cfg));
 }
 
 private function f_init(float t_guard := 40.0) runs on MTC_CT {
@@ -323,7 +337,8 @@ private function f_init(float t_guard := 40.0) runs on MTC_CT {
 
 	f_init_gsup(testcasename());
 	f_init_diameter(testcasename());
-	f_init_gtp(testcasename());
+	f_init_gtp2c(testcasename());
+	f_init_gtp1u(testcasename());
 }
 
 private type function void_fn(charstring id) runs on EPDG_ConnHdlr;
@@ -352,9 +367,12 @@ runs on MTC_CT return EPDG_ConnHdlr {
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
 
-	/* GTP2 */
+	/* GTP2C */
 	connect(vc_conn:GTP2, vc_GTP2:CLIENT);
 	connect(vc_conn:GTP2_PROC, vc_GTP2:CLIENT_PROC);
+	/* GTP1U */
+	connect(vc_conn:GTP1U, vc_GTP1U:CLIENT);
+	connect(vc_conn:GTP1U_PROC, vc_GTP1U:CLIENT_PROC);
 
 	/* SWx */
 	vc_conn_swx := DIAMETER_ConnHdlr_CT.create(id);
@@ -704,8 +722,8 @@ private function f_EPDG_ConnHdlr_parse_CreateSessionReq(PDU_GTPCv2 rx_msg) runs 
 	}*/
 
 	/* allocate + register TEID-C on local side */
-	g_pars.teic_local := f_gtp2_allocate_teid();
-	g_pars.bearer.teid_local := g_pars.teic_local;
+	g_pars.teic_local := f_gtp2_allocate_teic();
+	g_pars.bearer.teid_local := f_gtp1u_allocate_teid();
 }
 
 /* ePDG Creates session at the PGW. PGW sends Diameter s6b AAR + AAA. */
@@ -862,18 +880,18 @@ private template (value) Gtp1uPeer ts_GtpPeerU(octetstring ip) := {
 }
 private function f_GTP1U_send(octetstring payload) runs on EPDG_ConnHdlr {
 	var Gtp1uPeer peer := valueof(ts_GtpPeerU(f_inet_addr(g_pars.bearer.gtpu_addr_remote)));
-	GTP2.send(ts_GTP1U_GPDU(peer, omit /*opt_part*/, g_pars.bearer.teid_remote, payload));
+	GTP1U.send(ts_GTP1U_GPDU(peer, omit /*opt_part*/, g_pars.bearer.teid_remote, payload));
 }
 private function f_GTP1U_echo_ping_pong(uint16_t seq_nr := 0) runs on EPDG_ConnHdlr {
 	var Gtp1uPeer peer := valueof(ts_GtpPeerU(f_inet_addr(g_pars.bearer.gtpu_addr_remote)));
-	GTP2.send(ts_GTPU_PING(peer, seq := seq_nr));
-	GTP2.receive(tr_GTPU_PONG(peer));
+	GTP1U.send(ts_GTPU_PING(peer, seq := seq_nr));
+	GTP1U.receive(tr_GTPU_PONG(peer));
 }
 private altstep as_GTPU_rx_icmp4(template (present) PDU_ICMP expected := ?) runs on EPDG_ConnHdlr {
 	var Gtp1uUnitdata rx_msg;
 	var template (value) Gtp1uPeer peer := ts_GtpPeerU(f_inet_addr(g_pars.bearer.gtpu_addr_remote));
 
-	[] GTP2.receive(tr_GTPU_GPDU(peer, g_pars.bearer.teid_local)) -> value rx_msg {
+	[] GTP1U.receive(tr_GTPU_GPDU(peer, g_pars.bearer.teid_local)) -> value rx_msg {
 			/*TODO: verify gtpu txseq:
 			if (f_verify_gtpu_txseq(ud.gtpu, use_gtpu_txseq) == false) {
 				setverdict(fail);
@@ -890,7 +908,7 @@ private altstep as_GTPU_rx_icmp4(template (present) PDU_ICMP expected := ?) runs
 				repeat;
 			}
 	}
-	[] GTP2.receive(Gtp1uUnitdata:?) -> value rx_msg {
+	[] GTP1U.receive(Gtp1uUnitdata:?) -> value rx_msg {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected GTP msg rx: ", rx_msg));
 	}
 }
@@ -1298,7 +1316,7 @@ testcase TC_concurrent_ues100() runs on MTC_CT {
 private function f_TC_upf_echo_req(charstring id) runs on EPDG_ConnHdlr {
 	f_initial_attach();
 	/* Dispatch Echo Resp to this component: */
-	f_gtp2_register_teid('00000000'O);
+	f_gtp1u_register_teid('00000000'O);
 	f_GTP1U_echo_ping_pong(seq_nr := 0);
 	/* Send one again, to validate it works several times: */
 	f_GTP1U_echo_ping_pong(seq_nr := 1);
@@ -1316,7 +1334,7 @@ testcase TC_upf_echo_req() runs on MTC_CT {
 private function f_TC_mt_ipv4_echo_req(charstring id) runs on EPDG_ConnHdlr {
 	f_initial_attach();
 	/* Dispatch Echo Resp to this component: */
-	f_gtp2_register_teid('00000000'O);
+	f_gtp1u_register_teid('00000000'O);
 	var octetstring echo_req := f_gen_icmpv4_echo(f_inet_addr(mp_upf_gtpu_local_ip), f_inet_addr(g_pars.ue_ip));
 	f_GTP1U_send(echo_req);
 	as_GTPU_rx_icmp4((tr_ICMPv4_ERP, tr_ICMPv4_DU));

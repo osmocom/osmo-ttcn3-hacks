@@ -7,6 +7,8 @@ import from Osmocom_Types all;
 import from Native_Functions all;
 import from Misc_Helpers all;
 
+import from GTPv1U_Emulation all;
+
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
 import from GTPv2_Emulation all;
@@ -47,9 +49,11 @@ modulepar {
 }
 
 /* main component, we typically have one per testcase */
-type component PGW_Test_CT extends GTP2_ConnHdlr {
+type component PGW_Test_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr {
 	var GTPv2_Emulation_CT vc_GTP2;
-	port GTP2EM_PT TEID0;
+	port GTP2EM_PT TEIC0;
+	var GTPv1U_Emulation_CT vc_GTP1U;
+	port GTP1UEM_PT TEID0;
 
 	/* emulated PCRF */
 	var DIAMETER_Emulation_CT vc_Gx;
@@ -100,7 +104,7 @@ function f_diam_connhldr_ct_main(hexstring imsi) runs on DIAMETER_ConnHdlr_CT {
 
 
 /* per-session component; we typically have 1..N per testcase */
-type component PGW_Session_CT extends GTP2_ConnHdlr {
+type component PGW_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr {
 	var SessionPars	g_pars;
 
 	port DIAMETER_Conn_PT Gx;
@@ -280,27 +284,44 @@ friend function f_init_diameter(charstring id) runs on PGW_Test_CT {
 	f_sleep(1.0);
 }
 
-private function f_init(float guard_timeout := 60.0) runs on PGW_Test_CT {
-	T_guard.start(guard_timeout);
-	activate(as_Tguard());
-
+private function f_init_gtp2c() runs on PGW_Test_CT {
 	var Gtp2EmulationCfg cfg := {
 		gtpc_bind_ip := mp_local_hostname_c,
 		gtpc_bind_port := GTP2C_PORT,
 		gtpc_remote_ip := mp_pgw_hostname,
 		gtpc_remote_port := GTP2C_PORT,
-		gtpu_bind_ip := omit,  /* using gtpu daemon */
-		gtpu_bind_port := omit,  /* using gtpu daemon */
-		sgw_role := true,
-		use_gtpu_daemon := true
+		sgw_role := true
 	};
 
-	vc_GTP2 := GTPv2_Emulation_CT.create("GTP2_EM");
+	vc_GTP2 := GTPv2_Emulation_CT.create("GTP2C_EM");
 	map(vc_GTP2:GTP2C, system:GTP2C);
-	connect(vc_GTP2:TEID0, self:TEID0);
+	connect(vc_GTP2:TEIC0, self:TEIC0);
 	connect(vc_GTP2:CLIENT, self:GTP2);
 	connect(vc_GTP2:CLIENT_PROC, self:GTP2_PROC);
 	vc_GTP2.start(GTPv2_Emulation.main(cfg));
+}
+
+private function f_init_gtp1u() runs on PGW_Test_CT {
+	var Gtp1uEmulationCfg cfg := {
+		gtpu_bind_ip := omit,  /* using gtpu daemon */
+		gtpu_bind_port := omit,  /* using gtpu daemon */
+		use_gtpu_daemon := true
+	};
+
+	vc_GTP1U := GTPv1U_Emulation_CT.create("GTP1U_EM");
+	map(vc_GTP1U:GTP1U, system:GTP1U);
+	connect(vc_GTP1U:TEID0, self:TEID0);
+	connect(vc_GTP1U:CLIENT, self:GTP1U);
+	connect(vc_GTP1U:CLIENT_PROC, self:GTP1U_PROC);
+	vc_GTP1U.start(GTPv1U_Emulation.main(cfg));
+}
+
+private function f_init(float guard_timeout := 60.0) runs on PGW_Test_CT {
+	T_guard.start(guard_timeout);
+	activate(as_Tguard());
+
+	f_init_gtp2c();
+	f_init_gtp1u();
 
 	if (mp_pcrf_local_ip != "") {
 		f_init_diameter(testcasename());
@@ -323,6 +344,8 @@ runs on PGW_Test_CT return PGW_Session_CT {
 	vc_conn := PGW_Session_CT.create(id);
 	connect(vc_conn:GTP2, vc_GTP2:CLIENT);
 	connect(vc_conn:GTP2_PROC, vc_GTP2:CLIENT_PROC);
+	connect(vc_conn:GTP1U, vc_GTP1U:CLIENT);
+	connect(vc_conn:GTP1U_PROC, vc_GTP1U:CLIENT_PROC);
 
 	if (isbound(vc_Gx)) {
 		vc_conn_gx := DIAMETER_ConnHdlr_CT.create(id);
@@ -355,9 +378,9 @@ runs on PGW_Test_CT return PGW_Session_CT {
 private function f_handler_init(void_fn fn, SessionPars pars)
 runs on PGW_Session_CT {
 	g_pars := valueof(pars);
-	/* allocate + register TEID-C on local side */
-	g_pars.teic_local := f_gtp2_allocate_teid();
-	g_pars.bearer.teid_local := g_pars.teic_local;
+	/* allocate + register TEI{C,D} on local side */
+	g_pars.teic_local := f_gtp2_allocate_teic();
+	g_pars.bearer.teid_local := f_gtp1u_allocate_teid();
 	fn.apply();
 }
 
@@ -693,12 +716,12 @@ private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Sess
 	/* create tunnel in daemon */
 	if (isbound(g_ip4_addr)) {
 		uecups_create.user_addr := g_ip4_addr;
-		f_gtp2_create_tunnel(uecups_create);
+		f_gtp1u_create_tunnel(uecups_create);
 	}
 	if (isbound(g_ip6_addr)) {
 		uecups_create.user_addr_type := IPV6;
 		uecups_create.user_addr := g_ip6_addr;
-		f_gtp2_create_tunnel(uecups_create);
+		f_gtp1u_create_tunnel(uecups_create);
 	}
 }
 
@@ -871,7 +894,7 @@ private function f_delete_session(template (omit) GTP2C_Cause tx_cause := omit,
 			rx_teid := oct2int(g_pars.bearer.teid_local)
 		};
 		/* FIXME: what about IPv4/IPv6 differentiation? */
-		f_gtp2_destroy_tunnel(uecups_destroy);
+		f_gtp1u_destroy_tunnel(uecups_destroy);
 	}
 }
 
@@ -896,7 +919,7 @@ runs on PGW_Session_CT return integer
 	}
 
 	log("Starting a program: ", command);
-	var UECUPS_StartProgramRes res := f_gtp2_start_program(sprog);
+	var UECUPS_StartProgramRes res := f_gtp1u_start_program(sprog);
 	if (res.result != OK) {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Unable to start program '", command, "'"));
@@ -914,10 +937,10 @@ private function f_wait_term(integer pid, template (present) integer exit_code :
 
 	T.start;
 	alt {
-	[] GTP2.receive(UECUPS_ProgramTermInd:{pid := pid, exit_code := exit_code}) {
+	[] GTP1U.receive(UECUPS_ProgramTermInd:{pid := pid, exit_code := exit_code}) {
 		setverdict(pass);
 		}
-	[] GTP2.receive(UECUPS_ProgramTermInd:?) -> value pti {
+	[] GTP1U.receive(UECUPS_ProgramTermInd:?) -> value pti {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Received unexpected ProgramTermInd := ", pti));
 		}

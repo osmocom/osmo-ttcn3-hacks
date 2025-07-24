@@ -26,7 +26,6 @@ FILES="
 	TCCEncoding.cc
 	TCCInterface.cc
 	TELNETasp_PT.cc
-	UECUPS_CodecPort_CtrlFunctDef.cc
 "
 
 . ../_buildsystem/regen_makefile.inc.sh

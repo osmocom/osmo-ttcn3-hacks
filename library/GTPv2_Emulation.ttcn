@@ -14,52 +14,33 @@ module GTPv2_Emulation {
 import from IPL4asp_Types all;
 import from General_Types all;
 import from Osmocom_Types all;
-import from GTPU_Types all;
-import from GTPv1U_CodecPort all;
-import from GTPv1U_CodecPort_CtrlFunct all;
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
 import from GTPv2_CodecPort all;
 import from GTPv2_CodecPort_CtrlFunct all;
-import from SCTP_Templates all;
-
-import from UECUPS_Types all;
-import from UECUPS_CodecPort all;
-import from UECUPS_CodecPort_CtrlFunct all;
 
 /***********************************************************************
  * Main Emulation Component
  ***********************************************************************/
 
-modulepar {
-	charstring mp_uecups_host := "127.0.0.1";
-	integer mp_uecups_port := UECUPS_SCTP_PORT;
-};
+//modulepar {};
 
 const integer GTP2C_PORT := 2123;
-const integer GTP1U_PORT := 2152;
 
 type record Gtp2EmulationCfg {
 	HostName gtpc_bind_ip,
 	IPL4asp_Types.PortNumber gtpc_bind_port,
 	HostName gtpc_remote_ip,
 	IPL4asp_Types.PortNumber gtpc_remote_port,
-	HostName gtpu_bind_ip optional,
-	IPL4asp_Types.PortNumber gtpu_bind_port optional,
-	boolean sgw_role,
-	boolean use_gtpu_daemon
+	boolean sgw_role
 };
 
 type component GTPv2_Emulation_CT {
 	/* Communication with underlying GTP CodecPort */
 	port GTPv2C_PT GTP2C;
-	port GTPU_PT GTPU;
-
-	/* Control port to GTP-U Daemon */
-	port UECUPS_CODEC_PT UECUPS;
 
 	/* Communication with Clients */
-	port GTP2EM_PT TEID0;
+	port GTP2EM_PT TEIC0;
 	port GTP2EM_PT CLIENT;
 	port GTP2EM_PROC_PT CLIENT_PROC;
 
@@ -68,7 +49,7 @@ type component GTPv2_Emulation_CT {
 
 	/* State */
 	var Gtp2cPeer g_peer;
-	var integer g_gtp2c_id, g_gtp1u_id;
+	var integer g_gtp2c_id;
 	var OCT1 g_restart_ctr;
 	var uint16_t g_c_seq_nr;
 	var TidTableRec TidTable[256];
@@ -76,13 +57,11 @@ type component GTPv2_Emulation_CT {
 	var ImsiTableRec ImsiTable[256];
 	var UdMsgTableRec UdMsgTable[256];
 	var PidTableRec	PidTable[256];
-
-	var integer g_uecups_conn_id;
 };
 
-/* local TEID <-> ConnHdlr mapping */
+/* local TEIC <-> ConnHdlr mapping */
 type record TidTableRec {
-	OCT4 teid,
+	OCT4 teic,
 	GTP2_ConnHdlr vc_conn
 };
 
@@ -112,24 +91,24 @@ type record PidTableRec {
 	GTP2_ConnHdlr vc_conn
 };
 
-private function f_teid_known(OCT4 teid) runs on GTPv2_Emulation_CT return boolean {
+private function f_teic_known(OCT4 teic) runs on GTPv2_Emulation_CT return boolean {
 	var integer i;
 	for (i := 0; i < sizeof(TidTable); i := i+1) {
-		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+		if (isbound(TidTable[i].teic) and TidTable[i].teic == teic) {
 			return true;
 		}
 	}
 	return false;
 }
 
-private function f_comp_by_teid(OCT4 teid) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
+private function f_comp_by_teic(OCT4 teic) runs on GTPv2_Emulation_CT return GTP2_ConnHdlr {
 	var integer i;
 	for (i := 0; i < sizeof(TidTable); i := i+1) {
-		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+		if (isbound(TidTable[i].teic) and TidTable[i].teic == teic) {
 			return TidTable[i].vc_conn;
 		}
 	}
-	setverdict(fail, "No Component for TEID ", teid);
+	setverdict(fail, "No Component for TEIC ", teic);
 	mtc.stop;
 }
 
@@ -187,16 +166,16 @@ private function f_comp_by_pid(integer pid) runs on GTPv2_Emulation_CT return GT
 	mtc.stop;
 }
 
-private function f_tid_tbl_add(OCT4 teid, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
+private function f_tid_tbl_add(OCT4 teic, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(TidTable); i := i+1) {
-		if (not isbound(TidTable[i].teid)) {
-			TidTable[i].teid := teid;
+		if (not isbound(TidTable[i].teic)) {
+			TidTable[i].teic := teic;
 			TidTable[i].vc_conn := vc_conn;
 			return;
 		}
 	}
-	testcase.stop("No Space in TidTable for ", teid);
+	testcase.stop("No Space in TidTable for ", teic);
 }
 
 private function f_seq_tbl_add(OCT3 seq, GTP2_ConnHdlr vc_conn) runs on GTPv2_Emulation_CT {
@@ -260,21 +239,21 @@ private function f_pid_tbl_add(integer pid, GTP2_ConnHdlr vc_conn) runs on GTPv2
 }
 
 
-/* allocate an unused local teid */
-private function f_alloc_teid() runs on GTPv2_Emulation_CT return OCT4 {
-	var OCT4 teid;
+/* allocate an unused local teic */
+private function f_alloc_teic() runs on GTPv2_Emulation_CT return OCT4 {
+	var OCT4 teic;
 	var integer i, j;
 	for (i := 0; i < 100; i := i+1) {
-		teid := f_rnd_octstring(4);
+		teic := f_rnd_octstring(4);
 		for (j := 0; j < sizeof(TidTable); j := j+1) {
-			if (isbound(TidTable) and TidTable[i].teid == teid) {
+			if (isbound(TidTable) and TidTable[i].teic == teic) {
 				continue;
 			}
 		}
 		/* we iterated over all entries and found no match: great! */
-		return teid;
+		return teic;
 	}
-	testcase.stop("Cannot find unused TEID after ", i, " attempts");
+	testcase.stop("Cannot find unused TEIC after ", i, " attempts");
 }
 
 /* obtain the IMSI from a GTPv2C PDU, if there is any IMSI contained. The way how the TITAN
@@ -432,40 +411,6 @@ private function f_gtp2c_is_initial_msg(PDU_GTPCv2 msg) return boolean
 	return false;
 }
 
-function tr_UECUPS_RecvFrom_R(template PDU_UECUPS msg)
-runs on GTPv2_Emulation_CT return template UECUPS_RecvFrom {
-	var template UECUPS_RecvFrom mrf := {
-		connId := g_uecups_conn_id,
-		remName := ?,
-		remPort := ?,
-		locName := ?,
-		locPort := ?,
-		msg := msg
-	}
-	return mrf;
-}
-
-
-private function f_uecups_xceive(template (value) PDU_UECUPS tx,
-				template PDU_UECUPS rx_t := ?, float time_out := 10.0)
-runs on GTPv2_Emulation_CT  return PDU_UECUPS {
-	timer T := time_out;
-	var UECUPS_RecvFrom mrf;
-
-	UECUPS.send(t_UECUPS_Send(g_uecups_conn_id, tx));
-	T.start;
-	alt {
-	[] UECUPS.receive(tr_UECUPS_RecvFrom_R(rx_t)) -> value mrf { }
-	[] UECUPS.receive(tr_SctpAssocChange) { repeat; }
-	[] UECUPS.receive(tr_SctpPeerAddrChange) { repeat; }
-	[] T.timeout {
-		setverdict(fail, "Timeout waiting for ", rx_t);
-		mtc.stop;
-		}
-	}
-	return mrf.msg;
-}
-
 private function f_init(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 	var Result res;
 
@@ -481,41 +426,6 @@ private function f_init(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		connId := g_gtp2c_id,
 		remName := g_gtp2_cfg.gtpc_remote_ip,
 		remPort := g_gtp2_cfg.gtpc_remote_port
-	}
-
-	g_uecups_conn_id := res.connId;
-
-	if (g_gtp2_cfg.use_gtpu_daemon) {
-		map(self:UECUPS, system:UECUPS);
-		res := UECUPS_CodecPort_CtrlFunct.f_IPL4_connect(UECUPS, mp_uecups_host, mp_uecups_port, "", -1, -1,
-								 { sctp := valueof(ts_SctpTuple) });
-		if (not ispresent(res.connId)) {
-			setverdict(fail, "Could not connect UECUPS socket, check your configuration");
-			testcase.stop;
-		}
-
-		/* clear all tunnel state in the daemon at start */
-		f_uecups_xceive({reset_all_state := {}}, {reset_all_state_res:=?}, 30.0);
-	} else if (isvalue(cfg.gtpu_bind_ip) and isvalue(cfg.gtpu_bind_port)) {
-		map(self:GTPU, system:GTPU);
-		res := GTPv1U_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, cfg.gtpu_bind_ip,
-								cfg.gtpu_bind_port, {udp:={}});
-		g_gtp1u_id := res.connId;
-	}
-
-	/* make sure we always pass incoming UECUPS indications whenever receiving fom the UECUPS port */
-	activate(as_uecups_ind());
-}
-
-private altstep as_uecups_ind() runs on GTPv2_Emulation_CT {
-var UECUPS_RecvFrom rx;
-var GTP2_ConnHdlr vc_conn;
-/* handle incoming program_term_ind; dispatch to whatever component started the process */
-[] UECUPS.receive(tr_UECUPS_RecvFrom_R({program_term_ind:=?})) -> value rx {
-	vc_conn := f_comp_by_pid(rx.msg.program_term_ind.pid);
-	CLIENT.send(rx.msg.program_term_ind) to vc_conn;
-	/* FIXME: remove from table */
-	repeat;
 	}
 }
 
@@ -536,22 +446,17 @@ private function SendToUdMsgTable(Gtp2cUnitdata g2c_ud) runs on GTPv2_Emulation_
 
 function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 	var Gtp2cUnitdata g2c_ud;
-	var Gtp1uUnitdata g1u_ud;
 	var PDU_GTPCv2 g2c;
 	var GTP2_ConnHdlr vc_conn;
 	var hexstring imsi;
 	var OCT1 messageType;
-	var OCT4 teid;
-	var PDU_UECUPS rx_uecups;
-	var UECUPS_CreateTun gtc;
-	var UECUPS_DestroyTun gtd;
-	var UECUPS_StartProgram sprog;
+	var OCT4 teic;
 
 	f_init(cfg);
 
 	while (true) {
 	alt {
-	/* route inbound GTP2-C based on TEID, SEQ or IMSI */
+	/* route inbound GTP2-C based on TEIC, SEQ or IMSI */
 	[] GTP2C.receive(Gtp2cUnitdata:?) -> value g2c_ud {
 		var template hexstring imsi_t := f_gtp2c_extract_imsi(g2c_ud.gtpc);
 		/* if this is a response, route by SEQ: */
@@ -563,17 +468,17 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 			vc_conn := f_comp_by_imsi(valueof(imsi_t));
 			CLIENT.send(g2c_ud.gtpc) to vc_conn;
 		} else if ((ispresent(g2c_ud.gtpc.tEID) and g2c_ud.gtpc.tEID != '00000000'O)
-			   and f_teid_known(g2c_ud.gtpc.tEID)) {
-			vc_conn := f_comp_by_teid(g2c_ud.gtpc.tEID);
+			   and f_teic_known(g2c_ud.gtpc.tEID)) {
+			vc_conn := f_comp_by_teic(g2c_ud.gtpc.tEID);
 			CLIENT.send(g2c_ud.gtpc) to vc_conn;
 		} else if ((not ispresent(g2c_ud.gtpc.tEID) or g2c_ud.gtpc.tEID == '00000000'O)
-			   and f_teid_known('00000000'O)) {
-			vc_conn := f_comp_by_teid(g2c_ud.gtpc.tEID);
+			   and f_teic_known('00000000'O)) {
+			vc_conn := f_comp_by_teic(g2c_ud.gtpc.tEID);
 			CLIENT.send(g2c_ud.gtpc) to vc_conn;
 		} else {
 			SendToUdMsgTable(g2c_ud);
 			if (not ispresent(g2c_ud.gtpc.tEID) or g2c_ud.gtpc.tEID == '00000000'O) {
-				TEID0.send(g2c_ud.gtpc);
+				TEIC0.send(g2c_ud.gtpc);
 			}
 		}
 
@@ -583,18 +488,8 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		}
 
 		}
-	[] GTPU.receive(Gtp1uUnitdata:?) -> value g1u_ud {
-		if (f_teid_known(g1u_ud.gtpu.teid)) {
-			vc_conn := f_comp_by_teid(g1u_ud.gtpu.teid);
-			CLIENT.send(g1u_ud) to vc_conn;
-		} else if (g1u_ud.gtpu.teid == '00000000'O) {
-			TEID0.send(g1u_ud);
-		} else {
-			log("No client registered for TEID=", g1u_ud.gtpu.teid, "!");
-		}
-		}
 
-	[] TEID0.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
+	[] TEIC0.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
 		/* patch in the next sequence number on outbound Initial message */
 		if (f_gtp2c_is_initial_msg(g2c)) {
 			g2c.sequenceNumber := int2oct(g_c_seq_nr, 3);
@@ -606,9 +501,6 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		if (match(g2c, tr_PDU_GTP2C_msgtypes(gtp2_requests))) {
 			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
 		}
-		}
-	[] TEID0.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
-		GTPU.send(g1u_ud);
 		}
 
 	[] CLIENT.receive(PDU_GTPCv2:?) -> value g2c sender vc_conn {
@@ -624,9 +516,6 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 			f_seq_tbl_add(g2c.sequenceNumber, vc_conn);
 		}
 		}
-	[] CLIENT.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
-		GTPU.send(g1u_ud);
-		}
 
 	[] CLIENT_PROC.getcall(GTP2EM_register_imsi:{?}) -> param(imsi) sender vc_conn {
 		f_imsi_tbl_add(imsi, vc_conn);
@@ -637,32 +526,15 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
 		CLIENT_PROC.reply(GTP2EM_register_udmsg:{messageType}) to vc_conn;
 		}
 
-	[] CLIENT_PROC.getcall(GTP2EM_register_teid:{?}) -> param(teid) sender vc_conn {
-		f_tid_tbl_add(teid, vc_conn);
-		CLIENT_PROC.reply(GTP2EM_register_teid:{teid}) to vc_conn;
+	[] CLIENT_PROC.getcall(GTP2EM_register_teic:{?}) -> param(teic) sender vc_conn {
+		f_tid_tbl_add(teic, vc_conn);
+		CLIENT_PROC.reply(GTP2EM_register_teic:{teic}) to vc_conn;
 		}
-	[] CLIENT_PROC.getcall(GTP2EM_allocate_teid:{}) -> sender vc_conn {
-		var OCT4 t := f_alloc_teid();
+	[] CLIENT_PROC.getcall(GTP2EM_allocate_teic:{}) -> sender vc_conn {
+		var OCT4 t := f_alloc_teic();
 		f_tid_tbl_add(t, vc_conn);
-		CLIENT_PROC.reply(GTP2EM_allocate_teid:{} value t) to vc_conn;
+		CLIENT_PROC.reply(GTP2EM_allocate_teic:{} value t) to vc_conn;
 		}
-	[] CLIENT_PROC.getcall(GTP2EM_create_tunnel:{?}) -> param(gtc) sender vc_conn {
-		rx_uecups := f_uecups_xceive({create_tun := gtc}, {create_tun_res:={result:=OK}});
-		CLIENT_PROC.reply(GTP2EM_create_tunnel:{gtc}) to vc_conn;
-		}
-	[] CLIENT_PROC.getcall(GTP2EM_destroy_tunnel:{?}) -> param(gtd) sender vc_conn {
-		rx_uecups := f_uecups_xceive({destroy_tun := gtd}, {destroy_tun_res:={result:=OK}});
-		CLIENT_PROC.reply(GTP2EM_destroy_tunnel:{gtd}) to vc_conn;
-		}
-	[] CLIENT_PROC.getcall(GTP2EM_start_program:{?}) -> param(sprog) sender vc_conn {
-		rx_uecups := f_uecups_xceive({start_program := sprog}, {start_program_res:=?});
-		/* if successful: store (pid, vc_conn) tuple so we can route program_term_ind */
-		if (rx_uecups.start_program_res.result == OK) {
-			f_pid_tbl_add(rx_uecups.start_program_res.pid, vc_conn);
-		}
-		CLIENT_PROC.reply(GTP2EM_start_program:{sprog} value rx_uecups.start_program_res) to vc_conn;
-		}
-
 	}
 	}
 }
@@ -672,20 +544,17 @@ function main(Gtp2EmulationCfg cfg) runs on GTPv2_Emulation_CT {
  * Interaction between Main and Client Components
  ***********************************************************************/
 type port GTP2EM_PT message {
-	inout PDU_GTPCv2, Gtp1uUnitdata, UECUPS_ProgramTermInd;
+	inout PDU_GTPCv2;
 } with { extension "internal" };
 
 signature GTP2EM_register_imsi(hexstring imsi);
 signature GTP2EM_register_udmsg(OCT1 messageType);
-signature GTP2EM_register_teid(OCT4 teid);
-signature GTP2EM_allocate_teid() return OCT4;
-signature GTP2EM_create_tunnel(UECUPS_CreateTun gtc);
-signature GTP2EM_destroy_tunnel(UECUPS_DestroyTun gtd);
-signature GTP2EM_start_program(UECUPS_StartProgram sprog) return UECUPS_StartProgramRes;
+signature GTP2EM_register_teic(OCT4 teic);
+signature GTP2EM_allocate_teic() return OCT4;
 
 type port GTP2EM_PROC_PT procedure {
-	inout GTP2EM_register_imsi, GTP2EM_register_udmsg, GTP2EM_register_teid, GTP2EM_allocate_teid,
-	      GTP2EM_create_tunnel, GTP2EM_destroy_tunnel, GTP2EM_start_program;
+	inout GTP2EM_register_imsi, GTP2EM_register_udmsg,
+	      GTP2EM_register_teic, GTP2EM_allocate_teic;
 } with { extension "internal" };
 
 /***********************************************************************
@@ -713,44 +582,18 @@ function f_gtp2_register_udmsg(OCT1 messageType) runs on GTP2_ConnHdlr {
 	}
 }
 
-function f_gtp2_register_teid(OCT4 teid) runs on GTP2_ConnHdlr {
-	GTP2_PROC.call(GTP2EM_register_teid:{teid}) {
-		[] GTP2_PROC.getreply(GTP2EM_register_teid:{teid});
+function f_gtp2_register_teic(OCT4 teic) runs on GTP2_ConnHdlr {
+	GTP2_PROC.call(GTP2EM_register_teic:{teic}) {
+		[] GTP2_PROC.getreply(GTP2EM_register_teic:{teic});
 	}
 }
 
-function f_gtp2_allocate_teid() runs on GTP2_ConnHdlr return OCT4 {
+function f_gtp2_allocate_teic() runs on GTP2_ConnHdlr return OCT4 {
 	var OCT4 t;
-	GTP2_PROC.call(GTP2EM_allocate_teid:{}) {
-		[] GTP2_PROC.getreply(GTP2EM_allocate_teid:{}) -> value t {
+	GTP2_PROC.call(GTP2EM_allocate_teic:{}) {
+		[] GTP2_PROC.getreply(GTP2EM_allocate_teic:{}) -> value t {
 			return t;
 		}
 	}
 }
-
-function f_gtp2_create_tunnel(template (value) UECUPS_CreateTun gtc)
-runs on GTP2_ConnHdlr {
-	GTP2_PROC.call(GTP2EM_create_tunnel:{valueof(gtc)}) {
-		[] GTP2_PROC.getreply(GTP2EM_create_tunnel:{gtc});
-	}
-}
-
-function f_gtp2_destroy_tunnel(template (value) UECUPS_DestroyTun gtd)
-runs on GTP2_ConnHdlr {
-	GTP2_PROC.call(GTP2EM_destroy_tunnel:{valueof(gtd)}) {
-		[] GTP2_PROC.getreply(GTP2EM_destroy_tunnel:{gtd});
-	}
-}
-
-function f_gtp2_start_program(template (value) UECUPS_StartProgram sprog)
-runs on GTP2_ConnHdlr return UECUPS_StartProgramRes {
-	var UECUPS_StartProgramRes res;
-	GTP2_PROC.call(GTP2EM_start_program:{valueof(sprog)}) {
-		[] GTP2_PROC.getreply(GTP2EM_start_program:{sprog}) -> value res;
-	}
-	return res;
-}
-
-
-
 }

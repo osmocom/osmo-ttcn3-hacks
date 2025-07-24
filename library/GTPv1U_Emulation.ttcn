@@ -1,0 +1,361 @@
+/* GTPv1U Emulation in TTCN-3
+ *
+ * (C) 2018-2020 Harald Welte <laforge@gnumonks.org>
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module GTPv1U_Emulation {
+
+import from IPL4asp_Types all;
+import from General_Types all;
+import from Osmocom_Types all;
+import from GTPU_Types all;
+import from GTPv1U_CodecPort all;
+import from GTPv1U_CodecPort_CtrlFunct all;
+
+import from SCTP_Templates all;
+import from UECUPS_Types all;
+import from UECUPS_CodecPort all;
+import from UECUPS_CodecPort_CtrlFunct all;
+
+/***********************************************************************
+ * Main Emulation Component
+ ***********************************************************************/
+
+modulepar {
+	charstring mp_uecups_host := "127.0.0.1";
+	integer mp_uecups_port := UECUPS_SCTP_PORT;
+};
+
+const integer GTP1U_PORT := 2152;
+
+type record Gtp1uEmulationCfg {
+	HostName gtpu_bind_ip optional,
+	IPL4asp_Types.PortNumber gtpu_bind_port optional,
+	boolean use_gtpu_daemon
+};
+
+type component GTPv1U_Emulation_CT {
+	/* Communication with underlying GTP CodecPort */
+	port GTPU_PT GTP1U;
+
+	/* Control port to GTP-U Daemon */
+	port UECUPS_CODEC_PT UECUPS;
+
+	/* Communication with Clients */
+	port GTP1UEM_PT TEID0;
+	port GTP1UEM_PT CLIENT;
+	port GTP1UEM_PROC_PT CLIENT_PROC;
+
+	/* Configuration by the user */
+	var Gtp1uEmulationCfg g_gtp1u_cfg;
+
+	/* State */
+	var integer g_gtp1u_id := -1;
+	var OCT1 g_restart_ctr;
+	var uint16_t g_c_seq_nr;
+	var TidTableRec TidTable[256];
+	var PidTableRec	PidTable[256];
+
+	var integer g_uecups_conn_id := -1;
+};
+
+/* local TEID <-> ConnHdlr mapping */
+type record TidTableRec {
+	OCT4 teid,
+	GTP1U_ConnHdlr vc_conn
+};
+
+/* pid <-> ConnHdlr mapping (for UECUPS process termination indication) */
+type record PidTableRec {
+	/* process ID of the running process */
+	integer pid,
+	/* component that started it */
+	GTP1U_ConnHdlr vc_conn
+};
+
+private function f_teid_known(OCT4 teid) runs on GTPv1U_Emulation_CT return boolean {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+			return true;
+		}
+	}
+	return false;
+}
+
+private function f_comp_by_teid(OCT4 teid) runs on GTPv1U_Emulation_CT return GTP1U_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+			return TidTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for TEID ", teid);
+	mtc.stop;
+}
+
+private function f_comp_by_pid(integer pid) runs on GTPv1U_Emulation_CT return GTP1U_ConnHdlr {
+	var integer i;
+	for (i := 0; i < sizeof(PidTable); i := i+1) {
+		if (isbound(PidTable[i].pid) and PidTable[i].pid == pid) {
+			/* fixme: remove */
+			return PidTable[i].vc_conn;
+		}
+	}
+	setverdict(fail, "No Component for PID ", pid);
+	mtc.stop;
+}
+
+private function f_tid_tbl_add(OCT4 teid, GTP1U_ConnHdlr vc_conn) runs on GTPv1U_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(TidTable); i := i+1) {
+		if (not isbound(TidTable[i].teid)) {
+			TidTable[i].teid := teid;
+			TidTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in TidTable for ", teid);
+}
+
+private function f_pid_tbl_add(integer pid, GTP1U_ConnHdlr vc_conn) runs on GTPv1U_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(PidTable); i := i+1) {
+		if (not isbound(PidTable[i].pid)) {
+			PidTable[i].pid := pid;
+			PidTable[i].vc_conn := vc_conn;
+			return;
+		}
+	}
+	testcase.stop("No Space in PID Table for ", pid);
+}
+
+
+/* allocate an unused local teid */
+private function f_alloc_teid() runs on GTPv1U_Emulation_CT return OCT4 {
+	var OCT4 teid;
+	var integer i, j;
+	for (i := 0; i < 100; i := i+1) {
+		teid := f_rnd_octstring(4);
+		for (j := 0; j < sizeof(TidTable); j := j+1) {
+			if (isbound(TidTable) and TidTable[i].teid == teid) {
+				continue;
+			}
+		}
+		/* we iterated over all entries and found no match: great! */
+		return teid;
+	}
+	testcase.stop("Cannot find unused TEID after ", i, " attempts");
+}
+
+function tr_UECUPS_RecvFrom_R(template PDU_UECUPS msg)
+runs on GTPv1U_Emulation_CT return template UECUPS_RecvFrom {
+	var template UECUPS_RecvFrom mrf := {
+		connId := g_uecups_conn_id,
+		remName := ?,
+		remPort := ?,
+		locName := ?,
+		locPort := ?,
+		msg := msg
+	}
+	return mrf;
+}
+
+
+private function f_uecups_xceive(template (value) PDU_UECUPS tx,
+				template PDU_UECUPS rx_t := ?, float time_out := 10.0)
+runs on GTPv1U_Emulation_CT  return PDU_UECUPS {
+	timer T := time_out;
+	var UECUPS_RecvFrom mrf;
+
+	UECUPS.send(t_UECUPS_Send(g_uecups_conn_id, tx));
+	T.start;
+	alt {
+	[] UECUPS.receive(tr_UECUPS_RecvFrom_R(rx_t)) -> value mrf { }
+	[] UECUPS.receive(tr_SctpAssocChange) { repeat; }
+	[] UECUPS.receive(tr_SctpPeerAddrChange) { repeat; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for ", rx_t);
+		mtc.stop;
+		}
+	}
+	return mrf.msg;
+}
+
+private function f_init(Gtp1uEmulationCfg cfg) runs on GTPv1U_Emulation_CT {
+	var Result res;
+
+	g_restart_ctr := f_rnd_octstring(1);
+	g_c_seq_nr := f_rnd_int(65535);
+	g_gtp1u_cfg := cfg;
+
+	if (g_gtp1u_cfg.use_gtpu_daemon) {
+		map(self:UECUPS, system:UECUPS);
+		res := UECUPS_CodecPort_CtrlFunct.f_IPL4_connect(UECUPS, mp_uecups_host, mp_uecups_port, "", -1, -1,
+								 { sctp := valueof(ts_SctpTuple) });
+		if (not ispresent(res.connId)) {
+			setverdict(fail, "Could not connect UECUPS socket, check your configuration");
+			testcase.stop;
+		}
+		g_uecups_conn_id := res.connId;
+		/* clear all tunnel state in the daemon at start */
+		f_uecups_xceive({reset_all_state := {}}, {reset_all_state_res:=?}, 30.0);
+		/* make sure we always pass incoming UECUPS indications whenever receiving fom the UECUPS port */
+		activate(as_uecups_ind());
+	} else if (isvalue(cfg.gtpu_bind_ip) and isvalue(cfg.gtpu_bind_port)) {
+		map(self:GTP1U, system:GTP1U);
+		res := GTPv1U_CodecPort_CtrlFunct.f_GTPU_listen(GTP1U, cfg.gtpu_bind_ip,
+								cfg.gtpu_bind_port, {udp:={}});
+		g_gtp1u_id := res.connId;
+	}
+}
+
+private altstep as_uecups_ind() runs on GTPv1U_Emulation_CT {
+var UECUPS_RecvFrom rx;
+var GTP1U_ConnHdlr vc_conn;
+/* handle incoming program_term_ind; dispatch to whatever component started the process */
+[] UECUPS.receive(tr_UECUPS_RecvFrom_R({program_term_ind:=?})) -> value rx {
+	vc_conn := f_comp_by_pid(rx.msg.program_term_ind.pid);
+	CLIENT.send(rx.msg.program_term_ind) to vc_conn;
+	/* FIXME: remove from table */
+	repeat;
+	}
+}
+
+function main(Gtp1uEmulationCfg cfg) runs on GTPv1U_Emulation_CT {
+	var Gtp1uUnitdata g1u_ud;
+	var GTP1U_ConnHdlr vc_conn;
+	var OCT4 teid;
+	var PDU_UECUPS rx_uecups;
+	var UECUPS_CreateTun gtc;
+	var UECUPS_DestroyTun gtd;
+	var UECUPS_StartProgram sprog;
+
+	f_init(cfg);
+
+	while (true) {
+	alt {
+	[] GTP1U.receive(Gtp1uUnitdata:?) -> value g1u_ud {
+		if (f_teid_known(g1u_ud.gtpu.teid)) {
+			vc_conn := f_comp_by_teid(g1u_ud.gtpu.teid);
+			CLIENT.send(g1u_ud) to vc_conn;
+		} else if (g1u_ud.gtpu.teid == '00000000'O) {
+			TEID0.send(g1u_ud);
+		} else {
+			log("No client registered for TEID=", g1u_ud.gtpu.teid, "!");
+		}
+		}
+	[] TEID0.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
+		GTP1U.send(g1u_ud);
+		}
+	[] CLIENT.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
+		GTP1U.send(g1u_ud);
+		}
+
+	[] CLIENT_PROC.getcall(GTP1UEM_register_teid:{?}) -> param(teid) sender vc_conn {
+		f_tid_tbl_add(teid, vc_conn);
+		CLIENT_PROC.reply(GTP1UEM_register_teid:{teid}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP1UEM_allocate_teid:{}) -> sender vc_conn {
+		var OCT4 t := f_alloc_teid();
+		f_tid_tbl_add(t, vc_conn);
+		CLIENT_PROC.reply(GTP1UEM_allocate_teid:{} value t) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP1UEM_create_tunnel:{?}) -> param(gtc) sender vc_conn {
+		rx_uecups := f_uecups_xceive({create_tun := gtc}, {create_tun_res:={result:=OK}});
+		CLIENT_PROC.reply(GTP1UEM_create_tunnel:{gtc}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP1UEM_destroy_tunnel:{?}) -> param(gtd) sender vc_conn {
+		rx_uecups := f_uecups_xceive({destroy_tun := gtd}, {destroy_tun_res:={result:=OK}});
+		CLIENT_PROC.reply(GTP1UEM_destroy_tunnel:{gtd}) to vc_conn;
+		}
+	[] CLIENT_PROC.getcall(GTP1UEM_start_program:{?}) -> param(sprog) sender vc_conn {
+		rx_uecups := f_uecups_xceive({start_program := sprog}, {start_program_res:=?});
+		/* if successful: store (pid, vc_conn) tuple so we can route program_term_ind */
+		if (rx_uecups.start_program_res.result == OK) {
+			f_pid_tbl_add(rx_uecups.start_program_res.pid, vc_conn);
+		}
+		CLIENT_PROC.reply(GTP1UEM_start_program:{sprog} value rx_uecups.start_program_res) to vc_conn;
+		}
+
+	}
+	}
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+type port GTP1UEM_PT message {
+	inout Gtp1uUnitdata, UECUPS_ProgramTermInd;
+} with { extension "internal" };
+
+signature GTP1UEM_register_teid(OCT4 teid);
+signature GTP1UEM_allocate_teid() return OCT4;
+signature GTP1UEM_create_tunnel(UECUPS_CreateTun gtc);
+signature GTP1UEM_destroy_tunnel(UECUPS_DestroyTun gtd);
+signature GTP1UEM_start_program(UECUPS_StartProgram sprog) return UECUPS_StartProgramRes;
+
+type port GTP1UEM_PROC_PT procedure {
+	inout GTP1UEM_register_teid, GTP1UEM_allocate_teid,
+	      GTP1UEM_create_tunnel, GTP1UEM_destroy_tunnel, GTP1UEM_start_program;
+} with { extension "internal" };
+
+/***********************************************************************
+ * Client Component
+ ***********************************************************************/
+
+type component GTP1U_ConnHdlr {
+	port GTP1UEM_PT GTP1U;
+	port GTP1UEM_PROC_PT GTP1U_PROC;
+};
+
+
+function f_gtp1u_register_teid(OCT4 teid) runs on GTP1U_ConnHdlr {
+	GTP1U_PROC.call(GTP1UEM_register_teid:{teid}) {
+		[] GTP1U_PROC.getreply(GTP1UEM_register_teid:{teid});
+	}
+}
+
+function f_gtp1u_allocate_teid() runs on GTP1U_ConnHdlr return OCT4 {
+	var OCT4 t;
+	GTP1U_PROC.call(GTP1UEM_allocate_teid:{}) {
+		[] GTP1U_PROC.getreply(GTP1UEM_allocate_teid:{}) -> value t {
+			return t;
+		}
+	}
+}
+
+function f_gtp1u_create_tunnel(template (value) UECUPS_CreateTun gtc)
+runs on GTP1U_ConnHdlr {
+	GTP1U_PROC.call(GTP1UEM_create_tunnel:{valueof(gtc)}) {
+		[] GTP1U_PROC.getreply(GTP1UEM_create_tunnel:{gtc});
+	}
+}
+
+function f_gtp1u_destroy_tunnel(template (value) UECUPS_DestroyTun gtd)
+runs on GTP1U_ConnHdlr {
+	GTP1U_PROC.call(GTP1UEM_destroy_tunnel:{valueof(gtd)}) {
+		[] GTP1U_PROC.getreply(GTP1UEM_destroy_tunnel:{gtd});
+	}
+}
+
+function f_gtp1u_start_program(template (value) UECUPS_StartProgram sprog)
+runs on GTP1U_ConnHdlr return UECUPS_StartProgramRes {
+	var UECUPS_StartProgramRes res;
+	GTP1U_PROC.call(GTP1UEM_start_program:{valueof(sprog)}) {
+		[] GTP1U_PROC.getreply(GTP1UEM_start_program:{sprog}) -> value res;
+	}
+	return res;
+}
+
+
+
+}
