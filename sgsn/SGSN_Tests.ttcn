@@ -50,6 +50,7 @@ import from GTPU_Types all;
 import from GTPv1C_Templates all;
 import from GTPv1U_Templates all;
 import from GTP_Emulation all;
+import from GTPv1U_Emulation all;
 
 import from LLC_Types all;
 import from LLC_Templates all;
@@ -167,12 +168,12 @@ type record length(NUM_GB) of NSConfiguration NSConfigurations;
 const integer NUM_RNC := 1;
 type record IuInstance {
 	RAN_Adapter ranap,
-	GTP_Emulation_CT vc_RNC_GTP
+	GTPv1U_Emulation_CT vc_RNC_GTP1U
 };
 type record length(NUM_RNC) of IuInstance IuInstances;
 type record of RAN_Configuration RAN_Configurations;
 
-type component test_CT {
+type component test_CT extends GTP_ConnHdlr {
 	var GbInstances g_gb;
 	var IuInstances g_iu;
 	var boolean g_iu_enable := false;
@@ -187,9 +188,9 @@ type component test_CT {
 
 	/* used by RIM related test */
 	port BSSGP_PT RIM[NUM_GB];
-	port GTPEM_PT GTPC;
 
-	var GTP_Emulation_CT vc_GGSN_GTP;
+	var GTP_Emulation_CT vc_GGSN_GTP1C;
+	var GTPv1U_Emulation_CT vc_GGSN_GTP1U;
 
 	port TELNETasp_PT SGSNVTY;
 	port TELNETasp_PT STPVTY;
@@ -277,31 +278,34 @@ private function f_init_gsup(charstring id) runs on test_CT {
 private function f_init_rnc_gtp(charstring id, integer rnc_idx) runs on test_CT {
 	id := id & "-RNC_GTP";
 
-	var GtpEmulationCfg gtp_cfg := {
-		gtpc_bind_ip := omit,
-		gtpc_bind_port := omit,
+	var Gtp1uEmulationCfg gtp_cfg := {
 		gtpu_bind_ip := mp_ranap_cfg[rnc_idx].sctp_addr.local_ip_addr,
 		gtpu_bind_port := GTP1U_PORT,
-		sgsn_role := false
+		use_gtpu_daemon := false
 	};
 
-	g_iu[rnc_idx].vc_RNC_GTP := GTP_Emulation_CT.create(id);
-	g_iu[rnc_idx].vc_RNC_GTP.start(GTP_Emulation.main(gtp_cfg));
+	g_iu[rnc_idx].vc_RNC_GTP1U := GTPv1U_Emulation_CT.create(id);
+	g_iu[rnc_idx].vc_RNC_GTP1U.start(GTPv1U_Emulation.main(gtp_cfg));
 }
 
 private function f_init_ggsn_gtp(charstring id) runs on test_CT {
-	id := id & "-GGSN_GTP";
-
-	var GtpEmulationCfg gtp_cfg := {
+	var GtpEmulationCfg gtp1c_cfg := {
 		gtpc_bind_ip := mp_ggsn_ip,
 		gtpc_bind_port := GTP1C_PORT,
-		gtpu_bind_ip := mp_ggsn_ip,
-		gtpu_bind_port := GTP1U_PORT,
 		sgsn_role := false
 	};
 
-	vc_GGSN_GTP := GTP_Emulation_CT.create(id);
-	vc_GGSN_GTP.start(GTP_Emulation.main(gtp_cfg));
+	vc_GGSN_GTP1C := GTP_Emulation_CT.create(id & "-GGSN_GTP1C");
+	vc_GGSN_GTP1C.start(GTP_Emulation.main(gtp1c_cfg));
+
+	var Gtp1uEmulationCfg gtp1u_cfg := {
+		gtpu_bind_ip := mp_ggsn_ip,
+		gtpu_bind_port := GTP1U_PORT,
+		use_gtpu_daemon := false
+	};
+
+	vc_GGSN_GTP1U := GTPv1U_Emulation_CT.create(id & "-GGSN_GTP1U");
+	vc_GGSN_GTP1U.start(GTPv1U_Emulation.main(gtp1u_cfg));
 }
 
 friend function f_init_vty() runs on test_CT {
@@ -521,16 +525,18 @@ runs on test_CT return BSSGP_ConnHdlr {
 
 		for (var integer i := 0; i < NUM_RNC; i := i+1) {
 			/* GTP[0] is used by emulated GGSN: */
-			connect(vc_conn:GTP[i + 1], g_iu[i].vc_RNC_GTP:CLIENT);
-			connect(vc_conn:GTP_PROC[i + 1], g_iu[i].vc_RNC_GTP:CLIENT_PROC);
+			connect(vc_conn:GTP1U[i + 1], g_iu[i].vc_RNC_GTP1U:CLIENT);
+			connect(vc_conn:GTP1U_PROC[i + 1], g_iu[i].vc_RNC_GTP1U:CLIENT_PROC);
 		}
 	}
 
 	connect(vc_conn:GSUP, vc_GSUP:GSUP_CLIENT);
 	connect(vc_conn:GSUP_PROC, vc_GSUP:GSUP_PROC);
 
-	connect(vc_conn:GTP[GTP_GGSN_IDX], vc_GGSN_GTP:CLIENT);
-	connect(vc_conn:GTP_PROC[GTP_GGSN_IDX], vc_GGSN_GTP:CLIENT_PROC);
+	connect(vc_conn:GTP[GTP_GGSN_IDX], vc_GGSN_GTP1C:CLIENT);
+	connect(vc_conn:GTP_PROC[GTP_GGSN_IDX], vc_GGSN_GTP1C:CLIENT_PROC);
+	connect(vc_conn:GTP1U[GTP_GGSN_IDX], vc_GGSN_GTP1U:CLIENT);
+	connect(vc_conn:GTP1U_PROC[GTP_GGSN_IDX], vc_GGSN_GTP1U:CLIENT_PROC);
 
 	vc_conn.start(f_handler_init(fn, id, pars));
 	return vc_conn;
@@ -2818,7 +2824,7 @@ testcase TC_rim_eutran_to_geran() runs on test_CT {
 	var BSSGP_ConnHdlr vc_conn;
 	f_init();
 	/* connect RIM related port */
-	connect(vc_GGSN_GTP:CLIENT_DEFAULT, self:GTPC);
+	connect(vc_GGSN_GTP1C:CLIENT_DEFAULT, self:GTP[0]);
 
 	var Gtp1cPeer peer := {
 		connId := 1,
@@ -2852,7 +2858,7 @@ testcase TC_rim_eutran_to_geran() runs on test_CT {
 	gtpc_rim_ra_discr := ts_RIM_RoutingAddress_Discriminator(hex2bit(RIM_ADDR_GERAN_CELL_ID));
 	gtpc_pdu := ts_GTPC_RANInfoRelay(peer, ts_RANTransparentContainer_RAN_INFO_REQ(gtpc_bssgp_cont),
 					 gtpc_rim_ra, gtpc_rim_ra_discr);
-	GTPC.send(gtpc_pdu);
+	GTP[0].send(gtpc_pdu);
 
 	var template RIM_Routing_Address bssgp_dst_addr, bssgp_src_addr;
 	var template PDU_BSSGP bssgp_rim_pdu_expect;
@@ -2908,11 +2914,11 @@ testcase TC_rim_eutran_to_geran() runs on test_CT {
 
 	T.start;
 	alt {
-	[] GTPC.receive(gtpc_pdu_exp) {
+	[] GTP[0].receive(gtpc_pdu_exp) {
 		setverdict(pass);
 		T.stop;
 		}
-	[] GTPC.receive {
+	[] GTP[0].receive {
 		setverdict(fail, "Unexpected GTPC RIM PDU received");
 		}
 	[] T.timeout {
@@ -3004,7 +3010,7 @@ private function f_TC_cell_change_different_rai_ci_data(charstring id) runs on B
 	timer T := 2.0;
 	T.start;
 	alt {
-	[] GTP[GTP_GGSN_IDX].receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload)) {
+	[] GTP1U[GTP_GGSN_IDX].receive(tr_GTPU_GPDU(peer, apars.ggsn_tei_u, payload)) {
 		setverdict(fail, "Unexpected GTP message");
 	}
 	[] T.timeout { setverdict(pass); }
@@ -3058,7 +3064,7 @@ testcase TC_cell_change_different_ci_data() runs on test_CT {
 private function f_TC_sgsn_context_req_in(charstring id) runs on BSSGP_ConnHdlr {
 	var integer seq_nr := f_rnd_int(65535);
 	var Gtp1cUnitdata gtpc_ud;
-	var OCT4 teidc := f_gtp_teid_random();
+	var OCT4 teidc := f_gtp_teic_random();
 	timer T;
 
 	var Gtp1cPeer peer := {
@@ -3130,7 +3136,7 @@ testcase TC_sgsn_context_req_in() runs on test_CT {
 private function f_TC_sgsn_context_req_out(charstring id) runs on BSSGP_ConnHdlr {
 	var integer seq_nr := f_rnd_int(65535);
 	var Gtp1cUnitdata gtpc_ud;
-	var OCT4 teidc := f_gtp_teid_random();
+	var OCT4 teidc := f_gtp_teic_random();
 	timer T;
 
 	/* The MS goes to GERAN/UTRAN from an LTE cell */

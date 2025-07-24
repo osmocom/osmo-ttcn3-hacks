@@ -1,6 +1,7 @@
 /* GTP Emulation in TTCN-3
  *
  * (C) 2018 Harald Welte <laforge@gnumonks.org>
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
  * All rights reserved.
  *
  * Released under the terms of GNU General Public License, Version 2 or
@@ -15,11 +16,8 @@ import from IPL4asp_Types all;
 import from General_Types all;
 import from Osmocom_Types all;
 import from GTPC_Types all;
-import from GTPU_Types all;
 import from GTPv1C_CodecPort all;
-import from GTPv1U_CodecPort all;
 import from GTPv1C_CodecPort_CtrlFunct all;
-import from GTPv1U_CodecPort_CtrlFunct all;
 
 /***********************************************************************
  * Main Emulation Component
@@ -27,20 +25,16 @@ import from GTPv1U_CodecPort_CtrlFunct all;
 
 const integer GTP0_PORT := 3386;
 const integer GTP1C_PORT := 2123;
-const integer GTP1U_PORT := 2152;
 
 type record GtpEmulationCfg {
 	HostName gtpc_bind_ip optional,
 	PortNumber gtpc_bind_port optional,
-	HostName gtpu_bind_ip optional,
-	PortNumber gtpu_bind_port optional,
 	boolean sgsn_role
 };
 
 type component GTP_Emulation_CT {
 	/* Communication with underlying GTP CodecPort */
 	port GTPC_PT GTPC;
-	port GTPU_PT GTPU;
 
 	/* Communication with Clients */
 	port GTPEM_PT CLIENT;
@@ -51,15 +45,15 @@ type component GTP_Emulation_CT {
 	var GtpEmulationCfg g_gtp_cfg;
 
 	/* State */
-	var integer g_gtpc_id, g_gtpu_id;
+	var integer g_gtpc_id;
 	var OCT1 g_restart_ctr;
-	var uint16_t g_c_seq_nr, g_u_seq_nr;
+	var uint16_t g_c_seq_nr;
 	var TidTableRec TidTable[16];
 	var ImsiTableRec ImsiTable[16];
 };
 
 type record TidTableRec {
-	OCT4 teid,
+	OCT4 teic,
 	GTP_ConnHdlr vc_conn
 };
 
@@ -68,14 +62,14 @@ type record ImsiTableRec {
 	GTP_ConnHdlr vc_conn
 };
 
-private function f_comp_by_teid(OCT4 teid) runs on GTP_Emulation_CT return GTP_ConnHdlr {
+private function f_comp_by_teic(OCT4 teic) runs on GTP_Emulation_CT return GTP_ConnHdlr {
 	var integer i;
 	for (i := 0; i < sizeof(TidTable); i := i+1) {
-		if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+		if (isbound(TidTable[i].teic) and TidTable[i].teic == teic) {
 			return TidTable[i].vc_conn;
 		}
 	}
-	setverdict(fail, "No Component for TEID ", teid);
+	setverdict(fail, "No Component for TEIC ", teic);
 	mtc.stop;
 }
 
@@ -90,16 +84,16 @@ private function f_comp_by_imsi(hexstring imsi) runs on GTP_Emulation_CT return 
 	mtc.stop;
 }
 
-private function f_tid_tbl_add(OCT4 teid, GTP_ConnHdlr vc_conn) runs on GTP_Emulation_CT {
+private function f_tid_tbl_add(OCT4 teic, GTP_ConnHdlr vc_conn) runs on GTP_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(TidTable); i := i+1) {
-		if (not isbound(TidTable[i].teid)) {
-			TidTable[i].teid := teid;
+		if (not isbound(TidTable[i].teic)) {
+			TidTable[i].teic := teic;
 			TidTable[i].vc_conn := vc_conn;
 			return;
 		}
 	}
-	testcase.stop("No Space in TidTable for ", teid);
+	testcase.stop("No Space in TidTable for ", teic);
 }
 
 private function f_imsi_tbl_add(hexstring imsi, GTP_ConnHdlr vc_conn) runs on GTP_Emulation_CT {
@@ -220,38 +214,29 @@ private function f_init(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
 		g_gtpc_id := res.connId;
 	}
 
-	if (isvalue(cfg.gtpu_bind_ip) and isvalue(cfg.gtpu_bind_port)) {
-		map(self:GTPU, system:GTPU);
-		res := GTPv1U_CodecPort_CtrlFunct.f_GTPU_listen(GTPU, cfg.gtpu_bind_ip,
-							     cfg.gtpu_bind_port, {udp:={}});
-		g_gtpu_id := res.connId;
-	}
-
 	g_restart_ctr := f_rnd_octstring(1);
 	g_c_seq_nr := f_rnd_int(65535);
-	g_u_seq_nr := f_rnd_int(65535);
 	g_gtp_cfg := cfg;
 }
 
 function main(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
 	var Gtp1cUnitdata g1c_ud;
-	var Gtp1uUnitdata g1u_ud;
 	var GTP_ConnHdlr vc_conn;
 	var hexstring imsi;
-	var OCT4 teid;
+	var OCT4 teic;
 
 	f_init(cfg);
 
 	while (true) {
 	alt {
-	/* route inbound GTP-C based on IMSI or TEID */
+	/* route inbound GTP-C based on IMSI or TEIC */
 	[] GTPC.receive(Gtp1cUnitdata:?) -> value g1c_ud {
 		var template hexstring imsi_t := f_gtpc_extract_imsi(g1c_ud.gtpc);
 		if (isvalue(imsi_t)) {
 			vc_conn := f_comp_by_imsi(valueof(imsi_t));
 			CLIENT.send(g1c_ud) to vc_conn;
 		} else if(g1c_ud.gtpc.teid != int2oct(0, 4)) {
-			vc_conn := f_comp_by_teid(g1c_ud.gtpc.teid);
+			vc_conn := f_comp_by_teic(g1c_ud.gtpc.teid);
 			CLIENT.send(g1c_ud) to vc_conn;
 		} else {
 			/* Check if a default port is set: */
@@ -261,24 +246,17 @@ function main(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
 				/* Send to all clients */
 				var integer i;
 				for (i := 0; i < sizeof(TidTable); i := i+1) {
-					if (isbound(TidTable[i].teid) and TidTable[i].teid == teid) {
+					if (isbound(TidTable[i].teic) and TidTable[i].teic == teic) {
 						CLIENT.send(g1c_ud) to TidTable[i].vc_conn;
 					}
 				}
 			}
 		}
 		}
-	[] GTPU.receive(Gtp1uUnitdata:?) -> value g1u_ud {
-		vc_conn := f_comp_by_teid(g1u_ud.gtpu.teid);
-		CLIENT.send(g1u_ud) to vc_conn;
-		}
 
 	/* transparently forward any GTP-C / GTP-U from clients to peer[s] */
 	[] CLIENT.receive(Gtp1cUnitdata:?) -> value g1c_ud sender vc_conn {
 		GTPC.send(g1c_ud);
-		}
-	[] CLIENT.receive(Gtp1uUnitdata:?) -> value g1u_ud sender vc_conn {
-		GTPU.send(g1u_ud);
 		}
 	[] CLIENT_DEFAULT.receive(Gtp1cUnitdata:?) -> value g1c_ud sender vc_conn {
 		GTPC.send(g1c_ud);
@@ -289,9 +267,9 @@ function main(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
 		CLIENT_PROC.reply(GTPEM_register_imsi:{imsi}) to vc_conn;
 		}
 
-	[] CLIENT_PROC.getcall(GTPEM_register_teid:{?}) -> param(teid) sender vc_conn {
-		f_tid_tbl_add(teid, vc_conn);
-		CLIENT_PROC.reply(GTPEM_register_teid:{teid}) to vc_conn;
+	[] CLIENT_PROC.getcall(GTPEM_register_teic:{?}) -> param(teic) sender vc_conn {
+		f_tid_tbl_add(teic, vc_conn);
+		CLIENT_PROC.reply(GTPEM_register_teic:{teic}) to vc_conn;
 		}
 
 	}
@@ -303,14 +281,14 @@ function main(GtpEmulationCfg cfg) runs on GTP_Emulation_CT {
  * Interaction between Main and Client Components
  ***********************************************************************/
 type port GTPEM_PT message {
-	inout Gtp1cUnitdata, Gtp1uUnitdata;
+	inout Gtp1cUnitdata;
 } with { extension "internal" };
 
 signature GTPEM_register_imsi(hexstring imsi);
-signature GTPEM_register_teid(OCT4 teid);
+signature GTPEM_register_teic(OCT4 teic);
 
 type port GTPEM_PROC_PT procedure {
-	inout GTPEM_register_imsi, GTPEM_register_teid;
+	inout GTPEM_register_imsi, GTPEM_register_teic;
 } with { extension "internal" };
 
 /***********************************************************************
@@ -331,13 +309,13 @@ function f_gtp_register_imsi(hexstring imsi, integer gtp_idx := 0) runs on GTP_C
 	}
 }
 
-function f_gtp_register_teid(OCT4 teid, integer gtp_idx := 0) runs on GTP_ConnHdlr {
-	GTP_PROC[gtp_idx].call(GTPEM_register_teid:{teid}) {
-		[] GTP_PROC[gtp_idx].getreply(GTPEM_register_teid:{teid});
+function f_gtp_register_teic(OCT4 teic, integer gtp_idx := 0) runs on GTP_ConnHdlr {
+	GTP_PROC[gtp_idx].call(GTPEM_register_teic:{teic}) {
+		[] GTP_PROC[gtp_idx].getreply(GTPEM_register_teic:{teic});
 	}
 }
 
-function f_gtp_teid_random() return OCT4 {
+function f_gtp_teic_random() return OCT4 {
 	return f_rnd_octstring(4);
 }
 }

@@ -45,7 +45,7 @@ FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
-FILES="GTPC_EncDec.cc  GTPC_Types.ttcn  GTPU_EncDec.cc  GTPU_Types.ttcn"
+FILES="GTPU_EncDec.cc  GTPU_Types.ttcn"
 gen_links $DIR $FILES
 
 DIR=../library/hnbap
@@ -63,9 +63,8 @@ FILES="HNBLLIF_Types.ttcn HNBLLIF_Templates.ttcn HNBLLIF_CodecPort.ttcn "
 FILES+="Iuh_Types.ttcn Iuh_CodecPort.ttcn Iuh_CodecPort_CtrlFunctDef.cc Iuh_CodecPort_CtrlFunct.ttcn Iuh_Emulation.ttcn DNS_Helpers.ttcn "
 FILES+="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc IPA_Emulation.ttcnpp Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn RTP_CodecPort.ttcn RTP_CodecPort_CtrlFunct.ttcn RTP_CodecPort_CtrlFunctDef.cc RTP_Emulation.ttcn IuUP_Types.ttcn IuUP_EncDec.cc IuUP_Emulation.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
-FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1C_Templates.ttcn "
-FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn "
-FILES+="GTP_Emulation.ttcn IPCP_Types.ttcn IPCP_Templates.ttcn GSM_Types.ttcn "
+FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn GTPv1U_Emulation.ttcnpp "
+FILES+="IPCP_Types.ttcn IPCP_Templates.ttcn GSM_Types.ttcn "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
 
