@@ -1,17 +1,6 @@
 # Copyright 2017 Harald Welte
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 
 ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
@@ -81,10 +70,8 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 			$(OSMOGITEA_REPOS) \
 			$(FORKEDGITLAB_REPOS)
 
-# Tag names from 'git-describe --tags'; if not available, a commit hash may be used instead.
-# Do not put references to branches here, except for local testing: this breaks the caching
-# logic of docker containers, which only invalidate their cached ttcn3 dependencies if this
-# file changed.
+# Use tag names from 'git describe --tags' or commit hashes. This way we get
+# exact commits of deps when doing regression testing.
 nas_commit=					eff069b772a53e16773638f07599e7936ffcdd9a
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
