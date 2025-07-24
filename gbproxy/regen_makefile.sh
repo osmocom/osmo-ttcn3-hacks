@@ -8,10 +8,6 @@ FILES="
 	AF_PACKET_PT.cc
 	AF_PACKET_PT.hh
 	BSSGP_EncDec.cc
-	GTPC_EncDec.cc
-	GTPU_EncDec.cc
-	GTPv1C_CodecPort_CtrlFunctDef.cc
-	GTPv1U_CodecPort_CtrlFunctDef.cc
 	IPA_CodecPort_CtrlFunctDef.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
