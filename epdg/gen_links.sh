@@ -37,10 +37,6 @@ DIR=$BASEDIR/titan.ProtocolModules.MobileL3_v13.4.0/src
 FILES="MobileL3_CommonIE_Types.ttcn MobileL3_GMM_SM_Types.ttcn MobileL3_MM_Types.ttcn "
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/osmo-uecups/ttcn3
-FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
-gen_links $DIR $FILES
-
 DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPU_EncDec.cc GTPU_Types.ttcn "
 gen_links $DIR $FILES
@@ -59,7 +55,7 @@ FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc4004_Templates.ttcn DIAMETER_rfc5447
 FILES+="IPA_Types.ttcn IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc
 IPA_Emulation.ttcnpp "
 FILES+="PCO_Types.ttcn GSUP_Types.ttcn GSUP_Templates.ttcn GSUP_Emulation.ttcn "
-FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn GTPv1U_Emulation.ttcn "
+FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn GTPv1U_Emulation.ttcnpp "
 FILES+="GTPv2_PrivateExtensions.ttcn GTPv2_Templates.ttcn "
 FILES+="GTPv2_CodecPort.ttcn GTPv2_CodecPort_CtrlFunctDef.cc GTPv2_CodecPort_CtrlFunct.ttcn GTPv2_Emulation.ttcn "
 FILES+="ICMP_Templates.ttcn "

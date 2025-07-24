@@ -4,6 +4,7 @@ NAME=PGW_Tests
 
 FILES="
 	*.ttcn
+	*.ttcnpp
 	BSSGP_EncDec.cc
 	DIAMETER_CodecPort_CtrlFunctDef.cc
 	DIAMETER_EncDec.cc
@@ -23,6 +24,10 @@ FILES="
 	TCCEncoding.cc
 	UDP_EncDec.cc
 	UECUPS_CodecPort_CtrlFunctDef.cc
+"
+
+CPPFLAGS_TTCN3="
+	-DGTP1U_EMULATION_HAVE_UECUPS
 "
 
 . ../_buildsystem/regen_makefile.inc.sh
