@@ -18,6 +18,14 @@ DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
 FILES="IPL4asp_Functions.ttcn  IPL4asp_PT.cc  IPL4asp_PT.hh IPL4asp_PortType.ttcn  IPL4asp_Types.ttcn  IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
+FILES="GTPU_EncDec.cc GTPU_Types.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/osmo-uecups/ttcn3
+FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
+gen_links $DIR $FILES
+
 ####################
 # NG_NAS start
 ####################
@@ -80,6 +88,7 @@ FILES+="DNS_Helpers.ttcn "
 FILES+="NGAP_CodecPort.ttcn NGAP_CodecPort_CtrlFunctDef.cc NGAP_CodecPort_CtrlFunct.ttcn NGAP_Functions.ttcn NGAP_Emulation.ttcn "
 FILES+="NG_NAS_Osmo_Types.ttcn NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
 FILES+="NG_CryptoFunctionDefs.cc NG_CryptoFunctions.ttcn "
+FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn GTPv1U_Emulation.ttcnpp "
 gen_links $DIR $FILES
 
 gen_links_finish

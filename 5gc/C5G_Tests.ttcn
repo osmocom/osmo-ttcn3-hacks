@@ -45,6 +45,8 @@ import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 import from NG_CryptoFunctions all;
 
+import from GTPv1U_Emulation all;
+
 import from ConnHdlr all;
 
 /* (maximum) number of emulated UEs */
@@ -63,7 +65,20 @@ modulepar {
 	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
 	uint24_t mp_tac := 1;
 	charstring mp_apn := "internet";
-	charstring mp_local_gtpu_ip := "127.0.0.1";
+	charstring mp_local_gtpu_ip := "127.0.0.20";
+	charstring mp_ping_hostname := "10.45.0.1";
+
+	charstring mp_run_prog_log_path := "/tmp";
+	charstring mp_run_prog_as_user := "osmocom";
+}
+
+template (value) RunProgParams ts_RunProgParams(integer imsi_suffix) :=
+{
+	run_as_user := mp_run_prog_as_user,
+	log_path_prefix := mp_run_prog_log_path,
+	tun_netns_name := "tun" & int2str(imsi_suffix),
+	tun_dev_name := "tun" & int2str(imsi_suffix),
+	ping_hostname := mp_ping_hostname
 }
 
 template (value) UeParams ts_UeParams(integer imsi_suffix) :=
@@ -73,14 +88,13 @@ template (value) UeParams ts_UeParams(integer imsi_suffix) :=
 	usim_key := mp_usim_key,
 	usim_opc := mp_usim_opc,
 	apn := mp_apn,
+	run_prog_pars := ts_RunProgParams(imsi_suffix),
 	ran_gtpu_ip := mp_local_gtpu_ip,
-	ran_gtpu_teid := int2oct(imsi_suffix, 4),
+	ran_gtpu_teid := int2oct(imsi_suffix + 1, 4),
 	cn_gtpu_ip := omit,
 	cn_gtpu_teid := omit,
-	ue_ip := omit,
-	kausf := omit,
-	kseaf := omit,
-	kamf := omit
+	qfi := omit,
+	ue_ip := omit
 }
 
 type component MTC_CT {
@@ -89,6 +103,9 @@ type component MTC_CT {
 	var NGAP_Emulation_CT vc_NGAP[NUM_NGRAN];
 	port NGAP_PT NGAP_UNIT[NUM_NGRAN];
 	port NGAPEM_PROC_PT NGAP_PROC[NUM_NGRAN];
+
+	var GTPv1U_Emulation_CT vc_GTP1U;
+	port GTP1UEM_PT TEID0;
 
 	timer g_Tguard := 30.0;
 
@@ -154,11 +171,25 @@ private function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
 	}
 }
 
+private function f_init_gtp1u() runs on MTC_CT {
+	var Gtp1uEmulationCfg cfg := {
+		gtpu_bind_ip := omit,  /* using gtpu daemon */
+		gtpu_bind_port := omit,  /* using gtpu daemon */
+		use_gtpu_daemon := true
+	};
+
+	vc_GTP1U := GTPv1U_Emulation_CT.create("GTP1U_EM");
+	map(vc_GTP1U:GTP1U, system:GTP1U);
+	connect(vc_GTP1U:TEID0, self:TEID0);
+	vc_GTP1U.start(GTPv1U_Emulation.main(cfg));
+}
+
 private function f_init(integer imsi_suffix := 0, float t_guard := 30.0) runs on MTC_CT {
 	/* start guard timer and activate it as default */
 	g_Tguard.start(t_guard);
 	activate(as_Tguard());
 
+	f_init_gtp1u();
 	f_init_ngap(imsi_suffix);
 }
 
@@ -184,6 +215,10 @@ runs on MTC_CT return ConnHdlr {
 	/* NGAP part */
 	connect(vc_conn:NGAP, vc_NGAP[ngap_idx]:NGAP_CLIENT);
 	connect(vc_conn:NGAP_PROC, vc_NGAP[ngap_idx]:NGAP_PROC);
+
+	/* GTPv1U */
+	connect(vc_conn:GTP1U[0], vc_GTP1U:CLIENT);
+	connect(vc_conn:GTP1U_PROC[0], vc_GTP1U:CLIENT_PROC);
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
@@ -278,11 +313,29 @@ testcase TC_ng_register() runs on MTC_CT {
 	vc_conn.done;
 }
 
+private function f_TC_register_ping4() runs on ConnHdlr {
+	f_register();
+	f_pdu_sess_create_tun();
+	f_sleep(1.0);
+	f_ping4(g_pars.ue_pars.run_prog_pars.ping_hostname);
+	f_pdu_sess_delete_tun();
+}
+testcase TC_ng_register_ping4() runs on MTC_CT {
+	f_init();
+	f_ngap_setup(0);
+
+	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_with_pars(refers(f_TC_register_ping4), pars);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_ng_setup() );
 	execute( TC_ng_setup_unknown_global_gnb_id_plmn() );
 	execute( TC_ng_setup_wrong_tac() );
 	execute( TC_ng_register() );
+	execute( TC_ng_register_ping4() );
 }
 
 

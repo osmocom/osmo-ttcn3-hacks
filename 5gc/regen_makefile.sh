@@ -6,6 +6,7 @@ FILES="
 	*.asn
 	*.c
 	*.ttcn
+	*.ttcnpp
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
@@ -18,6 +19,13 @@ FILES="
 	TCCConversion.cc
 	TCCEncoding.cc
 	TCCInterface.cc
+	GTPU_EncDec.cc
+	GTPv1U_CodecPort_CtrlFunctDef.cc
+	UECUPS_CodecPort_CtrlFunctDef.cc
+"
+
+CPPFLAGS_TTCN3="
+	-DGTP1U_EMULATION_HAVE_UECUPS
 "
 
 . ../_buildsystem/regen_makefile.inc.sh

@@ -45,6 +45,9 @@ import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 import from NG_CryptoFunctions all;
 
+import from GTPv1U_Emulation all;
+import from UECUPS_Types all;
+
 /* (maximum) number of emulated eNBs */
 const integer NUM_NGRAN := 1;
 
@@ -55,6 +58,12 @@ type record NGRANParams {
 	SupportedTAList supported_ta_list
 }
 
+type record UeDerivedKeys {
+	OCT32 kausf,
+	OCT32 kseaf,
+	OCT32 kamf
+};
+
 /* parameters of emulated UE */
 type record UeParams {
 	HEX15n imsi,
@@ -62,15 +71,22 @@ type record UeParams {
 	octetstring usim_key,
 	octetstring usim_opc,
 	charstring apn,
+	RunProgParams run_prog_pars,
 	charstring ran_gtpu_ip,
 	OCT4 ran_gtpu_teid,
 	charstring cn_gtpu_ip optional,
 	OCT4 cn_gtpu_teid optional,
-	charstring ue_ip optional,
-	OCT32 kausf optional,
-	OCT32 kseaf optional,
-	OCT32 kamf optional
-}
+	OCT1 qfi optional,
+	charstring ue_ip optional
+};
+
+type record RunProgParams {
+	charstring run_as_user,
+	charstring log_path_prefix,
+	charstring tun_netns_name,
+	charstring tun_dev_name,
+	charstring ping_hostname
+};
 
 type record ConnHdlrPars {
 	/* copied over from MTC_CT on start of component */
@@ -83,8 +99,12 @@ type record ConnHdlrPars {
 	NAS_KeySetIdentifier kset_id
 }
 
-type component ConnHdlr extends NGAP_ConnHdlr {
+type component ConnHdlr extends NGAP_ConnHdlr, GTP1U_ConnHdlr {
 	var ConnHdlrPars g_pars;
+	var UeDerivedKeys g_keys;
+
+	/* number of programs started, used as identifier. */
+	var integer g_start_prog_count := 0;
 }
 
 type function void_fn() runs on ConnHdlr;
@@ -177,14 +197,14 @@ private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHd
 		}
 
 		var octetstring ssn := f_NG_NAS_ServingNetworkName_OCT(f_imsi_plmn_id(), omit);
-		g_pars.ue_pars.kausf := f_kdf_kausf(ck, ik, ssn, autn);
-		g_pars.ue_pars.kseaf := f_kdf_kseaf(g_pars.ue_pars.kausf, ssn);
-		g_pars.ue_pars.kamf := f_kdf_kamf(g_pars.ue_pars.kseaf, char2oct(hex2str(g_pars.ue_pars.imsi)), abba);
+		g_keys.kausf := f_kdf_kausf(ck, ik, ssn, autn);
+		g_keys.kseaf := f_kdf_kseaf(g_keys.kausf, ssn);
+		g_keys.kamf := f_kdf_kamf(g_keys.kseaf, char2oct(hex2str(g_pars.ue_pars.imsi)), abba);
 
 		var NGAPEM_Config cfg := {
 			set_nas_keys := {
-				k_nas_int := f_kdf_ng_nas_int(g_pars.ue_pars.kamf, NG_NAS_ALG_IP_NIA1),
-				k_nas_enc := f_kdf_ng_nas_enc(g_pars.ue_pars.kamf, NG_NAS_ALG_ENC_NEA0)
+				k_nas_int := f_kdf_ng_nas_int(g_keys.kamf, NG_NAS_ALG_IP_NIA1),
+				k_nas_enc := f_kdf_ng_nas_enc(g_keys.kamf, NG_NAS_ALG_ENC_NEA0)
 			}
 		};
 		NGAP.send(cfg);
@@ -325,6 +345,7 @@ private function f_pdu_sess_establish() runs on ConnHdlr {
 	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
 	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
 							       rx_nas.dl_Nas_Transport.payload.payload);
+	g_pars.ue_pars.qfi := inner_nas.pdu_Session_Establishment_Accept.authorizedQoSRules.listofQoSRules[0].identifier;
 	g_pars.ue_pars.ue_ip := f_inet_ntoa(inner_nas.pdu_Session_Establishment_Accept.pduAddress.adressInfo);
 	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.cn_gtpu_teid);
 	log("5GC assigned UE IP address: ", g_pars.ue_pars.ue_ip);
@@ -368,6 +389,69 @@ function f_register() runs on ConnHdlr {
 	as_ngap_handle_configuration_update();
 
 	f_pdu_sess_establish();
+}
+
+function f_pdu_sess_create_tun() runs on ConnHdlr {
+	var template (value) UECUPS_GtpExtHdr gtp_ext_hdr;
+	var template (value) UECUPS_CreateTun uecups_create;
+	var template (value) UECUPS_GtpExtHdr_PduSessContainer pdu_sess_cont;
+
+	pdu_sess_cont := ts_UECUPS_GtpExtHdr_PduSessContainer(UECUPS_GtpExtHdr_PduSessContainer_Type_ul_pdu_sess_info,
+							      oct2int(g_pars.ue_pars.qfi));
+	gtp_ext_hdr := ts_UECUPS_GtpExtHdr(pdu_session_container := pdu_sess_cont);
+
+	uecups_create := ts_UECUPS_CreateTun(
+		tx_teid := oct2int(g_pars.ue_pars.cn_gtpu_teid),
+		rx_teid := oct2int(g_pars.ue_pars.ran_gtpu_teid),
+		user_addr_type := IPV4,
+		user_addr := f_inet_addr(g_pars.ue_pars.ue_ip),
+		local_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(g_pars.ue_pars.ran_gtpu_ip))),
+		remote_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(g_pars.ue_pars.cn_gtpu_ip))),
+		tun_dev_name := g_pars.ue_pars.run_prog_pars.tun_dev_name,
+		tun_netns_name := g_pars.ue_pars.run_prog_pars.tun_netns_name,
+		gtp_ext_hdr := gtp_ext_hdr
+	);
+
+	f_gtp1u_create_tunnel(uecups_create);
+}
+
+/* destroy tunnel in daemon */
+function f_pdu_sess_delete_tun() runs on ConnHdlr {
+	var template (value) UECUPS_DestroyTun uecups_destroy;
+	uecups_destroy := ts_UECUPS_DestroyTun(
+		local_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(g_pars.ue_pars.ran_gtpu_ip))),
+		rx_teid := oct2int(g_pars.ue_pars.ran_gtpu_teid)
+	);
+	f_gtp1u_destroy_tunnel(uecups_destroy);
+}
+
+private function f_run_prog_init(charstring command) runs on ConnHdlr return UECUPS_StartProgram
+{
+	var template (value) UECUPS_StartProgram sprog := ts_UECUPS_StartProgram(
+		command := command,
+		environment := {},
+		run_as_user := g_pars.ue_pars.run_prog_pars.run_as_user,
+		tun_netns_name := g_pars.ue_pars.run_prog_pars.tun_netns_name
+	);
+	return valueof(sprog);
+}
+
+private function f_run_prog_unique_log_path() runs on ConnHdlr return charstring
+{
+	var charstring id := testcasename() & "-" & hex2str(g_pars.ue_pars.imsi) & "-" & int2str(g_start_prog_count);
+	var charstring prefix :=  g_pars.ue_pars.run_prog_pars.log_path_prefix & "/" & id;
+	g_start_prog_count := g_start_prog_count + 1;
+	return prefix;
+}
+
+/* execute ping command and wait for result */
+function f_ping4(charstring host, integer interval := 1, integer count := 10) runs on ConnHdlr
+{
+	/* command will be filled in by f_gtp1u_ping4() below: */
+	var UECUPS_StartProgram sprog := f_run_prog_init("");
+	f_gtp1u_ping4(sprog, host, interval, count, g_pars.ue_pars.ue_ip,
+		      redirect_output := true,
+		      redirect_output_path_prefix := f_run_prog_unique_log_path());
 }
 
 }

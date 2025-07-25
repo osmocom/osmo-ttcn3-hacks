@@ -72,7 +72,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 
 # Use tag names from 'git describe --tags' or commit hashes. This way we get
 # exact commits of deps when doing regression testing.
-nas_commit=					320d388e3aaee6c4f81488e6b5a8a27e7947b690
+nas_commit=					dcb175be8b2d9b4daf3e8a4ebf27da3caae8f7cb
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
 titan.ProtocolEmulations.SCCP_commit=	 	750a3e836831e58eae59d4757ef5d0c759f9ca5d
@@ -124,7 +124,7 @@ titan.TestPorts.TELNETasp_commit=		873fe539642542cd9a901c208f1ec11c6d2f5387
 titan.TestPorts.UDPasp_commit=			54176e95850654e5e8b0ffa2f1b5f35c412b949c
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-13-gd34ab71
 titan.TestPorts.USB_commit=			a9470fdc99c82fbf988f4508c3161118c9106e28
-osmo-uecups_commit=				0eb4f08a31fd1d7aac6ffe9c6a60503f17c01787
+osmo-uecups_commit=				fdff5ae0b7addf07c368adbe31610d4e57dac273
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)

@@ -32,10 +32,8 @@ add_tun_all() {
 	add_tun "ogstun6"
 	add_tun "ogstun46"
 
-	add_addr "ogstun4" "176.16.16.1/20"
-	add_addr "ogstun6" "2001:780:44:2000:0:0:0:1/56"
-	add_addr "ogstun46" "176.16.32.1/20"
-	add_addr "ogstun46" "2001:780:44:2100:0:0:0:1/56"
+	add_addr "ogstun46" "10.45.0.1/16"
+	add_addr "ogstun46" "cafe::1/64"
 
 	sudo ip link set ogstun4 up
 	sudo ip link set ogstun6 up
@@ -58,11 +56,6 @@ del_tun_all() {
 }
 
 check_usage
-
-# Add a bridge reachable through the GTP tunnel that can answer ICMP
-# pings (for e.g. TC_pdp4_act_deact_gtpu_access). The bridge is also used to
-# connect the SUT when it runs in QEMU.
-EXTRA_IPS="172.18.3.201 fd02:db8:3::201" add_remove_testenv0_bridge.sh
 
 case "$TESTENV_CLEAN_REASON" in
 	prepare)
