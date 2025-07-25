@@ -114,12 +114,13 @@ type component MTC_CT {
 	port NGAP_PT NGAP_UNIT[NUM_NGRAN];
 	port NGAPEM_PROC_PT NGAP_PROC[NUM_NGRAN];
 
+	timer g_Tguard := 30.0;
+
 	var UeParams g_ue_pars[NUM_UE];
 }
 
 type component ConnHdlr extends NGAP_ConnHdlr {
 	var ConnHdlrPars g_pars;
-	timer g_Tguard := 30.0;
 }
 
 type record ConnHdlrPars {
@@ -134,13 +135,13 @@ type record ConnHdlrPars {
 }
 
 /* send incoming unit data messages (like reset) to global NGAP_UNIT port */
-friend function NGapForwardUnitdataCallback(NGAP_PDU msg)
+private function NGapForwardUnitdataCallback(NGAP_PDU msg)
 runs on NGAP_Emulation_CT return template NGAP_PDU {
 	NGAP_UNIT.send(msg);
 	return omit;
 }
 
-friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
+private function f_init_one_ngran(integer num := 0) runs on MTC_CT {
 	var charstring id := testcasename() & "-NGAP" & int2str(num);
 	var NGAPOps ops := {
 		create_cb := refers(NGAP_Emulation.ExpectedCreateCallback),
@@ -177,12 +178,12 @@ friend function f_init_one_ngran(integer num := 0) runs on MTC_CT {
 	NGAP_UNIT[num].receive(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP});
 }
 
-friend function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
+private function f_init_one_ue(inout UeParams uep, integer imsi_suffix) {
 
 	uep := valueof(ts_UeParams(imsi_suffix));
 }
 
-friend function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
+private function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
 	var integer i;
 	for (i := 0; i < NUM_NGRAN; i := i+1) {
 		f_init_one_ngran(i);
@@ -192,8 +193,16 @@ friend function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
 	}
 }
 
+private function f_init(integer imsi_suffix := 0, float t_guard := 30.0) runs on MTC_CT {
+	/* start guard timer and activate it as default */
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+
+	f_init_ngap(imsi_suffix);
+}
+
 /* generate parameters for a connection handler */
-friend function f_init_pars(integer ue_idx := 0)
+private function f_init_pars(integer ue_idx := 0)
 runs on MTC_CT return ConnHdlrPars {
 	var ConnHdlrPars pars := {
 		ngran_pars := g_ngran_pars,
@@ -204,10 +213,10 @@ runs on MTC_CT return ConnHdlrPars {
 	return pars;
 }
 
-type function void_fn(ConnHdlrPars pars) runs on ConnHdlr;
+type function void_fn() runs on ConnHdlr;
 
 /* start a connection handler with given parameters */
-friend function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer ngap_idx := 0)
+private function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer ngap_idx := 0)
 runs on MTC_CT return ConnHdlr {
 	var ConnHdlr vc_conn;
 	var charstring id := testcasename() & int2str(ngap_idx);
@@ -219,24 +228,21 @@ runs on MTC_CT return ConnHdlr {
 
 	/* We cannot use vc_conn.start(f_init_handler(fn, id, pars)); as we cannot have
 	 * a stand-alone 'derefers()' call, see https://www.eclipse.org/forums/index.php/t/1091364/ */
-	vc_conn.start(derefers(fn)(pars));
+	vc_conn.start(f_init_handler(fn, pars));
 	return vc_conn;
 }
 
 /* altstep for the global guard timer */
-private altstep as_Tguard()runs on ConnHdlr {
+private altstep as_Tguard()runs on MTC_CT {
 	[] g_Tguard.timeout {
-		setverdict(fail, "Tguard timeout");
-		mtc.stop;
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
 	}
 }
 
-friend function f_init_handler(ConnHdlrPars pars, float t_guard := 30.0) runs on ConnHdlr {
+private function f_init_handler(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
 	/* make parameters available via component variable */
 	g_pars := pars;
-	/* start guard timre and activate it as default */
-	g_Tguard.start(t_guard);
-	activate(as_Tguard());
+	fn.apply();
 }
 
 private template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
@@ -277,7 +283,7 @@ private function f_ULI() runs on ConnHdlr return UserLocationInformation {
 	return valueof(p_ueLocInf);
 }
 
-friend function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
+private function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
 	var template (present) NGAP_IEs.Cause exp_cause := ?;
 	var boolean exp_fail := false;
 	timer T := 5.0;
@@ -563,30 +569,29 @@ private function f_register() runs on ConnHdlr {
 /* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
  * Related: https://github.com/open5gs/open5gs/issues/3544 */
 testcase TC_ng_setup_unknown_global_gnb_id_plmn() runs on MTC_CT {
-	f_init_ngap();
+	f_init();
 	g_ngran_pars[0].global_ngran_id.globalGNB_ID.pLMNIdentity := '62F224'O;
 	f_ngap_setup(0);
 }
 
 /* Unsuccessful NG Setup procedure to AMF (wrong PLMN) */
 testcase TC_ng_setup_wrong_tac() runs on MTC_CT {
-	f_init_ngap();
+	f_init();
 	g_ngran_pars[0].supported_ta_list[0].broadcastPLMNList[0].pLMNIdentity := '62F224'O;
 	f_ngap_setup(0, {misc:=unknown_PLMN_or_SNPN});
 }
 
 /* NG Setup procedure to 5GC using a correct Global gNB ID. */
 testcase TC_ng_setup() runs on MTC_CT {
-	f_init_ngap();
+	f_init();
 	f_ngap_setup(0);
 }
 
-private function f_TC_register(ConnHdlrPars pars) runs on ConnHdlr {
-	f_init_handler(pars);
+private function f_TC_register() runs on ConnHdlr {
 	f_register();
 }
 testcase TC_ng_register() runs on MTC_CT {
-	f_init_ngap();
+	f_init();
 	f_ngap_setup(0);
 
 	var ConnHdlrPars pars := f_init_pars(ue_idx := 0);
