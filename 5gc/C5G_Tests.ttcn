@@ -45,12 +45,10 @@ import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 import from NG_CryptoFunctions all;
 
-/* (maximum) number of emulated eNBs */
-const integer NUM_NGRAN := 1;
+import from ConnHdlr all;
 
 /* (maximum) number of emulated UEs */
 const integer NUM_UE := 1;
-
 
 modulepar {
 	/* NG-C interface */
@@ -68,35 +66,13 @@ modulepar {
 	charstring mp_local_gtpu_ip := "127.0.0.1";
 }
 
-/* parameters of emulated gNB / ng-eNB */
-type record NGRANParams {
-	GlobalRANNodeID global_ngran_id,
-	NGRAN_CGI cell_identity,
-	SupportedTAList supported_ta_list
-}
-
-/* parameters of emulated UE */
-type record UeParams {
-	HEX15n imsi,
-	HEX16n imeisv,
-	octetstring usim_key,
-	octetstring usim_opc,
-	charstring ran_gtpu_ip,
-	OCT4 ran_gtpu_teid,
-	charstring cn_gtpu_ip optional,
-	OCT4 cn_gtpu_teid optional,
-	charstring ue_ip optional,
-	OCT32 kausf optional,
-	OCT32 kseaf optional,
-	OCT32 kamf optional
-}
-
 template (value) UeParams ts_UeParams(integer imsi_suffix) :=
 {
 	imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), imsi_suffix),
 	imeisv := f_rnd_imeisv(),
 	usim_key := mp_usim_key,
 	usim_opc := mp_usim_opc,
+	apn := mp_apn,
 	ran_gtpu_ip := mp_local_gtpu_ip,
 	ran_gtpu_teid := int2oct(imsi_suffix, 4),
 	cn_gtpu_ip := omit,
@@ -117,21 +93,6 @@ type component MTC_CT {
 	timer g_Tguard := 30.0;
 
 	var UeParams g_ue_pars[NUM_UE];
-}
-
-type component ConnHdlr extends NGAP_ConnHdlr {
-	var ConnHdlrPars g_pars;
-}
-
-type record ConnHdlrPars {
-	/* copied over from MTC_CT on start of component */
-	NGRANParams ngran_pars[NUM_NGRAN],
-	/* copied over from MTC_CT on start of component */
-	UeParams ue_pars,
-	/* currently used 5GC (index into ngran_pars, NGAP, ...) */
-	integer c5g_idx,
-	/* Currently set KSI */
-	NAS_KeySetIdentifier kset_id
 }
 
 /* send incoming unit data messages (like reset) to global NGAP_UNIT port */
@@ -213,8 +174,6 @@ runs on MTC_CT return ConnHdlrPars {
 	return pars;
 }
 
-type function void_fn() runs on ConnHdlr;
-
 /* start a connection handler with given parameters */
 private function f_start_handler_with_pars(void_fn fn, ConnHdlrPars pars, integer ngap_idx := 0)
 runs on MTC_CT return ConnHdlr {
@@ -243,44 +202,6 @@ private function f_init_handler(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr 
 	/* make parameters available via component variable */
 	g_pars := pars;
 	fn.apply();
-}
-
-private template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
-	pLMNIdentity := ngran_pars.global_ngran_id.globalGNB_ID.pLMNIdentity,
-	tAC := ngran_pars.supported_ta_list[0].tAC,
-	iE_Extensions := omit
-}
-
-private function f_imsi_plmn_id()  runs on ConnHdlr return PLMNIdentity {
-	var hexstring imsi := g_pars.ue_pars.imsi;
-	var GsmMcc mcc := substr(imsi, 0, 3);
-	var GsmMnc mnc := substr(imsi, 3, 2);
-	return f_enc_mcc_mnc(mcc, mnc);
-}
-
-private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
-	var hexstring imsi := g_pars.ue_pars.imsi;
-	var PLMNIdentity plmn_id := f_imsi_plmn_id();
-	var octetstring imsi_suffix := imsi_hex2oct(substr(imsi, lengthof(imsi) - 10, 10));
-	return plmn_id & '21430001'O & imsi_suffix;
-}
-
-private function f_UE_SecurityCapability() runs on ConnHdlr return NG_UE_SecurityCapability {
-	var template (value) NG_UE_SecurityCapability ue_sec_cap;
-	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
-						     ngiaCap := '40'O /* ONLY NIA1 supported */);
-	return valueof(ue_sec_cap);
-}
-
-private function f_ULI() runs on ConnHdlr return UserLocationInformation {
-	var template (value) UserLocationInformation p_ueLocInf
-	p_ueLocInf := m_uPTransportLayerInformation_userLocationInformationNR(
-			m_userLocationInformationNR(
-				g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI,
-				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
-
-	));
-	return valueof(p_ueLocInf);
 }
 
 private function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
@@ -321,249 +242,6 @@ private function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause c
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for NGAP Setup result");
 		}
 	}
-}
-
-private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (present) NAS_KeySetIdentifier {
-	/* KSI not yet set, expect whatever assignment from network: */
-	if (g_pars.kset_id.nasKeySetId == tsc_NasKsi_NoKey) {
-		return cr_NAS_KeySetIdentifier(?, ?);
-	} else {
-		/* Expect specific kset_id. Upon transmitting it UE->Network, f_attach()
-		 * has updated it to the expected value. */
-		return g_pars.kset_id;
-	}
-}
-
-/* 3GPP TS 24.501 5.4.1.3.2, 3GPP TS 33.501 6.1.3.2 */
-private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHdlr {
-	var NG_NAS_DL_Message_Type rx_nas;
-	var template (present) NAS_KeySetIdentifier kset_id := f_tr_ConnHdlr_kset_id();
-	[] NGAP.receive(cr_NG_AUTHENTICATION_REQUEST) -> value rx_nas {
-		var integer ret;
-		var integer my_sqn := 0; /* TODO: move to a ConnHdlr state attribute? */
-		var OCT16 rand := bit2oct(rx_nas.authentication_Request.rand.randValue);
-		var OCT16 autn := bit2oct(rx_nas.authentication_Request.autn.aUTN);
-		var OCT2 abba := rx_nas.authentication_Request.abba.abbaValue;
-		var OCT16 ik;
-		var OCT16 ck;
-		var OCT8 res;
-		var OCT14 auts;
-
-		g_pars.kset_id := rx_nas.authentication_Request.ngNasKeySetId;
-
-		ret := f_milenage_check(g_pars.ue_pars.usim_key,
-					g_pars.ue_pars.usim_opc,
-					int2oct(my_sqn, 8),
-					rand, autn, ik, ck, res, auts);
-		if (ret == -1) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("fx_milenage_check() failed! -1"));
-		}
-		if (ret == -2) {
-			if (not allow_resync) {
-				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-							log2str("fx_milenage_check() unexpected Resync!"));
-			}
-			log("Milenage: RX-SQN differs from SIM SQN: Re-Sync! AUTS=", auts);
-			/* 3GPP TS 24.501 5.4.1.3.6 d) */
-			NGAP.send(cs_NG_AUTHENTICATION_FAILURE(cs_GMM_GSM_Cause(omit, int2bit(21, 8)),
-							       cs_AuthFailParam(oct2bit(auts))));
-			as_ngap_handle_auth(allow_resync := false);
-			return;
-		}
-
-		var octetstring ssn := f_NG_NAS_ServingNetworkName_OCT(f_imsi_plmn_id(), omit);
-		g_pars.ue_pars.kausf := f_kdf_kausf(ck, ik, ssn, autn);
-		g_pars.ue_pars.kseaf := f_kdf_kseaf(g_pars.ue_pars.kausf, ssn);
-		g_pars.ue_pars.kamf := f_kdf_kamf(g_pars.ue_pars.kseaf, char2oct(hex2str(g_pars.ue_pars.imsi)), abba);
-
-		var NGAPEM_Config cfg := {
-			set_nas_keys := {
-				k_nas_int := f_kdf_ng_nas_int(g_pars.ue_pars.kamf, NG_NAS_ALG_IP_NIA1),
-				k_nas_enc := f_kdf_ng_nas_enc(g_pars.ue_pars.kamf, NG_NAS_ALG_ENC_NEA0)
-			}
-		};
-		NGAP.send(cfg);
-
-		/* Derive (X)RES* from (X)RES, 3GPP TS 33.501 A.4  */
-		var OCT16 res_star := f_kdf_xres_star(ssn, ck, ik, rand, res);
-		NGAP.send(cs_NG_AUTHENTICATION_RESPONSE(cs_AuthenticationResponseParameter(oct2bit(res_star))));
-	}
-}
-
-private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
-	var NGAPEM_Config cfg;
-	var NG_NAS_DL_Message_Type rx_nas;
-	/* Make sure network selected specific algos we requested: */
-	var template (present) NG_UE_SecurityCapability ue_sec_cap :=
-		cr_NG_UE_SecurityCapabilityLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
-					      ngiaCap := '40'O /* ONLY NIA1 supported */);
-
-	[] NGAP.receive(cr_NG_SECURITY_MODE_COMMAND(p_UECap := ue_sec_cap)) -> value rx_nas {
-		/* Configure integrity protection: */
-		cfg := {
-			set_nas_alg_int := NG_NAS_ALG_IP_NIA1
-		};
-		NGAP.send(cfg);
-		/* Configure Ciphering: */
-		cfg := {
-			set_nas_alg_enc := NG_NAS_ALG_ENC_NEA0
-		};
-		NGAP.send(cfg);
-
-		var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
-		var NAS_PDU nas_pdu;
-		nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
-							g_pars.kset_id.nasKeySetId,
-							g_pars.kset_id.tsc,
-							cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
-										 f_SUCI_IMSI()),
-							p_UESecurityCap := f_UE_SecurityCapability());
-		nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
-		NGAP.send(cs_NG_SECURITY_MODE_COMPLETE(cs_NG_MobileIdentityTLV_IMEISV(hex2oct(g_pars.ue_pars.imeisv)),
-										      cs_ReplayedNASMessageContainerTLV(nas_pdu)));
-	}
-}
-
-private altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
-	var NG_NAS_DL_Message_Type rx_nas;
-
-	[] NGAP.receive(cr_NG_CONFIGURATION_UPDATE_COMMAND) -> value rx_nas {
-		NGAP.send(cs_NG_CONFIGURATION_UPDATE_COMPLETE);
-	}
-}
-
-/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
-private function f_pdu_handle_session_resource_setup_item(PDUSessionResourceSetupItemCxtReq req) runs on ConnHdlr return PDUSessionResourceSetupItemCxtRes
-{
-	var PDUSessionResourceSetupItemCxtRes resp;
-	var octetstring setup_trans_enc;
-	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
-	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
-	var template (value) UPTransportLayerInformation utla;
-	var template (value) QosFlowPerTNLInformation qos;
-
-	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
-	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
-	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
-		if (setup_req_transf.protocolIEs[i].id == id_UL_NGU_UP_TNLInformation) {
-			var UPTransportLayerInformation utli := setup_req_transf.protocolIEs[i].value_.uPTransportLayerInformation;
-			g_pars.ue_pars.cn_gtpu_ip := f_inet_ntoa(bit2oct(utli.gTPTunnel.transportLayerAddress));
-			g_pars.ue_pars.cn_gtpu_teid := utli.gTPTunnel.gTP_TEID;
-		}
-	}
-
-	/* Prepare Response for it: */
-	utla := m_uPTransportLayerInformation_gTPTunnel(
-			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.ran_gtpu_ip)),
-					p_gtp_teid := g_pars.ue_pars.ran_gtpu_teid));
-	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(1) });
-	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
-	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
-	resp := valueof(m_pDUSessionResourceSetupItemCxtRes(req.pDUSessionID, setup_trans_enc));
-	return resp;
-}
-
-private function f_pdu_handle_session_resource_setup_list(PDUSessionResourceSetupListCxtReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListCxtRes
-{
-	var PDUSessionResourceSetupListCxtRes li_resp;
-	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
-		var PDUSessionResourceSetupItemCxtRes it_resp;
-		it_resp := f_pdu_handle_session_resource_setup_item(li_req[i]);
-		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
-			li_resp := { it_resp };
-		} else {
-			li_resp := li_resp & { it_resp };
-		}
-	}
-	return li_resp;
-}
-
-private altstep as_ngap_handle_InitialCtxReq_withPDUSessionList() runs on ConnHdlr {
-	var NGAP_PDU rx_ngap;
-
-	[] NGAP.receive(mw_ngap_initMsg(mw_n2_InitialContextSetupRequest_withPDUSessionList)) -> value rx_ngap {
-		var AMF_UE_NGAP_ID amf_id := valueof(f_NGAP_get_AMF_UE_NGAP_ID(rx_ngap));
-		var RAN_UE_NGAP_ID ran_id := valueof(f_NGAP_get_RAN_UE_NGAP_ID(rx_ngap));
-		var InitialContextSetupRequest ctx_setup_req := rx_ngap.initiatingMessage.value_.initialContextSetupRequest;
-		var PDUSessionResourceSetupListCxtRes resources;
-
-		for (var integer i := 0; i < lengthof(ctx_setup_req.protocolIEs); i := i + 1) {
-			if (ctx_setup_req.protocolIEs[i].id != id_PDUSessionResourceSetupListCxtReq) {
-				continue;
-			}
-			var PDUSessionResourceSetupListCxtReq li := ctx_setup_req.protocolIEs[i].value_.pDUSessionResourceSetupListCxtReq;
-			resources := f_pdu_handle_session_resource_setup_list(li);
-		}
-		NGAP.send(m_ngap_succMsg(m_n2_InitialContextSetupResponse(amf_id, ran_id, resources)));
-	}
-}
-
-private function f_pdu_sess_establish() runs on ConnHdlr {
-	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
-	var NAS_PDU nas_pdu;
-	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
-
-	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV('01'O), '01'O,
-							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
-							      p_PDU_SessionType := cs_PDU_SessionTypeTV('001'B), /* IPv4 */
-							      p_SSC_Mode := cs_SSC_ModeTV('001'B));
-	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
-	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
-					     cs_PayloadContainerLV(nas_pdu),
-					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV('01'O),
-					     p_RequestType := cs_NG_Request_TypeTV('001'B),
-					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(mp_apn)));
-	NGAP.send(nas_ul_msg);
-	as_ngap_handle_InitialCtxReq_withPDUSessionList();
-
-	/* PDU Session Establishment Accept: This DL NAS arrives contained in InitialCtxReq handled above: */
-	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
-	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
-							       rx_nas.dl_Nas_Transport.payload.payload);
-	g_pars.ue_pars.ue_ip := f_inet_ntoa(inner_nas.pdu_Session_Establishment_Accept.pduAddress.adressInfo);
-	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.cn_gtpu_teid);
-	log("5GC assigned UE IP address: ", g_pars.ue_pars.ue_ip);
-}
-
-private function f_register() runs on ConnHdlr {
-	var template (value) NGAP_PDU tx_pdu;
-	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
-	var NAS_PDU nas_pdu;
-	var NG_NAS_DL_Message_Type rx_nas;
-
-	nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
-						 g_pars.kset_id.nasKeySetId,
-						 g_pars.kset_id.tsc,
-						 cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
-									  f_SUCI_IMSI()),
-						 p_UESecurityCap := f_UE_SecurityCapability());
-	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
-	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.c5g_idx,
-						       nas_pdu, /* Registration request */
-						       f_ULI(),
-						       mo_Signalling));
-	NGAP.send(tx_pdu);
-
-	/* Expect updated KSI from network following 5G Core standards
-	*(open5gs.git 70310979c58fe186e9eaa06bec9d9a31f24ff7a1): */
-	if (g_pars.kset_id.nasKeySetId != tsc_NasKsi_NoKey) {
-		if (g_pars.kset_id.nasKeySetId == '110'B) {
-			g_pars.kset_id.nasKeySetId := '000'B;
-		} else {
-			g_pars.kset_id.nasKeySetId := int2bit(bit2int(g_pars.kset_id.nasKeySetId) + 1, 3);
-		}
-	}
-
-	as_ngap_handle_auth();
-	as_ngap_handle_sec_mode();
-
-	NGAP.receive(cr_NG_REGISTRATION_ACCEPT) -> value rx_nas;
-	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
-
-	as_ngap_handle_configuration_update();
-
-	f_pdu_sess_establish();
 }
 
 /* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
