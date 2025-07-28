@@ -124,7 +124,7 @@ titan.TestPorts.TELNETasp_commit=		873fe539642542cd9a901c208f1ec11c6d2f5387
 titan.TestPorts.UDPasp_commit=			54176e95850654e5e8b0ffa2f1b5f35c412b949c
 titan.TestPorts.UNIX_DOMAIN_SOCKETasp_commit=	R.2.A-13-gd34ab71
 titan.TestPorts.USB_commit=			a9470fdc99c82fbf988f4508c3161118c9106e28
-osmo-uecups_commit=				8362efef7c6fa341eb947a75786878e0685767b7
+osmo-uecups_commit=				0eb4f08a31fd1d7aac6ffe9c6a60503f17c01787
 
 all: $(foreach dir,$(ALL_REPOS),$(dir)/update)
 clean: $(foreach dir,$(ALL_REPOS),$(dir)/clean)
