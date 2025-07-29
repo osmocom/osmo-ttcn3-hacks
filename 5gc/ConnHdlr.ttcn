@@ -41,6 +41,7 @@ import from NG_NAS_TypeDefs all;
 import from NG_NAS_MsgContainers all;
 import from NG_NAS_Templates all;
 
+import from NG_NAS_Osmo_Types all;
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 import from NG_CryptoFunctions all;
@@ -323,7 +324,7 @@ private altstep as_ngap_handle_InitialCtxReq_withPDUSessionList() runs on ConnHd
 	}
 }
 
-private function f_pdu_sess_establish() runs on ConnHdlr {
+function f_pdu_sess_establish() runs on ConnHdlr {
 	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
 	var NAS_PDU nas_pdu;
 	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
@@ -349,6 +350,8 @@ private function f_pdu_sess_establish() runs on ConnHdlr {
 	g_pars.ue_pars.ue_ip := f_inet_ntoa(inner_nas.pdu_Session_Establishment_Accept.pduAddress.adressInfo);
 	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.cn_gtpu_teid);
 	log("5GC assigned UE IP address: ", g_pars.ue_pars.ue_ip);
+
+	f_pdu_sess_create_tun();
 }
 
 function f_register() runs on ConnHdlr {
@@ -387,8 +390,100 @@ function f_register() runs on ConnHdlr {
 	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
 
 	as_ngap_handle_configuration_update();
+}
 
-	f_pdu_sess_establish();
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_released_item(PDUSessionResourceToReleaseItemRelCmd cmd) runs on ConnHdlr return PDUSessionResourceReleasedItemRelRes
+{
+	var PDUSessionResourceReleasedItemRelRes resp;
+	var NAS_CauseValue_Type nas_cause;
+
+	nas_cause := oct2bit(cmd.pDUSessionResourceReleaseCommandTransfer);
+
+	g_pars.ue_pars.cn_gtpu_ip := omit;
+	g_pars.ue_pars.cn_gtpu_teid := omit;
+
+	/* Prepare Response for it: */
+	resp := valueof(m_pDUSessionResourceReleasedItemRelRes(cmd.pDUSessionID, bit2oct(nas_cause)));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_released_list(PDUSessionResourceToReleaseListRelCmd li_cmd) runs on ConnHdlr return PDUSessionResourceReleasedListRelRes
+{
+	var PDUSessionResourceReleasedListRelRes li_resp;
+	for (var integer i := 0; i < lengthof(li_cmd); i := i + 1) {
+		var PDUSessionResourceReleasedItemRelRes it_resp;
+		it_resp := f_pdu_handle_session_resource_released_item(li_cmd[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+private altstep as_ngap_handle_PDUSessionReleaseCommand() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+
+	[] NGAP.receive(mw_ngap_initMsg(f_tr_n2_PDUSessionResourceReleaseCommand(?, ?, ?, ?))) -> value rx_ngap {
+		var AMF_UE_NGAP_ID amf_id := valueof(f_NGAP_get_AMF_UE_NGAP_ID(rx_ngap));
+		var RAN_UE_NGAP_ID ran_id := valueof(f_NGAP_get_RAN_UE_NGAP_ID(rx_ngap));
+		var PDUSessionResourceReleaseCommand rel_cmd := rx_ngap.initiatingMessage.value_.PDUSessionResourceReleaseCommand;
+		var PDUSessionResourceReleasedListRelRes resources;
+
+		for (var integer i := 0; i < lengthof(rel_cmd.protocolIEs); i := i + 1) {
+			if (rel_cmd.protocolIEs[i].id != id_PDUSessionResourceToReleaseListRelCmd) {
+				continue;
+			}
+			var PDUSessionResourceToReleaseListRelCmd li := rel_cmd.protocolIEs[i].value_.pDUSessionResourceToReleaseListRelCmd;
+			resources := f_pdu_handle_session_resource_released_list(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceReleaseResponse(amf_id, ran_id, resources)));
+	}
+}
+
+function f_pdu_sess_release() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+	var OCT1 pdu_sess_id := '01'O;
+	var ProcedureTransactionIdentifier pti := '02'O;
+	var NAS_CauseValue_Type cause_val := c_5GSM_Cause_RegularDeactivation;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_REQUEST(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							p_Cause := cs_GMM_GSM_Cause('59'O, cause_val));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(g_pars.ue_pars.apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_PDUSessionReleaseCommand();
+
+	/* 5G-NAS PDU Session Release Command: This DL NAS arrives contained in NGAP PDUSessionReleaseCommand handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	if (not match(inner_nas, cr_NG_PDU_SESSION_RELEASE_COMMAND(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							           cs_GMM_GSM_Cause(omit, cause_val)))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected decoded NAS Payload Container ", inner_nas));
+	}
+
+	g_pars.ue_pars.qfi := omit;
+	g_pars.ue_pars.ue_ip := omit;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_COMPLETE(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							 p_Cause := cs_GMM_GSM_Cause('59'O, cause_val));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id));
+	NGAP.send(nas_ul_msg);
+
+	f_pdu_sess_delete_tun();
 }
 
 function f_pdu_sess_create_tun() runs on ConnHdlr {
