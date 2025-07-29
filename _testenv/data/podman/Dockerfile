@@ -54,6 +54,7 @@ RUN	set -x && \
 		libmicrohttpd-dev \
 		libmnl-dev \
 		libmongoc-dev \
+		libnftables-dev \
 		libnghttp2-dev \
 		libnl-route-3-dev \
 		libortp-dev \
