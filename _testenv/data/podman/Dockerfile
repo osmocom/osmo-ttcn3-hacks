@@ -162,7 +162,7 @@ RUN	set -x && \
 	mkdir -p /tmp/mongodb && \
 	cd /tmp/mongodb && \
 	wget "https://pgp.mongodb.com/server-5.0.asc" -O "/mongodb.key" && \
-	wget "http://security.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.1n-0+deb10u6_amd64.deb" && \
+	wget "http://archive.debian.org/debian-security/pool/updates/main/o/openssl/libssl1.1_1.1.1n-0+deb10u6_amd64.deb" && \
 	dpkg -i "libssl1.1_1.1.1n-0+deb10u6_amd64.deb" && \
 	echo "deb [signed-by=/mongodb.key] http://repo.mongodb.org/apt/debian bullseye/mongodb-org/5.0 main" \
 		> /etc/apt/sources.list.d/mongodb-org.list && \
