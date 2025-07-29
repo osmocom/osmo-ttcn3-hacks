@@ -86,6 +86,7 @@ def generate_env(env={}, podman=False):
 
     if install_dir and install_dir != "/":
         path += f":{os.path.join(install_dir, 'bin')}"
+        path += f":{os.path.join(install_dir, 'usr/bin')}"
 
     if podman:
         path += ":/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
