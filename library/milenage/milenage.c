@@ -90,7 +90,7 @@ static int aes_128_encrypt_block(const u8 *key, const u8 *plain, u8 *encr)
 	return 0;
 }
 
-#define DEBUG
+//#define DEBUG
 #ifdef DEBUG
 void hexdump(const char *text, const uint8_t *data, int len)
 {
