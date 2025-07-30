@@ -17,11 +17,25 @@ while ! mongosh --quiet $DB_URI</dev/null; do
 	sleep 1
 done
 
-# Create a test subscriber with IMSI=001010000000000
-$DBCTL_CMD add 999700000000000 3c6e0b8a9c15224a8228b9a98ca1531d 762a2206fe0b4151ace403c86a11e479
+NUM_SUBCRS=256
+get_subscr_imsi() {
+	subscr_idx=$1
+	printf "999700000000%03u" "$subscr_idx"
+}
 
-# Mark test subscriber with IMSI=001010000000001 as:
-# Subscriber-Status=OPERATOR_DETERMINED_BARRING (1)
-# Operator-Determined-Barring="Barring of all outgoing inter-zonal calls except those directed to the home PLMN country" (7)
-$DBCTL_CMD add 999700000000001 3c6e0b8a9c15224a8228b9a98ca1531d 762a2206fe0b4151ace403c86a11e479
-$DBCTL_CMD subscriber_status 999700000000001 1 7
+# Create a test subscriber with IMSI=001010000000000
+DBCTL_PARALLEL_JOBS=20
+idx=0
+while test "$idx" -lt "$NUM_SUBCRS"; do
+	remain="$((NUM_SUBCRS - idx))"
+	if test "$remain" -gt "$DBCTL_PARALLEL_JOBS"; then
+		iterations=$DBCTL_PARALLEL_JOBS
+	else
+		iterations=$remain
+	fi
+	for it in $(seq "$iterations"); do
+		$DBCTL_CMD add "$(get_subscr_imsi $idx)" 3c6e0b8a9c15224a8228b9a98ca1531d 762a2206fe0b4151ace403c86a11e479 &
+		idx=$((idx + 1))
+	done
+	wait $(jobs -p)
+done
