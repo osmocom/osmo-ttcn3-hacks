@@ -72,7 +72,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 
 # Use tag names from 'git describe --tags' or commit hashes. This way we get
 # exact commits of deps when doing regression testing.
-nas_commit=					dcb175be8b2d9b4daf3e8a4ebf27da3caae8f7cb
+nas_commit=					ab43cccb96db6067ffba1c763b47cb25cd61b780
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
 titan.ProtocolEmulations.SCCP_commit=	 	750a3e836831e58eae59d4757ef5d0c759f9ca5d
