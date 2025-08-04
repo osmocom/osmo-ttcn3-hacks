@@ -7,8 +7,6 @@ import sys
 import testenv
 import testenv.cmd
 
-init_done = False
-
 
 def get_osmo_dev_dir():
     # Users may have used osmo-dev to clone osmo-ttcn3-hacks:
@@ -66,12 +64,7 @@ def get_targets(cfg):
     return ret
 
 
-def init():
-    global init_done
-
-    if init_done:
-        return
-
+def init(cfg):
     extra_opts = []
     if testenv.args.asan:
         extra_opts += ["sanitize.opts"]
@@ -91,6 +84,8 @@ def init():
         "--src-dir",
         testenv.src_dir,
         "--autoreconf-in-src-copy",
+        "--targets",
+        ",".join(get_targets(cfg)),
         "default.opts",
         "ccache.opts",
         "gtp_linux.opts",
@@ -111,7 +106,6 @@ def init():
         logging.critical("Your osmo-dev.git clone might be outdated, try:")
         logging.critical(f"$ git -C {shlex.quote(cwd)} pull")
         sys.exit(1)
-    init_done = True
 
 
 def make(cfg):

@@ -45,9 +45,6 @@ def run():
         testenv.podman.start()
         testenv.podman.check_titan_version()
 
-    if not testenv.args.binary_repo:
-        testenv.osmo_dev.init()
-
     testenv.testsuite.init()
     testenv.testsuite.build()
 
@@ -55,6 +52,7 @@ def run():
     if not testenv.args.binary_repo:
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
             testenv.testenv_cfg.set_current(cfg_name)
+            testenv.osmo_dev.init(cfg)
             testenv.osmo_dev.make(cfg)
 
     # Run the components + testsuite
