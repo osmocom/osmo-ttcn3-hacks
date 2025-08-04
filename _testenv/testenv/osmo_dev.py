@@ -51,6 +51,21 @@ def check_init_needed():
     sys.exit(1)
 
 
+def get_targets(cfg):
+    ret = []
+
+    for section in cfg:
+        section_data = cfg[section]
+        if section == "testsuite":
+            # Gets built with testenv.testsuite.build()
+            continue
+
+        if "make" in section_data and section_data["make"] != "no" and section_data["make"] not in ret:
+            ret += [section_data["make"]]
+
+    return ret
+
+
 def init():
     global init_done
 
@@ -100,17 +115,7 @@ def init():
 
 
 def make(cfg):
-    targets = []
-
-    for section in cfg:
-        section_data = cfg[section]
-        if section == "testsuite":
-            # Gets built with testenv.testsuite.build()
-            continue
-
-        if "make" in section_data and section_data["make"] != "no" and section_data["make"] not in targets:
-            targets += [section_data["make"]]
-
+    targets = get_targets(cfg)
     if not targets:
         logging.debug("No osmo-dev make targets found in testenv.cfg")
         return
