@@ -99,18 +99,13 @@ def init():
     init_done = True
 
 
-def make(cfg, limit_section=None):
+def make(cfg):
     targets = []
 
     for section in cfg:
         section_data = cfg[section]
         if section == "testsuite":
             # Gets built with testenv.testsuite.build()
-            continue
-        if limit_section and limit_section != section:
-            # When called from testenv.podman.install_packages as fallback to
-            # not having a package available, then we only want to run make
-            # for the target of one specific config section
             continue
 
         if "make" in section_data and section_data["make"] != "no" and section_data["make"] not in targets:
