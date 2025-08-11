@@ -151,3 +151,6 @@ regen-diameter-types-ttcn:
 # trivial to clean up the builddir manually.
 clean:
 	rm -rf _build
+
+clean-logs:
+	find $(SUBDIRS) -name "*.log" -print -delete
