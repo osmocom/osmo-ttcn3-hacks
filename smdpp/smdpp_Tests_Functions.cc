@@ -534,12 +534,12 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(const OCTETSTR
 		// Derive BSP session keys using X9.63 KDF (from_kdf)
 		LOG_DEBUG("BSP KDF inputs:");
 		LOG_DEBUG("  Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
-		LOG_DEBUG("  Key type: " + std::to_string(keyType.get_long_long_val()) + 
+		LOG_DEBUG("  Key type: " + std::to_string(keyType.get_long_long_val()) +
 			  " (0x" + HexUtil::bytesToHex({static_cast<uint8_t>(keyType.get_long_long_val())}) + ")");
 		LOG_DEBUG("  Key length: " + std::to_string(keyLength.get_long_long_val()));
 		LOG_DEBUG("  Host ID: " + HexUtil::bytesToHex(hostIdVec));
 		LOG_DEBUG("  EID: " + HexUtil::bytesToHex(eidVec));
-		
+
 		auto bsp = BspCryptoNS::BspCrypto::from_kdf(sharedSecretVec,
 							    static_cast<uint8_t>(keyType.get_long_long_val()),
 							    static_cast<uint8_t>(keyLength.get_long_long_val()),
@@ -574,19 +574,6 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(const OCTETSTR
 	});
 }
 
-CHARSTRING ext__RSPClient__sendHttpsPost(const INTEGER& clientHandle, const CHARSTRING& endpoint,
-					 const CHARSTRING& body, INTEGER& statusCode) {
-	statusCode = INTEGER(0);
-
-	return with_client(clientHandle, "ext__RSPClient__sendHttpsPost", CHARSTRING(""), [&](RSPClient* client) {
-		int httpStatus = 0;
-		std::string response =
-			client->sendHttpsPost(charstring_to_string(endpoint), charstring_to_string(body), httpStatus);
-		statusCode = INTEGER(httpStatus);
-		return string_to_charstring(response);
-	});
-}
-
 INTEGER ext__RSPClient__configureHttpClient(const INTEGER& clientHandle, const BOOLEAN& useCustomTlsCert,
 					    const CHARSTRING& customTlsCertPath) {
 	return with_client(clientHandle, "ext__RSPClient__configureHttpClient", INTEGER(-1), [&](RSPClient* client) {
@@ -596,6 +583,60 @@ INTEGER ext__RSPClient__configureHttpClient(const INTEGER& clientHandle, const B
 		LOG_DEBUG("Configured HTTP client - custom TLS cert: " + std::string(useCustomCert ? "true" : "false") +
 			  (certPath.empty() ? "" : " (" + certPath + ")"));
 		return INTEGER(0);
+	});
+}
+
+INTEGER ext__RSPClient__setAuthParams(const INTEGER& clientHandle, const BOOLEAN& useMutualTLS,
+				      const CHARSTRING& clientCertPath, const CHARSTRING& clientKeyPath) {
+	return with_client(clientHandle, "ext__RSPClient__setAuthParams", INTEGER(-1), [&](RSPClient* client) {
+		bool useMutual = static_cast<bool>(useMutualTLS);
+		std::string certPath = charstring_to_string(clientCertPath);
+		std::string keyPath = charstring_to_string(clientKeyPath);
+
+		client->setAuthParams(useMutual, certPath, keyPath);
+		LOG_DEBUG("Set auth params - mutual TLS: " + std::string(useMutual ? "true" : "false") +
+			  ", cert: " + certPath + ", key: " + keyPath);
+		return INTEGER(0);
+	});
+}
+
+CHARSTRING ext__RSPClient__sendHttpsPost(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+					       const CHARSTRING& body, const INTEGER& port, INTEGER& statusCode) {
+	statusCode = INTEGER(0);
+
+	return with_client(clientHandle, "ext__RSPClient__sendHttpsPostSimple", CHARSTRING(""), [&](RSPClient* client) {
+		int httpStatus = 0;
+		int dstport = static_cast<int>(port);
+
+		std::string response = client->sendHttpsPost(
+			charstring_to_string(endpoint),
+			charstring_to_string(body),
+			httpStatus,
+			dstport
+		);
+
+		statusCode = INTEGER(httpStatus);
+		return string_to_charstring(response);
+	});
+}
+
+CHARSTRING ext__RSPClient__sendHttpsPostWithAuth(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+						 const CHARSTRING& body, const INTEGER& port, INTEGER& statusCode) {
+	statusCode = INTEGER(0);
+
+	return with_client(clientHandle, "ext__RSPClient__sendHttpsPostWithAuth", CHARSTRING(""), [&](RSPClient* client) {
+		int httpStatus = 0;
+		int dstport = static_cast<int>(port);
+
+		std::string response = client->sendHttpsPostWithAuth(
+			charstring_to_string(endpoint),
+			charstring_to_string(body),
+			httpStatus,
+			dstport
+		);
+
+		statusCode = INTEGER(httpStatus);
+		return string_to_charstring(response);
 	});
 }
 
