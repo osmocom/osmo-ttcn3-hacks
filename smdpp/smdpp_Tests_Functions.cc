@@ -534,12 +534,12 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(const OCTETSTR
 		// Derive BSP session keys using X9.63 KDF (from_kdf)
 		LOG_DEBUG("BSP KDF inputs:");
 		LOG_DEBUG("  Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
-		LOG_DEBUG("  Key type: " + std::to_string(keyType.get_long_long_val()) + 
+		LOG_DEBUG("  Key type: " + std::to_string(keyType.get_long_long_val()) +
 			  " (0x" + HexUtil::bytesToHex({static_cast<uint8_t>(keyType.get_long_long_val())}) + ")");
 		LOG_DEBUG("  Key length: " + std::to_string(keyLength.get_long_long_val()));
 		LOG_DEBUG("  Host ID: " + HexUtil::bytesToHex(hostIdVec));
 		LOG_DEBUG("  EID: " + HexUtil::bytesToHex(eidVec));
-		
+
 		auto bsp = BspCryptoNS::BspCrypto::from_kdf(sharedSecretVec,
 							    static_cast<uint8_t>(keyType.get_long_long_val()),
 							    static_cast<uint8_t>(keyLength.get_long_long_val()),
@@ -575,16 +575,48 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(const OCTETSTR
 }
 
 CHARSTRING ext__RSPClient__sendHttpsPost(const INTEGER& clientHandle, const CHARSTRING& endpoint,
-					 const CHARSTRING& body, INTEGER& statusCode) {
+						 const CHARSTRING& body, const BOOLEAN& useMutualTLS,
+						 const CHARSTRING& clientCertPath, const CHARSTRING& clientKeyPath, INTEGER& statusCode) {
 	statusCode = INTEGER(0);
 
-	return with_client(clientHandle, "ext__RSPClient__sendHttpsPost", CHARSTRING(""), [&](RSPClient* client) {
+	return with_client(clientHandle, "ext__RSPClient__sendHttpsPostUnified", CHARSTRING(""), [&](RSPClient* client) {
 		int httpStatus = 0;
-		std::string response =
-			client->sendHttpsPost(charstring_to_string(endpoint), charstring_to_string(body), httpStatus);
+
+		std::string response = client->sendHttpsPostUnified(
+			charstring_to_string(endpoint),
+			charstring_to_string(body),
+			httpStatus,
+			static_cast<bool>(useMutualTLS),
+			charstring_to_string(clientCertPath),
+			charstring_to_string(clientKeyPath)
+		);
+
 		statusCode = INTEGER(httpStatus);
 		return string_to_charstring(response);
 	});
+}
+
+CHARSTRING ext__RSPClient__sendHttpsPost(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+					 const CHARSTRING& body, INTEGER& statusCode) {
+	return ext__RSPClient__sendHttpsPost(
+		clientHandle, endpoint, body,
+		BOOLEAN(false),  // useMutualTLS
+		CHARSTRING(""),  // clientCertPath
+		CHARSTRING(""),  // clientKeyPath
+		statusCode
+	);
+}
+
+CHARSTRING ext__RSPClient__sendHttpsPostWithMutualTLS(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+						      const CHARSTRING& body, const CHARSTRING& clientCertPath,
+						      const CHARSTRING& clientKeyPath, INTEGER& statusCode) {
+	return ext__RSPClient__sendHttpsPost(
+		clientHandle, endpoint, body,
+		BOOLEAN(true),
+		clientCertPath,
+		clientKeyPath,
+		statusCode
+	);
 }
 
 INTEGER ext__RSPClient__configureHttpClient(const INTEGER& clientHandle, const BOOLEAN& useCustomTlsCert,

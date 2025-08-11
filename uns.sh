@@ -48,8 +48,8 @@ CMDSTR+="ttcn3_logmerge smdp*log ${FCMD} > ${TESTP}/_merged.log;"
 #CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; rm ${TESTP}/_merged.log; sleep 2"
 CMDSTR+="ttcn3_logformat ${TESTP}/_merged.log > ${TESTP}/merged.log; find ${TESTP} -iname '*log' -not -name 'merged.log' -and -not -iname '*pyserver*.log' | xargs -n1 rm; rm ./*stderr; sleep 1;"
 # Merge both server logs
-CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_nist.log > ${TESTP}/pyserver_nist.log 2>/dev/null || true;"
-CMDSTR+="grep -v 'DEBUG:pySim.esim.saip' ${TESTP}/_pyserver_brp.log > ${TESTP}/pyserver_brp.log 2>/dev/null || true;"
+CMDSTR+="grep -ve 'DEBUG:pySim.esim.saip' -ve 'DEBUG:pySim.esim.esp' ${TESTP}/_pyserver_nist.log > ${TESTP}/pyserver_nist.log 2>/dev/null || true;"
+CMDSTR+="grep -ve 'DEBUG:pySim.esim.saip' -ve 'DEBUG:pySim.esim.esp' ${TESTP}/_pyserver_brp.log > ${TESTP}/pyserver_brp.log 2>/dev/null || true;"
 # Create combined pyserver.log
 CMDSTR+="echo '=== NIST Server Log (port 8000) ===' > ${TESTP}/pyserver.log;"
 CMDSTR+="cat ${TESTP}/pyserver_nist.log >> ${TESTP}/pyserver.log 2>/dev/null || true;"
