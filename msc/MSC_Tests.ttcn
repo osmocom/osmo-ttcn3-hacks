@@ -7710,6 +7710,101 @@ testcase TC_stat_bsc_sctp_disconnected() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* Test starting and stopping silent call via the VTY */
+private function f_TC_silent_call_start_stop(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var charstring cmd, resp;
+	timer T;
+
+	f_init_handler(pars);
+
+	cmd := "subscriber imsi " & hex2str(g_pars.imsi) & " silent-call ";
+
+	f_perform_lu();
+	f_ran_register_imsi(g_pars.imsi, g_pars.tmsi);
+
+	/* Start silent call via the VTY */
+	MSCVTY.send(cmd & "start any signalling");
+	resp := f_vty_wait_for_prompt(MSCVTY);
+	if (resp != "% Silent call initiated") {
+		setverdict(fail, "VTY: Unexpected response: ", resp);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* MSC->BSC: expect PAGING from the MSC */
+	f_expect_paging();
+	/* MS -> MSC: PAGING RESPONSE */
+	f_establish_fully(EST_TYPE_PAG_RESP);
+
+	/* Hold the call for some time */
+	T.start(3.0);
+	alt {
+	[] BSSAP.receive(tr_BSSMAP_AssignmentReq) {
+		BSSAP.send(ts_BSSMAP_AssignmentComplete);
+		repeat;
+		}
+	[] as_unexp_bssap_msg();
+	[] T.timeout { setverdict(pass); }
+	}
+
+	/* Stop silent call via the VTY */
+	MSCVTY.send(cmd & "stop");
+	resp := f_vty_wait_for_prompt(MSCVTY);
+	if (resp != "% Silent call ended\n% Silent call stopped") {
+		setverdict(fail, "VTY: Unexpected response: ", resp);
+	}
+
+	f_expect_clear();
+}
+testcase TC_silent_call_start_stop() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_silent_call_start_stop), 30);
+	vc_conn.done;
+}
+
+/* Test initiating a silent call while there's an active connection.
+ * The MSC is expected to be smart and reject such an attempt. */
+private function f_TC_silent_call_active_conn(charstring id, BSC_ConnHdlrPars pars) runs on BSC_ConnHdlr {
+	var charstring cmd, resp;
+
+	f_init_handler(pars);
+
+	cmd := "subscriber imsi " & hex2str(g_pars.imsi) & " silent-call ";
+
+	f_perform_lu();
+	f_ran_register_imsi(g_pars.imsi, g_pars.tmsi);
+
+	/* The MS establishes a connection (e.g. for periodic Location Updating) */
+	f_establish_fully();
+
+	/* Try initiating a silent call via the VTY */
+	MSCVTY.send(cmd & "start any signalling");
+	resp := f_vty_wait_for_prompt(MSCVTY);
+	select (resp) {
+	case ("% Subscriber already has an active connection") {
+		setverdict(pass);
+		}
+	case ("% Silent call initiated") {
+		setverdict(fail, "The MSC initiated silent call despite an active connection");
+		f_expect_paging();
+		}
+	case else {
+		setverdict(fail, "Unexpected VTY response: ", resp);
+		}
+	}
+
+	BSSAP.send(ts_BSSMAP_ClearRequest(0));
+	f_expect_clear();
+}
+testcase TC_silent_call_active_conn() runs on MTC_CT {
+	var BSC_ConnHdlr vc_conn;
+	f_init();
+
+	vc_conn := f_start_handler(refers(f_TC_silent_call_active_conn), 30);
+	vc_conn.done;
+}
+
 control {
 	execute( TC_cr_before_reset() );
 	execute( TC_lu_imsi_noauth_tmsi() );
@@ -7910,6 +8005,9 @@ control {
 	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
 		execute( TC_stat_bsc_sctp_disconnected() );
 	}
+
+	execute( TC_silent_call_start_stop() );
+	execute( TC_silent_call_active_conn() );
 }
 
 
