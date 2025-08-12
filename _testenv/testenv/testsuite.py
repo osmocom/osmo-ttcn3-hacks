@@ -43,7 +43,11 @@ def init():
         cache_dir = "podman" if testenv.args.podman else "host"
         builddir = os.path.join(testenv.args.cache, cache_dir, f"titan-{titan_version}")
         path_old = testenv.cmd.generate_env(podman=testenv.args.podman)["PATH"]
-        builddir_env = {"BUILDDIR": builddir, "TTCN3_DIR": ttcn3_dir, "PATH": f"{ttcn3_dir}/bin:{path_old}"}
+        builddir_env = {
+            "BUILDDIR": builddir,
+            "TTCN3_DIR": ttcn3_dir,
+            "PATH": f"{ttcn3_dir}/bin:{path_old}",
+        }
 
     prepare_testsuite_dir()
 
