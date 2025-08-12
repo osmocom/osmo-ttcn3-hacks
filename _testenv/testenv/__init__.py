@@ -69,6 +69,12 @@ def parse_args():
         action="store_true",
         help="build image even if it is up-to-date",
     )
+    sub_podman.add_argument(
+        "-d",
+        "--distro",
+        default=distro_default,
+        help=f"distribution for podman (default: {distro_default})",
+    )
 
     sub_run = sub.add_parser("run", help="build components and run a testsuite")
 
