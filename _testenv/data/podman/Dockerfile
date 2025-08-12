@@ -46,7 +46,7 @@ RUN	set -x && \
 		libdbd-sqlite3 \
 		libdbi-dev \
 		libelf-dev \
-		libgcc-11-dev \
+		libgcc-*-dev \
 		libgcrypt-dev \
 		libgnutls28-dev \
 		libidn11-dev \
