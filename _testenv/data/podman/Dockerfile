@@ -2,10 +2,6 @@ ARG	REGISTRY=docker.io
 ARG	DISTRO=debian:12
 FROM	${REGISTRY}/${DISTRO}
 
-# Arguments used after FROM must be specified again
-ARG	OSMOCOM_REPO_TESTSUITE_MIRROR="https://downloads.osmocom.org"
-ARG	OSMOCOM_REPO="$OSMOCOM_REPO_TESTSUITE_MIRROR/packages/osmocom:/latest/Debian_12/"
-
 # Copy from common dir
 COPY	obs.key /obs.key
 
@@ -146,11 +142,11 @@ RUN	set -x && \
 	pip3 install ./osmo-python-tests --break-system-packages && \
 	rm -rf osmo-python-tests
 
-# Add eclipse-titan from osmocom:latest, invalidate cache when :latest changes
-RUN	echo "deb [signed-by=/obs.key] $OSMOCOM_REPO ./" \
-		> /etc/apt/sources.list.d/osmocom-latest.list
-ADD	$OSMOCOM_REPO/Release /tmp/Release
+# Add eclipse-titan from osmocom:latest
 RUN	set -x && \
+	export DEBVER="$(grep ^VERSION_ID /etc/os-release | cut -d '"' -f 2)" && \
+	export OSMOCOM_REPO="https://downloads.osmocom.org/packages/osmocom:/latest/Debian_$DEBVER/" && \
+	echo "deb [signed-by=/obs.key] $OSMOCOM_REPO ./" >/etc/apt/sources.list.d/osmocom-latest.list && \
 	apt-get update && \
 	apt-get install -y --no-install-recommends \
 		eclipse-titan-optdir-9.0.0 \
