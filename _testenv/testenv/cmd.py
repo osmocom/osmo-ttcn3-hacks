@@ -3,6 +3,7 @@
 import logging
 import os
 import os.path
+import re
 import subprocess
 import testenv
 import testenv.testsuite
@@ -12,6 +13,12 @@ install_dir = None
 make_dir = None
 # osmo-dev make dir version, bump when making incompatible changes
 make_dir_version = 3
+
+
+def distro_cache_suffix():
+    if not testenv.args.podman or testenv.args.distro == "debian:bookworm":
+        return ""
+    return f"-{re.sub('[^a-zA-Z0-9]', '-', testenv.args.distro)}"
 
 
 def init_env():
@@ -26,6 +33,7 @@ def init_env():
             install_dir = "/"
         else:
             install_dir = os.path.join(testenv.args.cache, "podman/install")
+        install_dir += distro_cache_suffix()
     else:
         install_dir = os.path.join(testenv.args.cache, "host/install")
 
@@ -58,6 +66,7 @@ def init_env():
         make_dir += str(make_dir_version)
         if testenv.args.asan:
             make_dir += "-asan"
+        make_dir += distro_cache_suffix()
         env_extra["OSMO_DEV_MAKE_DIR"] = make_dir
 
     if testenv.args.kernel == "debian":

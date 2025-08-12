@@ -102,8 +102,9 @@ def init():
     global apt_dir_var_lib
     global run_shell_on_stop
 
-    apt_dir_var_cache = os.path.join(testenv.args.cache, "podman", "var-cache-apt")
-    apt_dir_var_lib = os.path.join(testenv.args.cache, "podman", "var-lib-apt")
+    suffix = testenv.cmd.distro_cache_suffix()
+    apt_dir_var_cache = os.path.join(testenv.args.cache, "podman", f"var-cache-apt{suffix}")
+    apt_dir_var_lib = os.path.join(testenv.args.cache, "podman", f"var-lib-apt{suffix}")
 
     os.makedirs(apt_dir_var_cache, exist_ok=True)
     os.makedirs(apt_dir_var_lib, exist_ok=True)
