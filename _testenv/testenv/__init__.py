@@ -187,7 +187,7 @@ def parse_args():
     group.add_argument(
         "-d",
         "--distro",
-        default=distro_default,
+        default=None,  # override in set_args_defaults
         help=f"distribution for podman (default: {distro_default})",
     )
     group.add_argument(
@@ -249,6 +249,9 @@ def verify_args_run():
     if args.binary_repo and not args.podman:
         raise NoTraceException("--binary-repo requires --podman")
 
+    if args.distro and not args.podman:
+        raise NoTraceException("--distro requires --podman")
+
     if args.kernel == "debian" and not args.podman:
         raise NoTraceException("--kernel-debian requires --podman")
 
@@ -263,9 +266,17 @@ def verify_args_run():
         raise NoTraceException(f"testsuite dir not found: {testsuite_dir}")
 
 
+def set_args_defaults():
+    """Some defaults are set later, e.g. after verifying that --distro is not
+    being used without --podman."""
+    if args.distro is None:
+        args.distro = distro_default
+
+
 def init_args():
     parse_args()
     verify_args_run()
+    set_args_defaults()
 
 
 class ColorFormatter(logging.Formatter):
