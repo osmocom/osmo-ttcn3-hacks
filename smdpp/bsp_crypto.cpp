@@ -640,10 +640,15 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(const st
 
     // Step 2: Verify StoreMetadata with session keys (MAC-only)
     std::cout << "Step 2: Verifying StoreMetadata with session keys (MAC-only)..." << std::endl;
-    elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf88, 0);
-    len = i2d_ASN1_OCTET_STRING_TAG8(elem, &encoded);
-	result.storeMetadata = decrypt_and_verify({ encoded, encoded + len }, false);
-    ossl_free_reset(encoded);
+    int num_metadata = sk_ASN1_OCTET_STRING_num(bpp->sequenceOf88);
+    for (int i = 0; i < num_metadata; i++) {
+        elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf88, i);
+        len = i2d_ASN1_OCTET_STRING_TAG8(elem, &encoded);
+        auto rv = decrypt_and_verify({ encoded, encoded + len }, false);
+        result.storeMetadata.insert(result.storeMetadata.end(), rv.begin(), rv.end());
+        ossl_free_reset(encoded);
+    }
+    std::cout << "Step 2: " << num_metadata << " metadata chunks verified" << std::endl;
 
     // Step 3: If present, decrypt ReplaceSessionKeys with session keys
     if (result.hasReplaceSessionKeys) {
@@ -679,7 +684,7 @@ BspCrypto::BppProcessingResult BspCrypto::process_bound_profile_package(const st
         std::cout << "Step 3: Decrypting profile data with session keys (no PPK)..." << std::endl;
         int num = sk_ASN1_OCTET_STRING_num(bpp->sequenceOf86);
         for (int i = 0; i < num; i++) {
-            elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf86, 0);
+            elem = sk_ASN1_OCTET_STRING_value(bpp->sequenceOf86, i);
             len = i2d_ASN1_OCTET_STRING_TAG6(elem, &encoded);
 			auto rv = decrypt_and_verify({ encoded, encoded + len }, true);
             result.profileData.insert(result.profileData.end(), rv.begin(), rv.end());

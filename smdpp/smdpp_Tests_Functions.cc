@@ -532,14 +532,20 @@ ProcessedBoundProfilePackage ext__BSP__processBoundProfilePackage(const OCTETSTR
 		std::vector<uint8_t> bppData = octetstring_to_bytes(encodedBoundProfilePackage);
 
 		// Derive BSP session keys using X9.63 KDF (from_kdf)
+		LOG_DEBUG("BSP KDF inputs:");
+		LOG_DEBUG("  Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
+		LOG_DEBUG("  Key type: " + std::to_string(keyType.get_long_long_val()) + 
+			  " (0x" + HexUtil::bytesToHex({static_cast<uint8_t>(keyType.get_long_long_val())}) + ")");
+		LOG_DEBUG("  Key length: " + std::to_string(keyLength.get_long_long_val()));
+		LOG_DEBUG("  Host ID: " + HexUtil::bytesToHex(hostIdVec));
+		LOG_DEBUG("  EID: " + HexUtil::bytesToHex(eidVec));
+		
 		auto bsp = BspCryptoNS::BspCrypto::from_kdf(sharedSecretVec,
 							    static_cast<uint8_t>(keyType.get_long_long_val()),
 							    static_cast<uint8_t>(keyLength.get_long_long_val()),
 							    hostIdVec, eidVec);
 
 		LOG_DEBUG("BSP session keys derived successfully");
-		LOG_DEBUG("Shared secret: " + HexUtil::bytesToHex(sharedSecretVec));
-		LOG_DEBUG("EID (converted): " + HexUtil::bytesToHex(eidVec));
 		LOG_DEBUG("Processing BoundProfilePackage of size: " + std::to_string(bppData.size()));
 
 		auto result = bsp.process_bound_profile_package(bppData);
