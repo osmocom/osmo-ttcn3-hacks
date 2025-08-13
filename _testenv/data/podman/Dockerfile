@@ -99,6 +99,9 @@ RUN	set -x && \
 # shipped with debian12 is buggy and generates wrong HTTP2 for open5gs.
 ENV	BACKPORTS_SOURCES_LIST="/etc/apt/sources.list.d/debian-backports.sources"
 RUN	set -x && \
+	if ! grep -q VERSION_CODENAME=bookworm /etc/os-release; then \
+		exit 0; \
+	fi && \
 	echo "Types: deb deb-src" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "URIs: http://deb.debian.org/debian" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "Suites: bookworm-backports" >>"$BACKPORTS_SOURCES_LIST" && \
