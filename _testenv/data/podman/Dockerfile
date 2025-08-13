@@ -101,7 +101,7 @@ ENV	BACKPORTS_SOURCES_LIST="/etc/apt/sources.list.d/debian-backports.sources"
 RUN	set -x && \
 	echo "Types: deb deb-src" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "URIs: http://deb.debian.org/debian" >>"$BACKPORTS_SOURCES_LIST" && \
-	echo "Suites: stable-backports" >>"$BACKPORTS_SOURCES_LIST" && \
+	echo "Suites: bookworm-backports" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "Components: main" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "Enabled: yes" >>"$BACKPORTS_SOURCES_LIST" && \
 	echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" >>"$BACKPORTS_SOURCES_LIST" && \
