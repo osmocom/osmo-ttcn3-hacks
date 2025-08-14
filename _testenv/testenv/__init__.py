@@ -25,6 +25,7 @@ log_prefix = "[testenv]"
 # from the binary repository
 distros_repodirs = {
     "debian:bookworm": "Debian_12",
+    "debian:trixie": "Debian_13",
 }
 
 
