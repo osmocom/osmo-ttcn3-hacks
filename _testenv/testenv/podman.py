@@ -300,18 +300,12 @@ def check_titan_version():
     sys.exit(1)
 
 
-def distro_to_repo_dir(distro):
-    if distro == "debian:bookworm":
-        return "Debian_12"
-    raise RuntimeError(f"Can't translate distro {distro} to repo_dir!")
-
-
 def enable_binary_repo():
     config = "deb [signed-by=/obs.key]"
     config += " https://downloads.osmocom.org/packages/"
     config += testenv.args.binary_repo.replace(":", ":/")
     config += "/"
-    config += distro_to_repo_dir(distro)
+    config += testenv.distros_repodirs[distro]
     config += "/ ./"
 
     path = "/etc/apt/sources.list.d/osmocom.list"
