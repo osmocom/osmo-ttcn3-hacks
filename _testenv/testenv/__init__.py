@@ -21,6 +21,12 @@ ccache_dir_default = os.path.join(cache_dir_default, "ccache")
 
 log_prefix = "[testenv]"
 
+# Mapping of supported distros (docker/podman image names) and repository dirs
+# from the binary repository
+distros_repodirs = {
+    "debian:bookworm": "Debian_12",
+}
+
 
 def resolve_testsuite_name_alias(name):
     mapping = {
@@ -251,6 +257,9 @@ def verify_args_run():
 
     if args.distro and not args.podman:
         raise NoTraceException("--distro requires --podman")
+
+    if args.distro and args.distro not in distros_repodirs:
+        raise NoTraceException(f"--distro must be one of {', '.join(distros_repodirs)}")
 
     if args.kernel == "debian" and not args.podman:
         raise NoTraceException("--kernel-debian requires --podman")
