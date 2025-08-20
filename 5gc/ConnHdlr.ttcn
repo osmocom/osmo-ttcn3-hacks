@@ -72,7 +72,7 @@ type record PDUSessionParams {
 	OCT4 ran_gtpu_teid,
 	charstring cn_gtpu_ip optional,
 	OCT4 cn_gtpu_teid optional,
-	OCT1 qfi optional,
+	QoS_RuleList qos_rules optional,
 	charstring ue_ip optional
 };
 
@@ -376,7 +376,7 @@ function f_pdu_sess_establish(boolean configure_userplane := true) runs on ConnH
 	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
 	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
 							       rx_nas.dl_Nas_Transport.payload.payload);
-	g_pars.ue_pars.sess_pars.qfi := inner_nas.pdu_Session_Establishment_Accept.authorizedQoSRules.listofQoSRules[0].identifier;
+	g_pars.ue_pars.sess_pars.qos_rules := inner_nas.pdu_Session_Establishment_Accept.authorizedQoSRules.listofQoSRules;
 	g_pars.ue_pars.sess_pars.ue_ip := f_inet_ntoa(inner_nas.pdu_Session_Establishment_Accept.pduAddress.adressInfo);
 	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.sess_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.sess_pars.cn_gtpu_teid);
 	log("5GC assigned UE IP address: ", g_pars.ue_pars.sess_pars.ue_ip);
@@ -384,6 +384,139 @@ function f_pdu_sess_establish(boolean configure_userplane := true) runs on ConnH
 	if (configure_userplane) {
 		f_pdu_sess_create_tun();
 	}
+}
+
+private function f_pdu_handle_session_resource_modify_item_qos_flow_list(QosFlowAddOrModifyRequestList qos_flow_req_li) runs on ConnHdlr return QosFlowAddOrModifyResponseList
+{
+	var QosFlowAddOrModifyResponseList qos_flow_resp_li;
+	for (var integer i := 0; i < lengthof(qos_flow_req_li); i := i + 1) {
+		var QosFlowAddOrModifyRequestItem qos_flow_req_it := qos_flow_req_li[i];
+		var QosFlowAddOrModifyResponseItem qos_flow_resp_it := valueof(m_qosFlowAddOrModifyResponseItem(qos_flow_req_it.qosFlowIdentifier));
+		qos_flow_resp_li[i] := qos_flow_resp_it;
+	}
+	return qos_flow_resp_li;
+}
+
+/* Handle a PDUSessionResourceModifyRequestTransfer contained inside NGAP PDUSessionResourceModifyRequest and return a Result for PDUSessionResourceModifyResponse */
+private function f_pdu_handle_session_resource_modify_item(PDUSessionResourceModifyItemModReq req) runs on ConnHdlr return PDUSessionResourceModifyItemModRes
+{
+	var PDUSessionResourceModifyItemModRes resp;
+	var NGAP_IEs.PDUSessionResourceModifyRequestTransfer mod_req_transf;
+	var NGAP_IEs.PDUSessionResourceModifyResponseTransfer mod_resp_transf;
+	var octetstring mod_resp_transf_enc;
+	var template (omit) QosFlowAddOrModifyResponseList qos_flow_resp_li := omit;
+
+	mod_req_transf := dec_NGAP_PDUSessionResourceModifyRequestTransfer(req.pDUSessionResourceModifyRequestTransfer);
+
+	for (var integer i := 0; i < lengthof(mod_req_transf.protocolIEs); i := i + 1) {
+		select(mod_req_transf.protocolIEs[i].id) {
+		case (id_QosFlowAddOrModifyRequestList) {
+			var QosFlowAddOrModifyRequestList qos_flow_req_li := mod_req_transf.protocolIEs[i].value_.qosFlowAddOrModifyRequestList;
+			qos_flow_resp_li := f_pdu_handle_session_resource_modify_item_qos_flow_list(qos_flow_req_li);
+			}
+		case (id_UL_NGU_UP_TNLModifyList) {
+			// TODO: assign the fields below, see how it's done in f_pdu_handle_session_resource_setup_item()
+			// g_pars.ue_pars.sess_pars.cn_gtpu_ip := ;
+			// g_pars.ue_pars.sess_pars.cn_gtpu_teid := ;
+			// TODO: Update IP+TEID in usperlane osmo-uecups if any of them changed.
+			}
+		}
+	}
+
+	/* Prepare Response for it: */
+	mod_resp_transf := valueof(m_pDUSessionResourceModifyResponseTransfer(p_qosFlowAddOrModifyResponseList := qos_flow_resp_li));
+	mod_resp_transf_enc := enc_NGAP_PDUSessionResourceModifyResponseTransfer(mod_resp_transf);
+	resp := valueof(m_pDUSessionResourceModifyItemModRes(req.pDUSessionID, mod_resp_transf_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_modify_list(PDUSessionResourceModifyListModReq li_cmd) runs on ConnHdlr return PDUSessionResourceModifyListModRes
+{
+	var PDUSessionResourceModifyListModRes li_resp;
+	for (var integer i := 0; i < lengthof(li_cmd); i := i + 1) {
+		var PDUSessionResourceModifyItemModRes it_resp;
+		it_resp := f_pdu_handle_session_resource_modify_item(li_cmd[i]);
+		li_resp[i] := it_resp;
+	}
+	return li_resp;
+}
+
+private altstep as_ngap_handle_PDUSessionResourceModifyRequest() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(mw_n2_PDUSessionResourceModify(g_pars.ue_pars.amf_id,
+							       g_pars.ue_pars.ran_id,
+							       ?));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var PDUSessionResourceModifyRequest mod_req := rx_ngap.initiatingMessage.value_.PDUSessionResourceModifyRequest;
+		var PDUSessionResourceModifyListModRes resources;
+
+		for (var integer i := 0; i < lengthof(mod_req.protocolIEs); i := i + 1) {
+			if (mod_req.protocolIEs[i].id != id_PDUSessionResourceModifyListModReq) {
+				continue;
+			}
+			var PDUSessionResourceModifyListModReq li := mod_req.protocolIEs[i].value_.pDUSessionResourceModifyListModReq;
+			resources := f_pdu_handle_session_resource_modify_list(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceModifyResponse(g_pars.ue_pars.amf_id,
+									       g_pars.ue_pars.ran_id,
+									       resources)));
+	}
+}
+
+/* 3GPP TS 24.501 8.3.7 PDU session modification request,
+ * 3GPP TS 23.502 4.3.3.2 UE requested PDU Session Modification */
+function f_pdu_sess_modify() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var OCT1 pdu_sess_id := int2oct(g_pars.ue_pars.sess_pars.id, 1);
+
+	var template (value) QoS_RuleU qos_rule_u := cs_QoS_RuleU_Create(
+		g_pars.ue_pars.sess_pars.qos_rules[0].u.creat.flowIdentifier,
+		'09'O,
+		{cs_PacketFilter_MediaUDP('0110'B, 60350)},
+		'0'B,
+		g_pars.ue_pars.sess_pars.qos_rules[0].u.creat.spare,
+		'1'B
+	);
+	var template (value) QoS_RuleList qos_rules := {
+		cs_QoS_Rule(g_pars.ue_pars.sess_pars.qos_rules[0].identifier,
+			    qos_rule_u)
+	};
+
+	/* 3GPP TS 24.501 Table 8.3.7.1. */
+	nas_ul_msg := cs_NG_PDU_SESSION_MODIFICATION_REQUEST(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							     p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateTV('FF'O, 'FF'O),
+							     p_QoS_Rules := cs_QoS_Rules(qos_rules, p_IEI := '7A'O));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(g_pars.ue_pars.apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_PDUSessionResourceModifyRequest();
+
+	/* 5G-NAS PDU Session Modify Request: This DL NAS arrives contained in NGAP PDUSessionModifyRequest handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	if (not match(inner_nas, cr_NG_PDU_SESSION_MODIFICATION_COMMAND(cs_NG_PDU_SessionIdV(pdu_sess_id),
+									pti))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected decoded NAS Payload Container ", inner_nas));
+	}
+
+	nas_ul_msg := cs_NG_PDU_SESSION_MODIFICATION_COMPLETE(cs_NG_PDU_SessionIdV(pdu_sess_id),
+							      pti);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id));
+	NGAP.send(nas_ul_msg);
 }
 
 function f_register() runs on ConnHdlr {
@@ -599,7 +732,7 @@ function f_pdu_sess_release(boolean configure_userplane := true) runs on ConnHdl
 					log2str("Unexpected decoded NAS Payload Container ", inner_nas));
 	}
 
-	g_pars.ue_pars.sess_pars.qfi := omit;
+	g_pars.ue_pars.sess_pars.qos_rules := omit;
 	g_pars.ue_pars.sess_pars.ue_ip := omit;
 
 	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_COMPLETE(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
@@ -621,7 +754,7 @@ function f_pdu_sess_create_tun() runs on ConnHdlr {
 	var template (value) UECUPS_GtpExtHdr_PduSessContainer pdu_sess_cont;
 
 	pdu_sess_cont := ts_UECUPS_GtpExtHdr_PduSessContainer(UECUPS_GtpExtHdr_PduSessContainer_Type_ul_pdu_sess_info,
-							      oct2int(g_pars.ue_pars.sess_pars.qfi));
+							      oct2int(g_pars.ue_pars.sess_pars.qos_rules[0].identifier));
 	gtp_ext_hdr := ts_UECUPS_GtpExtHdr(pdu_session_container := pdu_sess_cont);
 
 	uecups_create := ts_UECUPS_CreateTun(

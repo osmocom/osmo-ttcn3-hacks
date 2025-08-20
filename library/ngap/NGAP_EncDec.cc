@@ -69,4 +69,44 @@ NGAP__IEs::PDUSessionResourceSetupResponseTransfer dec__NGAP__PDUSessionResource
 	return ret;
 }
 
+OCTETSTRING enc__NGAP__PDUSessionResourceModifyRequestTransfer(const NGAP__IEs::PDUSessionResourceModifyRequestTransfer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::PDUSessionResourceModifyRequestTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::PDUSessionResourceModifyRequestTransfer dec__NGAP__PDUSessionResourceModifyRequestTransfer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::PDUSessionResourceModifyRequestTransfer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::PDUSessionResourceModifyRequestTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
+OCTETSTRING enc__NGAP__PDUSessionResourceModifyResponseTransfer(const NGAP__IEs::PDUSessionResourceModifyResponseTransfer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::PDUSessionResourceModifyResponseTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::PDUSessionResourceModifyResponseTransfer dec__NGAP__PDUSessionResourceModifyResponseTransfer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::PDUSessionResourceModifyResponseTransfer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::PDUSessionResourceModifyResponseTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
 }
