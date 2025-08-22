@@ -116,7 +116,7 @@ endef
 
 define DIR_clean_template
 .PHONY: $(1)/clean
-$(1)/clean:
+$(1)/clean: $(BUILDDIR)/$(1)/Makefile
 	$(MAKE) -C $(BUILDDIR)/$(1) clean
 endef
 
