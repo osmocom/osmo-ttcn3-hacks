@@ -301,16 +301,23 @@ def check_titan_version():
 
 
 def enable_binary_repo():
+    # Add the binary repository
     config = "deb [signed-by=/obs.key]"
     config += " https://downloads.osmocom.org/packages/"
     config += testenv.args.binary_repo.replace(":", ":/")
     config += "/"
     config += testenv.distros_repodirs[distro]
     config += "/ ./"
-
     path = "/etc/apt/sources.list.d/osmocom.list"
-
     exec_cmd(["sh", "-c", f"echo {shlex.quote(config)} > {path}"])
+
+    # Add an apt-pin to prefer its packages
+    config = "Package: *\n"
+    config += 'Pin: origin "downloads.osmocom.org"\n'
+    config += "Pin-Priority: 1100\n"
+    path = "/etc/apt/preferences.d/osmocom-apt-pin"
+    exec_cmd(["sh", "-c", f"echo {shlex.quote(config)} > {path}"])
+
     exec_cmd(["apt-get", "-q", "update"])
 
 
