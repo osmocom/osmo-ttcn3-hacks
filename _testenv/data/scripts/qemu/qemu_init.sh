@@ -22,7 +22,7 @@ mount -t sysfs sys /sys
 
 # Load modules from qemu_initrd_add_mod()
 if [ -e /modules ]; then
-	cat /modules | xargs -t -n1 modprobe
+	cat /modules | xargs -t -n1 modprobe || true
 fi
 
 ip link set lo up

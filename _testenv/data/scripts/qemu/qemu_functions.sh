@@ -38,6 +38,7 @@ qemu_initrd_add_mod() {
 		--show-depends \
 		--set-version="$kernel" \
 		"$@" \
+		| grep -v '^builtin ' \
 		| sort -u \
 		| cut -d ' ' -f 2)"
 
