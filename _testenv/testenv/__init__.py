@@ -15,7 +15,7 @@ ttcn3_hacks_dir = os.path.realpath(f"{__file__}/../../..")
 src_dir = os.environ.get("TESTENV_SRC_DIR", os.path.realpath(f"{__file__}/../../../.."))
 data_dir = os.path.join(os.path.realpath(f"{__file__}/../.."), "data")
 custom_kernel_path = os.path.join(os.path.realpath(f"{__file__}/../../.."), ".linux")
-distro_default = "debian:bookworm"
+distro_default = "debian:trixie"
 cache_dir_default = os.path.join(os.path.expanduser("~/.cache"), "osmo-ttcn3-testenv")
 ccache_dir_default = os.path.join(cache_dir_default, "ccache")
 
