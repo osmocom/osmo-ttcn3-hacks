@@ -33,7 +33,7 @@ def init_env():
             install_dir = "/"
         else:
             install_dir = os.path.join(testenv.args.cache, "podman/install")
-        install_dir += distro_cache_suffix()
+            install_dir += distro_cache_suffix()
     else:
         install_dir = os.path.join(testenv.args.cache, "host/install")
 
