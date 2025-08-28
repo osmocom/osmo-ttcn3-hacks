@@ -89,6 +89,11 @@ vty_port=4243
   depending on when the script runs. The script will not run on crash if podman
   is used, as the container gets shutdown beforehand.
 
+* `max_jobs_per_gb_ram=`: optional value that can be set to reduce the amount
+  of parallel jobs when compiling the testsuite. This is set in the 5gc
+  testsuite to avoid consuming the whole RAM and freezing (or possibly getting
+  killed from an out-of-memory daemon).
+
 #### Component section
 
 * `program=`: executable for starting a test component, may contain arguments.

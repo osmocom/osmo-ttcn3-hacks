@@ -125,6 +125,7 @@ def parse_args():
         "--jobs",
         help="number of jobs to run simultaneously (default: nproc)",
         type=int,
+        default=os.cpu_count(),
     )
     group.add_argument(
         "-a",

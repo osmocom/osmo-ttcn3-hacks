@@ -5,9 +5,11 @@ import configparser
 import fnmatch
 import glob
 import logging
+import math
 import os.path
 import sys
 import testenv
+import traceback
 
 cfgs = {}
 current = None
@@ -147,6 +149,64 @@ def get_titan_version_first_cfg():
     return get_titan_version(cfg)
 
 
+def verify_max_jobs_per_gb_ram(cfgs_all):
+    error = False
+    max_jobs_per_gb_ram = None
+
+    for cfg_name, cfg in cfgs_all.items():
+        cfg_max = cfg["testsuite"].get("max_jobs_per_gb_ram", None)
+        if cfg_max is not None:
+            if max_jobs_per_gb_ram is not None:
+                if cfg_max != max_jobs_per_gb_ram:
+                    error = True
+                    break
+            else:
+                max_jobs_per_gb_ram = cfg_max
+        elif max_jobs_per_gb_ram:
+            error = True
+            break
+
+    if not error:
+        return
+
+    logging.error("Found different max_jobs_per_gb_ram= values in testenv.cfg files of the same directory.")
+    logging.error("This is not supported, please fix it.")
+    sys.exit(1)
+
+
+def get_titan_make_job_count():
+    _, cfg = next(iter(cfgs.items()))
+    max_jobs_per_gb_ram = cfg["testsuite"].get("max_jobs_per_gb_ram", None)
+    max_jobs = None
+
+    if max_jobs_per_gb_ram:
+        try:
+            gb_ram = 0
+            with open("/proc/meminfo") as f:
+                line = f.readline()
+                # Parse e.g. "MemTotal:       15571604 kB"
+                if line.startswith("MemTotal:"):
+                    gb_ram = int(line.split(" ")[-2]) / 1024 / 1024
+                    logging.debug(f"Building with {round(gb_ram, 2)} GB of RAM")
+            max_jobs = math.floor(gb_ram * float(max_jobs_per_gb_ram))
+            if max_jobs < 1:
+                raise RuntimeError(f"max_jobs is invalid: max_jobs={max_jobs}, gb_ram={gb_ram}")
+
+        except Exception as ex:
+            traceback.print_exception(type(ex), ex, ex.__traceback__)
+            logging.error(f"Calculating max jobs with max_jobs_per_gb_ram={max_jobs_per_gb_ram} failed, assuming 4")
+            max_jobs = 4
+
+    if max_jobs and max_jobs < testenv.args.jobs:
+        logging.info(
+            f"Using only {max_jobs} jobs instead of {testenv.args.jobs} because of"
+            f" max_jobs_per_gb_ram={max_jobs_per_gb_ram} in testenv.cfg"
+        )
+        return max_jobs
+
+    return testenv.args.jobs
+
+
 def verify_qemu_cfgs():
     """Check if passed -C or -K args make sense with the testenv configs."""
     testsuite = testenv.args.testsuite
@@ -194,6 +254,7 @@ def verify(cfg, path):
         "prepare",
         "program",
         "titan_min",
+        "max_jobs_per_gb_ram",
     ]
     keys_valid_component = [
         "clean",
@@ -345,6 +406,8 @@ def init():
             return
 
         cfgs_all[basename] = cfg
+
+    verify_max_jobs_per_gb_ram(cfgs_all)
 
     # Select configs based on --config argument(s)
     for config_arg in testenv.args.config:

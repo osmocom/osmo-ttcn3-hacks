@@ -58,8 +58,7 @@ def build():
     logging.info(f"Building testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     env = copy.copy(builddir_env)
-    if testenv.args.jobs:
-        env["PARALLEL_MAKE"] = f"-j{testenv.args.jobs}"
+    env["PARALLEL_MAKE"] = f"-j{testenv.testenv_cfg.get_titan_make_job_count()}"
 
     testenv.cmd.run(["make", testenv.args.testsuite], cwd=testenv.ttcn3_hacks_dir, env=env)
 
