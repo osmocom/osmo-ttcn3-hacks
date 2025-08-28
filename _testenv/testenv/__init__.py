@@ -279,7 +279,7 @@ def verify_args_run():
 def set_args_defaults():
     """Some defaults are set later, e.g. after verifying that --distro is not
     being used without --podman."""
-    if args.distro is None:
+    if hasattr(args, "distro") and args.distro is None:
         args.distro = distro_default
 
 
