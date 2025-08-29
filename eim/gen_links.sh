@@ -35,7 +35,6 @@ FILES="PEDefinitions.asn PKIX1Explicit88.asn PKIX1Implicit88.asn RSPDefinitions.
 FILES+="PKIX1Explicit88_Templates.ttcn PKIX1Explicit88_Types.ttcn PKIX1Implicit88_Templates.ttcn "
 FILES+="PKIX1Implicit88_Types.ttcn RSPDefinitions_Templates.ttcn RSPDefinitions_Types.ttcn "
 FILES+="SGP32Definitions_Templates.ttcn SGP32Definitions_Types.ttcn "
-FILES+="PKIX1Explicit88_EncDec.cc PKIX1Implicit88_EncDec.cc RSPDefinitions_EncDec.cc SGP32Definitions_EncDec.cc "
 FILES+="es9p_Types_JSON.ttcn esx_header_Types_JSON.ttcn"
 gen_links $DIR $FILES
 

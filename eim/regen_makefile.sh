@@ -13,10 +13,6 @@ FILES="
 	Native_FunctionDefs.cc
 	TCCConversion.cc
 	TCCInterface.cc
-	SGP32Definitions_EncDec.cc
-	RSPDefinitions_EncDec.cc
-	PKIX1Explicit88_EncDec.cc
-	PKIX1Implicit88_EncDec.cc
 	PIPEasp_PT.cc
 "
 . ../_buildsystem/regen_makefile.inc.sh
