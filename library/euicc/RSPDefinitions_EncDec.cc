@@ -57,6 +57,57 @@ EUICCInfo2 dec__EUICCInfo2(const OCTETSTRING &stream) {
 	return msg;
 }
 
+OCTETSTRING enc__EuiccSigned1(const EuiccSigned1 &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(EuiccSigned1_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+EuiccSigned1 dec__EuiccSigned1(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	EuiccSigned1 msg;
+	buf.put_os(stream);
+
+	msg.decode(EuiccSigned1_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__EUICCSigned2(const EUICCSigned2 &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(EUICCSigned2_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+EUICCSigned2 dec__EUICCSigned2(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	EUICCSigned2 msg;
+	buf.put_os(stream);
+
+	msg.decode(EUICCSigned2_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__ControlRefTemplate(const ControlRefTemplate &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(ControlRefTemplate_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+ControlRefTemplate dec__ControlRefTemplate(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	ControlRefTemplate msg;
+	buf.put_os(stream);
+
+	msg.decode(ControlRefTemplate_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
 OCTETSTRING enc__AuthenticateServerResponse(const AuthenticateServerResponse &msg) {
 	TTCN_Buffer buf;
 
@@ -309,6 +360,57 @@ RemoteProfileProvisioningRequest dec__RemoteProfileProvisioningRequest(const OCT
 	buf.put_os(stream);
 
 	msg.decode(RemoteProfileProvisioningRequest_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__EuiccCancelSessionSigned(const EuiccCancelSessionSigned &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(EuiccCancelSessionSigned_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+EuiccCancelSessionSigned dec__EuiccCancelSessionSigned(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	EuiccCancelSessionSigned msg;
+	buf.put_os(stream);
+
+	msg.decode(EuiccCancelSessionSigned_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__OtherSignedNotification(const OtherSignedNotification &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(OtherSignedNotification_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+OtherSignedNotification dec__OtherSignedNotification(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	OtherSignedNotification msg;
+	buf.put_os(stream);
+
+	msg.decode(OtherSignedNotification_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
+	return msg;
+}
+
+OCTETSTRING enc__NotificationMetadata(const NotificationMetadata &msg) {
+	TTCN_Buffer buf;
+
+	buf.clear();
+	msg.encode(NotificationMetadata_descr_, buf, TTCN_EncDec::CT_BER, BER_ENCODE_DER);
+	return OCTETSTRING(buf.get_len(), buf.get_data());
+}
+
+NotificationMetadata dec__NotificationMetadata(const OCTETSTRING &stream) {
+	TTCN_Buffer buf;
+	NotificationMetadata msg;
+	buf.put_os(stream);
+
+	msg.decode(NotificationMetadata_descr_, buf, TTCN_EncDec::CT_BER, BER_ACCEPT_ALL);
 	return msg;
 }
 
