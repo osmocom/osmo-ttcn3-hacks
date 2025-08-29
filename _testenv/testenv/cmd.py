@@ -12,7 +12,7 @@ env_extra = {}
 install_dir = None
 make_dir = None
 # osmo-dev make dir version, bump when making incompatible changes
-make_dir_version = 3
+make_dir_version = 4
 
 
 def distro_cache_suffix():
@@ -33,6 +33,8 @@ def init_env():
             install_dir = "/"
         else:
             install_dir = os.path.join(testenv.args.cache, "podman/install")
+            if testenv.args.asan:
+                install_dir += "-asan"
             install_dir += distro_cache_suffix()
     else:
         install_dir = os.path.join(testenv.args.cache, "host/install")
