@@ -6,6 +6,7 @@
     * Gp: GTP (emulates GGSN)
     * GSUP (emulates HLR)
     * VTY
+    * StatsD
 
 {% dot sgsn_tests.svg
 digraph G {
@@ -20,5 +21,6 @@ digraph G {
   ATS -> STP [label="Iu (IuPS)"];
   SGSN -> ATS [label="GSUP"];
   ATS -> SGSN [label="VTY"];
+  SGSN -> ATS [label="StatsD"];
 }
 %}
