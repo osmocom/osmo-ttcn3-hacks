@@ -19,6 +19,7 @@ FILES="
 	RANAP_EncDec.cc
 	SCCP_EncDec.cc
 	SCTPasp_PT.cc
+	StatsD_CodecPort_CtrlFunctdef.cc
 	TCCConversion.cc
 	TCCInterface.cc
 	TELNETasp_PT.cc
@@ -30,6 +31,7 @@ CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_GSUP
 	-DRAN_EMULATION_RANAP
 	-DUSE_MTP3_DISTRIBUTOR
+	-DSTATSD_HAVE_VTY
 "
 
 . ../_buildsystem/regen_makefile.inc.sh
