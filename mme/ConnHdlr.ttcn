@@ -1,0 +1,927 @@
+/* MME (Mobility Management Engine) test suite in TTCN-3, ConnHdlr
+ * (C) 2019 Harald Welte <laforge@gnumonks.org>
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+import from S1AP_Types all;
+import from S1AP_Templates all;
+import from S1AP_Functions all;
+import from S1AP_Emulation all;
+import from S1AP_PDU_Descriptions all;
+import from S1AP_IEs all;
+import from S1AP_PDU_Contents all;
+import from S1AP_Constants all;
+
+import from NAS_EPS_Types all;
+import from NAS_EPS_Templates all;
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_ts29_272_Templates all;
+import from DIAMETER_Emulation all;
+
+import from SGsAP_Types all;
+import from SGsAP_Templates all;
+import from SGsAP_Emulation all;
+
+import from GTP_Emulation all;
+import from GTPC_Types all;
+import from GTPv1C_CodecPort all;
+import from GTPv1C_Templates all;
+
+import from LTE_CryptoFunctions all;
+
+import from L3_Templates all;
+import from DNS_Helpers all;
+import from Osmocom_Types all;
+import from Osmocom_Gb_Types all;
+
+import from GTPv2_Types all;
+import from GTPv2_Templates all;
+import from GTPv2_Emulation all;
+
+/* (maximum) number of emulated eNBs */
+const integer NUM_ENB := 3;
+
+type record DiameterParams {
+	charstring local_ip,
+	integer local_port,
+	charstring diam_realm,
+	charstring local_diam_host,
+	charstring remote_diam_host
+};
+
+type record SGWParams {
+	charstring local_ip,
+	integer local_port,
+	charstring remote_ip,
+	integer remote_port,
+	/* PGW information announced by SGWC. MME never really interacts with these: */
+	charstring s5c_pgw_ip
+};
+
+/* parameters of emulated ENB */
+type record EnbParams {
+	charstring gtp1u_local_ip,
+	Global_ENB_ID global_enb_id,
+	integer cell_identity,
+	SupportedTAs supported_tas
+};
+
+type record BearerConfig {
+	 /* EPS Bearer ID */
+	uint4_t	ebi optional,
+	/* TEI (Data) local side, S11 (SGW) */
+	OCT4 	s11_teid_local optional,
+	/* TEI (Data) remote side, S11 (SGW) */
+	OCT4	s11_teid_remote optional,
+	/* TEI (Data) local side, S5c (PGW) */
+	OCT4 	s5c_teid_local optional,
+	/* TEI (Data) remote side, S5c (PGW) */
+	OCT4	s5c_teid_remote optional
+};
+
+/* parameters of emulated UE */
+type record UeParams {
+	hexstring imsi,
+	charstring ue_ip,
+	NAS_EPS_Types.GUTI guti optional,
+	octetstring kasme optional,
+
+	/* TEI (Control) local side, S11 (SGW) */
+	OCT4 	s11_teic_local,
+	/* TEI (Control) remote side, S11 (SGW) */
+	OCT4	s11_teic_remote optional,
+	/* TEI (Control) local side, S5c (PGW) */
+	OCT4 	s5c_teic_local,
+	/* TEI (Control) remote side, S5c (PGW) */
+	OCT4	s5c_teic_remote optional,
+
+	BearerConfig bearer optional
+}
+
+type record ConnHdlrPars {
+	/* copied over from MTC_CT on start of component */
+	EnbParams enb_pars[NUM_ENB],
+	DiameterParams hss_pars,
+	SGWParams sgw_pars,
+	/* copied over from MTC_CT on start of component */
+	UeParams ue_pars,
+	/* currently used MME (index into enb_pars, S1AP, ...) */
+	integer mme_idx,
+	/* Currently set KSI */
+	NAS_KeySetIdentifierV kset_id
+}
+
+type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr, GTP_ConnHdlr, GTP2_ConnHdlr {
+	var ConnHdlrPars g_pars;
+
+	var Gtp1cPeer g_gn_iface_peer;
+}
+
+const UENetworkCapabilityV c_NAS_defaultUeNetCap := {
+	eEA := '10000000'B,
+	eIA := '11000000'B,
+	uEA := omit,
+	uIA := omit,
+	uCS2 := omit,
+	nF := omit,
+	vCC := omit,
+	lCS := omit,
+	lPP := omit,
+	aCC_CSFB := omit,
+	h245_ASH := omit,
+	proSe := omit,
+	proSe_dd := omit,
+	proSe_dc := omit,
+	proSe_relay := omit,
+	cP_CIoT := omit,
+	uP_CIoT := omit,
+	s1_Udata := omit,
+	eRwoPDN := omit,
+	hC_CP_CIoT := omit,
+	ePCO := omit,
+	multipleDRB := omit,
+	v2XPC5 := omit,
+	restrictEC := omit,
+	cPbackoff := omit,
+	dCNR := omit,
+	n1Mode := omit,
+	sGC := omit,
+	spare1 := omit,
+	spare := omit
+};
+
+private const octetstring c_NAS_defaultAPN := '00'O;
+
+type function void_fn() runs on ConnHdlr;
+
+/* Encode an S1AP Global-ENB-ID into an octetstring */
+private function enc_S1AP_Global_ENB_ID(Global_ENB_ID global_enb_id) return octetstring {
+
+	/* Due to the limitations of libfftranscode, we can not define encoders (or decoders) for individual
+	 * information elements (in S1AP_Types.cc). Unfortuantely Global-ENB-ID also appears in BSSGP in its
+	 * encoded form. (see also: GTP-C 3GPP TS 48.018, section 11.3.70). To encode a given Global-ENB-ID
+	 * we craft a full S1AP PDU and encode it. Then we can cut out the encoded Global-ENB-ID from the
+	 * generated octetstring. */
+
+	var SupportedTAs supported_tas_dummy := {{
+				tAC := '0000'O,
+				broadcastPLMNs := { '00f000'O },
+				iE_Extensions := omit
+				}};
+	var octetstring encoded;
+	var integer global_enb_id_len;
+
+	if (ispresent(global_enb_id.eNB_ID.macroENB_ID)) {
+		global_enb_id_len := 8;
+	} else {
+		/* All other ENB ID types fit into 8 byte (homeENB_ID, short_macroENB_ID, long_macroENB_ID) */
+		global_enb_id_len := 9;
+	}
+
+	encoded := enc_S1AP_PDU(valueof(ts_S1AP_SetupReq(global_enb_id, supported_tas_dummy, v32)));
+
+	return substr(encoded, 11, global_enb_id_len);
+}
+
+template (value) S1AP_IEs.TAI ts_enb_S1AP_TAI(EnbParams enb) := {
+	pLMNidentity := enb.global_enb_id.pLMNidentity,
+	tAC := enb.supported_tas[0].tAC,
+	iE_Extensions := omit
+}
+
+template (value) EUTRAN_CGI ts_enb_S1AP_CGI(EnbParams enb) := {
+	pLMNidentity := enb.global_enb_id.pLMNidentity,
+	cell_ID := int2bit(enb.cell_identity, 28),
+	iE_Extensions := omit
+}
+
+private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (present) NAS_KeySetIdentifierV {
+	/* KSI not yet set, expect whatever assignment from network: */
+	if (g_pars.kset_id.identifier == c_NAS_KEY_SET_ID_NO_KEY) {
+		return tr_NAS_KeySetIdentifierV(?, ?);
+	} else {
+		/* Expect specific kset_id. Upon transmitting it UE->Network, f_attach()
+		 * has updated it to the expected value. */
+		return g_pars.kset_id;
+	}
+}
+private altstep as_s1ap_handle_auth() runs on ConnHdlr {
+	var PDU_NAS_EPS rx_nas;
+	var template (present) NAS_KeySetIdentifierV kset_id := f_tr_ConnHdlr_kset_id();
+	[] S1AP.receive(tr_NAS_AuthReq(kset_id := kset_id)) -> value rx_nas {
+		g_pars.kset_id := rx_nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_AuthenticationRequest.nasKeySetId;
+		/* static XRES result as we fixed the HSS RAND value and always have the following
+		RAND:   20080c3818183b522614162c07601d0d
+		AUTN:   f11b89a2a8be00001f9c526f3d75d44c
+		IK:     11329aae8e8d2941bb226b2061137c58
+		CK:     740d62df9803eebde5120acf358433d0
+		RES:    6a91970e838fd079
+		SRES:   e91e4777
+		Kc:     3b0f999e42198874
+		SQN:    32
+		IND:    0
+		*/
+		/* KASME: 95AFAD9A0D29AFAA079A9451DF7161D7EE4CBF2AF9387F766D058BB6B44B905D */
+		const OCT16 ck := '740d62df9803eebde5120acf358433d0'O;
+		const OCT16 ik := '11329aae8e8d2941bb226b2061137c58'O;
+		const OCT16 autn := 'f11b89a2a8be00001f9c526f3d75d44c'O;
+		const OCT8 res := '6a91970e838fd079'O;
+		const OCT3 plmn_id := '00F110'O;
+		const OCT6 sqn := '000000000020'O;
+		const OCT6 ak := substr(autn, 0, 6) xor4b sqn;
+		g_pars.ue_pars.kasme := f_kdf_kasme(ck, ik, plmn_id, sqn, ak);
+		var S1APEM_Config cfg := {
+			set_nas_keys := {
+				k_nas_int := f_kdf_nas_int(1, g_pars.ue_pars.kasme),
+				k_nas_enc := f_kdf_nas_enc(1, g_pars.ue_pars.kasme)
+			}
+		};
+		S1AP.send(cfg);
+		S1AP.send(ts_NAS_AuthResp(res));
+		}
+}
+
+private altstep as_s1ap_handle_sec_mode() runs on ConnHdlr {
+	var S1APEM_Config cfg;
+	var PDU_NAS_EPS rx_nas;
+	var NAS_SecurityAlgorithmsV alg := {
+		    typeOfIntegrityProtection := '001'B,
+		    spare1 := '0'B,
+		    typeOfCiphering := '000'B,
+		    spare2 := '0'B
+	};
+	[] S1AP.receive(tr_NAS_SecModeCmd(alg, f_tr_ConnHdlr_kset_id(), ?)) {
+		/* TODO: apply below integrity and ciphering based on
+		 * Security Mode Command field "NAS security algorithms - Selected NAS security algorithms"*/
+
+		/* Configure integrity protection: */
+		cfg := {
+			set_nas_alg_int := NAS_ALG_IP_EIA1
+		};
+		S1AP.send(cfg);
+		/* Configure Ciphering: */
+		cfg := {
+			set_nas_alg_enc := NAS_ALG_ENC_EEA0
+		};
+		S1AP.send(cfg);
+
+		S1AP.send(ts_NAS_SecModeCmpl);
+		}
+}
+
+
+private altstep as_s1ap_handle_IntialCtxSetupReq_Attach_Accept() runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_IntialCtxSetupReq) -> value rx_msg {
+		var template (omit) MME_UE_S1AP_ID mme_ue_id := f_S1AP_get_MME_UE_S1AP_ID(rx_msg);
+		var template (omit) ENB_UE_S1AP_ID enb_ue_id := f_S1AP_get_ENB_UE_S1AP_ID(rx_msg);
+		var template (value) E_RABSetupItemCtxtSURes rab_setup_it;
+		var template (value) E_RABSetupListCtxtSURes rab_setup_items;
+		var octetstring esm_enc;
+		var template (value) PDU_NAS_EPS nas;
+		var EPS_MobileIdentityTLV mi_tlv;
+
+		S1AP.receive(tr_NAS_AttachAccept()) -> value rx_nas;
+		mi_tlv := rx_nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_AttachAccept.gUTI;
+		if (mi_tlv.ePS_MobileIdentity.ePS_MobileIdentity.typeOfIdentity != '110'B) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx GUTI of unexpected MI type: ", mi_tlv));
+		}
+		g_pars.ue_pars.guti := mi_tlv.ePS_MobileIdentity.ePS_MobileIdentity.oddEvenInd_identity.guti
+
+		rab_setup_it := ts_S1AP_RABSetupItemCtxtSURes(rab_id := 5,
+							      tla := oct2bit(f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip)),
+							      gtp_teid := '00000002'O);
+		rab_setup_items := ts_S1AP_RABSetupListCtxtSURes(rab_setup_it);
+		S1AP.send(ts_S1AP_InitialCtxSetupResp(valueof(mme_ue_id), valueof(enb_ue_id), rab_setup_items));
+
+		nas := ts_NAS_ActDefEpsBearCtxAck(int2bit(g_pars.ue_pars.bearer.ebi, 4), '00000000'B, omit);
+		esm_enc := enc_PDU_NAS_EPS(valueof(nas));
+		S1AP.send(ts_NAS_AttachComplete(esm_enc));
+
+		/* Optional from the network: */
+		S1AP.receive(tr_NAS_EMMInformation);
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
+altstep as_s1ap_handle_IntialCtxSetupReq_TAU_Accept() runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_IntialCtxSetupReq) -> value rx_msg {
+		/* 3GPP TS 23.401 D.3.6 step 22: */
+		var template (omit) MME_UE_S1AP_ID mme_ue_id := f_S1AP_get_MME_UE_S1AP_ID(rx_msg);
+		var template (omit) ENB_UE_S1AP_ID enb_ue_id := f_S1AP_get_ENB_UE_S1AP_ID(rx_msg);
+		var template (value) E_RABSetupItemCtxtSURes rab_setup_it;
+		var template (value) E_RABSetupListCtxtSURes rab_setup_items;
+		var S1APEM_Config cfg;
+
+		S1AP.receive(tr_PDU_NAS_EPS_TrackingAreaUpdateAccept)-> value rx_nas;
+
+		/* Configure integrity protection: */
+		cfg := {
+			set_nas_alg_int := NAS_ALG_IP_EIA1
+		};
+		S1AP.send(cfg);
+
+		rab_setup_it := ts_S1AP_RABSetupItemCtxtSURes(rab_id := 5,
+							tla := oct2bit(f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip)),
+							gtp_teid := '00000002'O);
+		rab_setup_items := ts_S1AP_RABSetupListCtxtSURes(rab_setup_it);
+		S1AP.send(ts_S1AP_InitialCtxSetupResp(valueof(mme_ue_id), valueof(enb_ue_id), rab_setup_items));
+
+		/* 3GPP TS 23.401 D.3.6 step 23: */
+		/* Integrity Protection and Ciphering implemented by S1AP_Emulation: */
+		S1AP.send(ts_PDU_NAS_EPS_TrackingAreaUpdateComplete(c_EPS_SEC_NONE));
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
+altstep as_s1ap_handle_UeContextReleaseCmd(template S1AP_IEs.Cause cause := ?) runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_UeContextReleaseCmd(?, cause)) -> value rx_msg {
+		var template MME_UE_S1AP_ID mme_ue_id;
+		var template ENB_UE_S1AP_ID enb_ue_id;
+		if (not ispresent(rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair)) {
+			/* TODO: The UE CONTEXT RELEASE COMMAND (see also: 3GPP TS 36.413, section 9.1.4.6), may identify the
+			* context by either an uE_S1AP_ID_pair (MME_UE_S1AP_ID and ENB_UE_S1AP_ID) or an MME_UE_S1AP_ID alone.
+			* The latter case is not implemented here yet. */
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("complete implementation of UeContextReleaseCmd handling"));
+			return;
+		}
+
+		mme_ue_id := rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair.mME_UE_S1AP_ID;
+		enb_ue_id := rx_msg.initiatingMessage.value_.uEContextReleaseCommand.protocolIEs[0].value_.uE_S1AP_IDs.uE_S1AP_ID_pair.eNB_UE_S1AP_ID;
+
+		S1AP.send(ts_S1AP_UeContextReleaseCompl(mme_ue_id, enb_ue_id));
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
+/* Exepect AuthInfoReq (AIR) from HSS; respond with AuthInforAnswer (AIA) */
+private altstep as_DIA_AuthInfo() runs on ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_AIR(g_pars.ue_pars.imsi)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var octetstring sess_id;
+		var octetstring vplmn_id;
+		var hexstring imsi;
+		var template (value) AVP_list auth_info_content;
+
+		/* retrieve input data */
+		imsi := valueof(f_DIAMETER_get_imsi(rx_dia));
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+		sess_id := valueof(avp.avp_data.avp_BASE_NONE_Session_Id);
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_AAA_3GPP_Visited_PLMN_Id);
+		vplmn_id := valueof(avp.avp_data.avp_AAA_3GPP_Visited_PLMN_Id);
+
+		/* compute tuple */
+		auth_info_content := { ts_AVP_EutranVec(1, '20080c3818183b522614162c07601d0d'O, '6a91970e838fd079'O, 'f11b89a2a8be00001f9c526f3d75d44c'O, '95AFAD9A0D29AFAA079A9451DF7161D7EE4CBF2AF9387F766D058BB6B44B905D'O) };
+
+		DIAMETER.send(ts_DIA_AIA(auth_info_content, sess_id,
+					 hbh_id := rx_dia.hop_by_hop_id,
+					 ete_id := rx_dia.end_to_end_id));
+	}
+}
+
+/* Expect UpdateLocationReq (ULR); respond with UpdateLocationAnswer (ULA) */
+altstep as_DIA_UpdLoc() runs on ConnHdlr {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER.receive(tr_DIA_ULR(g_pars.ue_pars.imsi)) -> value rx_dia {
+		var template (omit) AVP avp;
+		var hexstring imsi;
+		var template (value) AVP_list sub_data;
+
+		/* retrieve input data */
+		imsi := valueof(f_DIAMETER_get_imsi(rx_dia));
+		avp := f_DIAMETER_get_avp(rx_dia, c_AVP_Code_BASE_NONE_Session_Id);
+
+		sub_data := {
+			ts_AVP_3GPP_SubscriberStatus(SERVICE_GRANTED),
+			ts_AVP_3GPP_SubscrRauTauTmr(30),
+			ts_AVP_3GPP_AMBR(1000, 2000),
+			ts_AVP_3GPP_ApnConfigProfile({
+				ts_AVP_3GPP_ContextId(1),
+				ts_AVP_3GPP_AllApnConfigsIncl,
+				ts_AVP_3GPP_ApnConfig(1, IPv4, "*")
+			})
+			};
+
+		DIAMETER.send(ts_DIA_ULA(sub_data, avp.avp_data.avp_BASE_NONE_Session_Id,
+					 hbh_id := rx_dia.hop_by_hop_id,
+					 ete_id := rx_dia.end_to_end_id));
+	}
+}
+
+function f_DIA_CancelLocation(integer idx := 0, template S1AP_IEs.Cause cause := omit) runs on ConnHdlr {
+
+	var UINT32 hbh_id := f_rnd_octstring(4);
+	var UINT32 ete_id := f_rnd_octstring(4);
+	var PDU_DIAMETER rx_dia;
+
+	/* Unlike CLR, CLA contains no IMSI. Register ete_id in DIAMETER_Emulation,
+	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
+	 */
+	f_diameter_expect_eteid(ete_id);
+
+	DIAMETER.send(ts_DIA_CLR(g_pars.ue_pars.imsi, SGSN_UPDATE_PROCEDURE,
+		      orig_host := g_pars.hss_pars.local_diam_host,
+		      orig_realm := g_pars.hss_pars.diam_realm,
+		      dest_host := g_pars.hss_pars.remote_diam_host,
+		      dest_realm := g_pars.hss_pars.diam_realm,
+		      hbh_id := hbh_id,
+		      ete_id := ete_id));
+
+	alt {
+	[] DIAMETER.receive(tr_DIA_CLA) -> value rx_dia {}
+	[] DIAMETER.receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected Diameter S6b msg rx: ", rx_dia));
+		}
+	}
+}
+
+altstep as_GTP2C_CreateSession_success() runs on ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+	var BearerContextIEs rx_bctx_ies;
+	var template (value) FullyQualifiedTEID s11_fteid_c_ie, s11_fteid_u_ie, s5c_fteid_c_ie, s5c_fteid_u_ie;
+	var template (value) PDN_AddressAllocation paa;
+	var template (value) BearerContextIEs bctx_ies;
+
+	[] GTP2.receive(tr_GTP2C_CreateSessionReq(g_pars.ue_pars.imsi)) -> value rx_msg {
+		/* Parse TEIC and Bearer EBI and TEID and store it in g_pars */
+		g_pars.ue_pars.s11_teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[0].tEID_GRE_Key;
+		g_pars.ue_pars.s5c_teic_remote := rx_msg.gtpcv2_pdu.createSessionRequest.fullyQualifiedTEID[1].tEID_GRE_Key;
+
+		rx_bctx_ies := rx_msg.gtpcv2_pdu.createSessionRequest.bearerContextGrouped[0].bearerContextIEs;
+		g_pars.ue_pars.bearer.ebi := rx_bctx_ies.ePS_Bearer_ID.ePS_Bearer_ID_Value;
+
+		/* allocate + register TEID-C on local side */
+		g_pars.ue_pars.s11_teic_local := f_gtp2_allocate_teic();
+		g_pars.ue_pars.bearer.s11_teid_local := g_pars.ue_pars.s11_teic_local;
+		g_pars.ue_pars.s5c_teic_local := f_gtp2_allocate_teic();
+		g_pars.ue_pars.bearer.s5c_teid_local := g_pars.ue_pars.s5c_teic_local;
+
+		s11_fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S11_MME_GTPC, g_pars.ue_pars.s11_teic_local, 0,
+					f_inet_addr(g_pars.sgw_pars.local_ip), omit);
+		s5c_fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_PGW_GTPC, g_pars.ue_pars.s5c_teic_local, 1,
+					f_inet_addr(g_pars.sgw_pars.s5c_pgw_ip), omit);
+		s11_fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S1U_SGW_GTPU, g_pars.ue_pars.bearer.s11_teid_local, 0,
+					f_inet_addr(g_pars.sgw_pars.local_ip), omit);
+		s5c_fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_PGW_GTPU, g_pars.ue_pars.bearer.s5c_teid_local, 2,
+					f_inet_addr(g_pars.sgw_pars.s5c_pgw_ip), omit);
+		paa := ts_GTP2C_PdnAddrAlloc_v4(f_inet_addr(g_pars.ue_pars.ue_ip));
+		bctx_ies := ts_GTP2C_BcContextIE(ebi := g_pars.ue_pars.bearer.ebi,
+						 teid_list := { s11_fteid_u_ie, s5c_fteid_u_ie },
+						 qos := ts_GTP2C_BearerQos('09'O, 0, 0, 0, 0),
+						 charging_id := ts_GTP2C_ChargingID(g_pars.ue_pars.bearer.s11_teid_local));
+
+		GTP2.send(ts_GTP2C_CreateSessionResp(g_pars.ue_pars.s11_teic_remote,
+						     rx_msg.sequenceNumber,
+						     Request_accepted,
+						     { s11_fteid_c_ie, s5c_fteid_c_ie },
+						     paa, { ts_GTP2C_BcGrouped(bctx_ies) } ));
+		setverdict(pass);
+	}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unexpected GTPv2/S11 message from MME"));
+	}
+}
+
+altstep as_GTP2C_ModifyBearer_success() runs on ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+	var BearerContextIEs rx_bctx_ies;
+	var template (value) FullyQualifiedTEID s11_fteid_c_ie, s11_fteid_u_ie, s5c_fteid_c_ie, s5c_fteid_u_ie;
+	var template (value) BearerContextIEs bctx_ies;
+
+	[] GTP2.receive(tr_GTP2C_ModifyBearerReq(g_pars.ue_pars.s11_teic_local)) -> value rx_msg {
+
+		rx_bctx_ies := rx_msg.gtpcv2_pdu.modifyBearerRequest.bearerContextGrouped[0].bearerContextIEs;
+
+		/* TODO: validate the S1-U fullyQualifiedTEID announces the IP address provided by the ENB in InitialCtxSetupResp */
+		// rx_bctx_ies.fullyQualifiedTEID[0]. == f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip)
+
+		/* Update S11 TEID */
+		g_pars.ue_pars.bearer.s11_teid_remote := rx_bctx_ies.fullyQualifiedTEID[0].tEID_GRE_Key;
+
+		s11_fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S1U_SGW_GTPU, g_pars.ue_pars.bearer.s11_teid_local, 0,
+					f_inet_addr(g_pars.sgw_pars.local_ip), omit);
+		bctx_ies := ts_GTP2C_BcContextIE(ebi := g_pars.ue_pars.bearer.ebi,
+						 teid_list := { s11_fteid_u_ie },
+						 qos := ts_GTP2C_BearerQos('09'O, 0, 0, 0, 0),
+						 charging_id := ts_GTP2C_ChargingID(g_pars.ue_pars.bearer.s11_teid_local));
+
+		GTP2.send(ts_GTP2C_ModifyBearerResp(g_pars.ue_pars.s11_teic_remote,
+						     rx_msg.sequenceNumber,
+						     Request_accepted,
+						     g_pars.ue_pars.bearer.ebi,
+						     { ts_GTP2C_BcGrouped(bctx_ies) } ));
+		setverdict(pass);
+	}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unexpected GTPv2/S11 message from MME"));
+	}
+}
+
+altstep as_GTP2C_DeleteSession_success(template Indication ind_flags := *) runs on ConnHdlr {
+	var PDU_GTPCv2 rx_msg;
+
+	[] GTP2.receive(tr_GTP2C_DeleteSessionReq(g_pars.ue_pars.s11_teic_local, indicationFlags := ind_flags)) -> value rx_msg {
+		GTP2.send(ts_GTP2C_DeleteSessionResp(g_pars.ue_pars.s11_teic_remote,
+						     rx_msg.sequenceNumber,
+						     Request_accepted));
+		setverdict(pass);
+	}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unexpected GTPv2/S11 message from MME"));
+	}
+}
+
+
+/* 3GPP TS 23.401 D.3.5, TS 23.003 2.8.2.1 */
+private function guti2rai_ptmsi(in NAS_EPS_Types.GUTI guti, in OCT2 truncated_nas_token, out RoutingAreaIdentity rai, out OCT4 ptmsi, out OCT3 ptmsi_sig) runs on ConnHdlr {
+	var bitstring mtmsi_bits := oct2bit(guti.mTMSI);
+	var bitstring ptmsi_bits;
+	var bitstring ptmsi_sig_bits;
+
+	rai := valueof(ts_RoutingAreaIdentity(guti.mccDigit1 & guti.mccDigit2 & guti.mccDigit3,
+					      guti.mncDigit3 & guti.mncDigit1 & guti.mncDigit2,
+					      guti.mMEGI, guti.mMEC));
+	/* 3GPP TS 23.003 2.8.2.0: "P-TMSI shall be of 32 bits length where the two topmost bits are
+	 * reserved and always set to '11'. Hence, for a UE which may handover to GERAN/UTRAN (based on
+	 * subscription and UE capabilities), the corresponding bits in the M-TMSI are set to '11'"
+	 */
+	ptmsi_bits := '11'B & substr(mtmsi_bits, 2, 6) & oct2bit(guti.mMEC) & substr(mtmsi_bits, 16, 16);
+	ptmsi_sig_bits := substr(mtmsi_bits, 8, 8) & oct2bit(truncated_nas_token);
+	ptmsi := bit2oct(ptmsi_bits);
+	ptmsi_sig := bit2oct(ptmsi_sig_bits);
+	/* TODO: The UE shall fill the remaining 2 octets of the <P-TMSI signature> according to clauses 9.1.1, 9.4.1, 10.2.1, or
+	 * 10.5.1 of 3GPP TS.33.401 [89] , as appropriate, for RAU/Attach procedures.*/
+}
+
+/* 3GPP TS 23.401 D.3.6, TS 23.003 2.8.2.2.2 (Mapping in the UE) */
+function rai_ptmsi2_guti(in RoutingAreaIdentity rai, in OCT4 ptmsi, out NAS_EPS_Types.GUTI guti) {
+
+
+	var bitstring ptmsi_bits := oct2bit(ptmsi);
+	var bitstring rac_bits := oct2bit(rai.rac);
+	var bitstring mtmsi_bits := '11'B &
+				    substr(ptmsi_bits, 2, 6) &
+				    substr(rac_bits, 0, 8) &
+				    substr(ptmsi_bits, 16, 16);
+	guti := valueof(ts_NAS_GUTI(mcc_mnc := rai.mcc_digits & rai.mnc_digits,
+			    mmegi := rai.lac,
+			    mmec := bit2oct(substr(ptmsi_bits, 8, 8)),
+			    tmsi := bit2oct(mtmsi_bits)));
+}
+
+/* Test UE attached to EUTRAN reselecting a GERAN cell. In this scenario, the
+ * new SGSN will attempt to obtain information of the UE from the old SGSN (MME)
+ * through Gn interface using SGSN Context Request/Response procedure (OS#6294). */
+function f_gtp_sgsn_context_4g_to_2g(OCT4 new_sgsn_local_teid := '12345678'O) runs on ConnHdlr {
+	var template (value) GTPC_PDUs SGSNContextReqPDU;
+	var RoutingAreaIdentity rai;
+	var OCT4 ptmsi;
+	var OCT3 ptmsi_sig;
+	var Gtp1cUnitdata gtpc_pdu;
+	var OCT4 old_mme_local_teid;
+	var  uint16_t gtpc_seq_nr := f_rnd_int(65535);
+
+	/* Derive NAS Token (and post-increment ul_count): */
+	var OCT32 nas_token := f_s1apem_derive_nas_token(g_pars.ue_pars.kasme);
+	var OCT2 truncated_nas_token := substr(nas_token, 30, 2);
+
+	guti2rai_ptmsi(g_pars.ue_pars.guti, truncated_nas_token, rai, ptmsi, ptmsi_sig);
+
+	SGSNContextReqPDU := ts_SGSNContextReqPDU(rai, new_sgsn_local_teid, f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip),
+						  ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig));
+	GTP[0].send(ts_GTPC_SGSNContextReq(g_gn_iface_peer, gtpc_seq_nr, SGSNContextReqPDU));
+
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] GTP[0].receive(tr_GTPC_SGSNContextResp(g_gn_iface_peer, new_sgsn_local_teid,
+					       tr_SGSNContextRespPDU(GTP_CAUSE_REQUEST_ACCEPTED,
+					       g_pars.ue_pars.imsi))) -> value gtpc_pdu {
+		old_mme_local_teid := gtpc_pdu.gtpc.gtpc_pdu.sgsn_ContextResponse.teidControlPlane.teidControlPlane;
+		setverdict(pass);
+		}
+	[] GTP[0].receive {
+		 Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("unexpected GTPC message from MME"));
+		}
+	[] T.timeout {
+		 Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("no SGSN Context Response from MME"));
+		}
+	}
+
+	GTP[0].send(ts_GTPC_SGSNContextAck(g_gn_iface_peer, old_mme_local_teid,
+					oct2int(gtpc_pdu.gtpc.opt_part.sequenceNumber),
+					ts_SGSNContextAckPDU(GTP_CAUSE_REQUEST_ACCEPTED)));
+
+}
+
+altstep as_gtp_sgsn_context_2g_to_4g(OCT4 new_sgsn_teid := 'ABABABAB'O, GTPv1C_Templates.GTP_RATType rat_type := GTP_RAT_TYPE_EUTRAN,
+				     RoutingAreaIdentity rai,
+				     OCT4 ptmsi,
+				     OCT3 ptmsi_sig,
+				     boolean exp_auth := false)
+runs on ConnHdlr {
+	var Gtp1cUnitdata gtpc_pdu;
+
+	[] GTP[0].receive(tr_GTPC_SGSNContextReq(g_gn_iface_peer, tr_SGSNContextReqPDU(rai := rai, ptmsi := ts_PTMSI(ptmsi), ptmsi_sig := ts_PTMSI_sig(ptmsi_sig), rat_type := int2oct(enum2int(rat_type), 1)))) -> value gtpc_pdu {
+		var template (value) PDP_Context_GTPC pdp_ctx;
+		var template (value) GTPC_PDUs SGSNContextRespPDU;
+		var Gtp1cUnitdata gtpc_pdu_ack;
+		var OCT4 old_mme_remote_teid := gtpc_pdu.gtpc.gtpc_pdu.sgsn_ContextRequest.teidControlPlane.teidControlPlane;
+
+		const OCT16 ck := '740d62df9803eebde5120acf358433d0'O;
+		const OCT16 ik := '11329aae8e8d2941bb226b2061137c58'O;
+
+		pdp_ctx := ts_PDP_Context_GTPC(f_inet_addr(g_pars.ue_pars.ue_ip),
+					       f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip),
+					       c_NAS_defaultAPN,
+					       ggsn_teic := '12345678'O,
+					       ggsn_teid := '87654321'O);
+		SGSNContextRespPDU := ts_SGSNContextRespPDU(GTP_CAUSE_REQUEST_ACCEPTED,
+							   g_pars.ue_pars.imsi,
+							   new_sgsn_teid,
+							   f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip),
+							   ts_MM_ContextUMTS(ck, ik),
+							   { pdp_ctx });
+		GTP[0].send(ts_GTPC_SGSNContextResp(g_gn_iface_peer,
+						 old_mme_remote_teid,
+						 oct2int(gtpc_pdu.gtpc.opt_part.sequenceNumber),
+						 SGSNContextRespPDU));
+
+		if (exp_auth) {
+			as_DIA_AuthInfo();
+			as_s1ap_handle_auth();
+			as_s1ap_handle_sec_mode();
+		}
+
+		GTP[0].receive(tr_GTPC_SGSNContextAck(g_gn_iface_peer, new_sgsn_teid,
+						   tr_SGSNContextAckPDU(GTP_CAUSE_REQUEST_ACCEPTED))) -> value gtpc_pdu;
+		setverdict(pass);
+	}
+	[] GTP[0].receive {
+		setverdict(fail, "unexpected GTPC message from MME");
+	}
+}
+
+function f_attach() runs on ConnHdlr {
+	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI(g_pars.ue_pars.imsi);
+	var template (value) PDU_NAS_EPS nas_esm, nas_emm;
+	timer T := 5.0;
+
+	nas_esm := ts_NAS_PdnConnReq(bearer_id := '0000'B, proc_tid := int2bit(1,8),
+					pdn_type := NAS_PDN_T_IPv4, req_type := '001'B);
+	nas_emm := ts_NAS_AttachRequest(att_type := '000'B, kset_id := g_pars.kset_id, mobile_id := mi,
+					ue_net_cap := c_NAS_defaultUeNetCap,
+					esm_enc := enc_PDU_NAS_EPS(valueof(nas_esm)));
+	var template (value) S1AP_PDU tx;
+	tx := ts_S1AP_InitialUE(p_eNB_value := 0, p_nasPdu := enc_PDU_NAS_EPS(valueof(nas_emm)),
+				p_tAI := ts_enb_S1AP_TAI(g_pars.enb_pars[g_pars.mme_idx]),
+				p_eUTRAN_CGI := ts_enb_S1AP_CGI(g_pars.enb_pars[g_pars.mme_idx]),
+				p_rrcCause := mo_Signalling);
+	S1AP.send(tx);
+
+	/* Expect updated KSI from network following 5G Core standards
+	*(open5gs.git 70310979c58fe186e9eaa06bec9d9a31f24ff7a1): */
+	if (g_pars.kset_id.identifier != c_NAS_KEY_SET_ID_NO_KEY) {
+		if (g_pars.kset_id.identifier == '110'B) {
+			g_pars.kset_id.identifier := '000'B;
+		} else {
+			g_pars.kset_id.identifier := int2bit(bit2int(g_pars.kset_id.identifier) + 1, 3);
+		}
+	}
+
+	as_DIA_AuthInfo();
+	as_s1ap_handle_auth();
+	alt {
+	[] as_DIA_UpdLoc() {
+		as_s1ap_handle_sec_mode();
+		}
+	[] as_s1ap_handle_sec_mode() {
+		as_DIA_UpdLoc();
+		}
+	}
+
+	/* We now expect the MME to send a Create Session Request to the SGW-C */
+	f_gtp2_register_udmsg('20'O);
+	T.start;
+	alt {
+	[] as_GTP2C_CreateSession_success();
+	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+
+	T.start;
+	alt {
+	[] as_s1ap_handle_IntialCtxSetupReq_Attach_Accept();
+	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+
+	/* We now expect the MME to send a Modify Bearer Request to the SGW-C */
+	f_gtp2_register_udmsg('22'O);
+	T.start;
+	alt {
+	[] as_GTP2C_ModifyBearer_success();
+	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+}
+
+external function enc_PDU_GTPC_RAN_INF_REQ(in PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_pdu) return octetstring
+with { extension "prototype(convert)"
+       extension "encode(RAW)"
+     }
+
+external function enc_PDU_GTPC_RAN_INF(in PDU_BSSGP_RAN_INFORMATION_GTPC gtpc_pdu) return octetstring
+with { extension "prototype(convert)"
+       extension "encode(RAW)"
+     }
+
+function f_convert_plmn(OCT3 pLMNidentity) return hexstring {
+	var hexstring pLMNidentity_hex := oct2hex(pLMNidentity);
+	var hexstring pLMNidentity_hex_swapped;
+	pLMNidentity_hex_swapped[0] := pLMNidentity_hex[1];
+	pLMNidentity_hex_swapped[1] := pLMNidentity_hex[0];
+	pLMNidentity_hex_swapped[2] := pLMNidentity_hex[3];
+	pLMNidentity_hex_swapped[3] := pLMNidentity_hex[2];
+	pLMNidentity_hex_swapped[4] := pLMNidentity_hex[5];
+	pLMNidentity_hex_swapped[5] := pLMNidentity_hex[4];
+	return pLMNidentity_hex_swapped;
+}
+
+/* Make a template for a GTPC BSSGP container that contains a RAN INFORMATION REQUEST. The template can be used to
+ * craft the request for the S1AP/S1-MME interface and also to verfify the contents of the coresponding request on
+ * the GTPC/Gn interface */
+private function f_make_ts_GTPC_RAN_Information_Request(GTP_CellId geran_gtp_ci)
+runs on ConnHdlr return template (value) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC {
+	var template (value) RIM_Routing_Address_GTPC gtpc_dst_addr, gtpc_src_addr;
+	var template (value) RAN_Information_Request_RIM_Container_GTPC gtpc_rim_req_cont;
+	var template (value) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_bssgp_cont;
+	var octetstring gnbid;
+	var GTP_CellId eutran_gtp_ci;
+	eutran_gtp_ci.ra_id.lai.mcc_mnc := f_convert_plmn(g_pars.enb_pars[g_pars.mme_idx].global_enb_id.pLMNidentity);
+
+	gnbid := enc_S1AP_Global_ENB_ID(g_pars.enb_pars[g_pars.mme_idx].global_enb_id);
+	gtpc_dst_addr := ts_GTPC_RIM_Routing_Address_cid(geran_gtp_ci);
+	gtpc_src_addr := ts_GTPC_RIM_Routing_Address_enbid(eutran_gtp_ci,
+							   oct2int(g_pars.enb_pars[g_pars.mme_idx].supported_tas[0].tAC),
+							   gnbid);
+
+	gtpc_rim_req_cont := ts_GTPC_RAN_Information_Request_RIM_Container(
+				ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+				ts_GTPC_RIM_Sequence_Number(1),
+				ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+				ts_GTPC_RIM_Protocol_Version_Number(1),
+				tsu_GTPC_RAN_Information_Request_Application_Container_NACC(geran_gtp_ci),
+				omit);
+	gtpc_bssgp_cont := ts_GTPC_RAN_Information_Request(
+				ts_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+				ts_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+				gtpc_rim_req_cont);
+
+	return gtpc_bssgp_cont;
+}
+
+private function f_make_tr_GTPC_RAN_Information_Request(GTP_CellId geran_gtp_ci)
+runs on ConnHdlr return template (present) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC {
+	var template (present) RIM_Routing_Address_GTPC gtpc_dst_addr, gtpc_src_addr;
+	var template (present) RAN_Information_Request_RIM_Container_GTPC gtpc_rim_req_cont;
+	var template (present) PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_bssgp_cont;
+	var octetstring gnbid;
+	var GTP_CellId eutran_gtp_ci;
+	eutran_gtp_ci.ra_id.lai.mcc_mnc := f_convert_plmn(g_pars.enb_pars[g_pars.mme_idx].global_enb_id.pLMNidentity);
+
+	gnbid := enc_S1AP_Global_ENB_ID(g_pars.enb_pars[g_pars.mme_idx].global_enb_id);
+	gtpc_dst_addr := ts_GTPC_RIM_Routing_Address_cid(geran_gtp_ci);
+	gtpc_src_addr := ts_GTPC_RIM_Routing_Address_enbid(eutran_gtp_ci,
+							   oct2int(g_pars.enb_pars[g_pars.mme_idx].supported_tas[0].tAC),
+							   gnbid);
+
+	gtpc_rim_req_cont := tr_GTPC_RAN_Information_Request_RIM_Container(
+				ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+				ts_GTPC_RIM_Sequence_Number(1),
+				ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+				ts_GTPC_RIM_Protocol_Version_Number(1),
+				tru_GTPC_RAN_Information_Request_Application_Container_NACC(geran_gtp_ci));
+	gtpc_bssgp_cont := tr_GTPC_RAN_Information_Request(
+				tr_GTPC_RIM_Routing_Information(RIM_ADDR_GERAN_CELL_ID, gtpc_dst_addr),
+				tr_GTPC_RIM_Routing_Information(RIM_ADDR_EUTRAN_NODEB_ID, gtpc_src_addr),
+				gtpc_rim_req_cont);
+
+	return gtpc_bssgp_cont;
+}
+
+/* Make initial RAN INFORMATION REQUEST message that is sent on the S1AP/S1-MME interface */
+function f_make_ts_S1AP_eNBDirectInfTrans(GTP_CellId geran_gtp_ci)
+runs on ConnHdlr return template (value) S1AP_PDU {
+	var template (value) Inter_SystemInformationTransferType inf;
+
+	inf.rIMTransfer.rIMInformation := enc_PDU_GTPC_RAN_INF_REQ(valueof(f_make_ts_GTPC_RAN_Information_Request(geran_gtp_ci)));
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.pLMNidentity := hex2oct(f_convert_plmn(hex2oct(geran_gtp_ci.ra_id.lai.mcc_mnc)));
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.lAC := int2oct(geran_gtp_ci.ra_id.lai.lac, 2);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.lAI.iE_Extensions := omit;
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.rAC := int2oct(geran_gtp_ci.ra_id.rac, 1);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.cI := int2oct(geran_gtp_ci.cell_id, 2);
+	inf.rIMTransfer.rIMRoutingAddress.gERAN_Cell_ID.iE_Extensions := omit;
+	inf.rIMTransfer.iE_Extensions := omit;
+
+	return ts_S1AP_eNBDirectInfTrans(inf);
+}
+
+/* Make RAN INFORMATION (response) message that is sent on the GTPC/Gn interface */
+function f_make_ts_GTPC_RANInfoRelay(template Gtp1cUnitdata req_gtpc_pdu,
+				     GTP_CellId geran_gtp_ci, octetstring geran_si)
+runs on ConnHdlr return template (value) Gtp1cUnitdata {
+	var template Gtp1cUnitdata res_gtpc_pdu;
+	var template RAN_Information_RIM_Container_GTPC gtpc_rim_res_cont;
+	var template PDU_BSSGP_RAN_INFORMATION_GTPC gtpc_bssgp_rim_res_pdu;
+	var template RIM_Routing_Information_GTPC gtpc_rim_dst_cell_id, gtpc_rim_src_cell_id;
+	var template RIM_RoutingAddress gtpc_rim_ra;
+	var template RIM_RoutingAddress_Discriminator gtpc_rim_ra_discr;
+
+	/* Assemble GTPC RAN Information */
+	gtpc_rim_res_cont := ts_GTPC_RAN_Information_RIM_Container(ts_GTPC_RIM_Application_Identity(RIM_APP_ID_NACC),
+			     ts_GTPC_RIM_Sequence_Number(2),
+			     ts_GTPC_RIM_PDU_Indications(false, RIM_PDU_TYPE_SING_REP),
+			     ts_GTPC_RIM_Protocol_Version_Number(1),
+			     tsu_GTPC_ApplContainer_or_ApplErrContainer_NACC(tsu_GTPC_ApplContainer_NACC(geran_gtp_ci, false, 3, geran_si)),
+			     omit);
+
+	/* The source becomes the destination and vice versa */
+	gtpc_rim_dst_cell_id := req_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.transparentContainer.
+			        rANTransparentContainerField.pDU_BSSGP_RAN_INFORMATION_REQUEST.source_Cell_Identifier
+	gtpc_rim_src_cell_id := req_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.transparentContainer.
+			        rANTransparentContainerField.pDU_BSSGP_RAN_INFORMATION_REQUEST.destination_Cell_Identifier
+	gtpc_bssgp_rim_res_pdu := ts_GTPC_RAN_Information(gtpc_rim_dst_cell_id,
+							  gtpc_rim_src_cell_id,
+							  gtpc_rim_res_cont);
+
+	/* Assemble RIM Routing Address (essentially a copy of the destination cell identifier)*/
+	gtpc_rim_ra := ts_RIM_RoutingAddress(enc_RIM_Routing_Address_GTPC(valueof(gtpc_rim_dst_cell_id.rIM_Routing_Address)));
+	gtpc_rim_ra_discr := ts_RIM_RoutingAddress_Discriminator(hex2bit(valueof(gtpc_rim_dst_cell_id.rIMRoutingAddressDiscriminator)));
+
+	res_gtpc_pdu := ts_GTPC_RANInfoRelay(g_gn_iface_peer,
+					     ts_RANTransparentContainer_RAN_INFO(gtpc_bssgp_rim_res_pdu),
+					     gtpc_rim_ra, gtpc_rim_ra_discr);
+
+	return res_gtpc_pdu;
+}
+
+/* Make template to verify the RAN INFORMATION REQUEST as it appears on the GTPC/Gn interface */
+function f_make_tr_GTPC_MsgType(GTP_CellId geran_gtp_ci)
+runs on ConnHdlr return template (present) Gtp1cUnitdata {
+	var template Gtp1cUnitdata msg;
+	var template GTPC_PDUs pdus;
+	var template RANTransparentContainer ran_transp_cont;
+
+	ran_transp_cont := tr_RANTransparentContainer_RAN_INFO_REQ(
+			   f_make_tr_GTPC_RAN_Information_Request(geran_gtp_ci));
+	pdus := tr_RANInfoRelay(ran_transp_cont);
+	msg := tr_GTPC_MsgType(g_gn_iface_peer, rANInformationRelay, '00000000'O, pdus);
+
+	return msg;
+}
+
+/* Make template to verify the RAN INFORMATION (response) as it appears on the S1AP/S1-MME interface */
+function f_make_tr_S1AP_MMEDirectInfTrans(Gtp1cUnitdata ran_information_gtpc_pdu)
+runs on ConnHdlr return template (present) S1AP_PDU {
+	var template S1AP_PDU msg;
+	var template Inter_SystemInformationTransferType inf;
+
+	inf.rIMTransfer.rIMInformation := enc_PDU_GTPC_RAN_INF(
+					  ran_information_gtpc_pdu.gtpc.gtpc_pdu.ranInformationRelay.
+					  transparentContainer.rANTransparentContainerField.
+					  pDU_BSSGP_RAN_INFORMATION);
+	inf.rIMTransfer.rIMRoutingAddress := omit;
+	inf.rIMTransfer.iE_Extensions := omit;
+	msg := tr_S1AP_MMEDirectInfTrans(inf);
+
+	return msg;
+}
+
+}
