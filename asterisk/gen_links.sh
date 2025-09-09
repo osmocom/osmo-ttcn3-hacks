@@ -16,7 +16,7 @@ FILES="Socket_API_Definitions.ttcn"
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
-FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn PIPEasp_Templates.ttcn "
+FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn "
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.IPL4asp/src
