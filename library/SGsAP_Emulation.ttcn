@@ -34,6 +34,7 @@ import from SGsAP_Templates all;
 import from SCTP_Templates all;
 import from Osmocom_Types all;
 import from IPL4asp_Types all;
+import from Misc_Helpers all;
 import from DNS_Helpers all;
 import from MobileL3_Types all;
 
@@ -48,9 +49,20 @@ type port SGsAP_Conn_PT message {
 	inout PDU_SGsAP, PDU_ML3_MS_NW, PDU_ML3_NW_MS;
 } with { extension "internal" };
 
+type enumerated SGsAPEM_EventUpDown {
+	SGsAPEM_EVENT_DOWN,
+	SGsAPEM_EVENT_UP
+}
+
+/* an event indicating us whether or not a connection is physically up or down,
+ * and whether we have received an ID_ACK */
+type union SGsAPEM_Event {
+	SGsAPEM_EventUpDown	up_down
+}
+
 /* global test port e.g. for non-imsi/conn specific messages */
 type port SGsAP_PT message {
-	inout PDU_SGsAP;
+	inout PDU_SGsAP, SGsAPEM_Event;
 } with { extension "internal" };
 
 
@@ -76,8 +88,10 @@ type component SGsAP_Emulation_CT {
 	/* test port for unit data messages */
 	port SGsAP_PT SGsAP_UNIT;
 
+	var SGsAP_conn_parameters g_pars;
 	var charstring g_sgsap_id;
-	var integer g_sgsap_conn_id := -1;
+	var integer g_self_conn_id := -1;
+	var IPL4asp_Types.ConnectionId g_last_conn_id := -1; /* server only */
 }
 
 type function SGsAPCreateCallback(PDU_SGsAP msg, hexstring imsi, charstring id)
@@ -101,7 +115,7 @@ type record SGsAP_conn_parameters {
 function tr_SGsAP_RecvFrom_R(template PDU_SGsAP msg)
 runs on SGsAP_Emulation_CT return template SGsAP_RecvFrom {
 	var template SGsAP_RecvFrom mrf := {
-		connId := g_sgsap_conn_id,
+		connId := ?,
 		remName := ?,
 		remPort := ?,
 		locName := ?,
@@ -246,13 +260,35 @@ private function f_SGsAP_get_imsi(PDU_SGsAP pdu) return template (omit) IMSI
 	return omit;
 }
 
+private function emu_is_server() runs on SGsAP_Emulation_CT return boolean {
+	return g_pars.remote_sctp_port == -1;
+}
+
+/* Resolve TCP/IP connection identifier depending on server/client mode */
+private function f_sgsap_conn_id()
+runs on SGsAP_Emulation_CT return IPL4asp_Types.ConnectionId {
+	var IPL4asp_Types.ConnectionId conn_id;
+
+	if (not emu_is_server()) {
+		conn_id := g_self_conn_id;
+	} else {
+		conn_id := g_last_conn_id;
+	}
+
+	if (conn_id == -1) { /* Just to be sure */
+		Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail, "Connection is not established");
+	}
+
+	return conn_id;
+}
+
 private function f_sgsap_xceive(template (value) PDU_SGsAP tx,
 				template PDU_SGsAP rx_t := ?)
 runs on SGsAP_Emulation_CT  return PDU_SGsAP {
 	timer T := 10.0;
 	var SGsAP_RecvFrom mrf;
 
-	SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, tx));
+	SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), tx));
 	alt {
 	[] SGsAP.receive(tr_SGsAP_RecvFrom_R(rx_t)) -> value mrf { }
 	[] SGsAP.receive(tr_SctpAssocChange) { repeat; }
@@ -265,8 +301,15 @@ runs on SGsAP_Emulation_CT  return PDU_SGsAP {
 	return mrf.msg;
 }
 
+private function f_send_SGsAPEM_Event(template (value) SGsAPEM_Event evt) runs on SGsAP_Emulation_CT {
+	if (SGsAP_UNIT.checkstate("Connected")) {
+		SGsAP_UNIT.send(evt);
+	}
+}
+
 function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsAP_Emulation_CT {
 	var Result res;
+	g_pars := p;
 	g_sgsap_id := id;
 	f_imsi_table_init();
 	f_expect_table_init();
@@ -281,10 +324,14 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 							        { sctp := valueof(ts_SctpTuple) });
 	}
 	if (not ispresent(res.connId)) {
-		setverdict(fail, "Could not connect SGsAP socket, check your configuration");
-		mtc.stop;
+		Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail, "Could not connect SGsAP socket, check your configuration");
 	}
-	g_sgsap_conn_id := res.connId;
+	g_self_conn_id := res.connId;
+
+	/* notify user about SCTP establishment */
+	if (p.remote_sctp_port != -1) {
+		f_send_SGsAPEM_Event(SGsAPEM_Event:{up_down:=SGsAPEM_EVENT_UP});
+	}
 
 	while (true) {
 		var SGsAP_ConnHdlr vc_conn;
@@ -295,30 +342,41 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 		var SGsAP_RecvFrom mrf;
 		var PDU_SGsAP msg;
 		var charstring vlr_name, mme_name;
+		var ASP_Event asp_evt;
 
 		alt {
+		/* SGsAP UNITDATA from client */
+		[] SGsAP_UNIT.receive(PDU_SGsAP:?) -> value msg sender vc_conn {
+			/* Pass message through */
+			SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), msg));
+			}
+
 		/* SGsAP from client */
 		[] SGsAP_CLIENT.receive(PDU_SGsAP:?) -> value msg sender vc_conn {
 			/* Pass message through */
 			/* TODO: check which ConnectionID client has allocated + store in table? */
-			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
+			SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), msg));
 			}
 		/* DTAP/MobileL3 from client (emulated MS): wrap in SGsAP-UL-UD and send */
 		[] SGsAP_CLIENT.receive(PDU_ML3_MS_NW:?) -> value l3_mo sender vc_conn {
 			var octetstring l3_enc := enc_PDU_ML3_MS_NW(l3_mo);
 			imsi := f_imsi_by_comp(vc_conn);
 			msg := valueof(ts_SGsAP_UL_UD(imsi, l3_enc));
-			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
+			SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), msg));
 			}
 		[] SGsAP_CLIENT.receive(PDU_ML3_NW_MS:?) -> value l3_mt sender vc_conn {
 			var octetstring l3_enc := enc_PDU_ML3_NW_MS(l3_mt);
 			imsi := f_imsi_by_comp(vc_conn);
 			msg := valueof(ts_SGsAP_DL_UD(imsi, l3_enc));
-			SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, msg));
+			SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), msg));
 			}
 
 		/* DTAP/MobileL3 from MSC/VLR to MS wrapped in SGsAP-DL-UD: Extract, decode, forward */
 		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(tr_SGsAP_DL_UD(?,?))) -> value mrf {
+			if (not match(mrf.connId, f_sgsap_conn_id())) {
+				Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail,
+							log2str("Received message from unexpected conn_id!", mrf));
+			}
 			var octetstring l3_enc := mrf.msg.sGsAP_DOWNLINK_UNITDATA.nAS_MessageContainer.nAS_MessageContainer;
 			imsi := mrf.msg.sGsAP_DOWNLINK_UNITDATA.iMSI.iMSI.digits;
 			vc_conn := f_comp_by_imsi(imsi);
@@ -326,6 +384,10 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 			SGsAP_CLIENT.send(l3_mt) to vc_conn;
 			}
 		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(tr_SGsAP_UL_UD(?,?))) -> value mrf {
+			if (not match(mrf.connId, f_sgsap_conn_id())) {
+				Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail,
+							log2str("Received message from unexpected conn_id!", mrf));
+			}
 			var octetstring l3_enc := mrf.msg.sGsAP_UPLINK_UNITDATA.nAS_MessageContainer.nAS_MessageContainer;
 			imsi := mrf.msg.sGsAP_UPLINK_UNITDATA.iMSI.iMSI.digits;
 			l3_mo := dec_PDU_ML3_MS_NW(l3_enc);
@@ -336,6 +398,10 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 
 		/* any other SGsAP from MSC/VLR */
 		[] SGsAP.receive(tr_SGsAP_RecvFrom_R(?)) -> value mrf {
+			if (not match(mrf.connId, f_sgsap_conn_id())) {
+				Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail,
+							log2str("Received message from unexpected conn_id!", mrf));
+			}
 			imsi_t := f_SGsAP_get_imsi(mrf.msg);
 			if (isvalue(imsi_t)) {
 				imsi := valueof(imsi_t.iMSI.digits);
@@ -351,12 +417,39 @@ function main(SGsAPOps ops, SGsAP_conn_parameters p, charstring id) runs on SGsA
 				/* message contained no IMSI; is not IMSI-oriented */
 				var template PDU_SGsAP resp := ops.unitdata_cb.apply(mrf.msg);
 				if (isvalue(resp)) {
-					SGsAP.send(t_SGsAP_Send(g_sgsap_conn_id, valueof(resp)));
+					SGsAP.send(t_SGsAP_Send(f_sgsap_conn_id(), valueof(resp)));
 				}
 			}
 			}
 		[] SGsAP.receive(tr_SctpAssocChange) { }
 		[] SGsAP.receive(tr_SctpPeerAddrChange)  { }
+		[] SGsAP.receive(tr_SctpShutDownEvent) {
+			log("SGsAP: SCTP shutdown");
+			g_self_conn_id := -1;
+			f_send_SGsAPEM_Event(SGsAPEM_Event:{up_down:=SGsAPEM_EVENT_DOWN}); /* TODO: send asp_evt.sctpShutDownEvent.clientId */
+			if (not emu_is_server()) {
+				self.stop;
+			}
+		}
+		/* server only */
+		[] SGsAP.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
+			if (not emu_is_server()) {
+				Misc_Helpers.f_shutdown(__FILE__, __LINE__, fail,
+							log2str("Unexpected event receiver in client mode", asp_evt));
+			}
+			g_last_conn_id := asp_evt.connOpened.connId;
+			log("Established a new SGsAP connection (conn_id=", g_last_conn_id, ")");
+
+			f_send_SGsAPEM_Event(SGsAPEM_Event:{up_down:=SGsAPEM_EVENT_UP}); /* TODO: send g_last_conn_id */
+		}
+		[] SGsAP.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
+			log("SGsAP: Closed");
+			g_self_conn_id := -1;
+			f_send_SGsAPEM_Event(SGsAPEM_Event:{up_down:=SGsAPEM_EVENT_DOWN}); /* TODO: send asp_evt.connClosed.connId */
+			if (not emu_is_server()) {
+				self.stop;
+			}
+		}
 		[] SGsAP_PROC.getcall(SGsAPEM_register:{?,?}) -> param(imsi, vc_conn) {
 			f_create_expect(imsi, vc_conn);
 			SGsAP_PROC.reply(SGsAPEM_register:{imsi, vc_conn}) to vc_conn;
