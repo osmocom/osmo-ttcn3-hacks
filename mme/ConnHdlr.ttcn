@@ -15,6 +15,8 @@ import from General_Types all;
 import from Native_Functions all;
 import from IPL4asp_Types all;
 import from Misc_Helpers all;
+import from GSM_Types all;
+
 import from S1AP_Types all;
 import from S1AP_Templates all;
 import from S1AP_Functions all;
@@ -72,6 +74,12 @@ type record SGWParams {
 	charstring s5c_pgw_ip
 };
 
+type record SGsAPPars {
+	octetstring vlr_name,
+	octetstring mme_name,
+	LocationAreaIdValue lai
+};
+
 /* parameters of emulated ENB */
 type record EnbParams {
 	charstring gtp1u_local_ip,
@@ -109,7 +117,8 @@ type record UeParams {
 	/* TEI (Control) remote side, S5c (PGW) */
 	OCT4	s5c_teic_remote optional,
 
-	BearerConfig bearer optional
+	BearerConfig bearer optional,
+	OCT4 tmsi optional
 }
 
 type record ConnHdlrPars {
@@ -117,6 +126,7 @@ type record ConnHdlrPars {
 	EnbParams enb_pars[NUM_ENB],
 	DiameterParams hss_pars,
 	SGWParams sgw_pars,
+	SGsAPPars sgsap_pars,
 	/* copied over from MTC_CT on start of component */
 	UeParams ue_pars,
 	/* currently used MME (index into enb_pars, S1AP, ...) */
@@ -349,6 +359,35 @@ altstep as_s1ap_handle_IntialCtxSetupReq_TAU_Accept() runs on ConnHdlr {
 		/* 3GPP TS 23.401 D.3.6 step 23: */
 		/* Integrity Protection and Ciphering implemented by S1AP_Emulation: */
 		S1AP.send(ts_PDU_NAS_EPS_TrackingAreaUpdateComplete(c_EPS_SEC_NONE));
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
+private function f_SGsAP_LAI_to_S1AP_LAI(SGsAP_Types.LocationAreaIdValue inp) return S1AP_IEs.LAI
+{
+	var template (value) S1AP_IEs.LAI s1ap_lai;
+	s1ap_lai := ts_S1AP_LAI(enc_BcdMccMnc(inp.mccDigit1 & inp.mccDigit2 & inp.mccDigit3 &
+					      inp.mncDigit3 & inp.mncDigit1 & inp.mncDigit2),
+				inp.lac);
+	return valueof(s1ap_lai);
+}
+
+/* 3GPP TS 23.272 7.3 steps 1.d + 1.e */
+altstep as_s1ap_handle_UeContextModificationReq(template CSFallbackIndicator csfb_ind := omit) runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_UeContextModificationReq(?, ?,
+							 csfb_ind := cs_fallback_required,
+							 registered_lai := f_SGsAP_LAI_to_S1AP_LAI(g_pars.sgsap_pars.lai))) -> value rx_msg {
+		var template MME_UE_S1AP_ID mme_ue_id;
+		var template ENB_UE_S1AP_ID enb_ue_id;
+
+		mme_ue_id := f_S1AP_get_MME_UE_S1AP_ID(rx_msg);
+		enb_ue_id := f_S1AP_get_ENB_UE_S1AP_ID(rx_msg);
+
+		S1AP.send(ts_S1AP_UeContextModificationResp(mme_ue_id, enb_ue_id));
 		}
 	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
@@ -691,7 +730,7 @@ runs on ConnHdlr {
 	}
 }
 
-function f_attach(BIT3 att_type := '001'B) runs on ConnHdlr {
+function f_attach(BIT3 att_type := '001'B, boolean exp_sgsap_lu := false) runs on ConnHdlr {
 	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI(g_pars.ue_pars.imsi);
 	var template (value) PDU_NAS_EPS nas_esm, nas_emm;
 	timer T := 5.0;
@@ -737,10 +776,26 @@ function f_attach(BIT3 att_type := '001'B) runs on ConnHdlr {
 	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
 	}
 
+	if (exp_sgsap_lu) {
+		T.start;
+		alt {
+		[] as_sgsap_handle_lu_req(IMSI_attach);
+		[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No SGsAP message from MME")); }
+		}
+	}
+
 	T.start;
 	alt {
 	[] as_s1ap_handle_IntialCtxSetupReq_Attach_Accept();
 	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+
+	if (exp_sgsap_lu) {
+		T.start;
+		alt {
+		[] SGsAP.receive(tr_SGsAP_TMSI_REALL_CMPL(g_pars.ue_pars.imsi));
+		[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No SGsAP-TMSI-REALLOCATION-COMPLETE message from MME")); }
+		}
 	}
 
 	/* We now expect the MME to send a Modify Bearer Request to the SGW-C */
@@ -751,6 +806,10 @@ function f_attach(BIT3 att_type := '001'B) runs on ConnHdlr {
 	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
 	}
 }
+
+/******************************
+ * RIM
+ ******************************/
 
 external function enc_PDU_GTPC_RAN_INF_REQ(in PDU_BSSGP_RAN_INFORMATION_REQUEST_GTPC gtpc_pdu) return octetstring
 with { extension "prototype(convert)"
@@ -922,6 +981,142 @@ runs on ConnHdlr return template (present) S1AP_PDU {
 	msg := tr_S1AP_MMEDirectInfTrans(inf);
 
 	return msg;
+}
+
+/*****************************
+ * SGsAP
+ *****************************/
+
+private altstep as_sgsap_handle_lu_req(template (present) EPS_location_update_type exp_eps_lu_type := ?) runs on ConnHdlr {
+	var PDU_SGsAP rx_sgsap;
+	var template (present) NAS_KeySetIdentifierV kset_id := f_tr_ConnHdlr_kset_id();
+	[] SGsAP.receive(tr_SGsAP_LU_REQ(g_pars.ue_pars.imsi,
+					g_pars.sgsap_pars.mme_name,
+					exp_eps_lu_type,
+					g_pars.sgsap_pars.lai)) -> value rx_sgsap {
+		SGsAP.send(ts_SGsAP_LU_ACCEPT(g_pars.ue_pars.imsi,
+					     g_pars.sgsap_pars.lai,
+					     ts_MI_TMSI_LV(g_pars.ue_pars.tmsi)));
+		}
+}
+
+/* perform a SGs paging procedure */
+function f_sgsap_page_sms(template (omit) OCT4 tmsi,
+			  template (omit) SGs_Cause exp_cause) runs on ConnHdlr {
+	var Service_Indicator serv_ind := SMS_indicator;
+	var boolean exp_success := true;
+	var PDU_SGsAP rx;
+	if (not istemplatekind(exp_cause, "omit")) {
+		exp_success := false;
+	}
+	SGsAP.send(ts_SGsAP_PAGING_REQ(g_pars.ue_pars.imsi,
+				       g_pars.sgsap_pars.vlr_name,
+				       serv_ind,
+				       tmsi));
+	alt {
+	/* we expect success */
+	[exp_success] SGsAP.receive(tr_SGsAP_SERVICE_REQ(g_pars.ue_pars.imsi, serv_ind, ?)) {
+		setverdict(pass);
+		}
+	[exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, ?)) {
+		setverdict(fail, "Received unexpected PAGING REJECT");
+		}
+	/* we expect failure */
+	[not exp_success] SGsAP.receive(tr_SGsAP_SERVICE_REQ(g_pars.ue_pars.imsi, serv_ind, ?)) {
+		setverdict(fail, "Received SERVICE REQ waiting for PAGING REJECT");
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, exp_cause)) {
+		setverdict(pass);
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, ?)) {
+		setverdict(fail, "Received unexpected PAGING REJECT cause");
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected SGsAP");
+		}
+	}
+}
+
+/* perform a SGs paging procedure. 3GPP TS 23.272 7.3 */
+function f_sgsap_page_cs(template (omit) OCT4 tmsi,
+			 template (omit) SGs_Cause exp_cause) runs on ConnHdlr {
+	var Service_Indicator serv_ind := CS_call_indicator;
+	var boolean exp_success := true;
+	var PDU_SGsAP rx;
+	if (not istemplatekind(exp_cause, "omit")) {
+		exp_success := false;
+	}
+
+	SGsAP.send(ts_SGsAP_PAGING_REQ(g_pars.ue_pars.imsi,
+				       g_pars.sgsap_pars.vlr_name,
+				       serv_ind,
+				       tmsi));
+
+	if (exp_success) {
+		S1AP.receive(tr_NAS_CS_ServiceNotification(ts_PagingIdentityV_TMSI));
+		S1AP.send(ts_NAS_CS_ExtendedServiceRequest('0001'B /*mobile terminating CS fallback or 1xCS fallback*/,
+							   g_pars.kset_id,
+							   ts_NAS_MobileIdentityV_TMSI(g_pars.ue_pars.tmsi),
+							   '001'B /* CS fallback accepted by the UE */));
+	}
+
+	alt {
+	/* we expect success */
+	[exp_success] SGsAP.receive(tr_SGsAP_SERVICE_REQ(g_pars.ue_pars.imsi, serv_ind, ?)) {
+		setverdict(pass);
+		}
+	[exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, ?)) {
+		setverdict(fail, "Received unexpected PAGING REJECT");
+		}
+	/* we expect failure */
+	[not exp_success] SGsAP.receive(tr_SGsAP_SERVICE_REQ(g_pars.ue_pars.imsi, serv_ind, ?)) {
+		setverdict(fail, "Received SERVICE REQ waiting for PAGING REJECT");
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, exp_cause)) {
+		setverdict(pass);
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_PAGING_REJ(g_pars.ue_pars.imsi, ?)) {
+		setverdict(fail, "Received unexpected PAGING REJECT cause");
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected SGsAP");
+		}
+	}
+
+	if (exp_success) {
+		/* 3GPP TS 23.272 7.3 steps 1.d + 1.e */
+		as_s1ap_handle_UeContextModificationReq(cs_fallback_required);
+	}
+}
+
+/* perform a SGs alert procedure */
+function f_sgsap_alert(template (omit) SGs_Cause exp_cause) runs on ConnHdlr{
+	var boolean exp_success := true;
+	var PDU_SGsAP rx;
+	if (not istemplatekind(exp_cause, "omit")) {
+		exp_success := false;
+	}
+	SGsAP.send(ts_SGsAP_ALERT_REQ(g_pars.ue_pars.imsi));
+	alt {
+	[exp_success] SGsAP.receive(tr_SGsAP_ALERT_ACK(g_pars.ue_pars.imsi)) {
+		setverdict(pass);
+		}
+	[exp_success] SGsAP.receive(tr_SGsAP_ALERT_REJECT(g_pars.ue_pars.imsi, ?)) -> value rx {
+		setverdict(fail, "Received unexpected ALERT REJECT ", rx);
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_ALERT_ACK(g_pars.ue_pars.imsi)) {
+		setverdict(fail, "Received unexpected ALERT ACK");
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_ALERT_REJECT(g_pars.ue_pars.imsi, exp_cause)) {
+		setverdict(pass)
+		}
+	[not exp_success] SGsAP.receive(tr_SGsAP_ALERT_REJECT(g_pars.ue_pars.imsi, ?)) -> value rx {
+		setverdict(fail, "Received ALERT REJECT with unexpected cause ", rx);
+		}
+	[] SGsAP.receive {
+		setverdict(fail, "Received unexpected SGsAP");
+		}
+	}
 }
 
 }
