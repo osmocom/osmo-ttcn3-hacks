@@ -21,6 +21,22 @@ DIR=$BASEDIR/titan.ProtocolModules.PFCP_v15.1.0/src
 FILES="PFCP_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
+FILES="Socket_API_Definitions.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
+FILES="Abstract_Socket.cc Abstract_Socket.hh "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
+FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
+FILES="JSON_EncDec.cc JSON_Types.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library/s1ap
 FILES="S1AP_CommonDataTypes.asn S1AP_Constants.asn S1AP_Containers.asn S1AP_IEs.asn "
 FILES+="S1AP_PDU_Contents.asn S1AP_PDU_Descriptions.asn "
@@ -33,6 +49,7 @@ FILES+="PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFun
 FILES+="S1AP_CodecPort.ttcn S1AP_CodecPort_CtrlFunctDef.cc S1AP_CodecPort_CtrlFunct.ttcn S1AP_Functions.ttcn "
 FILES+="SCTP_Templates.ttcn "
 FILES+="StatsD_Types.ttcn StatsD_CodecPort.ttcn StatsD_CodecPort_CtrlFunct.ttcn StatsD_CodecPort_CtrlFunctdef.cc StatsD_Checker.ttcnpp "
+FILES+="HTTP_Adapter.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
