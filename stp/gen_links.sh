@@ -46,11 +46,17 @@ DIR=$BASEDIR/titan.TestPorts.TELNETasp/src
 FILES="TELNETasp_PT.cc  TELNETasp_PT.hh  TELNETasp_PortType.ttcn"
 gen_links $DIR $FILES
 
+DIR=../library/tcap
+FILES="TCAPMessages.asn TCAP_DialoguePDUs.asn TCAP_UnidialoguePDUs.asn "
+FILES+="TCAP_EncDec.cc TCAP_CodecPort.ttcn TCAP_Types.ttcn TCAP_Templates.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Osmocom_VTY_Functions.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
+FILES+="IPA_EXT_TCAP_ROUTING.ttcn "
 FILES+="IPA_Types.ttcn IPA_Emulation.ttcnpp IPA_CodecPort.ttcn IPA_CodecPort_CtrlFunct.ttcn IPA_CodecPort_CtrlFunctDef.cc "
 FILES+="Osmocom_CTRL_Types.ttcn Osmocom_CTRL_Functions.ttcn Osmocom_CTRL_Adapter.ttcn "
-FILES+="SCCP_Templates.ttcn "
+FILES+="SCCP_Templates.ttcn SCCP_Adapter.ttcnpp "
 FILES+="M3UA_Templates.ttcn M3UA_CodecPort.ttcn M3UA_CodecPort_CtrlFunct.ttcn M3UA_CodecPort_CtrlFunctDef.cc "
 FILES+="SCTP_Templates.ttcn "
 gen_links $DIR $FILES
