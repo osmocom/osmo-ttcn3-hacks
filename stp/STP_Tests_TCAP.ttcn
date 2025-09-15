@@ -1,0 +1,644 @@
+module STP_Tests_TCAP {
+
+/* Osmocom STP test suite in in TTCN-3, TCAP routing (TCAP: ITU Q.771-774)
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_VTY_Functions all;
+
+import from M3UA_Types all;
+import from M3UA_Templates all;
+import from M3UA_CodecPort all;
+import from M3UA_CodecPort_CtrlFunct all;
+
+import from M3UA_Emulation all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
+
+import from SCCP_Types all;
+import from SCCP_Templates all;
+import from SCCPasp_Types all;
+import from SCCP_Emulation all;
+import from SCCP_Adapter all;
+
+import from IPA_Emulation all;
+import from IPA_EXT_TCAP_ROUTING all;
+
+import from STP_Tests_Common all;
+import from STP_Tests_IPA all;
+import from STP_Tests_M3UA all;
+
+import from TCAPMessages language "ASN.1:1997" all;
+import from TCAP_Types all;
+import from TCAP_Templates all;
+import from TCAP_CodecPort all;
+
+const integer MAX_NUM_ASP := 4;
+const OCT1 c_M3UA_SI_SCCP := '03'O;
+
+type record TCAP_CT_Configuration {
+	/* Name of the ASP in the STP, (eg. to access it over VTY) */
+	charstring asp_name,
+	/* Name of the AS in the STP, (eg. to access it over VTY) */
+	charstring as_name,
+	SCCP_Adapter_Config cfg
+}
+type record of TCAP_CT_Configuration TCAP_CT_Configurations;
+
+modulepar {
+	/* local ASPs. Set in .cfg file: */
+	TCAP_CT_Configurations mp_tcap_configs := {}
+}
+
+type component TCAP_CT extends Test_CT {
+	var SCCP_Adapter g_tcap[MAX_NUM_ASP];
+	port TCAP_CODEC_PT SCCP_TCAP[MAX_NUM_ASP];
+	/* Port for IPA Extension TCAP_ROUTING */
+	port IPA_TCAP_ROUTING_PT IPA_TCAP_ROUTING[MAX_NUM_ASP];
+};
+
+private function tcap_build_configs(template (omit) Misc_Helpers.ro_charstring asps := omit)
+runs on TCAP_CT return TCAP_CT_Configurations
+{
+	if (not isvalue(asps)) {
+		return mp_tcap_configs;
+	}
+
+	var TCAP_CT_Configurations tcap_configs := {};
+	for (var integer i := 0; i < lengthof(asps); i := i + 1) {
+		var boolean found := false;
+		for (var integer j := 0; j < lengthof(mp_tcap_configs); j := j + 1) {
+			if (mp_tcap_configs[j].asp_name == valueof(asps[i])) {
+				found := true;
+				tcap_configs := tcap_configs & {mp_tcap_configs[j]};
+				break;
+			}
+		}
+		if (not found) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Could not find ASP ", asps[i], ", check your configuration"));
+		}
+	}
+	return tcap_configs;
+}
+
+
+private function f_init_tcap(TCAP_CT_Configurations tcap_configs) runs on TCAP_CT {
+	f_init_common();
+
+	for (var integer i := 0; i < lengthof(tcap_configs); i := i + 1) {
+		if (tcap_configs[i].cfg.transport == SCCP_TRANSPORT_SCCPlite) {
+			tcap_configs[i].cfg.tpars.sccplite.ipa_ccm_pars := c_IPA_default_ccm_pars;
+			tcap_configs[i].cfg.tpars.sccplite.ipa_ccm_pars.name := tcap_configs[i].as_name;
+		}
+		f_sccp_adapter_init(g_tcap[i], tcap_configs[i].cfg, "STP_TCAP_" & int2str(i));
+		connect(self:SCCP_TCAP[i], g_tcap[i].vc_SCCP:SCCP_SP_PORT);
+		if (tcap_configs[i].cfg.transport == SCCP_TRANSPORT_SCCPlite) {
+			connect(self:IPA_TCAP_ROUTING[i], g_tcap[i].vc_IPA:IPA_TCAP_ROUTING_PORT);
+		}
+	}
+
+	for (var integer i := 0; i < lengthof(tcap_configs); i := i + 1) {
+		f_sccp_adapter_start(g_tcap[i]);
+	}
+
+	/* M3UA Emulation doesn't yet signal events up the stack, so it's
+	impossible to know exactly when the ASP becomes active. Hence, wait for
+	a while here to do ASPUP+ASPAC procedures: */
+	f_sleep(3.0);
+}
+
+private function f_asp_tx_ipa_ext_tcap_routing(template (value) IPA_EXT_TCAP_ROUTING_Message send_msg,
+					       integer asp_idx := 0, boolean exp_ack := true)
+runs on TCAP_CT
+{
+	var IPA_EXT_TCAP_ROUTING_Message msg;
+	timer T := 2.0;
+
+	IPA_TCAP_ROUTING[asp_idx].send(send_msg);
+	T.start;
+	alt {
+	[exp_ack] IPA_TCAP_ROUTING[asp_idx].receive(tr_IPA_EXT_TCAP_ROUTING_ACK);
+	[not exp_ack] IPA_TCAP_ROUTING[asp_idx].receive(tr_IPA_EXT_TCAP_ROUTING_NACK);
+	[] IPA_TCAP_ROUTING[asp_idx].receive(IPA_EXT_TCAP_ROUTING_Message:?) -> value msg {
+		setverdict(fail, __SCOPE__, "(): Rx unexpected IPA: ", msg);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	[] T.timeout {
+		setverdict(fail, __SCOPE__, "(): Timeout waiting for IPA EXT TCAP ROUTING ACK/NACK");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+}
+
+private function f_asp_tx_tcap(template (value) TCMessage tcap_msg,
+			       integer asp_idx := 0)
+runs on TCAP_CT
+{
+	var template (value) TCAP_N_UNITDATA_req sccp_unitdata_req :=
+		ts_TCAP_UNITDATA_req(g_tcap[asp_idx].sccp_addr_peer,
+				     g_tcap[asp_idx].sccp_addr_own,
+				     tcap_msg,
+				     RETURN_OPTION_ON_ERROR)
+	SCCP_TCAP[asp_idx].send(sccp_unitdata_req);
+}
+
+
+private altstep as_asp_rx_tcap_any(template (present) TCMessage tcap_msg := ?,
+				   integer tx_asp_idx := 0)
+runs on TCAP_CT
+{
+	var template (present) TCAP_N_UNITDATA_ind exp_sccp_unitdata_ind :=
+		tr_TCAP_UNITDATA_ind(g_tcap[tx_asp_idx].sccp_addr_peer,
+				     g_tcap[tx_asp_idx].sccp_addr_own,
+				     tcap_msg);
+	[] any from SCCP_TCAP.receive(exp_sccp_unitdata_ind) {
+		setverdict(pass);
+	}
+}
+
+private altstep as_asp_rx_tcap(template (present) TCMessage tcap_msg := ?,
+			       integer tx_asp_idx := 0,
+			       integer rx_asp_idx := 0, boolean fail_rx_others := true)
+runs on TCAP_CT
+{
+	var template (present) TCAP_N_UNITDATA_ind exp_sccp_unitdata_ind :=
+		tr_TCAP_UNITDATA_ind(g_tcap[tx_asp_idx].sccp_addr_peer,
+				     g_tcap[tx_asp_idx].sccp_addr_own,
+				     tcap_msg);
+
+	[] SCCP_TCAP[rx_asp_idx].receive(exp_sccp_unitdata_ind) {
+		setverdict(pass);
+	}
+	[fail_rx_others] any from SCCP_TCAP.receive(exp_sccp_unitdata_ind) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx TCAP at unexpected ASP with idx != ", rx_asp_idx));
+	}
+}
+
+private function f_asp_tx_tcap_exp(template (value) TCMessage tcap_msg,
+				   integer tx_asp_idx,
+				   integer rx_asp_idx)
+runs on TCAP_CT
+{
+	f_asp_tx_tcap(tcap_msg, tx_asp_idx);
+	as_asp_rx_tcap(tcap_msg, tx_asp_idx, rx_asp_idx);
+}
+
+private function f_asp_tx_tcap_exp_any(template (value) TCMessage tcap_msg,
+				       integer tx_asp_idx)
+runs on TCAP_CT
+{
+	f_asp_tx_tcap(tcap_msg, tx_asp_idx);
+	as_asp_rx_tcap_any(tcap_msg, tx_asp_idx);
+}
+
+private function f_asp_tx_tcap_m3ua_ipa_transaction(integer o_asp_idx,
+						integer t_asp_idx,
+						OCT4 o_tid,
+						OCT4 t_tid)
+runs on TCAP_CT
+{
+	var template (value) TCMessage tcap_msg;
+
+	/* TCAP Being: O -> T */
+	tcap_msg := ts_TCAP_Begin(o_tid);
+	f_asp_tx_tcap_exp(tcap_msg, o_asp_idx, t_asp_idx);
+
+	/* TCAP Continue: O <- T */
+	tcap_msg := ts_TCAP_Continue(t_tid, o_tid);
+	f_asp_tx_tcap_exp_any(tcap_msg, t_asp_idx);
+
+	/* TCAP Continue: O -> T */
+	tcap_msg := ts_TCAP_Continue(o_tid, t_tid);
+	f_asp_tx_tcap_exp(tcap_msg, o_asp_idx, t_asp_idx);
+
+	/* TCAP End O <- T */
+	tcap_msg := ts_TCAP_End(o_tid);
+	f_asp_tx_tcap_exp_any(tcap_msg, t_asp_idx);
+}
+
+private function f_tcap_loadshare_register(integer node_a, integer tid_a_start, integer tid_a_stop,
+					   integer node_b, integer tid_b_start, integer tid_b_stop,
+					   boolean exp_ack := true, integer seq_nr := 1)
+runs on TCAP_CT
+{
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+
+	/* Node a */
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := seq_nr,
+							 tid_start := tid_a_start,
+							 tid_end := tid_a_stop,
+							 pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							 ssn := IPA_EXT_TCAP_ROUTING_SSN_WILDCARD);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, node_a);
+
+	/* Node b */
+	tcap_rt_msg.u.add_range.tid_start := tid_b_start;
+	tcap_rt_msg.u.add_range.tid_end := tid_b_stop;
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, node_b, exp_ack := exp_ack);
+}
+
+/* test routing TCAP traffic from IPA AS to IPA AS */
+testcase TC_tcap_loadshare_ipa_to_ipa() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-ipa-loadshare-1-0",
+						      "asp-ipa-loadshare-1-1",
+						      "asp-ipa-loadshare-2-0",
+						      "asp-ipa-loadshare-2-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-1-0": */
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 1,
+							  tid_start := 0,
+							  tid_end := 99,
+							  pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							  ssn := IPA_EXT_TCAP_ROUTING_SSN_WILDCARD)
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 0);
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-2-0": */
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 2);
+
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-1-1": */
+	tcap_rt_msg.u.add_range.tid_start := 100;
+	tcap_rt_msg.u.add_range.tid_end := 199;
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 1);
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-2-1": */
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 3, int2oct(177, 4), int2oct(78, 4));
+
+	setverdict(pass);
+}
+
+/* test routing TCAP traffic from IPA AS to M3UA AS */
+testcase TC_tcap_loadshare_m3ua_to_ipa() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-0-0": */
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 0,
+							 tid_start := 0,
+							 tid_end := 99,
+							 pc := tcap_configs[2].cfg.own_pc,
+							 ssn := tcap_configs[2].cfg.own_ssn);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 2);
+
+	/* Configure TCAP routing on ASP "asp-ipa-loadshare-0-1": */
+	tcap_rt_msg.u.add_range.tid_start := 100;
+	tcap_rt_msg.u.add_range.tid_end := 199;
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 2, int2oct(77, 4), int2oct(42, 4));
+
+	setverdict(pass);
+}
+
+
+
+/* Test m3ua routing towards IPA/TCAP and register for wildcards ssn/pc */
+testcase TC_tcap_loadshare_m3ua_to_ipa_wildcard() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on IPA ASPs "asp-ipa-loadshare-0-0/1" */
+	f_tcap_loadshare_register(2, 0, 99, 3, 100, 199);
+	f_sleep(1.0);
+
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 2, int2oct(77, 4), int2oct(75, 4));
+
+	setverdict(pass);
+}
+
+/* test routing TCAP traffic - do 100 sessions towards the same ipa/tcap node */
+testcase TC_tcap_loadshare_m3ua_to_ipa_50(integer loops := 50) runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on IPA ASPs "asp-ipa-loadshare-0-0/1" */
+	f_tcap_loadshare_register(2, 0, 299, 3, 300, 599);
+
+	var integer rand_tid := f_rnd_int(298);
+	for (var integer i := 0; i < loops; i := i + 1) {
+		var integer otid := 1 + i;
+		var integer dtid := 1 + ((rand_tid + i) mod 298);
+		f_asp_tx_tcap_m3ua_ipa_transaction(0, 2, int2oct(otid, 4), int2oct(dtid, 4));
+	}
+
+	setverdict(pass);
+}
+
+/* test routing TCAP overlapping ranges */
+private function f_tcap_loadshare_ipa_tcap_range_fail_overlap(integer tid_a_start, integer tid_a_stop,
+					       integer tid_b_start, integer tid_b_stop) runs on TCAP_CT
+{
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on IPA ASPs "asp-ipa-loadshare-0-0/1" */
+	f_tcap_loadshare_register(2, tid_a_start, tid_a_stop, 3, tid_b_start, tid_b_stop, exp_ack := false);
+	setverdict(pass);
+}
+
+testcase TC_tcap_loadshare_ipa_tcap_range_fail_overlap_same() runs on TCAP_CT
+{
+	f_tcap_loadshare_ipa_tcap_range_fail_overlap(0, 99, 0, 99);
+}
+
+testcase TC_tcap_loadshare_ipa_tcap_range_fail_overlap_last() runs on TCAP_CT
+{
+	f_tcap_loadshare_ipa_tcap_range_fail_overlap(0, 99, 99, 199);
+}
+
+testcase TC_tcap_loadshare_ipa_tcap_range_fail_overlap_within() runs on TCAP_CT
+{
+	f_tcap_loadshare_ipa_tcap_range_fail_overlap(0, 99, 60, 80);
+}
+
+testcase TC_tcap_loadshare_ipa_tcap_range_fail_overlap_switch() runs on TCAP_CT
+{
+	f_tcap_loadshare_ipa_tcap_range_fail_overlap(99, 199, 0, 99);
+}
+
+private function f_tcap_loadshare_ipa_tcap_range_success_pc(TCAP_CT_Configurations tcap_configs)
+runs on TCAP_CT
+{
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 1,
+							 tid_start := 0,
+							 tid_end := 99,
+							 pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							 ssn := IPA_EXT_TCAP_ROUTING_SSN_WILDCARD);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 2);
+
+	tcap_rt_msg.u.add_range.tid_start := 60;
+	tcap_rt_msg.u.add_range.tid_end := 80;
+	tcap_rt_msg.u.add_range.pc := tcap_configs[2].cfg.own_pc;
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+}
+
+/* Test overlapping tid ranges, but with a more specific PC, within the same AS
+ *
+ * node a: 0..99
+ * node b: 60..80/pc (own)
+ */
+testcase TC_tcap_loadshare_ipa_tcap_range_success_pc() runs on TCAP_CT {
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+	f_tcap_loadshare_ipa_tcap_range_success_pc(tcap_configs);
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 2, int2oct(23, 4), int2oct(98, 4));
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 3, int2oct(60, 4), int2oct(79, 4));
+	/* TODO: check traffic routing with the correct PC, but different SSN, otid := 60 */
+
+	setverdict(pass);
+}
+
+/* Test overlapping tid ranges, but with a more specific PC and SSN, within the same AS
+ *
+ * node a: 0..99
+ * node b: 60..80/pc (own)
+ * node b: 60..80/pc; 60..80/pc/ssn (own)
+ */
+testcase TC_tcap_loadshare_ipa_tcap_range_success_pc_ssn() runs on TCAP_CT {
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+	f_init_tcap(tcap_configs);
+
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+
+	f_tcap_loadshare_ipa_tcap_range_success_pc(tcap_configs);
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 2,
+							 tid_start := 60,
+							 tid_end := 80,
+							 pc := tcap_configs[2].cfg.own_pc,
+							 ssn := tcap_configs[2].cfg.own_ssn);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 3, int2oct(60, 4), int2oct(70, 4));
+
+	setverdict(pass);
+}
+
+/* Test overlapping tid ranges, but with a more specific PC and SSN, within the same AS
+ *
+ * node a: 0..99
+ * node b: 60..80/pc (own)
+ * node b: 60..80/pc; 60..80/ssn (own)
+ */
+testcase TC_tcap_loadshare_ipa_tcap_range_success_pc_ssn2() runs on TCAP_CT {
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+
+	f_init_tcap(tcap_configs);
+	f_tcap_loadshare_ipa_tcap_range_success_pc(tcap_configs);
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 2,
+							 tid_start := 60,
+							 tid_end := 80,
+							 pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							 ssn := tcap_configs[2].cfg.own_ssn);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+	f_asp_tx_tcap_m3ua_ipa_transaction(0, 3, int2oct(60, 4), int2oct(99, 4));
+
+	setverdict(pass);
+}
+
+/* Test overlapping tid ranges, but with a more specific PC and SSN, within the same AS
+ *
+ * node a: 0..99
+ * node b: 60..80/pc (own)
+ * node b: 60..80/ssn (own)
+ * node b: 65..70/ssn (own) (fails)
+ */
+testcase TC_tcap_loadshare_ipa_tcap_range_fail_pc_ssn_overlap() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+	f_tcap_loadshare_ipa_tcap_range_success_pc(tcap_configs);
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 2,
+							 tid_start := 60,
+							 tid_end := 80,
+							 pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							 ssn := tcap_configs[2].cfg.own_ssn);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3);
+	tcap_rt_msg := ts_IPA_EXT_TCAP_ROUTING_ADD_RANGE(seq_nr := 3,
+							 tid_start := 65,
+							 tid_end := 70,
+							 pc := IPA_EXT_TCAP_ROUTING_PC_WILDCARD,
+							 ssn := tcap_configs[2].cfg.own_ssn);
+	f_asp_tx_ipa_ext_tcap_routing(tcap_rt_msg, 3, exp_ack := false);
+	setverdict(pass);
+}
+
+/* Simulate a Insert Subscriber Data from IPA towards M3UA */
+// FIXME: rename it to allow IPA -> M3UA traffic
+private function f_asp_tx_tcap_ipa_m3ua_gt_isd_transaction(
+		integer o_asp_idx,
+		integer t_asp_idx,
+		OCT4 o_tid,
+		OCT4 t_tid)
+runs on TCAP_CT
+{
+	var template (value) TCMessage tcap_msg;
+
+	/* TCAP Being: O -> T */
+	tcap_msg := ts_TCAP_Begin(o_tid);
+	f_asp_tx_tcap_exp_any(tcap_msg, o_asp_idx);
+
+	/* TCAP Continue: O <- T */
+	tcap_msg := ts_TCAP_Continue(t_tid, o_tid);
+	f_asp_tx_tcap_exp(tcap_msg, o_asp_idx, t_asp_idx);
+
+	/* TCAP Continue: O -> T */
+	tcap_msg := ts_TCAP_Continue(o_tid, t_tid);
+	f_asp_tx_tcap_exp_any(tcap_msg, o_asp_idx);
+
+	/* TCAP End O <- T */
+	tcap_msg := ts_TCAP_End(o_tid);
+	f_asp_tx_tcap_exp(tcap_msg, o_asp_idx, t_asp_idx);
+}
+
+/* Test m3ua -> ipa/tcap doing a ISD with SCCP GT */
+testcase TC_tcap_loadshare_m3ua_to_ip_gt_isd() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	/* FIXME: create m3ua and ipa endpoints which contain GTs, using the same endpoints
+	 *        as for 0-0.
+	 */
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-1-0",
+						      "asp-m3ua-loadshare-1-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+
+	f_init_tcap(tcap_configs);
+
+	/* Configure TCAP routing on IPA ASPs "asp-ipa-loadshare-0-0/1" */
+	f_tcap_loadshare_register(2, 0, 99, 3, 100, 199);
+	f_sleep(1.0);
+
+	f_asp_tx_tcap_ipa_m3ua_gt_isd_transaction(0, 2, int2oct(77, 4), int2oct(75, 4));
+	setverdict(pass);
+}
+
+/* Test if UTDS is sent back when sending a TCAP messages with a OTID not valid
+ *
+ * node a: 0..99
+ * node b: 100..199
+ */
+testcase TC_tcap_loadshare_ipa_tcap_utds() runs on TCAP_CT {
+	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
+	var Misc_Helpers.ro_charstring tcap_asps := { "asp-m3ua-loadshare-0-0",
+						      "asp-m3ua-loadshare-0-1",
+						      "asp-ipa-loadshare-0-0",
+						      "asp-ipa-loadshare-0-1" };
+	var TCAP_CT_Configurations tcap_configs := tcap_build_configs(tcap_asps);
+	var template (value) TCMessage tcap_msg;
+	timer T := 5.0;
+
+	f_init_tcap(tcap_configs);
+	/* Configure TCAP routing on IPA ASPs "asp-ipa-loadshare-0-0/1" */
+	f_tcap_loadshare_register(2, 0, 99, 3, 100, 199);
+
+
+	/* send a TCAP message with oTID 250 (no range available) */
+
+	/* TCAP Being: O -> T */
+	tcap_msg := ts_TCAP_Begin(int2oct(250, 4));
+	f_asp_tx_tcap(tcap_msg, 0);
+
+	var template (present) TCAP_N_NOTICE_ind exp_sccp_notice_ind :=
+		tr_TCAP_N_NOTICE_ind(g_tcap[0].sccp_addr_own,
+				     g_tcap[0].sccp_addr_peer,
+				     *,
+				     tcap_msg);
+	T.start;
+	alt {
+	[] any from SCCP_TCAP.receive(exp_sccp_notice_ind) {
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, __SCOPE__, "(): Timeout waiting for UTDS");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	setverdict(pass);
+}
+
+/* TODO: test TCAP Abort message is used.
+ * TODO: test TCAP Begin+End message is used.
+ * TODO: test TCAP GlobalTitles ISD
+ * TODO: test TCAP GlobalTitles ULA
+ */
+
+control {
+	execute( TC_tcap_loadshare_ipa_to_ipa() );
+	execute( TC_tcap_loadshare_m3ua_to_ipa() );
+	execute( TC_tcap_loadshare_m3ua_to_ipa_50() );
+	execute( TC_tcap_loadshare_m3ua_to_ipa_wildcard() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_fail_overlap_same() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_fail_overlap_last() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_fail_overlap_within() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_fail_overlap_switch() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_success_pc() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_success_pc_ssn() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_success_pc_ssn2() );
+	execute( TC_tcap_loadshare_ipa_tcap_range_fail_pc_ssn_overlap() );
+	execute( TC_tcap_loadshare_ipa_tcap_utds() );
+}
+
+
+
+}
