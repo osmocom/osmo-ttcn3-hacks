@@ -3,6 +3,7 @@
 NAME=STP_Tests
 
 FILES="
+	*.asn
 	*.ttcn
 	*.ttcnpp
 	SCCP_EncDec.cc
@@ -16,11 +17,13 @@ FILES="
 	Native_FunctionDefs.cc
 	TCCEncoding.cc
 	M3UA_CodecPort_CtrlFunctDef.cc
+	TCAP_EncDec.cc
 "
 
 CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 	-DIPA_EMULATION_SCCP
+	-DIPA_EMULATION_TCAP_ROUTING
 	-DUSE_MTP3_DISTRIBUTOR
 "
 
