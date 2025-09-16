@@ -928,6 +928,7 @@ class HttpClient {
 		std::string clientKeyPath;
 		bool includeAdminProtocolHeader = false;
 		bool verboseOutput = false;
+		std::string contentType = "application/json";
 	};
 
 	ResponseData postJson(const std::string& url, unsigned int port, const std::string& jsonData, X509_STORE* store, std::vector<X509*>& certPool,
@@ -1021,15 +1022,23 @@ inline HttpClient::ResponseData HttpClient::postJson(const std::string& url, uns
 	}
 
 	struct curl_slist* headers = nullptr;
+	std::string contentTypeHeader = "Content-Type: " + config.contentType;
 	if (config.useMutualTLS) {
-		headers = curl_slist_append(headers, "Content-Type: application/json;charset=UTF-8");
+		if (config.contentType == "application/json") {
+			contentTypeHeader += ";charset=UTF-8";
+		}
+		headers = curl_slist_append(headers, contentTypeHeader.c_str());
 		headers = curl_slist_append(headers, "Accept: application/json");
 		if (config.includeAdminProtocolHeader) {
 			headers = curl_slist_append(headers, "X-Admin-Protocol: gsma/rsp/v2.5.0");
 		}
 	} else {
-		headers = curl_slist_append(headers, "Content-Type: application/json");
-		headers = curl_slist_append(headers, "Accept: application/json");
+		headers = curl_slist_append(headers, contentTypeHeader.c_str());
+		// For ASN.1, accept the same content type
+		std::string acceptHeader = "Accept: " + (config.contentType == "application/x-gsma-rsp-asn1" ? config.contentType : "application/json");
+		headers = curl_slist_append(headers, acceptHeader.c_str());
+		// Always add X-Admin-Protocol for ES9+ regardless of content type
+		headers = curl_slist_append(headers, "X-Admin-Protocol: gsma/rsp/v2.5.0");
 	}
 
 	SslCtxData ctxData = { .store = store, .certPool = &certPool, .verifyResult = false, .errorMessage = "" };
@@ -1040,6 +1049,7 @@ inline HttpClient::ResponseData HttpClient::postJson(const std::string& url, uns
 		curl_easy_setopt(curl, CURLOPT_PORT, port);
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, jsonData.size()); // Important for binary data
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
 		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
@@ -1048,6 +1058,10 @@ inline HttpClient::ResponseData HttpClient::postJson(const std::string& url, uns
 		// Enable SSL verification
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+		// Set reasonable timeouts
+		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
 
 		if (config.useMutualTLS) {
 			if (!config.clientCertPath.empty()) {
@@ -1630,8 +1644,16 @@ class RSPClient {
 		return sendHttpsPostUnified(endpoint, body, httpStatusCode, portOverride, m_useMutualTLS, m_clientCertPath, m_clientKeyPath);
 	}
 
+	std::string sendHttpsPostWithContentType(const std::string& endpoint, const std::string& body, const std::string& contentType, int& httpStatusCode,
+						 unsigned int portOverride) {
+		LOG_DEBUG("sendHttpsPostWithContentType: endpoint=" + endpoint + ", contentType=" + contentType + ", bodySize=" + std::to_string(body.size()) +
+			  ", port=" + std::to_string(portOverride));
+		return sendHttpsPostUnified(endpoint, body, httpStatusCode, portOverride, false, "", "", contentType);
+	}
+
 	std::string sendHttpsPostUnified(const std::string& endpoint, const std::string& body, int& httpStatusCode, unsigned int portOverride,
-					 bool useMutualTLS = false, const std::string& clientCertPath = "", const std::string& clientKeyPath = "") {
+					 bool useMutualTLS = false, const std::string& clientCertPath = "", const std::string& clientKeyPath = "",
+					 const std::string& contentType = "application/json") {
 		if (!m_httpClient) {
 			m_httpClient = std::make_unique<HttpClient>();
 		}
@@ -1664,6 +1686,7 @@ class RSPClient {
 		config.clientKeyPath = clientKeyPath;
 		config.includeAdminProtocolHeader = useMutualTLS; // ES2+ requires this header
 		config.verboseOutput = false;
+		config.contentType = contentType;
 
 		LOG_DEBUG("Sending " + std::string(useMutualTLS ? "ES2+ request with mutual TLS" : "HTTPS request") + " to: " + endpoint +
 			  " (port: " + std::to_string(portOverride) + ")");

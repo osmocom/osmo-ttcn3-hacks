@@ -234,6 +234,24 @@ external function ext_RSPClient_sendHttpsPostWithAuth(
     out integer statusCode
 ) return charstring;
 
+external function ext_RSPClient_sendHttpsPostWithContentType(
+    integer clientHandle,
+    charstring endpoint,
+    charstring body,
+    integer dport,
+    charstring contentType,
+    out integer statusCode
+) return charstring;
+
+external function ext_RSPClient_sendHttpsPostBinary(
+    integer clientHandle,
+    charstring endpoint,
+    octetstring body,
+    integer dport,
+    charstring contentType,
+    out integer statusCode
+) return octetstring;
+
 /* RSP Protocol Constants */
 const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
 const charstring c_oid_rspRole_dp_pb := "2.23.146.1.2.1.5";
@@ -337,6 +355,11 @@ type component smdpp_ConnHdlr {
 	var charstring g_last_es9p_request := "";
 };
 
+type enumerated ES9EncodingMode {
+	ES9_JSON,
+	ES9_ASN1
+}
+
 type record smdpp_ConnHdlrPars {
 	charstring smdp_server_url,
 	integer smdp_es9p_server_port,
@@ -353,7 +376,8 @@ type record smdpp_ConnHdlrPars {
 	GetBppErrorInjection gbpp_err_injection optional,
 	boolean cc_required optional,
 	boolean use_ppk optional,
-	integer metadata_segments optional
+	integer metadata_segments optional,
+	ES9EncodingMode es9_encoding_mode optional
 };
 
 private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
@@ -373,7 +397,8 @@ private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 		gbpp_err_injection := omit,
 		cc_required := false,
 		use_ppk := false,
-		metadata_segments := 1
+		metadata_segments := 1,
+		es9_encoding_mode := omit  /* Default to JSON mode */
 	};
 	return pars;
 }
@@ -921,16 +946,62 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 private function f_es9p_transceive_wrap(RemoteProfileProvisioningRequest request)
 runs on smdpp_ConnHdlr
 return DecodedRPPReponse_Wrap {
-	f_es9p_send_new(request);
+
+	var ES9EncodingMode encoding_mode := ES9_JSON;
+	if (ispresent(g_pars_smdpp.es9_encoding_mode)) {
+		encoding_mode := g_pars_smdpp.es9_encoding_mode;
+	}
+
+	if (encoding_mode == ES9_ASN1) {
+		return f_es9p_transceive_wrap_asn1(request);
+	} else {
+		f_es9p_send_new(request);
+
+		var integer http_status;
+		var charstring response_body := ext_RSPClient_sendHttpsPost(
+			g_rsp_client_handle,
+			g_last_es9p_endpoint,
+			g_last_es9p_request,
+			g_pars_smdpp.smdp_es9p_server_port,
+			http_status
+		);
+
+		if (http_status != 200) {
+			setverdict(fail, "HTTP error response: " & int2str(http_status));
+			var DecodedRPPReponse_Wrap empty_response;
+			return empty_response;
+		}
+
+		// Decode to wrapper type that handles both success and error
+		var DecodedRPPReponse_Wrap response := {omit, omit};
+		dec_RemoteProfileProvisioningResponse_from_JSON(response_body, response);
+
+		return response;
+	}
+}
+
+/* Pure ASN.1 mode transceive function */
+private function f_es9p_transceive_wrap_asn1(RemoteProfileProvisioningRequest request)
+runs on smdpp_ConnHdlr
+return DecodedRPPReponse_Wrap {
+	/* Encode the request as pure ASN.1 (already includes A2 tag) */
+	var octetstring asn1_request := enc_RemoteProfileProvisioningRequest(request);
+
+	ext_logInfo("ASN.1 request size: " & int2str(lengthof(asn1_request)) & " bytes");
+	ext_logInfo("ASN.1 request first 50 bytes: " & oct2str(substr(asn1_request, 0, 50)));
+	ext_logInfo("ASN.1 request full: " & oct2str(asn1_request));
 
 	var integer http_status;
-	var charstring response_body := ext_RSPClient_sendHttpsPost(
+	ext_logInfo("Sending ASN.1 request to /gsma/rsp2/asn1 on port " & int2str(g_pars_smdpp.smdp_es9p_server_port));
+	var octetstring response_body := ext_RSPClient_sendHttpsPostBinary(
 		g_rsp_client_handle,
-		g_last_es9p_endpoint,
-		g_last_es9p_request,
-        g_pars_smdpp.smdp_es9p_server_port,
+		"/gsma/rsp2/asn1",
+		asn1_request,
+		g_pars_smdpp.smdp_es9p_server_port,
+		"application/x-gsma-rsp-asn1",
 		http_status
 	);
+	ext_logInfo("Received HTTP status: " & int2str(http_status));
 
 	if (http_status != 200) {
 		setverdict(fail, "HTTP error response: " & int2str(http_status));
@@ -938,11 +1009,129 @@ return DecodedRPPReponse_Wrap {
 		return empty_response;
 	}
 
-	// Decode to wrapper type that handles both success and error
-	var DecodedRPPReponse_Wrap response := {omit, omit};
-	dec_RemoteProfileProvisioningResponse_from_JSON(response_body, response);
+	/* Decode pure ASN.1 response (already includes A3 tag) */
+	var RemoteProfileProvisioningResponse asn1_response := dec_RemoteProfileProvisioningResponse(response_body);
 
-	return response;
+	/* Convert to DecodedRPPReponse_Wrap format for compatibility */
+	var DecodedRPPReponse_Wrap wrap := {omit, omit};
+
+	/* ASN.1 errors are encoded as specific CHOICE values */
+	if (f_is_asn1_error_response(asn1_response)) {
+		ext_logInfo("ASN.1 response detected as error, converting...");
+		wrap.err := f_convert_asn1_error_to_json(asn1_response);
+		ext_logInfo("Converted error: subject=" & wrap.err.subjectCode & ", reason=" & wrap.err.reasonCode);
+	} else {
+		/* Success response */
+		wrap.asn1_pdu := asn1_response;
+	}
+
+	return wrap;
+}
+
+/* Helper to check if ASN.1 response is an error */
+private function f_is_asn1_error_response(RemoteProfileProvisioningResponse resp) return boolean {
+	if (ischosen(resp.authenticateClientResponseEs9)) {
+		ext_logInfo("Response has authenticateClientResponseEs9");
+		/* AuthenticateClientResponseEs9 is a CHOICE between authenticateClientOk and authenticateClientError */
+		if (ischosen(resp.authenticateClientResponseEs9.authenticateClientError)) {
+			return true;
+		}
+	} else if (ischosen(resp.getBoundProfilePackageResponse)) {
+		/* GetBoundProfilePackageResponse is a CHOICE between getBoundProfilePackageOk and getBoundProfilePackageError */
+		if (ischosen(resp.getBoundProfilePackageResponse.getBoundProfilePackageError)) {
+			return true;
+		}
+	} else if (ischosen(resp.initiateAuthenticationResponse)) {
+		/* InitiateAuthenticationResponse is a CHOICE between initiateAuthenticationOk and initiateAuthenticationError */
+		if (ischosen(resp.initiateAuthenticationResponse.initiateAuthenticationError)) {
+			return true;
+		}
+	} else if (ischosen(resp.cancelSessionResponseEs9)) {
+		/* CancelSessionResponseEs9 is a CHOICE between cancelSessionOk and cancelSessionError */
+		if (ischosen(resp.cancelSessionResponseEs9.cancelSessionError)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Helper to convert ASN.1 error to JSON error format */
+private function f_convert_asn1_error_to_json(RemoteProfileProvisioningResponse resp)
+return JSON_ESx_FunctionExecutionStatusCodeData {
+	var JSON_ESx_FunctionExecutionStatusCodeData err := {
+		subjectCode := "",
+		reasonCode := "",
+		subjectIdentifier := omit,
+		message_ := ""
+	};
+
+	if (ischosen(resp.authenticateClientResponseEs9)) {
+		if (ischosen(resp.authenticateClientResponseEs9.authenticateClientError)) {
+			var integer errorCode := resp.authenticateClientResponseEs9.authenticateClientError;
+			/* Map AuthenticateClient error codes per SGP.22 */
+			if (errorCode == 1) {  /* eumCertificateInvalid */
+				err.subjectCode := "8.1.1";
+				err.reasonCode := "3.1";
+				err.message_ := "EUM Certificate Invalid";
+			} else if (errorCode == 2) {  /* eumCertificateExpired */
+				err.subjectCode := "8.1.1";
+				err.reasonCode := "3.2";
+				err.message_ := "EUM Certificate Expired";
+			} else if (errorCode == 3) {  /* euiccCertificateInvalid */
+				err.subjectCode := "8.1.2";
+				err.reasonCode := "3.1";
+				err.message_ := "eUICC Certificate Invalid";
+			} else if (errorCode == 4) {  /* euiccCertificateExpired */
+				err.subjectCode := "8.1.2";
+				err.reasonCode := "3.2";
+				err.message_ := "eUICC Certificate Expired";
+			} else if (errorCode == 5) {  /* euiccSignatureInvalid */
+				err.subjectCode := "8.1.3";
+				err.reasonCode := "3.1";
+				err.message_ := "eUICC Signature Invalid";
+			} else if (errorCode == 8) {  /* matchingIdRefused */
+				err.subjectCode := "8.2.6";
+				err.reasonCode := "3.1";
+				err.message_ := "Matching ID Refused";
+			} else if (errorCode == 127) {  /* undefinedError */
+				err.subjectCode := "8.8.1";
+				err.reasonCode := "5";
+				err.message_ := "Undefined Error";
+			}
+		}
+	} else if (ischosen(resp.getBoundProfilePackageResponse)) {
+		if (ischosen(resp.getBoundProfilePackageResponse.getBoundProfilePackageError)) {
+			var integer errorCode := resp.getBoundProfilePackageResponse.getBoundProfilePackageError;
+			/* Map GetBoundProfilePackage error codes */
+			if (errorCode == 1) {  /* euiccSignatureInvalid */
+				err.subjectCode := "8.1.3";
+				err.reasonCode := "3.1";
+				err.message_ := "eUICC Signature Invalid";
+			} else if (errorCode == 2) {  /* confirmationCodeMissing */
+				err.subjectCode := "8.2.7";
+				err.reasonCode := "3.7";
+				err.message_ := "Confirmation Code Missing";
+			} else if (errorCode == 3) {  /* confirmationCodeRefused */
+				err.subjectCode := "8.2.7";
+				err.reasonCode := "3.8";
+				err.message_ := "Confirmation Code Refused";
+			} else if (errorCode == 127) {  /* undefinedError */
+				err.subjectCode := "8.8.1";
+				err.reasonCode := "5";
+				err.message_ := "Undefined Error";
+			}
+		}
+	}
+
+	/* Fallback for undefined or empty errors, tbd */
+	if (err.subjectCode == "" or err.reasonCode == "") {
+		err.subjectCode := "8.8.1";
+		err.reasonCode := "5";
+		err.message_ := "Undefined Error (Server Internal Error)";
+		ext_logInfo("Using fallback error codes for undefined error");
+	}
+
+	return err;
 }
 
 private function f_es9p_transceive_success(RemoteProfileProvisioningRequest request)
@@ -3056,6 +3245,12 @@ private function f_TC_CancelSession_After_AuthenticateClient_Generic(
 	ext_logInfo("=== Step 2: AuthenticateClient ===");
 	var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
 	var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
+
+	if (not ischosen(authClientResp.authenticateClientResponseEs9.authenticateClientOk)) {
+		setverdict(fail, "AuthenticateClient did not return success response");
+		f_rsp_client_cleanup();
+		return;
+	}
 	var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
 
 	ext_logInfo("=== Step 3: CancelSession - " & reason_name & " ===");
@@ -5635,6 +5830,81 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
     f_validate_get_bound_profile_package_response(packageResp);
 
     f_rsp_client_cleanup();
+
+    setverdict(pass);
+}
+
+/* ========================================================================
+ * ASN.1 Mode Test Variants
+ * These tests run the same logic as the NIST tests but use pure ASN.1
+ * encoding instead of JSON for the ES9+ interface
+ * ======================================================================== */
+
+testcase TC_SM_DP_ES9_InitiateAuthenticationASN1_01_Nominal() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    pars.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_InitiateAuth_01_Nominal), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_AuthenticateClientASN1_01_Nominal() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    pars.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_AuthenticateClient_01_Nominal), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_GetBoundProfilePackageASN1_01_Nominal() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    pars.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_GetBoundProfilePackage_01_Nominal), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_CancelSession_After_AuthenticateClientASN1_01_Nominal() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    pars.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_CancelSession_After_AuthenticateClient_01_End_User_Rejection), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+testcase TC_SM_DP_ES9_HandleNotificationASN1_01_Nominal() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    pars.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_HandleNotification_01_Nominal), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* quick comparison */
+testcase TC_ES9_Mode_Comparison() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars_json := f_init_pars();
+    pars_json.es9_encoding_mode := ES9_JSON;
+    var smdpp_ConnHdlr vc_json;
+    f_init(testcasename() & "_JSON");
+    vc_json := f_start_handler(refers(f_TC_InitiateAuth_01_Nominal), pars_json);
+    vc_json.done;
+
+    var smdpp_ConnHdlrPars pars_asn1 := f_init_pars();
+    pars_asn1.es9_encoding_mode := ES9_ASN1;
+    var smdpp_ConnHdlr vc_asn1;
+    f_init(testcasename() & "_ASN1");
+    vc_asn1 := f_start_handler(refers(f_TC_InitiateAuth_01_Nominal), pars_asn1);
+    vc_asn1.done;
 
     setverdict(pass);
 }

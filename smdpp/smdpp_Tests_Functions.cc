@@ -640,4 +640,73 @@ CHARSTRING ext__RSPClient__sendHttpsPostWithAuth(const INTEGER& clientHandle, co
 	});
 }
 
+CHARSTRING ext__RSPClient__sendHttpsPostWithContentType(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+						 const CHARSTRING& body, const INTEGER& port, const CHARSTRING& contentType, INTEGER& statusCode) {
+	statusCode = INTEGER(0);
+
+	return with_client(clientHandle, "ext__RSPClient__sendHttpsPostWithContentType", CHARSTRING(""), [&](RSPClient* client) {
+		int httpStatus = 0;
+		int dstport = static_cast<int>(port);
+
+		std::string response = client->sendHttpsPostWithContentType(
+			charstring_to_string(endpoint),
+			charstring_to_string(body),
+			charstring_to_string(contentType),
+			httpStatus,
+			dstport
+		);
+
+		statusCode = INTEGER(httpStatus);
+		return string_to_charstring(response);
+	});
+}
+
+OCTETSTRING ext__RSPClient__sendHttpsPostBinary(const INTEGER& clientHandle, const CHARSTRING& endpoint,
+						 const OCTETSTRING& body, const INTEGER& port, const CHARSTRING& contentType, INTEGER& statusCode) {
+	statusCode = INTEGER(0);
+
+	std::string endpointStr = charstring_to_string(endpoint);
+	std::string contentTypeStr = charstring_to_string(contentType);
+	int dstport = static_cast<int>(port);
+
+	LOG_INFO("ext__RSPClient__sendHttpsPostBinary: endpoint=" + endpointStr +
+	         ", port=" + std::to_string(dstport) +
+	         ", contentType=" + contentTypeStr +
+	         ", bodySize=" + std::to_string(body.lengthof()));
+
+	return with_client(clientHandle, "ext__RSPClient__sendHttpsPostBinary", OCTETSTRING(), [&](RSPClient* client) {
+		int httpStatus = 0;
+
+		std::string binaryBody;
+		binaryBody.reserve(body.lengthof());
+		for (int i = 0; i < body.lengthof(); i++) {
+			binaryBody.push_back(static_cast<char>(body[i].get_octet()));
+		}
+
+		LOG_INFO("Calling sendHttpsPostWithContentType...");
+
+		std::string response = client->sendHttpsPostWithContentType(
+			endpointStr,
+			binaryBody,
+			contentTypeStr,
+			httpStatus,
+			dstport
+		);
+
+		LOG_INFO("sendHttpsPostWithContentType returned, status=" + std::to_string(httpStatus) +
+		         ", responseSize=" + std::to_string(response.size()));
+
+		if (httpStatus == 0 || response.empty()) {
+			LOG_ERROR("HTTP request failed with status " + std::to_string(httpStatus));
+			statusCode = INTEGER(0);
+			return OCTETSTRING();  // Return empty octetstring on failure
+		}
+
+		OCTETSTRING result(response.size(), (const unsigned char*)response.data());
+
+		statusCode = INTEGER(httpStatus);
+		return result;
+	});
+}
+
 } // namespace smdpp__Tests
