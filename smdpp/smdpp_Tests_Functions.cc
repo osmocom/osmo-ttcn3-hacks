@@ -13,8 +13,9 @@
 
 #include <TTCN3.hh>
 #include "smdpp_Tests.hh"
-#include "rsp_client.cpp"
-#include "bsp_crypto.cpp"
+#include "rsp_client.h"
+#include "bsp_crypto.h"
+#include "logger.h"
 
 using namespace RspCrypto;
 

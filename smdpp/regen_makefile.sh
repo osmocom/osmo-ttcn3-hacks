@@ -13,6 +13,8 @@ FILES="
 	TCCInterface.cc
 	PIPEasp_PT.cc
 	smdpp_Tests_Functions.cc
+	rsp_client.cc
+	bsp_crypto.cc
 "
 . ../_buildsystem/regen_makefile.inc.sh
 

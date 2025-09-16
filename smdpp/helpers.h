@@ -1,3 +1,23 @@
+#ifndef HELPERS_H
+#define HELPERS_H
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <iterator>
+#include <iomanip>
+#include <stdexcept>
+
+// Include OpenSSL headers we need
+extern "C" {
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
+}
+
 std::ostream& operator<<(std::ostream& os, const std::vector<std::string>& v) {
 	using namespace std;
 	copy(v.begin(), v.end(), std::ostream_iterator<std::string>(os, "\n"));
@@ -32,6 +52,12 @@ struct X509Deleter {
 	}
 };
 
+struct EVP_PKEY_Deleter {
+	void operator()(EVP_PKEY* key) const {
+		EVP_PKEY_free(key);
+	}
+};
+
 struct X509_STORE_Deleter {
 	void operator()(X509_STORE* store) const {
 		X509_STORE_free(store);
@@ -41,12 +67,6 @@ struct X509_STORE_Deleter {
 struct X509_STORE_CTX_Deleter {
 	void operator()(X509_STORE_CTX* ctx) const {
 		X509_STORE_CTX_free(ctx);
-	}
-};
-
-struct EVP_PKEY_Deleter {
-	void operator()(EVP_PKEY* key) const {
-		EVP_PKEY_free(key);
 	}
 };
 
@@ -147,3 +167,5 @@ class HexUtil {
 };
 
 } // namespace RspCrypto
+
+#endif // HELPERS_H

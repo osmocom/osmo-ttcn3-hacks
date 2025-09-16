@@ -1,4 +1,7 @@
 
+#ifndef LOGGER_H
+#define LOGGER_H
+
 #include <cstddef>
 #include <filesystem>
 #include <iterator>
@@ -249,3 +252,5 @@ class OpenSSLErrorHandler {
 };
 
 } // namespace RspCrypto
+
+#endif // LOGGER_H
