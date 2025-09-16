@@ -33,6 +33,7 @@ import from es12_Types_JSON all;
 import from es9p_Types_JSON all;
 import from es2p_Types_JSON all;
 import from esx_header_Types_JSON all;
+import from ES2Plus_Tests all;
 
 /* C++ handles only crypto, TTCN-3 handles ASN.1 encoding/decoding most of the time */
 
@@ -208,6 +209,7 @@ external function ext_RSPClient_sendHttpsPost(
     integer clientHandle,
     charstring endpoint,
     charstring body,
+    integer dport,
     out integer statusCode
 ) return charstring;
 
@@ -216,6 +218,21 @@ external function ext_RSPClient_configureHttpClient(
     boolean useCustomTlsCert,
     charstring customTlsCertPath
 ) return integer;
+
+external function ext_RSPClient_setAuthParams(
+    integer clientHandle,
+    boolean useMutualTLS,
+    charstring clientCertPath,
+    charstring clientKeyPath
+) return integer;
+
+external function ext_RSPClient_sendHttpsPostWithAuth(
+    integer clientHandle,
+    charstring endpoint,
+    charstring body,
+    integer dport,
+    out integer statusCode
+) return charstring;
 
 /* RSP Protocol Constants */
 const charstring c_oid_rspRole_dp_auth := "2.23.146.1.2.1.4";
@@ -233,6 +250,12 @@ const octetstring c_ecPoint_uncompressed := '04'O;
 const integer c_hostId_min_length := 4;
 const integer c_hostId_max_length := 16;
 const integer c_min_segment_length := 2;
+
+// ensure canonical DER encoding, using a width 4 bitstring here leads to violations
+const NotificationEvent c_notificationInstall := '1'B;  // Bit 0
+const NotificationEvent c_notificationEnable := '10'B;   // Bit 1
+const NotificationEvent c_notificationDisable := '100'B;  // Bit 2
+const NotificationEvent c_notificationDelete := '1000'B;   // Bit 3
 
 /* Error injection types for AuthenticateClient testing */
 type union AuthClientErrorInjection {
@@ -316,7 +339,8 @@ type component smdpp_ConnHdlr {
 
 type record smdpp_ConnHdlrPars {
 	charstring smdp_server_url,
-	integer smdp_server_port,
+	integer smdp_es9p_server_port,
+    integer smdp_es2p_server_port,
 	charstring cert_path,
 	charstring cert_name_filter,
 	charstring euicc_cert_path,
@@ -335,7 +359,8 @@ type record smdpp_ConnHdlrPars {
 private function f_init_pars() runs on MTC_CT return smdpp_ConnHdlrPars {
 	var smdpp_ConnHdlrPars pars := {
 		smdp_server_url := "testsmdpplus1.example.com",
-		smdp_server_port := 8000,
+		smdp_es9p_server_port := 8000,
+        smdp_es2p_server_port := 8000,
 		cert_path := "./sgp26/CertificateIssuer",
 		cert_name_filter := "",  // Load all certificates (both NIST and BRP) or "NIST" or "BRP"
 		euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der",
@@ -396,7 +421,7 @@ private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
 
 	g_rsp_client_handle := ext_RSPClient_create(
 		g_pars_smdpp.smdp_server_url,
-		g_pars_smdpp.smdp_server_port,
+		g_pars_smdpp.smdp_es9p_server_port,
 		g_pars_smdpp.cert_path,
 		g_pars_smdpp.cert_name_filter
 	);
@@ -446,6 +471,137 @@ private function f_rsp_client_cleanup() runs on smdpp_ConnHdlr {
 		ext_RSPClient_destroy(g_rsp_client_handle);
 		g_rsp_client_handle := -1;
 	}
+}
+
+/* HELPER FUNCTIONS FOR ES2+ DYNAMIC PROFILE PROVISIONING */
+
+// Main ES2+ provisioning function - provisions a profile dynamically via ES2+
+private function f_provision_profile_via_es2plus(
+    charstring eid := "89049032123451234512345678901235",
+    boolean with_confirmation_code := false,
+    charstring profile_type := "Test",
+    boolean release_flag := true
+) runs on smdpp_ConnHdlr return charstring {
+
+    // ES2+ constants
+    const charstring c_es2plus_base_path := "/gsma/rsp2/es2plus";
+    const charstring c_path_download_order := c_es2plus_base_path & "/downloadOrder";
+    const charstring c_path_confirm_order := c_es2plus_base_path & "/confirmOrder";
+    const charstring c_cert_path := "./test_certs/CERT_MNO_ECDSA_NIST.pem";
+    const charstring c_key_path := "./test_certs/SK_MNO_ECDSA_NIST.pem";
+
+    // Generate unique function call identifier
+    var octetstring rnd_oct := f_rnd_octstring(4);
+    var charstring func_call_id := "TTCN3-" & oct2str(rnd_oct);
+
+    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle,
+        true,  // useMutualTLS
+        c_cert_path,
+        c_key_path
+    );
+
+    if (result != 0) {
+        setverdict(fail, "Failed to set authentication parameters");
+        mtc.stop;
+    }
+
+    // Step 1: DownloadOrder to reserve ICCID
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := {
+                functionRequesterIdentifier := "test.operator.com",
+                functionCallIdentifier := func_call_id & "-DL"
+            },
+            eid := eid,
+            iccid := omit,
+            profileType := profile_type
+        }
+    };
+
+    var octetstring req_enc := enc_JSON_ES2p_Request(dl_req);
+    var integer status_code;
+    var charstring response := ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        c_path_download_order,
+        oct2char(req_enc),
+        g_pars_smdpp.smdp_es2p_server_port,
+        status_code
+    );
+
+    if (status_code != 200) {
+        ext_logError("ES2+ DownloadOrder failed with status: " & int2str(status_code));
+        return "";
+    }
+
+    var JSON_ES2p_Response dl_resp := dec_JSON_ES2p_Response(char2oct(response), "downloadOrder");
+    if (dl_resp.downloadOrderResponse.header.functionExecutionStatus.status != "Executed-Success") {
+        ext_logError("ES2+ DownloadOrder returned error");
+        return "";
+    }
+
+    var charstring new_iccid := dl_resp.downloadOrderResponse.iccid;
+    ext_logInfo("ES2+ provisioned ICCID: " & new_iccid);
+
+    // Step 2: ConfirmOrder to create profile with matchingId
+    var JSON_ES2p_Request conf_req := {
+        confirmOrderRequest := {
+            header := {
+                functionRequesterIdentifier := "test.operator.com",
+                functionCallIdentifier := func_call_id & "-CF"
+            },
+            iccid := new_iccid,
+            eid := omit,
+            matchingId := omit,  // Let server generate
+            confirmationCode :=  omit,
+            smdsAddress := omit,
+            releaseFlag := release_flag
+        }
+    };
+
+    if (with_confirmation_code) {
+        conf_req.confirmOrderRequest.confirmationCode := "12345678";
+    }
+
+    req_enc := enc_JSON_ES2p_Request(conf_req);
+    response := ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        c_path_confirm_order,
+        oct2char(req_enc),
+        g_pars_smdpp.smdp_es2p_server_port,
+        status_code
+    );
+
+    if (status_code != 200) {
+        ext_logError("ES2+ ConfirmOrder failed with status: " & int2str(status_code));
+        return "";
+    }
+
+    var JSON_ES2p_Response conf_resp := dec_JSON_ES2p_Response(char2oct(response), "confirmOrder");
+    if (conf_resp.confirmOrderResponse.header.functionExecutionStatus.status != "Executed-Success") {
+        ext_logError("ES2+ ConfirmOrder returned error");
+        return "";
+    }
+
+    var charstring matching_id := conf_resp.confirmOrderResponse.matchingId;
+    ext_logInfo("ES2+ provisioned profile with matchingId: " & matching_id);
+
+    // Store confirmation code if requested
+    if (with_confirmation_code) {
+        ext_logInfo("Profile provisioned with confirmation code required");
+    }
+
+    return matching_id;
+}
+
+// Simplified variant for basic profile provisioning
+private function f_provision_simple_profile() runs on smdpp_ConnHdlr return charstring {
+    return f_provision_profile_via_es2plus();
+}
+
+// Variant for profile with confirmation code
+private function f_provision_profile_with_cc(charstring eid := "89049032123451234512345678901235") runs on smdpp_ConnHdlr return charstring {
+    return f_provision_profile_via_es2plus(eid, true);
 }
 
 /* HELPER FUNCTIONS FOR CERTIFICATE PKID MANAGEMENT */
@@ -722,6 +878,7 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 		g_rsp_client_handle,
 		g_last_es9p_endpoint,
 		g_last_es9p_request,
+        g_pars_smdpp.smdp_es9p_server_port,
 		http_status
 	);
 
@@ -771,6 +928,7 @@ return DecodedRPPReponse_Wrap {
 		g_rsp_client_handle,
 		g_last_es9p_endpoint,
 		g_last_es9p_request,
+        g_pars_smdpp.smdp_es9p_server_port,
 		http_status
 	);
 
@@ -904,8 +1062,13 @@ private function f_build_authenticate_client_request(
 }
 
 private function f_perform_authenticate_client_standard(
-    charstring matchingId := "TS48v4_SAIP2.3_BERTLV"
+    charstring matchingId := ""  /* Empty string will trigger dynamic provisioning */
 ) runs on smdpp_ConnHdlr return AuthenticateClientOk {
+    /* Provision profile dynamically if matchingId not provided */
+    if (matchingId == "") {
+        matchingId := f_provision_simple_profile();
+    }
+
     var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
     f_set_euicc_pkids(euiccInfo2);
 
@@ -937,6 +1100,11 @@ private function f_generate_wrong_Generic() return octetstring {
 
 external function encode_DER_InitialiseSecureChannelRequest_ver(
   in InitialiseSecureChannelRequest_ver pdu
+) return octetstring
+with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
+
+external function encode_DER_profileInstallationResultData(
+  in ProfileInstallationResultData pdu
 ) return octetstring
 with { extension "prototype(convert) encode(BER:BER_ENCODE_DER)" };
 
@@ -1110,6 +1278,7 @@ return JSON_ES9p_EmptyResponse {
         g_rsp_client_handle,
         g_last_es9p_endpoint,
         g_last_es9p_request,
+        g_pars_smdpp.smdp_es9p_server_port,
         http_status
     );
 
@@ -1182,7 +1351,7 @@ private function f_create_profile_installation_result(octetstring transactionId,
 runs on smdpp_ConnHdlr return ProfileInstallationResult {
     var NotificationMetadata notifMeta := {
         seqNumber := 1,
-        profileManagementOperation := '00000001'B, /* notificationInstall - bit 0 set */
+        profileManagementOperation := c_notificationInstall,
         notificationAddress := g_pars_smdpp.smdp_server_url,
         iccid := omit
     };
@@ -1214,11 +1383,7 @@ runs on smdpp_ConnHdlr return ProfileInstallationResult {
         };
     }
 
-    var ProfileInstallationResult temp_pir := {
-        profileInstallationResultData := pirData,
-        euiccSignPIR := ''O  /* Empty signature for encoding */
-    };
-    var octetstring full_encoded := enc_ProfileInstallationResult(temp_pir);
+    var octetstring full_encoded := encode_DER_profileInstallationResultData(pirData);
     var octetstring euiccSignPIR := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, full_encoded);
 
     var ProfileInstallationResult pir := {
@@ -1244,7 +1409,7 @@ private function f_performInitiateAuthentication() runs on smdpp_ConnHdlr return
 
 private function f_buildAuthenticateClientRequest_unified(
 	octetstring serverChallenge,
-	charstring matchingId := "TS48v4_SAIP2.3_BERTLV",
+	charstring matchingId := "",  /* Empty string will trigger dynamic provisioning */
 	template (omit) EUICCInfo2 euiccInfo2 := omit,      // omit = create default
 	template (omit) DeviceInfo deviceInfo := omit,       // omit = no device info
 	template (omit) octetstring transactionIdOverride := omit,  // omit = use correct ID
@@ -1265,12 +1430,16 @@ private function f_buildAuthenticateClientRequest_unified(
 	var CtxParams1 ctxParams := valueof(ts_ctxParams1);
 	/* matchingId:
 	 * - "OMIT" -> field omitted from ASN.1 structure
-	 * - "" -> field is present but empty
+	 * - "" -> triggers dynamic provisioning and uses the result
 	 * - any other value -> field contains that value
 	 */
 	if (matchingId == "OMIT") {
 		ctxParams.ctxParamsForCommonAuthentication.matchingId := omit;
 	} else {
+		/* Provision profile dynamically if matchingId empty */
+		if (matchingId == "") {
+			matchingId := f_provision_simple_profile();
+		}
 		ctxParams.ctxParamsForCommonAuthentication.matchingId := matchingId;
 	}
 
@@ -1314,7 +1483,7 @@ private function f_buildAuthenticateClientRequest_unified(
 
 private function f_buildAuthenticateClientRequest(
 	octetstring serverChallenge,
-	charstring matchingId := "TS48v4_SAIP2.3_BERTLV",
+	charstring matchingId := "",  /* Empty string will trigger dynamic provisioning */
 	template (omit) octetstring transactionIdOverride := omit  // error injection - omit means correct ID
 ) runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
 	return f_buildAuthenticateClientRequest_unified(
@@ -1500,7 +1669,12 @@ private function f_cancelSession(octetstring transactionId, objid smdpOid) runs 
     }
 }
 
-private function f_create_authenticate_client_request(charstring matchingId := "TS48v4_SAIP2.3_BERTLV") runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
+private function f_create_authenticate_client_request(charstring matchingId := "") runs on smdpp_ConnHdlr return RemoteProfileProvisioningRequest {
+	/* Provision profile dynamically if matchingId not provided */
+	if (matchingId == "") {
+		matchingId := f_provision_simple_profile();
+	}
+
 	var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
 	f_set_euicc_pkids(euiccInfo2);
 
@@ -1613,7 +1787,10 @@ private function f_authenticateClient_error_generic(
 
     /* Build CtxParams */
     var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-    ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+
+    /* Provision profile dynamically unless error injection overrides it */
+    var charstring provisionedMatchingId := f_provision_simple_profile();
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := provisionedMatchingId;
 
     /* Apply context parameter errors if specified */
     if (ischosen(err_injection.ctx_error)) {
@@ -2060,7 +2237,7 @@ private function f_TC_AuthenticateClient_03_Mismatched_Transaction_ID(charstring
 	var AuthClientErrorTestParams params := {
 		testName := "AuthenticateClient - Mismatched Transaction ID",
 		stepDescription := "AuthenticateClient with wrong transaction ID in signed data",
-		matchingId := "TS48v4_SAIP2.3_BERTLV",
+		matchingId := omit,  /* Will be provisioned dynamically */
 		transactionIdOverride := wrongTransactionId,
 		expectedSubjectCode := "8.10.1",
 		expectedReasonCode := "3.9",
@@ -2103,8 +2280,11 @@ private function f_test_getBoundProfilePackage_generic(
         var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
         f_set_euicc_pkids(euiccInfo2);
 
+        /* Provision profile dynamically */
+        var charstring provisionedMatchingId := f_provision_simple_profile();
+
         var CtxParams1 ctxParams := valueof(ts_ctxParams1);
-        ctxParams.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+        ctxParams.ctxParamsForCommonAuthentication.matchingId := provisionedMatchingId;
 
         var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
         var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
@@ -2508,11 +2688,16 @@ private function f_TC_AuthenticateClient_RetryCases_Reuse_OTPK(charstring id) ru
 }
 
 private function f_perform_session_through_getBoundProfilePackage(
-    charstring matchingId := "TS48v4_SAIP2.3_BERTLV"
+    charstring matchingId := ""  /* Empty string will trigger dynamic provisioning */
 ) runs on smdpp_ConnHdlr return GetBoundProfilePackageOk {
+    /* Provision profile dynamically if matchingId not provided */
+    if (matchingId == "") {
+        matchingId := f_provision_simple_profile();
+    }
+
     var InitiateAuthenticationOkEs9 authOk := f_initiate_authentication_and_validate();
 
-    var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request();
+    var RemoteProfileProvisioningRequest authClientReq := f_create_authenticate_client_request(matchingId);
     var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
     var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
 
@@ -3349,8 +3534,11 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	euic2.euiccCiPKIdListForVerification := f_get_ci_pkids_for_verification();
 	euic2.euiccCiPKIdListForSigning := f_get_ci_pkids_for_signing();
 
+	/* Provision profile dynamically */
+	var charstring provisionedMatchingId := f_provision_simple_profile();
+
 	var  CtxParams1 ctxpar := valueof(ts_ctxParams1);
-	ctxpar.ctxParamsForCommonAuthentication.matchingId := "TS48v4_SAIP2.3_BERTLV";
+	ctxpar.ctxParamsForCommonAuthentication.matchingId := provisionedMatchingId;
 
 	var EuiccSigned1 euiccSig := {
 		transactionId := g_transactionId,
@@ -3718,7 +3906,7 @@ private function f_TC_HandleNotification_02_OtherSignedNotification(charstring i
 
 	var NotificationMetadata notifMeta := {
 		seqNumber := 2,  /* Different sequence number from PIR */
-		profileManagementOperation := '00000010'B, /* notificationEnable */
+		profileManagementOperation :=  c_notificationEnable,
 		notificationAddress := g_pars_smdpp.smdp_server_url,
 		iccid := omit  /* No specific ICCID for this test */
 	};
@@ -4447,14 +4635,40 @@ private function f_TC_AuthenticateClient_Error_14_UnmatchedEID_DefaultDP(charstr
 
 /* Test Case: TC_SM-DP+_ES9+.AuthenticateClientNIST - Error Test Sequence #15 // SGP.23 v1.15 section 4.3.14.2.2 Test Sequence #15 */
 private function f_TC_AuthenticateClient_Error_15_NoEligibleProfile(charstring id) runs on smdpp_ConnHdlr {
-    f_test_authenticateClient_error({
-        testName := "AuthenticateClient - Error: No Eligible Profile",
-        stepDescription := "AuthenticateClient when no profile matches device capabilities",
-        matchingId := "AC_NO_ELIGIBLE",  /* Profile with incompatible requirements */
-        expectedSubjectCode := "8.2.5",
-        expectedReasonCode := "4.3",
-        errorDescription := "No Eligible Profile test"
-    }, id);
+    /* SGP.23 Section 4.3.14.2.2 Test Sequence #15
+     * The profile has PPR1 set (disabling not allowed) but the eUICC reports PPR1 as forbidden
+     * because an operational profile is already installed */
+
+    if (not f_rsp_client_init()) {
+        setverdict(fail, "RSP client initialization failed");
+        return;
+    }
+
+    var InitiateAuthenticationOkEs9 authOk := f_initiate_authentication_and_validate();
+
+    ext_logInfo("Step 2: AuthenticateClient with eUICC reporting forbidden PPR1");
+
+    var EUICCInfo2 euiccInfo2 := valueof(ts_EUICCInfo2);
+    f_set_euicc_pkids(euiccInfo2);
+    /* Set forbiddenProfilePolicyRules to indicate PPR1 is forbidden
+     * PPR1 (bit 1) = "Disabling of this Profile is not allowed"
+     * This is forbidden when an operational profile is already installed */
+    euiccInfo2.forbiddenProfilePolicyRules := '0100'B;  /* PPR1 is bit 1 */
+
+    var CtxParams1 ctxParams := valueof(ts_ctxParams1);
+    /* Use AC_PPR1 which has PPR1 set in the profile */
+    ctxParams.ctxParamsForCommonAuthentication.matchingId := "AC_PPR1";
+
+    var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
+    var octetstring euiccSignature1 := f_sign_euicc_signed1(euiccSigned1);
+
+    var RemoteProfileProvisioningRequest authReq := f_build_authenticate_client_request(euiccSigned1, euiccSignature1);
+    var JSON_ESx_FunctionExecutionStatusCodeData err := f_es9p_transceive_error(authReq);
+
+    f_validate_error_response(err, "8.2.5", "4.3", "No eligible Profile for this eUICC/Device");
+    setverdict(pass);
+
+    f_rsp_client_cleanup();
 }
 
 /* Test Case: TC_SM-DP+_ES9+.AuthenticateClientNIST - Error Test Sequence #16 // SGP.23 v1.15 section 4.3.14.2.2 Test Sequence #16 */
@@ -5157,7 +5371,7 @@ testcase TC_SM_DP_ES9_AuthenticateClientNIST_Error_TransactionIdMismatchASN1() r
 
 testcase TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5170,7 +5384,7 @@ testcase TC_SM_DP_ES9_InitiateAuthenticationBRP_01_Nominal() runs on MTC_CT {
 
 testcase TC_SM_DP_ES9_AuthenticateClientBRP_01_Nominal() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5183,7 +5397,7 @@ testcase TC_SM_DP_ES9_AuthenticateClientBRP_01_Nominal() runs on MTC_CT {
 
 testcase TC_SM_DP_ES9_GetBoundProfilePackageBRP_01_Nominal() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5196,7 +5410,7 @@ testcase TC_SM_DP_ES9_GetBoundProfilePackageBRP_01_Nominal() runs on MTC_CT {
 
 testcase TC_rsp_complete_flow_BRP() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5209,7 +5423,7 @@ testcase TC_rsp_complete_flow_BRP() runs on MTC_CT {
 
 testcase TC_SM_DP_ES9_HandleNotificationBRP() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5222,7 +5436,7 @@ testcase TC_SM_DP_ES9_HandleNotificationBRP() runs on MTC_CT {
 
 testcase TC_SM_DP_ES9_CancelSession_After_AuthenticateClientBRP() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5235,7 +5449,7 @@ testcase TC_SM_DP_ES9_CancelSession_After_AuthenticateClientBRP() runs on MTC_CT
 
 testcase TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageBRP() runs on MTC_CT {
     var smdpp_ConnHdlrPars pars := f_init_pars();
-    pars.smdp_server_port := 8001;  /* BRP server port */
+    pars.smdp_es9p_server_port := 8001;  /* BRP server port */
     pars.cert_name_filter := "BRP";  /* Use Brainpool certificates */
     pars.euicc_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_BRP.der";
     pars.euicc_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_BRP.pem";
@@ -5243,6 +5457,185 @@ testcase TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageBRP() runs on MT
     f_init(testcasename());
     vc_conn := f_start_handler(refers(f_TC_CancelSession_After_GetBoundProfilePackage_01), pars);
     vc_conn.done;
+    setverdict(pass);
+}
+
+/* ES2+/ES9+ Integration Test Case */
+testcase TC_ES2Plus_ES9Plus_FullFlow() runs on MTC_CT {
+    var smdpp_ConnHdlrPars pars := f_init_pars();
+    var smdpp_ConnHdlr vc_conn;
+    f_init(testcasename());
+    vc_conn := f_start_handler(refers(f_TC_ES2Plus_ES9Plus_FullFlow), pars);
+    vc_conn.done;
+    setverdict(pass);
+}
+
+/* ES2+/ES9+ Integration Test Implementation */
+private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_ConnHdlr {
+    // ES2+ constants
+    const charstring c_es2plus_base_path := "/gsma/rsp2/es2plus";
+    const charstring c_path_download_order := c_es2plus_base_path & "/downloadOrder";
+    const charstring c_path_confirm_order := c_es2plus_base_path & "/confirmOrder";
+    const charstring c_eid1 := "89049032123451234512345678901235";
+    const charstring c_cert_path := "./test_certs/CERT_MNO_ECDSA_NIST.pem";
+    const charstring c_key_path := "./test_certs/SK_MNO_ECDSA_NIST.pem";
+
+    if (not f_rsp_client_init()) {
+        setverdict(fail, "RSP client initialization failed");
+        return;
+    }
+
+    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle,
+        true,  // useMutualTLS
+        c_cert_path,
+        c_key_path
+    );
+
+    if (result != 0) {
+        setverdict(fail, "Failed to set authentication parameters");
+        mtc.stop;
+    }
+
+    // Step 1: Order profile via ES2+
+
+    // 1.1: dl req
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := {
+                functionRequesterIdentifier := "test.operator.com",
+                functionCallIdentifier := "01234567890123456789012345678901"
+            },
+            eid := c_eid1,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var octetstring req_enc := enc_JSON_ES2p_Request(dl_req);
+    var integer status_code;
+    var charstring response := ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        c_path_download_order,
+        oct2char(req_enc),
+        g_pars_smdpp.smdp_es2p_server_port,
+        status_code
+    );
+
+    if (status_code != 200) {
+        setverdict(fail, "DownloadOrder failed with status: ", status_code);
+        f_rsp_client_cleanup();
+        return;
+    }
+
+    var JSON_ES2p_Response dl_resp := dec_JSON_ES2p_Response(char2oct(response), "downloadOrder");
+    if (dl_resp.downloadOrderResponse.header.functionExecutionStatus.status != "Executed-Success") {
+        setverdict(fail, "DownloadOrder returned error");
+        f_rsp_client_cleanup();
+        return;
+    }
+
+    var charstring new_iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // 1.2: confirm
+    var JSON_ES2p_Request conf_req := {
+        confirmOrderRequest := {
+            header := {
+                functionRequesterIdentifier := "test.operator.com",
+                functionCallIdentifier := "02234567890123456789012345678901"
+            },
+            iccid := new_iccid,
+            eid := omit,
+            matchingId := omit,
+            confirmationCode := omit,
+            smdsAddress := omit,
+            releaseFlag := true
+        }
+    };
+
+    req_enc := enc_JSON_ES2p_Request(conf_req);
+    response := ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        c_path_confirm_order,
+        oct2char(req_enc),
+        g_pars_smdpp.smdp_es2p_server_port,
+        status_code
+    );
+
+    if (status_code != 200) {
+        setverdict(fail, "ConfirmOrder failed with status: ", status_code);
+        f_rsp_client_cleanup();
+        return;
+    }
+
+    var JSON_ES2p_Response conf_resp := dec_JSON_ES2p_Response(char2oct(response), "confirmOrder");
+    if (conf_resp.confirmOrderResponse.header.functionExecutionStatus.status != "Executed-Success") {
+        setverdict(fail, "ConfirmOrder returned error");
+        f_rsp_client_cleanup();
+        return;
+    }
+
+    var charstring matching_id := conf_resp.confirmOrderResponse.matchingId;
+
+    // Step 2: Download profile via ES9+
+
+    // Step 2.1: InitiateAuthentication
+    var RemoteProfileProvisioningRequest initAuthReq := f_create_initiate_authentication_request();
+    var RemoteProfileProvisioningResponse initAuthResp := f_es9p_transceive_success(initAuthReq);
+
+    if (not f_validate_initiate_authentication_response(initAuthResp)) {
+        setverdict(fail, "InitiateAuthentication validation failed");
+        f_rsp_client_cleanup();
+        return;
+    }
+
+    var InitiateAuthenticationOkEs9 initAuthOk := initAuthResp.initiateAuthenticationResponse.initiateAuthenticationOk;
+
+    // Step 2.2: AuthenticateClient with ES2+ matchingId
+
+    var RemoteProfileProvisioningRequest authClientReq := f_buildAuthenticateClientRequest(
+        initAuthOk.serverSigned1.serverChallenge,
+        matching_id  // Using the matchingId from ES2+ ConfirmOrder
+    );
+
+    var RemoteProfileProvisioningResponse authClientResp := f_es9p_transceive_success(authClientReq);
+    var AuthenticateClientOk authClientOk := authClientResp.authenticateClientResponseEs9.authenticateClientOk;
+
+    f_validateAuthenticateClientResponse(authClientOk);
+
+    // Handle confirmation code if required
+    if (authClientOk.smdpSigned2.ccRequiredFlag == true) {
+        log("Confirmation code is required for this profile");
+        result := ext_RSPClient_setTransactionId(g_rsp_client_handle, authClientOk.transactionId);
+        if (result != 0) {
+            setverdict(fail, "Failed to set transaction ID");
+            f_rsp_client_cleanup();
+            return;
+        }
+
+        var charstring confirmationCode := "12345678";  // Default test code
+        result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+        if (result != 0) {
+            setverdict(fail, "Failed to set confirmation code");
+            f_rsp_client_cleanup();
+            return;
+        }
+        log("Set confirmation code: ", confirmationCode);
+    }
+
+    // Step 2.3: GetBoundProfilePackage
+
+    var RemoteProfileProvisioningRequest packageReq := f_create_get_bound_profile_package_request(
+        authClientOk.smdpSignature2
+    );
+
+    var RemoteProfileProvisioningResponse packageResp := f_es9p_transceive_success(packageReq);
+    var GetBoundProfilePackageOk packageOk := packageResp.getBoundProfilePackageResponse.getBoundProfilePackageOk;
+
+    f_validate_get_bound_profile_package_response(packageResp);
+
+    f_rsp_client_cleanup();
+
     setverdict(pass);
 }
 
@@ -5525,6 +5918,9 @@ control {
 	execute(TC_SM_DP_ES9_CancelSession_After_GetBoundProfilePackageBRP());
 	/* Complete flow with BRP certificates */
 	execute(TC_rsp_complete_flow_BRP());
+
+	/* ES2+/ES9+ Integration Test */
+	execute(TC_ES2Plus_ES9Plus_FullFlow());
 }
 
 }

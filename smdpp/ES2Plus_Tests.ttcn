@@ -1,0 +1,1031 @@
+module ES2Plus_Tests {
+
+/* ES2+ Interface Test Suite
+ * Based on SGP.22 v2.5 Section 5.3 and SGP.23 v1.5 Section 4.3.1-4.3.5
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Native_Functions all;
+import from es2p_Types_JSON all;
+import from esx_header_Types_JSON all;
+import from TCCConversion_Functions all;
+import from smdpp_Tests all;  // For RSPClient functions and types
+
+// ES2+ specific constants
+const charstring c_es2plus_base_path := "/gsma/rsp2/es2plus";
+const charstring c_path_download_order := c_es2plus_base_path & "/downloadOrder";
+const charstring c_path_confirm_order := c_es2plus_base_path & "/confirmOrder";
+const charstring c_path_cancel_order := c_es2plus_base_path & "/cancelOrder";
+const charstring c_path_release_profile := c_es2plus_base_path & "/releaseProfile";
+
+// Test ICCIDs that exist in Python server test mode
+const charstring c_iccid_test_1 := "89000000000000001010";
+const charstring c_iccid_test_2 := "89000000000000001028";
+const charstring c_iccid_test_3 := "89000000000000001036";
+const charstring c_iccid_test_4 := "89000000000000001044";
+const charstring c_iccid_test_5 := "89000000000000001051";
+
+// Test EIDs from test specification
+const charstring c_eid1 := "89049032123451234512345678901235";
+const charstring c_eid2 := "89049032123451234512345678901236";
+
+// Client certificate paths
+const charstring c_cert_path := "./test_certs/CERT_MNO_ECDSA_NIST.pem";
+const charstring c_key_path := "./test_certs/SK_MNO_ECDSA_NIST.pem";
+
+// Wrong certificate for testing
+const charstring c_wrong_cert_path := "./sgp26/eUICC/CERT_EUICC_ECDSA_NIST.der";
+const charstring c_wrong_key_path := "./sgp26/eUICC/SK_EUICC_ECDSA_NIST.pem";
+
+// Module parameters
+modulepar {
+    charstring mp_es2plus_server_host := "testsmdpplus1.example.com";
+    integer mp_es9_server_port := 8000;
+    integer mp_es2plus_server_port := 8000;  // NIST tests use port 8000
+    charstring mp_operator_id := "test.operator.com";
+    charstring mp_nist_rsp_cert_path := "./sgp26/";
+    boolean mp_use_ssl := true;  // SSL with mutual TLS authentication enabled
+}
+
+// Test component - extend smdpp_ConnHdlr to reuse RSPClient functionality
+type component ES2Plus_ConnHdlr extends smdpp_ConnHdlr {
+    // Inherits g_rsp_client_handle from smdpp_ConnHdlr
+}
+
+// Parameter structures for test cases
+type record DownloadOrderTestParams {
+    charstring testName,
+    charstring eid optional,
+    charstring iccid optional,
+    charstring profileType optional,
+    boolean expectError,
+    charstring expectedSubjectCode optional,
+    charstring expectedReasonCode optional
+}
+
+type record ConfirmOrderTestParams {
+    charstring testName,
+    charstring iccid,
+    charstring eid optional,
+    charstring matchingId optional,
+    charstring confirmationCode optional,
+    charstring smdsAddress optional,
+    boolean releaseFlag,
+    boolean expectError,
+    charstring expectedSubjectCode optional,
+    charstring expectedReasonCode optional
+}
+
+type record CancelOrderTestParams {
+    charstring testName,
+    charstring iccid,
+    charstring eid optional,
+    charstring matchingId optional,
+    charstring finalProfileStatusIndicator,
+    boolean expectError,
+    charstring expectedSubjectCode optional,
+    charstring expectedReasonCode optional
+}
+
+// Helper function to generate unique function call identifier
+function f_gen_es2plus_uuid() return charstring {
+    // Simple UUID based on random octets
+    var octetstring rnd_oct := f_rnd_octstring(4);
+    return "TTCN3-" & oct2str(rnd_oct);
+}
+
+// Helper function to build ES2+ request header
+function f_es2plus_request_header() return JSON_ESx_RequestHeader {
+    return {
+        functionRequesterIdentifier := mp_operator_id,
+        functionCallIdentifier := f_gen_es2plus_uuid()
+    };
+}
+
+// Helper function for ES2+ HTTP requests
+function f_es2plus_http_request(charstring path, charstring functionName, JSON_ES2p_Request request) runs on ES2Plus_ConnHdlr return JSON_ES2p_Response {
+
+    var integer status_code;
+    var charstring response;
+
+    // Encode request
+    var octetstring req_enc := enc_JSON_ES2p_Request(request);
+
+    // Build full URL
+    var charstring url := path;  // URL without host/port - the C++ function will add it
+
+    // Send request using pre-configured authentication
+    response := smdpp_Tests.ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        url,
+        oct2char(req_enc),
+        mp_es2plus_server_port,
+        status_code
+    );
+
+    if (status_code != 200) {
+        setverdict(fail, "HTTP request failed with status ", status_code);
+        mtc.stop;
+    }
+
+    // Decode response based on function name
+    return dec_JSON_ES2p_Response(char2oct(response), functionName);
+}
+
+// Check if response indicates success
+function f_es2plus_check_success(JSON_ESx_ResponseHeader header) return boolean {
+    if (header.functionExecutionStatus.status == "Executed-Success") {
+        return true;
+    }
+    return false;
+}
+
+// Helper function to verify error response
+function f_es2plus_check_error(JSON_ESx_ResponseHeader header, charstring expected_subject_code, charstring expected_reason_code) return boolean {
+    if (header.functionExecutionStatus.status != "Failed") {
+        log("Expected Failed status, got: ", header.functionExecutionStatus.status);
+        return false;
+    }
+
+    if (not ispresent(header.functionExecutionStatus.statusCodeData)) {
+        log("Missing statusCodeData in error response");
+        return false;
+    }
+
+    var JSON_ESx_FunctionExecutionStatusCodeData statusData := header.functionExecutionStatus.statusCodeData;
+
+    if (statusData.subjectCode != expected_subject_code) {
+        log("Expected subject code ", expected_subject_code, ", got: ", statusData.subjectCode);
+        return false;
+    }
+
+    if (statusData.reasonCode != expected_reason_code) {
+        log("Expected reason code ", expected_reason_code, ", got: ", statusData.reasonCode);
+        return false;
+    }
+
+    log("Got expected error: ", expected_subject_code, "/", expected_reason_code);
+    return true;
+}
+
+// Initialize RSP client for ES2+
+function f_init_es2plus() runs on ES2Plus_ConnHdlr {
+    // Initialize RSP client using imported function from smdpp_Tests
+    g_rsp_client_handle := smdpp_Tests.ext_RSPClient_create(
+        mp_es2plus_server_host,
+        mp_es2plus_server_port,
+        mp_nist_rsp_cert_path,
+        "NIST"
+    );
+
+    if (g_rsp_client_handle < 0) {
+        setverdict(fail, "Failed to initialize RSP client");
+        mtc.stop;
+    }
+
+    // Set authentication parameters once for all ES2+ operations
+    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle,
+        true,  // useMutualTLS
+        c_cert_path,
+        c_key_path
+    );
+
+    if (result != 0) {
+        setverdict(fail, "Failed to set authentication parameters");
+        mtc.stop;
+    }
+}
+
+/***********************************************************************
+ * Generic Test Functions
+ ***********************************************************************/
+
+// Generic DownloadOrder test function
+private function f_TC_DownloadOrder_Generic(
+    DownloadOrderTestParams params
+) runs on ES2Plus_ConnHdlr {
+
+    log("=== Test Case: ", params.testName, " ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Build request
+    var JSON_ES2p_Request req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := params.eid,
+            iccid := params.iccid,
+            profileType := params.profileType
+        }
+    };
+
+    // Send and receive
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", req);
+
+    // Check result
+    if (params.expectError) {
+        if (not f_es2plus_check_error(resp.downloadOrderResponse.header,
+                                       params.expectedSubjectCode,
+                                       params.expectedReasonCode)) {
+            setverdict(fail, "Expected error ", params.expectedSubjectCode, "/",
+                       params.expectedReasonCode, " not received");
+            mtc.stop;
+        }
+    } else {
+        if (not f_es2plus_check_success(resp.downloadOrderResponse.header)) {
+            setverdict(fail, "DownloadOrder failed unexpectedly");
+            mtc.stop;
+        }
+
+        // Verify ICCID returned
+        if (not ispresent(resp.downloadOrderResponse.iccid)) {
+            setverdict(fail, "No ICCID in response");
+            mtc.stop;
+        }
+
+        log("Reserved ICCID: ", resp.downloadOrderResponse.iccid);
+    }
+
+    setverdict(pass);
+}
+
+// Generic ConfirmOrder test function
+private function f_TC_ConfirmOrder_Generic(
+    ConfirmOrderTestParams params
+) runs on ES2Plus_ConnHdlr {
+
+    log("=== Test Case: ", params.testName, " ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Build request
+    var JSON_ES2p_Request req := {
+        confirmOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := params.iccid,
+            eid := params.eid,
+            matchingId := params.matchingId,
+            confirmationCode := params.confirmationCode,
+            smdsAddress := params.smdsAddress,
+            releaseFlag := params.releaseFlag
+        }
+    };
+
+    // Send and receive
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_confirm_order, "confirmOrder", req);
+
+    // Check result
+    if (params.expectError) {
+        if (not f_es2plus_check_error(resp.confirmOrderResponse.header,
+                                       params.expectedSubjectCode,
+                                       params.expectedReasonCode)) {
+            setverdict(fail, "Expected error ", params.expectedSubjectCode, "/",
+                       params.expectedReasonCode, " not received");
+            mtc.stop;
+        }
+    } else {
+        if (not f_es2plus_check_success(resp.confirmOrderResponse.header)) {
+            setverdict(fail, "ConfirmOrder failed unexpectedly");
+            mtc.stop;
+        }
+
+        // Verify matchingId returned
+        if (not ispresent(resp.confirmOrderResponse.matchingId)) {
+            setverdict(fail, "No matchingId in response");
+            mtc.stop;
+        }
+
+        log("Got matchingId: ", resp.confirmOrderResponse.matchingId);
+    }
+
+    setverdict(pass);
+}
+
+// Generic CancelOrder test function
+private function f_TC_CancelOrder_Generic(
+    CancelOrderTestParams params
+) runs on ES2Plus_ConnHdlr {
+
+    log("=== Test Case: ", params.testName, " ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Build request
+    var JSON_ES2p_Request req := {
+        cancelOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := params.iccid,
+            eid := params.eid,
+            matchingId := params.matchingId,
+            finalProfileStatusIndicator := params.finalProfileStatusIndicator
+        }
+    };
+
+    // Send and receive
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_cancel_order, "cancelOrder", req);
+
+    // Check result
+    if (params.expectError) {
+        if (not f_es2plus_check_error(resp.cancelOrderResponse.header,
+                                       params.expectedSubjectCode,
+                                       params.expectedReasonCode)) {
+            setverdict(fail, "Expected error ", params.expectedSubjectCode, "/",
+                       params.expectedReasonCode, " not received");
+            mtc.stop;
+        }
+    } else {
+        if (not f_es2plus_check_success(resp.cancelOrderResponse.header)) {
+            setverdict(fail, "CancelOrder failed unexpectedly");
+            mtc.stop;
+        }
+    }
+
+    setverdict(pass);
+}
+
+/***********************************************************************
+ * DownloadOrder Test Cases
+ ***********************************************************************/
+
+// Test: DownloadOrder with available ICCID (nominal)
+testcase TC_ES2Plus_DownloadOrder_01_Nominal_ICCID() runs on ES2Plus_ConnHdlr {
+    f_TC_DownloadOrder_Generic({
+        testName := "DownloadOrder - Nominal with ICCID",
+        eid := omit,
+        iccid := c_iccid_test_1,
+        profileType := omit,
+        expectError := false
+    });
+}
+
+// Test: DownloadOrder with profileType (nominal)
+testcase TC_ES2Plus_DownloadOrder_02_Nominal_ProfileType() runs on ES2Plus_ConnHdlr {
+    f_TC_DownloadOrder_Generic({
+        testName := "DownloadOrder - Nominal with ProfileType",
+        eid := c_eid1,
+        iccid := omit,
+        profileType := "Test",
+        expectError := false
+    });
+}
+
+// Test: DownloadOrder Error - ICCID already in use
+testcase TC_ES2Plus_DownloadOrder_Error_01_ICCID_AlreadyInUse() runs on ES2Plus_ConnHdlr {
+    // This test requires two operations - first reserve, then try again
+    log("=== Test Case: DownloadOrder - Error: ICCID Already in Use ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First reserve an ICCID and tie this ICCID to an EID immediately.
+    var JSON_ES2p_Request req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := c_eid1,
+            iccid := c_iccid_test_3,
+            profileType := omit
+        }
+    };
+
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", req);
+
+    // Verify first request succeeds
+    if (not f_es2plus_check_success(resp.downloadOrderResponse.header)) {
+        setverdict(fail, "Initial DownloadOrder failed");
+        mtc.stop;
+    }
+
+    // Now try to reserve the same ICCID again, but withot an EID. Since the EID is missing, the SM-DP+ will now
+    // recognize this request as a new request and reject with the expeced error. (Two requests with the same
+    // input parameters will be interpreted as a resent function call as long as the outcome is the same)
+    var JSON_ES2p_Request req2 := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := omit,
+            iccid := c_iccid_test_3,
+            profileType := omit
+        }
+    };
+    resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", req2);
+
+    // Should get error 8.2.1/3.3
+    if (not f_es2plus_check_error(resp.downloadOrderResponse.header, "8.2.1", "3.3")) {
+        setverdict(fail, "Expected error 8.2.1/3.3 for ICCID already in use");
+        mtc.stop;
+    }
+
+    setverdict(pass);
+}
+
+// Test: DownloadOrder Error - Unknown ICCID
+testcase TC_ES2Plus_DownloadOrder_Error_02_Unknown_ICCID() runs on ES2Plus_ConnHdlr {
+    f_TC_DownloadOrder_Generic({
+        testName := "DownloadOrder - Error: Unknown ICCID",
+        eid := omit,
+        iccid := "8900000000000099999",
+        profileType := omit,
+        expectError := true,
+        expectedSubjectCode := "8.2.1",
+        expectedReasonCode := "3.9"
+    });
+}
+
+/***********************************************************************
+ * ConfirmOrder Test Cases
+ ***********************************************************************/
+
+// Test: ConfirmOrder nominal case
+testcase TC_ES2Plus_ConfirmOrder_01_Nominal() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Nominal ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First, do a DownloadOrder to get an ICCID
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := omit,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring reserved_iccid := dl_resp.downloadOrderResponse.iccid;
+    log("Got ICCID from DownloadOrder: ", reserved_iccid);
+
+    // Now confirm the order
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Nominal",
+        iccid := reserved_iccid,
+        eid := omit,
+        matchingId := omit,
+        confirmationCode := omit,
+        smdsAddress := omit,
+        releaseFlag := true,
+        expectError := false
+    });
+}
+
+// Test: ConfirmOrder Error - Unknown Profile
+testcase TC_ES2Plus_ConfirmOrder_Error_01_Unknown_Profile() runs on ES2Plus_ConnHdlr {
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Error: Unknown Profile",
+        iccid := "8900000000000099999",
+        eid := omit,
+        matchingId := omit,
+        confirmationCode := omit,
+        smdsAddress := omit,
+        releaseFlag := true,
+        expectError := true,
+        expectedSubjectCode := "8.2.1",
+        expectedReasonCode := "3.9"
+    });
+}
+
+// Test: ConfirmOrder Error - Profile in Available state
+testcase TC_ES2Plus_ConfirmOrder_Error_02_Profile_Available() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Error: Profile in Available State ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Try to confirm an ICCID that hasn't been ordered
+    var JSON_ES2p_Request req := {
+        confirmOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := c_iccid_test_4,
+            eid := omit,
+            matchingId := omit,
+            confirmationCode := omit,
+            smdsAddress := omit,
+            releaseFlag := true
+        }
+    };
+
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_confirm_order, "confirmOrder", req);
+
+    // Should get an error (exact code may vary)
+    if (resp.confirmOrderResponse.header.functionExecutionStatus.status != "Failed") {
+        setverdict(fail, "Expected error for profile in Available state");
+        mtc.stop;
+    }
+
+    setverdict(pass);
+}
+
+// Test: ConfirmOrder Error - Conflicting matchingID
+testcase TC_ES2Plus_ConfirmOrder_Error_03_Conflicting_MatchingID() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Error: Conflicting MatchingID ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First, create a profile with a specific matchingID
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := omit,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "Setup DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid1 := dl_resp.downloadOrderResponse.iccid;
+
+    // Confirm with a specific matchingID
+    var JSON_ES2p_Request conf_req := {
+        confirmOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := iccid1,
+            eid := omit,
+            matchingId := "MATCHING_ID_CONFLICT_TEST",
+            confirmationCode := omit,
+            smdsAddress := omit,
+            releaseFlag := true
+        }
+    };
+
+    var JSON_ES2p_Response conf_resp := f_es2plus_http_request(c_path_confirm_order, "confirmOrder", conf_req);
+
+    if (not f_es2plus_check_success(conf_resp.confirmOrderResponse.header)) {
+        setverdict(fail, "First ConfirmOrder failed");
+        mtc.stop;
+    }
+
+    // Now create another profile and try to use the same matchingID
+    dl_req.downloadOrderRequest.header := f_es2plus_request_header();
+    dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "Second DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid2 := dl_resp.downloadOrderResponse.iccid;
+
+    // Try to confirm with the same matchingID
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Error: Conflicting MatchingID",
+        iccid := iccid2,
+        eid := omit,
+        matchingId := "MATCHING_ID_CONFLICT_TEST",
+        confirmationCode := omit,
+        smdsAddress := omit,
+        releaseFlag := true,
+        expectError := true,
+        expectedSubjectCode := "8.2.6",
+        expectedReasonCode := "3.3"
+    });
+}
+
+// Test: ConfirmOrder Error - Incorrect smdsAddress
+testcase TC_ES2Plus_ConfirmOrder_Error_04_Incorrect_SmdsAddress() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Error: Incorrect smdsAddress ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First create a profile
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := omit,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // Try to confirm with invalid smdsAddress
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Error: Incorrect smdsAddress",
+        iccid := iccid,
+        eid := c_eid1,
+        matchingId := omit,
+        confirmationCode := omit,
+        smdsAddress := "invalid.smds.address",
+        releaseFlag := true,
+        expectError := true,
+        expectedSubjectCode := "8.9",
+        expectedReasonCode := "5.1"
+    });
+}
+
+// Test: ConfirmOrder Error - Missing EID with empty matchingID
+testcase TC_ES2Plus_ConfirmOrder_Error_05_Missing_EID_Empty_MatchingID() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Error: Missing EID with Empty MatchingID ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First create a profile
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := omit,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // Try to confirm without EID and with empty matchingID
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Error: Missing EID with Empty MatchingID",
+        iccid := iccid,
+        eid := omit,
+        matchingId := "",
+        confirmationCode := omit,
+        smdsAddress := omit,
+        releaseFlag := true,
+        expectError := true,
+        expectedSubjectCode := "8.1.1",
+        expectedReasonCode := "2.2"
+    });
+}
+
+// Test: ConfirmOrder Error - Different EID
+testcase TC_ES2Plus_ConfirmOrder_Error_06_Different_EID() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: ConfirmOrder - Error: Different EID ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Create a profile linked to a specific EID
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := c_eid1,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // Try to confirm with a different EID
+    f_TC_ConfirmOrder_Generic({
+        testName := "ConfirmOrder - Error: Different EID",
+        iccid := iccid,
+        eid := c_eid2,
+        matchingId := omit,
+        confirmationCode := omit,
+        smdsAddress := omit,
+        releaseFlag := true,
+        expectError := true,
+        expectedSubjectCode := "8.1.1",
+        expectedReasonCode := "3.10"
+    });
+}
+
+/***********************************************************************
+ * CancelOrder Test Cases
+ ***********************************************************************/
+
+// Test: CancelOrder nominal case
+testcase TC_ES2Plus_CancelOrder_01_Nominal() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: CancelOrder - Nominal ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First, create and confirm a profile
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := c_eid1,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+    log("Reserved ICCID: ", iccid);
+
+    // Confirm the order
+    var JSON_ES2p_Request conf_req := {
+        confirmOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := iccid,
+            eid := omit,
+            matchingId := omit,
+            confirmationCode := omit,
+            smdsAddress := omit,
+            releaseFlag := false  // Don't release yet
+        }
+    };
+
+    var JSON_ES2p_Response conf_resp := f_es2plus_http_request(c_path_confirm_order, "confirmOrder", conf_req);
+
+    if (not f_es2plus_check_success(conf_resp.confirmOrderResponse.header)) {
+        setverdict(fail, "ConfirmOrder failed");
+        mtc.stop;
+    }
+
+    var charstring matching_id := conf_resp.confirmOrderResponse.matchingId;
+    log("Got matchingId: ", matching_id);
+
+    // Now cancel the order
+    f_TC_CancelOrder_Generic({
+        testName := "CancelOrder - Nominal",
+        iccid := iccid,
+        eid := c_eid1,
+        matchingId := matching_id,
+        finalProfileStatusIndicator := "Available",
+        expectError := false
+    });
+}
+
+// Test: CancelOrder Error - Unknown ICCID
+testcase TC_ES2Plus_CancelOrder_Error_01_Unknown_ICCID() runs on ES2Plus_ConnHdlr {
+    f_TC_CancelOrder_Generic({
+        testName := "CancelOrder - Error: Unknown ICCID",
+        iccid := "8900000000000099999",
+        eid := omit,
+        matchingId := omit,
+        finalProfileStatusIndicator := "Available",
+        expectError := true,
+        expectedSubjectCode := "8.2.1",
+        expectedReasonCode := "3.9"
+    });
+}
+
+// Test: CancelOrder Error - Missing EID
+testcase TC_ES2Plus_CancelOrder_Error_02_Missing_EID() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: CancelOrder - Error: Missing EID ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // First create a profile linked to an EID
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := c_eid1,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "Setup DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // Try to cancel without providing the EID
+    var JSON_ES2p_Request req := {
+        cancelOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := iccid,
+            eid := omit,  // Missing required EID
+            matchingId := omit,
+            finalProfileStatusIndicator := "Available"
+        }
+    };
+
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_cancel_order, "cancelOrder", req);
+
+    // Should get an error
+    if (resp.cancelOrderResponse.header.functionExecutionStatus.status != "Failed") {
+        setverdict(fail, "Expected error for missing EID");
+        mtc.stop;
+    }
+
+    setverdict(pass);
+}
+
+// Test: CancelOrder Error - Incorrect matchingID
+testcase TC_ES2Plus_CancelOrder_Error_03_Incorrect_MatchingID() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: CancelOrder - Error: Incorrect MatchingID ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Create and confirm a profile
+    var JSON_ES2p_Request dl_req := {
+        downloadOrderRequest := {
+            header := f_es2plus_request_header(),
+            eid := c_eid1,
+            iccid := omit,
+            profileType := "Test"
+        }
+    };
+
+    var JSON_ES2p_Response dl_resp := f_es2plus_http_request(c_path_download_order, "downloadOrder", dl_req);
+
+    if (not f_es2plus_check_success(dl_resp.downloadOrderResponse.header)) {
+        setverdict(fail, "DownloadOrder failed");
+        mtc.stop;
+    }
+
+    var charstring iccid := dl_resp.downloadOrderResponse.iccid;
+
+    // Confirm to get a matchingID
+    var JSON_ES2p_Request conf_req := {
+        confirmOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := iccid,
+            eid := omit,
+            matchingId := omit,
+            confirmationCode := omit,
+            smdsAddress := omit,
+            releaseFlag := false
+        }
+    };
+
+    var JSON_ES2p_Response conf_resp := f_es2plus_http_request(c_path_confirm_order, "confirmOrder", conf_req);
+
+    if (not f_es2plus_check_success(conf_resp.confirmOrderResponse.header)) {
+        setverdict(fail, "ConfirmOrder failed");
+        mtc.stop;
+    }
+
+    // Try to cancel with wrong matchingID
+    f_TC_CancelOrder_Generic({
+        testName := "CancelOrder - Error: Incorrect MatchingID",
+        iccid := iccid,
+        eid := c_eid1,
+        matchingId := "WRONG_MATCHING_ID",
+        finalProfileStatusIndicator := "Available",
+        expectError := true,
+        expectedSubjectCode := "8.2.6",
+        expectedReasonCode := "3.10"
+    });
+}
+
+// Test: CancelOrder Error - Profile in Available state
+testcase TC_ES2Plus_CancelOrder_Error_04_Profile_Available() runs on ES2Plus_ConnHdlr {
+    log("=== Test Case: CancelOrder - Error: Profile in Available State ===");
+
+    // Initialize
+    f_init_es2plus();
+
+    // Try to cancel an ICCID that hasn't been ordered
+    var JSON_ES2p_Request req := {
+        cancelOrderRequest := {
+            header := f_es2plus_request_header(),
+            iccid := c_iccid_test_5,
+            eid := omit,
+            matchingId := omit,
+            finalProfileStatusIndicator := "Available"
+        }
+    };
+
+    var JSON_ES2p_Response resp := f_es2plus_http_request(c_path_cancel_order, "cancelOrder", req);
+
+    // Should get an error
+    if (resp.cancelOrderResponse.header.functionExecutionStatus.status != "Failed") {
+        setverdict(fail, "Expected error for profile in Available state");
+        mtc.stop;
+    }
+
+    setverdict(pass);
+}
+
+/***********************************************************************
+ * Special Test Cases
+ ***********************************************************************/
+
+// Test with wrong client certificate - should fail
+testcase TC_ES2Plus_Wrong_Client_Cert() runs on ES2Plus_ConnHdlr {
+    // Initialize
+    f_init_es2plus();
+
+    // Build request
+    var JSON_ES2p_DownloadOrderRequest req := {
+        header := f_es2plus_request_header(),
+        iccid := c_iccid_test_1
+    };
+
+    var JSON_ES2p_Request es2p_req := {
+        downloadOrderRequest := req
+    };
+
+    var integer status_code;
+    var charstring response;
+
+    // Temporarily set wrong authentication parameters
+    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle,
+        true,  // useMutualTLS
+        c_wrong_cert_path,  // Using wrong certificate
+        c_wrong_key_path    // Using wrong key
+    );
+
+    if (result != 0) {
+        setverdict(fail, "Failed to set wrong auth parameters");
+        mtc.stop;
+    }
+
+    // Send request using WRONG client certificate
+    var octetstring req_enc := enc_JSON_ES2p_Request(es2p_req);
+    var charstring url := c_path_download_order;
+
+    log("ES2+ Request with WRONG certificate to ", url);
+    response := smdpp_Tests.ext_RSPClient_sendHttpsPostWithAuth(
+        g_rsp_client_handle,
+        url,
+        oct2char(req_enc),
+        mp_es2plus_server_port,
+        status_code
+    );
+
+    // Should get 401 Unauthorized or error
+    if (status_code == 401 or status_code == 403 or status_code == 0) {
+        setverdict(pass, "Server correctly rejected wrong client certificate");
+    } else {
+        setverdict(fail, "Server accepted wrong client certificate! Status: ", status_code);
+    }
+
+    // Restore correct auth params for cleanup
+    smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle,
+        true,
+        c_cert_path,
+        c_key_path
+    );
+}
+
+// Test control section
+control {
+    // Wrong certificate test
+    execute(TC_ES2Plus_Wrong_Client_Cert());
+
+    // DownloadOrder tests
+    execute(TC_ES2Plus_DownloadOrder_01_Nominal_ICCID());
+    execute(TC_ES2Plus_DownloadOrder_02_Nominal_ProfileType());
+    execute(TC_ES2Plus_DownloadOrder_Error_01_ICCID_AlreadyInUse());
+    execute(TC_ES2Plus_DownloadOrder_Error_02_Unknown_ICCID());
+
+    // ConfirmOrder tests
+    execute(TC_ES2Plus_ConfirmOrder_01_Nominal());
+    execute(TC_ES2Plus_ConfirmOrder_Error_01_Unknown_Profile());
+    execute(TC_ES2Plus_ConfirmOrder_Error_02_Profile_Available());
+    execute(TC_ES2Plus_ConfirmOrder_Error_03_Conflicting_MatchingID());
+    execute(TC_ES2Plus_ConfirmOrder_Error_04_Incorrect_SmdsAddress());
+    execute(TC_ES2Plus_ConfirmOrder_Error_05_Missing_EID_Empty_MatchingID());
+    execute(TC_ES2Plus_ConfirmOrder_Error_06_Different_EID());
+
+    // CancelOrder tests
+    execute(TC_ES2Plus_CancelOrder_01_Nominal());
+    execute(TC_ES2Plus_CancelOrder_Error_01_Unknown_ICCID());
+    execute(TC_ES2Plus_CancelOrder_Error_02_Missing_EID());
+    execute(TC_ES2Plus_CancelOrder_Error_03_Incorrect_MatchingID());
+    execute(TC_ES2Plus_CancelOrder_Error_04_Profile_Available());
+}
+
+}

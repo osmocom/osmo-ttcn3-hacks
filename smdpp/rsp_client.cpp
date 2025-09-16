@@ -922,6 +922,17 @@ class HttpClient {
 		std::string headers;
 	};
 
+	struct PostConfig {
+		bool useMutualTLS = false;
+		std::string clientCertPath;
+		std::string clientKeyPath;
+		bool includeAdminProtocolHeader = false;
+		bool verboseOutput = false;
+	};
+
+	ResponseData postJson(const std::string& url, unsigned int port, const std::string& jsonData, X509_STORE* store, std::vector<X509*>& certPool,
+			      const PostConfig& config);
+
     private:
 	static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* userp) {
 		size_t realSize = size * nmemb;
@@ -998,67 +1009,89 @@ class HttpClient {
 
 		return CURLE_OK;
 	}
+};
 
-    public:
-	ResponseData postJsonWithCustomVerification(const std::string& url, unsigned int port, const std::string& jsonData, X509_STORE* store,
-						    std::vector<X509*>& certPool) {
-		ResponseData response;
-		CURL* curl = curl_easy_init();
+inline HttpClient::ResponseData HttpClient::postJson(const std::string& url, unsigned int port, const std::string& jsonData, X509_STORE* store,
+						     std::vector<X509*>& certPool, const PostConfig& config) {
+	ResponseData response;
+	CURL* curl = curl_easy_init();
 
-		if (!curl) {
-			throw std::runtime_error("Failed to initialize CURL");
+	if (!curl) {
+		throw std::runtime_error("Failed to initialize CURL");
+	}
+
+	struct curl_slist* headers = nullptr;
+	if (config.useMutualTLS) {
+		headers = curl_slist_append(headers, "Content-Type: application/json;charset=UTF-8");
+		headers = curl_slist_append(headers, "Accept: application/json");
+		if (config.includeAdminProtocolHeader) {
+			headers = curl_slist_append(headers, "X-Admin-Protocol: gsma/rsp/v2.5.0");
 		}
-
-		struct curl_slist* headers = nullptr;
+	} else {
 		headers = curl_slist_append(headers, "Content-Type: application/json");
 		headers = curl_slist_append(headers, "Accept: application/json");
+	}
 
-		SslCtxData ctxData = { .store = store, .certPool = &certPool, .verifyResult = false, .errorMessage = "" };
+	SslCtxData ctxData = { .store = store, .certPool = &certPool, .verifyResult = false, .errorMessage = "" };
 
-		try {
-			// Basic CURL setup
-			curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-			curl_easy_setopt(curl, CURLOPT_PORT, port);
-			curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-			curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
-			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
-			curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
-			curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response.headers);
+	try {
+		// Basic CURL setup
+		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+		curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response.headers);
 
-			// Enable SSL verification
-			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-			curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+		// Enable SSL verification
+		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+		curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 
-			// Use our custom SSL context function and data
-			curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, sslCtxFunction);
-			curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, &ctxData);
+		if (config.useMutualTLS) {
+			if (!config.clientCertPath.empty()) {
+				curl_easy_setopt(curl, CURLOPT_SSLCERT, config.clientCertPath.c_str());
 
-			// Don't disable the default CA bundle - custom certs will be added to it
-			// This allows both system CAs and custom test certificates to work
-			// together
-
-			// curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-
-			CURLcode res = curl_easy_perform(curl);
-
-			if (res != CURLE_OK) {
-				throw std::runtime_error(std::string("CURL request failed: ") + curl_easy_strerror(res));
+				std::string certType = "PEM";
+				if (config.clientCertPath.find(".der") != std::string::npos || config.clientCertPath.find(".DER") != std::string::npos) {
+					certType = "DER";
+				}
+				curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE, certType.c_str());
+				LOG_DEBUG("Set client certificate: " + config.clientCertPath + " (type: " + certType + ")");
 			}
 
-			curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.statusCode);
-
-			curl_slist_free_all(headers);
-			curl_easy_cleanup(curl);
-
-			return response;
-		} catch (...) {
-			curl_slist_free_all(headers);
-			curl_easy_cleanup(curl);
-			throw;
+			if (!config.clientKeyPath.empty()) {
+				curl_easy_setopt(curl, CURLOPT_SSLKEY, config.clientKeyPath.c_str());
+				curl_easy_setopt(curl, CURLOPT_SSLKEYTYPE, "PEM");
+				LOG_DEBUG("Set client private key: " + config.clientKeyPath);
+			}
 		}
+
+		// Use our custom SSL context function for server cert verification
+		curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, sslCtxFunction);
+		curl_easy_setopt(curl, CURLOPT_SSL_CTX_DATA, &ctxData);
+
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, config.verboseOutput ? 1L : 0L);
+
+		CURLcode res = curl_easy_perform(curl);
+
+		if (res != CURLE_OK) {
+			throw std::runtime_error(std::string("CURL request failed: ") + curl_easy_strerror(res));
+		}
+
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.statusCode);
+
+		curl_slist_free_all(headers);
+		curl_easy_cleanup(curl);
+
+		return response;
+	} catch (...) {
+		curl_slist_free_all(headers);
+		curl_easy_cleanup(curl);
+		throw;
 	}
-};
+}
 
 // Hashed Confirmation Code = SHA256(SHA256(Confirmation Code) | TransactionID)
 static std::vector<uint8_t> computeConfirmationCodeHash(const std::string& confirmationCode, const std::vector<uint8_t>& transactionId) {
@@ -1089,7 +1122,7 @@ class RSPClient {
     public:
 	RSPClient(const std::string& serverUrl, const unsigned int serverPort, const std::vector<std::string>& certPath,
 		  const std::vector<std::string>& name_filters = {})
-		: m_serverUrl(serverUrl), m_serverPort(serverPort) {
+		: m_serverUrl(serverUrl) {
 		// OpenSSL 3.0+ initializes automatically
 
 		for (auto cpath : certPath) {
@@ -1165,11 +1198,11 @@ class RSPClient {
 
 		try {
 			m_EID = CertificateUtil::getEID(m_euiccCert.get());
-			LOG_INFO("Using EID from certificate: " + m_EID);
+			LOG_DEBUG("Using EID from certificate: " + m_EID);
 
 			auto ski = CertificateUtil::getSubjectKeyIdentifier(m_euiccCert.get());
 			m_euiccSKI = ski;
-			LOG_INFO("Using eUICC SKI as PKID: " + HexUtil::bytesToHex(m_euiccSKI));
+			LOG_DEBUG("Using eUICC SKI as PKID: " + HexUtil::bytesToHex(m_euiccSKI));
 		} catch (const std::exception& e) {
 			LOG_ERROR("Failed to extract EUICC-specific data: " + std::string(e.what()));
 			throw;
@@ -1576,7 +1609,29 @@ class RSPClient {
 		m_customTlsCertPath = customTlsCertPath;
 	}
 
-	std::string sendHttpsPost(const std::string& endpoint, const std::string& body, int& httpStatusCode) {
+	// Set authentication parameters for mutual TLS auth
+	void setAuthParams(bool useMutualTLS, const std::string& clientCertPath, const std::string& clientKeyPath) {
+		m_useMutualTLS = useMutualTLS;
+		m_clientCertPath = clientCertPath;
+		m_clientKeyPath = clientKeyPath;
+		LOG_DEBUG("Auth params set: mutualTLS=" + std::to_string(useMutualTLS) + ", cert=" + clientCertPath + ", key=" + clientKeyPath);
+	}
+
+	// Send HTTPS POST without client authentication (for ES9+)
+	std::string sendHttpsPost(const std::string& endpoint, const std::string& body, int& httpStatusCode, unsigned int portOverride) {
+		return sendHttpsPostUnified(endpoint, body, httpStatusCode, portOverride);
+	}
+
+	// Send HTTPS POST with pre-configured client authentication (for ES2+)
+	std::string sendHttpsPostWithAuth(const std::string& endpoint, const std::string& body, int& httpStatusCode, unsigned int portOverride) {
+		if (!m_useMutualTLS) {
+			LOG_WARNING("sendHttpsPostWithAuth called but mutual TLS not configured");
+		}
+		return sendHttpsPostUnified(endpoint, body, httpStatusCode, portOverride, m_useMutualTLS, m_clientCertPath, m_clientKeyPath);
+	}
+
+	std::string sendHttpsPostUnified(const std::string& endpoint, const std::string& body, int& httpStatusCode, unsigned int portOverride,
+					 bool useMutualTLS = false, const std::string& clientCertPath = "", const std::string& clientKeyPath = "") {
 		if (!m_httpClient) {
 			m_httpClient = std::make_unique<HttpClient>();
 		}
@@ -1584,32 +1639,36 @@ class RSPClient {
 		// full URL without port (port set via CURLOPT_PORT)
 		std::string url = "https://" + m_serverUrl + endpoint;
 
-		HttpClient::ResponseData response;
-
-		if (m_useCustomTlsCert) {
-			if (!m_customTlsCertPath.empty()) {
-				try {
-					auto tlsCerts = CertificateUtil::loadCertificateChain(m_customTlsCertPath);
-					for (auto& cert : tlsCerts) {
-						m_certPool.push_back(std::move(cert));
-					}
-					LOG_DEBUG("Loaded custom TLS certificate from: " + m_customTlsCertPath);
-				} catch (const std::exception& e) {
-					LOG_WARNING("Failed to load custom TLS certificate: " + std::string(e.what()));
-				}
-			}
-
-			std::vector<X509*> rawCertPool;
-			for (const auto& cert : m_certPool) {
-				rawCertPool.push_back(cert.get());
-			}
-
-			response = m_httpClient->postJsonWithCustomVerification(url, m_serverPort, body, nullptr, rawCertPool);
-		} else {
-			std::vector<X509*> emptyCertPool;
-			response = m_httpClient->postJsonWithCustomVerification(url, m_serverPort, body, nullptr, emptyCertPool);
-			LOG_INFO("Using standard CA bundle for TLS verification");
+		// Build certificate pool for server verification
+		std::vector<X509*> rawCertPool;
+		for (const auto& cert : m_certPool) {
+			rawCertPool.push_back(cert.get());
 		}
+
+		// Add custom TLS server certificate if configured globally
+		if (m_useCustomTlsCert && !m_customTlsCertPath.empty()) {
+			try {
+				auto tlsCerts = CertificateUtil::loadCertificateChain(m_customTlsCertPath);
+				for (auto& cert : tlsCerts) {
+					rawCertPool.push_back(cert.get());
+				}
+				LOG_DEBUG("Added custom TLS server certificate from: " + m_customTlsCertPath);
+			} catch (const std::exception& e) {
+				LOG_WARNING("Failed to load custom TLS server certificate: " + std::string(e.what()));
+			}
+		}
+
+		HttpClient::PostConfig config;
+		config.useMutualTLS = useMutualTLS;
+		config.clientCertPath = clientCertPath;
+		config.clientKeyPath = clientKeyPath;
+		config.includeAdminProtocolHeader = useMutualTLS; // ES2+ requires this header
+		config.verboseOutput = false;
+
+		LOG_DEBUG("Sending " + std::string(useMutualTLS ? "ES2+ request with mutual TLS" : "HTTPS request") + " to: " + endpoint +
+			  " (port: " + std::to_string(portOverride) + ")");
+
+		HttpClient::ResponseData response = m_httpClient->postJson(url, portOverride, body, nullptr, rawCertPool, config);
 
 		httpStatusCode = response.statusCode;
 
@@ -1619,7 +1678,6 @@ class RSPClient {
 	}
 
 	std::string m_serverUrl;
-	unsigned int m_serverPort;
 
 	std::unique_ptr<X509, X509Deleter> m_rootCA;
 	std::vector<std::unique_ptr<X509, X509Deleter>> m_intermediateCA;
@@ -1646,6 +1704,11 @@ class RSPClient {
 	std::unique_ptr<HttpClient> m_httpClient;
 	bool m_useCustomTlsCert = true; // Flag for custom vs public CA
 	std::string m_customTlsCertPath; // Path to custom TLS certificate
+
+	// Authentication parameters for mutual TLS auth
+	bool m_useMutualTLS = false;
+	std::string m_clientCertPath = "";
+	std::string m_clientKeyPath = "";
 };
 
 } // namespace RspCrypto
