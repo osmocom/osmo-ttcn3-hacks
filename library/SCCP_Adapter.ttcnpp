@@ -1,0 +1,168 @@
+module SCCP_Adapter {
+
+/* This module implements a 'dumb' SCCP adapter.  It creates the IPA/M3UA and SCCP components and allows stacking a
+ * codec port on top.  As a result, it provides the ability to transceive SCCP-User-SAP primitives
+ * with decoded uper layer payload.  Use this if you want to have full control about what you transmit or
+ * receive, without any automatisms in place.  Allows you to refuse connections or other abnormal behavior.
+ */
+/* (C) 2017-2019 Harald Welte <laforge@gnumonks.org>
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+import from General_Types all;
+import from Osmocom_Types all;
+
+import from M3UA_Emulation all;
+import from MTP3asp_Types all;
+import from MTP3asp_PortType all;
+
+import from IPA_Emulation all;
+
+import from SCCP_Types all;
+import from SCCPasp_Types all;
+import from SCCP_Emulation all;
+import from SCCP_Templates all;
+
+import from SCTPasp_Types all;
+import from SCTPasp_PortType all;
+
+type enumerated SCCP_Adapter_Transport {
+	SCCP_TRANSPORT_SIGTRAN, /* 3GPP AoIP: SCCP over M3UA over SCTP */
+	SCCP_TRANSPORT_SCCPlite /* SCCPlite: SCCP over IPA over TCP */
+};
+
+type record SCCP_Adapter_Config_Sigtran {
+	SCTP_Association_Address sctp_addr
+	/* sctp_is_server: Controlled over module param M3UA_Emulation.tsp_SCTP_Server_Mode */
+};
+
+type record SCCP_Adapter_Config_Sccplite {
+	SCTP_Association_Address tcp_addr,
+	boolean tcp_is_server
+};
+
+type union SCCP_Adapter_Transport_ConfigUnion {
+	SCCP_Adapter_Config_Sigtran sigtran,
+	SCCP_Adapter_Config_Sccplite sccplite
+};
+
+type record SCCP_Adapter_Config {
+	SCCP_Adapter_Transport transport,
+	SCCP_Adapter_Transport_ConfigUnion tpars,
+	charstring sccp_service_type,
+	integer own_pc,
+	integer own_ssn,
+	integer peer_pc,
+	integer peer_ssn,
+	octetstring sio,
+	integer rctx
+} with { variant (tpars) "CROSSTAG(sigtran, 	transport = SCCP_TRANSPORT_SIGTRAN;
+				   sccplite,	transport = SCCP_TRANSPORT_SCCPlite;)"
+};
+type record of SCCP_Adapter_Config SCCP_Adapter_Configs;
+
+type record SCCP_Adapter {
+	/* component references */
+	M3UA_CT vc_M3UA,		/* only in 3GPP AoIP */
+	IPA_Emulation_CT vc_IPA,	/* only in SCCPlite */
+	IPA_EventWaiter_CT vc_WAIT,	/* only in SCCPlite */
+	SCCP_CT vc_SCCP,
+
+	MSC_SCCP_MTP3_parameters sccp_pars,
+	SCCP_PAR_Address sccp_addr_own,
+	SCCP_PAR_Address sccp_addr_peer,
+	SCCP_Adapter_Config cfg
+};
+
+
+private function init_pars(inout SCCP_Adapter ba, in SCCP_Adapter_Config cfg) {
+	ba.sccp_pars := {
+		sio := {
+			ni := substr(oct2bit(cfg.sio),0,2),
+			prio := substr(oct2bit(cfg.sio),2,2),
+			si := substr(oct2bit(cfg.sio),4,4)
+		},
+		opc := cfg.own_pc,
+		dpc := cfg.peer_pc,
+		sls := 0,
+		sccp_serviceType := cfg.sccp_service_type,
+		ssn := cfg.own_ssn
+	};
+	ba.sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(cfg.own_pc, cfg.own_ssn, cfg.sio, cfg.sccp_service_type));
+	ba.sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(cfg.peer_pc, cfg.peer_ssn, cfg.sio, cfg.sccp_service_type));
+	ba.cfg := cfg;
+}
+
+function f_sccp_adapter_init(inout SCCP_Adapter ba, in SCCP_Adapter_Config cfg, charstring id) {
+	init_pars(ba, cfg);
+
+	/* create components */
+	ba.vc_SCCP := SCCP_CT.create(id & "-SCCP") alive;
+	select (cfg.transport) {
+	case (SCCP_TRANSPORT_SIGTRAN) {
+		var template (omit) integer rctx;
+		if (not ispresent(cfg.rctx)) {
+			rctx := omit;
+		} else {
+			rctx := cfg.rctx;
+		}
+		ba.vc_M3UA := M3UA_CT.create(id & "-M3UA") alive;
+		map(ba.vc_M3UA:SCTP_PORT, system:sctp);
+		/* connect MTP3 service provider (M3UA) to lower side of SCCP */
+		connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		ba.vc_M3UA.start(f_M3UA_Emulation(cfg.tpars.sigtran.sctp_addr, rctx));
+		}
+#ifdef IPA_EMULATION_SCCP
+	case (SCCP_TRANSPORT_SCCPlite) {
+		ba.vc_IPA := IPA_Emulation_CT.create(id & "-IPA") alive;
+		map(ba.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
+		/* connect MTP3 service provider (IPA) to lower side of SCCP */
+		connect(ba.vc_IPA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		/* connect waiter to general IPA port (for ASP_IPA_Event) */
+		ba.vc_WAIT := IPA_EventWaiter_CT.create(id & "-IPA-WAIT") alive;
+		connect(ba.vc_IPA:IPA_SP_PORT, ba.vc_WAIT:IPA_SP_PORT);
+		ba.vc_WAIT.start(IPA_Emulation.waiter_main());
+		if (cfg.tpars.sccplite.tcp_is_server) {
+			ba.vc_IPA.start(IPA_Emulation.main_server(cfg.tpars.sccplite.tcp_addr.local_ip_addr,
+								  cfg.tpars.sccplite.tcp_addr.local_sctp_port,
+								  true, IPA_INIT_SEND_IPA_ID_ACK));
+		} else {
+			ba.vc_IPA.start(IPA_Emulation.main_client(cfg.tpars.sccplite.tcp_addr.remote_ip_addr,
+								  cfg.tpars.sccplite.tcp_addr.remote_sctp_port,
+								  cfg.tpars.sccplite.tcp_addr.local_ip_addr,
+								  cfg.tpars.sccplite.tcp_addr.local_sctp_port));
+		}
+		/* wait until we received an IPA CCM ID_ACK */
+		ba.vc_WAIT.done;
+		disconnect(ba.vc_IPA:IPA_SP_PORT, ba.vc_WAIT:IPA_SP_PORT);
+		}
+#endif /* IPA_EMULATION_SCCP */
+	case else {
+		setverdict(fail, "Unsuppored RAN_Transport");
+		mtc.stop;
+		}
+	}
+
+
+}
+
+function f_sccp_adapter_start(inout SCCP_Adapter ba) {
+	ba.vc_SCCP.start(SCCPStart(ba.sccp_pars));
+}
+
+function f_sccp_adapter_cleanup(inout SCCP_Adapter ba) {
+	if (ba.cfg.transport == SCCP_TRANSPORT_SIGTRAN) {
+		unmap(ba.vc_M3UA:SCTP_PORT, system:sctp);
+		disconnect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
+		ba.vc_M3UA.stop;
+	}
+	ba.vc_SCCP.stop;
+}
+
+} with { encode "RAW" };
