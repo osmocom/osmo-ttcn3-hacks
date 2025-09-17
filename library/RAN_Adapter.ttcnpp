@@ -22,15 +22,12 @@ import from M3UA_Emulation all;
 import from MTP3asp_Types all;
 import from MTP3asp_PortType all;
 
-import from IPA_Emulation all;
-
 import from SCCP_Types all;
 import from SCCPasp_Types all;
 import from SCCP_Emulation all;
 import from SCCP_Templates all;
 
-import from SCTPasp_Types all;
-import from SCTPasp_PortType all;
+import from SCCP_Adapter all;
 
 #ifdef RAN_EMULATION_BSSAP
 import from BSSMAP_Templates all;
@@ -38,177 +35,79 @@ import from BSSMAP_Templates all;
 import from RAN_Emulation all;
 
 type record RAN_Adapter {
-	/* component references */
-	M3UA_CT vc_M3UA,		/* only in 3GPP AoIP */
-	IPA_Emulation_CT vc_IPA,	/* only in SCCPlite */
-	IPA_EventWaiter_CT vc_WAIT,	/* only in SCCPlite */
-	SCCP_CT vc_SCCP,
-
-	MSC_SCCP_MTP3_parameters sccp_pars,
-	SCCP_PAR_Address sccp_addr_own,
-	SCCP_PAR_Address sccp_addr_peer,
+	SCCP_Adapter sccpa,
 	RAN_Transport transport,
-	boolean transport_is_server,
-
-	/* handler mode */
 	RAN_Emulation_CT vc_RAN
 }
 
 type record RAN_Configuration {
 	RAN_Transport transport,
-	boolean transport_is_server,
-	charstring sccp_service_type,
-	SCTP_Association_Address sctp_addr,
-	integer own_pc,
-	integer own_ssn,
-	integer peer_pc,
-	integer peer_ssn,
-	octetstring sio,
-	integer rctx
+	SCCP_Adapter_Config sccp
 };
 type record of RAN_Configuration RAN_Configurations;
 
-private function init_pars(inout RAN_Adapter ba, in RAN_Configuration cfg) {
-	ba.sccp_pars := {
-		sio := {
-			ni := substr(oct2bit(cfg.sio),0,2),
-			prio := substr(oct2bit(cfg.sio),2,2),
-			si := substr(oct2bit(cfg.sio),4,4)
-		},
-		opc := cfg.own_pc,
-		dpc := cfg.peer_pc,
-		sls := 0,
-		sccp_serviceType := cfg.sccp_service_type,
-		ssn := cfg.own_ssn
-	};
-	ba.sccp_addr_own := valueof(ts_SccpAddr_PC_SSN(cfg.own_pc, cfg.own_ssn, cfg.sio, cfg.sccp_service_type));
-	ba.sccp_addr_peer := valueof(ts_SccpAddr_PC_SSN(cfg.peer_pc, cfg.peer_ssn, cfg.sio, cfg.sccp_service_type));
-	ba.transport := cfg.transport;
-	ba.transport_is_server := cfg.transport_is_server;
-}
-
-
 function f_ran_adapter_init(inout RAN_Adapter ba, in RAN_Configuration cfg, charstring id,
-			template RanOps ops) {
-	init_pars(ba, cfg);
-	ops.sccp_addr_local := ba.sccp_addr_own;
-	ops.sccp_addr_peer := ba.sccp_addr_peer;
+			    RanOps ops) {
+	f_sccp_adapter_init(ba.sccpa, cfg.sccp, id);
+	ba.transport := cfg.transport;
+	ops.sccp_addr_local := ba.sccpa.sccp_addr_own;
+	ops.sccp_addr_peer := ba.sccpa.sccp_addr_peer;
 
 	/* create components */
-	ba.vc_SCCP := SCCP_CT.create(id & "-SCCP") alive;
-	if (isvalue(ops)) {
-		ba.vc_RAN := RAN_Emulation_CT.create(id & "-RAN") alive;
-	} else {
-		ba.vc_RAN := null;
-	}
-	select (cfg.transport) {
-	case (BSSAP_TRANSPORT_AoIP, RANAP_TRANSPORT_IuCS) {
-		var template (omit) integer rctx;
-		if (not ispresent(cfg.rctx)) {
-			rctx := omit;
-		} else {
-			rctx := cfg.rctx;
-		}
-		ba.vc_M3UA := M3UA_CT.create(id & "-M3UA") alive;
-		map(ba.vc_M3UA:SCTP_PORT, system:sctp);
-		/* connect MTP3 service provider (M3UA) to lower side of SCCP */
-		connect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
-		ba.vc_M3UA.start(f_M3UA_Emulation(cfg.sctp_addr, rctx));
-		}
-#ifdef IPA_EMULATION_SCCP
-	case (BSSAP_TRANSPORT_SCCPlite) {
-		ba.vc_IPA := IPA_Emulation_CT.create(id & "-IPA") alive;
-		map(ba.vc_IPA:IPA_PORT, system:IPA_CODEC_PT);
-		/* connect MTP3 service provider (IPA) to lower side of SCCP */
-		connect(ba.vc_IPA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
-		/* connect waiter to general IPA port (for ASP_IPA_Event) */
-		ba.vc_WAIT := IPA_EventWaiter_CT.create(id & "-IPA-WAIT") alive;
-		connect(ba.vc_IPA:IPA_SP_PORT, ba.vc_WAIT:IPA_SP_PORT);
-		ba.vc_WAIT.start(IPA_Emulation.waiter_main());
-		if (cfg.transport_is_server) {
-			ba.vc_IPA.start(IPA_Emulation.main_server(cfg.sctp_addr.local_ip_addr,
-								  cfg.sctp_addr.local_sctp_port,
-								  true, IPA_INIT_SEND_IPA_ID_ACK));
-		} else {
-			ba.vc_IPA.start(IPA_Emulation.main_client(cfg.sctp_addr.remote_ip_addr,
-								  cfg.sctp_addr.remote_sctp_port,
-								  cfg.sctp_addr.local_ip_addr,
-								  cfg.sctp_addr.local_sctp_port));
-		}
-		/* wait until we received an IPA CCM ID_ACK */
-		ba.vc_WAIT.done;
-		disconnect(ba.vc_IPA:IPA_SP_PORT, ba.vc_WAIT:IPA_SP_PORT);
-		}
-#endif /* IPA_EMULATION_SCCP */
-	case else {
-		setverdict(fail, "Unsuppored RAN_Transport");
-		mtc.stop;
-		}
-	}
+	ba.vc_RAN := RAN_Emulation_CT.create(id & "-RAN") alive;
 
-	if (isvalue(ops)) {
-		timer T := 5.0;
-		T.start;
-		//T.timeout;
-		ops.transport := cfg.transport;
-		/* connect BSSNAP component to upper side of SCCP */
-		if (cfg.transport == RANAP_TRANSPORT_IuCS) {
+	timer T := 5.0;
+	T.start;
+	//T.timeout;
+	ops.transport := cfg.transport;
+	/* connect BSSNAP component to upper side of SCCP */
+	if (cfg.transport == RANAP_TRANSPORT_IuCS) {
 #ifdef RAN_EMULATION_RANAP
-			log("Connecting RANAP RAN_Emulation to SCCP_SP_PORT");
-			ops.protocol := RAN_PROTOCOL_RANAP
-			connect(ba.vc_RAN:RANAP, ba.vc_SCCP:SCCP_SP_PORT);
+		log("Connecting RANAP RAN_Emulation to SCCP_SP_PORT");
+		ops.protocol := RAN_PROTOCOL_RANAP
+		connect(ba.vc_RAN:RANAP, ba.sccpa.vc_SCCP:SCCP_SP_PORT);
 #endif
-		} else {
+	} else {
 #ifdef RAN_EMULATION_BSSAP
-			log("Connecting BSSAP RAN_Emulation to SCCP_SP_PORT");
-			connect(ba.vc_RAN:BSSAP, ba.vc_SCCP:SCCP_SP_PORT);
+		log("Connecting BSSAP RAN_Emulation to SCCP_SP_PORT");
+		connect(ba.vc_RAN:BSSAP, ba.sccpa.vc_SCCP:SCCP_SP_PORT);
 #endif
-		}
-		if (cfg.transport == BSSAP_TRANSPORT_SCCPlite) {
+	}
+	if (cfg.transport == BSSAP_TRANSPORT_SCCPlite) {
 #ifdef IPA_EMULATION_MGCP
-			/* connect IPA MGCP port with BSSMAP MGCP port */
-			log("Connecting MGCP RAN Emulation to IPA MGCP PORT");
-			connect(ba.vc_IPA:IPA_MGCP_PORT, ba.vc_RAN:MGCP);
+		/* connect IPA MGCP port with BSSMAP MGCP port */
+		log("Connecting MGCP RAN Emulation to IPA MGCP PORT");
+		connect(ba.sccpa.vc_IPA:IPA_MGCP_PORT, ba.vc_RAN:MGCP);
 #endif
 #ifdef IPA_EMULATION_CTRL
 #ifdef RAN_EMULATION_CTRL
-			/* connect IPA CTRL port with BSSMAP CTRL port */
-			log("Connecting CTRL RAN Emulation to IPA CTRL PORT");
-			connect(ba.vc_IPA:IPA_CTRL_PORT, ba.vc_RAN:CTRL);
+		/* connect IPA CTRL port with BSSMAP CTRL port */
+		log("Connecting CTRL RAN Emulation to IPA CTRL PORT");
+		connect(ba.sccpa.vc_IPA:IPA_CTRL_PORT, ba.vc_RAN:CTRL);
 #endif
 #endif
-		}
-		log("Starting RAN_Emulation");
-		ba.vc_RAN.start(RAN_Emulation.main(valueof(ops), ""));
 	}
-
-
+	log("Starting RAN_Emulation");
+	ba.vc_RAN.start(RAN_Emulation.main(valueof(ops), ""));
 }
 
 function f_ran_adapter_start(inout RAN_Adapter ba) {
-	ba.vc_SCCP.start(SCCPStart(ba.sccp_pars));
+	f_sccp_adapter_start(ba.sccpa);
 }
 
 function f_ran_adapter_cleanup(inout RAN_Adapter ba) {
-	if (ba.vc_RAN != null) {
-		if (ba.transport == RANAP_TRANSPORT_IuCS) {
+	if (ba.transport == RANAP_TRANSPORT_IuCS) {
 #ifdef RAN_EMULATION_RANAP
-			disconnect(ba.vc_RAN:RANAP, ba.vc_SCCP:SCCP_SP_PORT);
+		disconnect(ba.vc_RAN:RANAP, ba.sccpa.vc_SCCP:SCCP_SP_PORT);
 #endif
-		} else {
+	} else {
 #ifdef RAN_EMULATION_BSSAP
-			disconnect(ba.vc_RAN:BSSAP, ba.vc_SCCP:SCCP_SP_PORT);
+		disconnect(ba.vc_RAN:BSSAP, ba.sccpa.vc_SCCP:SCCP_SP_PORT);
 #endif
-		}
-		ba.vc_RAN.stop;
 	}
-	if (ba.transport == BSSAP_TRANSPORT_AoIP or
-	    ba.transport == RANAP_TRANSPORT_IuCS) {
-		unmap(ba.vc_M3UA:SCTP_PORT, system:sctp);
-		disconnect(ba.vc_M3UA:MTP3_SP_PORT, ba.vc_SCCP:MTP3_SCCP_PORT);
-		ba.vc_M3UA.stop;
-	}
-	ba.vc_SCCP.stop;
+	ba.vc_RAN.stop;
+
+	f_sccp_adapter_cleanup(ba.sccpa);
 }
 
 
