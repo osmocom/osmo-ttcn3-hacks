@@ -32,6 +32,7 @@ import from GSM_Types all;
 import from IPL4asp_Types all;
 
 import from BSSAP_Types all;
+import from SCCP_Adapter all;
 import from RAN_Adapter all;
 import from BSSAP_LE_Adapter all;
 import from BSSAP_LE_CodecPort all;
@@ -893,11 +894,11 @@ private function f_legacy_bssap_reset(integer bssap_idx := 0) runs on test_CT {
 	var BSSAP_N_UNITDATA_ind ud_ind;
 	var boolean reset_received := false;
 	timer T := 5.0;
-	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[bssap_idx].sccp_addr_peer, g_bssap[bssap_idx].sccp_addr_own,
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[bssap_idx].sccpa.sccp_addr_peer, g_bssap[bssap_idx].sccpa.sccp_addr_own,
 					 ts_BSSMAP_Reset(0, g_osmux_enabled_cn)));
 	T.start;
 	alt {
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[bssap_idx].sccp_addr_own, g_bssap[bssap_idx].sccp_addr_peer,
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[bssap_idx].sccpa.sccp_addr_own, g_bssap[bssap_idx].sccpa.sccp_addr_peer,
 					       tr_BSSMAP_ResetAck(g_osmux_enabled_cn))) {
 		log("BSSMAP: Received RESET-ACK in response to RESET, we're ready to go!");
 		}
@@ -1209,18 +1210,18 @@ private function f_bssap_idx_init(integer bssap_idx) runs on test_CT {
 		var RanOps ranops := MSC_RanOps;
 		ranops.use_osmux := g_osmux_enabled_cn;
 		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", ranops);
-		if (isbound(g_bssap[bssap_idx].vc_IPA)) {
-			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].vc_IPA:CFG_PORT);
+		if (isbound(g_bssap[bssap_idx].sccpa.vc_IPA)) {
+			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].sccpa.vc_IPA:CFG_PORT);
 		}
 		connect(self:SCCPLITE_IPA_CTRL, g_bssap[bssap_idx].vc_RAN:CTRL_CLIENT);
 		f_ran_adapter_start(g_bssap[bssap_idx]);
 	} else {
-		f_ran_adapter_init(g_bssap[bssap_idx], mp_bssap_cfg[bssap_idx], "VirtMSC", omit);
-		if (isbound(g_bssap[bssap_idx].vc_IPA)) {
-			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].vc_IPA:CFG_PORT);
+		f_sccp_adapter_init(g_bssap[bssap_idx].sccpa, mp_bssap_cfg[bssap_idx].sccp, "VirtMSC");
+		if (isbound(g_bssap[bssap_idx].sccpa.vc_IPA)) {
+			connect(self:SCCPLITE_IPA_CFG_PORT[bssap_idx], g_bssap[bssap_idx].sccpa.vc_IPA:CFG_PORT);
 		}
-		connect(self:BSSAP, g_bssap[bssap_idx].vc_SCCP:SCCP_SP_PORT);
-		f_ran_adapter_start(g_bssap[bssap_idx]);
+		connect(self:BSSAP, g_bssap[bssap_idx].sccpa.vc_SCCP:SCCP_SP_PORT);
+		f_sccp_adapter_start(g_bssap[bssap_idx].sccpa);
 		f_legacy_bssap_reset();
 	}
 }
@@ -1233,13 +1234,17 @@ private function f_bssap_idx_disconnect(integer bssap_idx) runs on test_CT {
 		os_error_text := omit
 	};
 
-	if (isbound(g_bssap[bssap_idx].vc_IPA)) {
+	if (isbound(g_bssap[bssap_idx].sccpa.vc_IPA)) {
 		/* Alive components don't finish sockets (TCP FIN) when they are
 		* stopped. Hence, we need to manually call close() on them to make sure
 		* the IUT knows about it. */
 		f_ipa_cfg_disconnect(SCCPLITE_IPA_CFG_PORT[bssap_idx], res);
 	} else {
-		f_ran_adapter_cleanup(g_bssap[bssap_idx]);
+		if (g_handler_mode) {
+			f_ran_adapter_cleanup(g_bssap[bssap_idx]);
+		} else {
+			f_sccp_adapter_cleanup(g_bssap[bssap_idx].sccpa);
+		}
 	}
 }
 
@@ -1696,7 +1701,7 @@ testcase TC_chan_deact_silence() runs on test_CT {
 testcase TC_outbound_connect(integer bssap_idx := 0) runs on test_CT {
 	f_init(1);
 
-	BSSAP.send(ts_BSSAP_CONNECT_req(g_bssap[bssap_idx].sccp_addr_peer, g_bssap[bssap_idx].sccp_addr_own,
+	BSSAP.send(ts_BSSAP_CONNECT_req(g_bssap[bssap_idx].sccpa.sccp_addr_peer, g_bssap[bssap_idx].sccpa.sccp_addr_own,
 				        2342, ts_BSSMAP_AssignmentReq));
 	BSSAP.receive(tr_BSSAP_DISC_ind(2342, ?, ?));
 	f_shutdown_helper();
@@ -2416,9 +2421,9 @@ testcase TC_chan_rel_a_reset() runs on test_CT {
 	IPA_RSL[0][0].clear;
 
 	/* perform BSSAP RESET, expect RESET ACK and DISC.ind on connection */
-	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own, ts_BSSMAP_Reset(0, g_osmux_enabled_cn)));
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccpa.sccp_addr_peer, g_bssap[0].sccpa.sccp_addr_own, ts_BSSMAP_Reset(0, g_osmux_enabled_cn)));
 	interleave {
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[0].sccp_addr_own, g_bssap[0].sccp_addr_peer, tr_BSSMAP_ResetAck(g_osmux_enabled_cn))) { }
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[0].sccpa.sccp_addr_own, g_bssap[0].sccpa.sccp_addr_peer, tr_BSSMAP_ResetAck(g_osmux_enabled_cn))) { }
 	[] BSSAP.receive(tr_BSSAP_DISC_ind(dt.sccp_conn_id, ?, ?)) { }
 	}
 
@@ -3510,7 +3515,7 @@ private function f_pageing_helper(hexstring imsi,
 		bssmap_chneed := omit;
 	}
 
-	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own,
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccpa.sccp_addr_peer, g_bssap[0].sccpa.sccp_addr_own,
 					 ts_BSSMAP_Paging(imsi, cid_list, tmsi, bssmap_chneed)));
 
 	if (not istemplatekind(tmsi, "omit")) {
@@ -3828,9 +3833,9 @@ testcase TC_paging_imsi_a_reset() runs on test_CT {
 	f_pageing_helper('001010123456789'H, cid_list, c_BtsId_all);
 
 	/* Perform a BSSMAP Reset and wait for ACK */
-	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own, ts_BSSMAP_Reset(0, g_osmux_enabled_cn)));
+	BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccpa.sccp_addr_peer, g_bssap[0].sccpa.sccp_addr_own, ts_BSSMAP_Reset(0, g_osmux_enabled_cn)));
 	alt {
-	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[0].sccp_addr_own, g_bssap[0].sccp_addr_peer, tr_BSSMAP_ResetAck(g_osmux_enabled_cn))) { }
+	[] BSSAP.receive(tr_BSSAP_UNITDATA_ind(g_bssap[0].sccpa.sccp_addr_own, g_bssap[0].sccpa.sccp_addr_peer, tr_BSSMAP_ResetAck(g_osmux_enabled_cn))) { }
 	[] BSSAP.receive { repeat; }
 	}
 
@@ -3937,7 +3942,7 @@ function f_TC_paging_Nreq(integer num_subscribers, boolean send_pag_load_ind) ru
 
 	for (i := 0; i < num_subscribers; i := i + 1) {
 		/* Page on LAC-CI of BTS0: */
-		BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccp_addr_peer, g_bssap[0].sccp_addr_own,
+		BSSAP.send(ts_BSSAP_UNITDATA_req(g_bssap[0].sccpa.sccp_addr_peer, g_bssap[0].sccpa.sccp_addr_own,
 			   ts_BSSMAP_Paging(imsis[i], valueof(ts_BSSMAP_CIL_LAC_CI({ts_BSSMAP_CI_LAC_CI(1, 0)})),
 			   omit, omit)));
 	}
@@ -6679,8 +6684,8 @@ function f_tc_ho_into_this_bsc_main(TestHdlrParams pars, charstring vty_a5_cfg :
 	f_vty_encryption_a5(vty_a5_cfg);
 	f_ctrs_bsc_and_bts_handover_init();
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_ho_into_this_bsc), pars);
 	vc_conn.done;
@@ -6853,8 +6858,8 @@ private function f_tc_srvcc_eutran_to_geran_ho_out_main(boolean disable_fast_ret
 	f_ctrs_bsc_and_bts_handover_init();
 
 	pars.last_used_eutran_plmn := '323454'O;
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_srvcc_eutran_to_geran_ho_out), pars);
 	vc_conn.done;
@@ -6960,8 +6965,8 @@ testcase TC_ho_in_fail_msc_clears() runs on test_CT {
 
 	f_ctrs_bsc_and_bts_handover_init();
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_ho_in_fail_msc_clears), pars);
 	vc_conn.done;
@@ -7057,8 +7062,8 @@ testcase TC_ho_in_fail_msc_clears_after_ho_detect() runs on test_CT {
 
 	f_ctrs_bsc_and_bts_handover_init();
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_ho_in_fail_msc_clears_after_ho_detect), pars);
 	vc_conn.done;
@@ -7149,8 +7154,8 @@ testcase TC_ho_in_fail_no_detect() runs on test_CT {
 
 	f_ctrs_bsc_and_bts_handover_init();
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_ho_in_fail_no_detect), pars);
 	vc_conn.done;
@@ -7233,8 +7238,8 @@ testcase TC_ho_in_fail_no_detect2() runs on test_CT {
 
 	f_ctrs_bsc_and_bts_handover_init();
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_ho_in_fail_no_detect2), pars);
 	vc_conn.done;
@@ -9193,8 +9198,8 @@ testcase TC_mscpool_paging_and_response_imsi() runs on test_CT {
 	var MSC_ConnHdlr vc_conn1;
 	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
 	pars1.mscpool.rsl_idx := 0;
-	pars1.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_peer;
-	pars1.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_own;
+	pars1.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccpa.sccp_addr_peer;
+	pars1.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccpa.sccp_addr_own;
 	vc_conn1 := f_start_handler(refers(f_tc_mscpool_paging_imsi), pars1);
 	vc_conn1.done;
 	f_ctrs_msc_expect(0, "mscpool:subscr:paged");
@@ -9245,8 +9250,8 @@ testcase TC_mscpool_paging_and_response_tmsi() runs on test_CT {
 	var MSC_ConnHdlr vc_conn1;
 	var TestHdlrParams pars1 := f_gen_test_hdlr_pars(bssap_idx := 0);
 	pars1.mscpool.rsl_idx := 0;
-	pars1.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_peer;
-	pars1.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccp_addr_own;
+	pars1.sccp_addr_bsc := g_bssap[pars1.mscpool.bssap_idx].sccpa.sccp_addr_peer;
+	pars1.sccp_addr_msc := g_bssap[pars1.mscpool.bssap_idx].sccpa.sccp_addr_own;
 	vc_conn1 := f_start_handler(refers(f_tc_mscpool_paging_tmsi), pars1);
 	vc_conn1.done;
 	f_ctrs_msc_expect(0, "mscpool:subscr:paged");
@@ -10555,8 +10560,8 @@ testcase TC_lcs_loc_req_for_idle_ms() runs on test_CT {
 	f_init(1, true);
 	f_sleep(1.0);
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_idle_ms), pars);
 	vc_conn.done;
@@ -10595,8 +10600,8 @@ testcase TC_lcs_loc_req_no_subscriber() runs on test_CT {
 	f_init(1, true);
 	f_sleep(1.0);
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_no_subscriber), pars);
 	vc_conn.done;
@@ -10730,8 +10735,8 @@ testcase TC_lcs_loc_req_for_idle_ms_no_pag_resp() runs on test_CT {
 	f_init(1, true);
 	f_sleep(1.0);
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_lcs_loc_req_for_idle_ms_no_pag_resp), pars);
 	vc_conn.done;
@@ -10790,8 +10795,8 @@ testcase TC_cm_service_during_lcs_loc_req() runs on test_CT {
 	f_init(1, true);
 	f_sleep(1.0);
 
-	pars.sccp_addr_msc := g_bssap[0].sccp_addr_own;
-	pars.sccp_addr_bsc := g_bssap[0].sccp_addr_peer;
+	pars.sccp_addr_msc := g_bssap[0].sccpa.sccp_addr_own;
+	pars.sccp_addr_bsc := g_bssap[0].sccpa.sccp_addr_peer;
 
 	vc_conn := f_start_handler(refers(f_tc_cm_service_during_lcs_loc_req), pars);
 	vc_conn.done;
