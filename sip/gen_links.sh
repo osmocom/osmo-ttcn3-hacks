@@ -10,7 +10,7 @@ gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h "
-FILES+="TCCOpenSecurity_Functions.ttcn TCCOpenSecurity.cc TCCOpenSecurity_Functions.hh "
+FILES+="TCCOpenSecurity_Functions.ttcn TCCOpenSecurity.cc "
 FILES+="TCCDateTime.cc TCCDateTime_Functions.ttcn"
 gen_links $DIR $FILES
 
