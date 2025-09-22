@@ -27,9 +27,24 @@ gen_links() {
 	local files="$*"
 
 	for f in $files; do
-		(ln -sf \
-			"$(realpath "$TOPDIR/$PROJECTDIR/$dir/$f")" \
-			"$BUILDDIR/$PROJECTDIR/$f") &
+		local target="$(realpath "$TOPDIR/$PROJECTDIR/$dir/$f")"
+		if ! [ -e "$target" ]; then
+			echo
+			echo "ERROR in $PROJECTDIR/gen_links.sh:"
+			echo
+			echo "  File not found:"
+			echo "    $dir/$f"
+			echo
+			echo "  Section:"
+			echo "    DIR=$dir"
+			echo "    FILES=\"…$f…\""
+			echo "    gen_links \$DIR \$FILES"
+			echo
+			exit 1
+		fi
+		ln -sf \
+			"$target" \
+			"$BUILDDIR/$PROJECTDIR/$f" &
 	done
 }
 
