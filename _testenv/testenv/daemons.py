@@ -68,7 +68,7 @@ def start(cfg):
         # Wait 200ms and check if it is still running
         time.sleep(0.2)
         if daemons[section].poll() is not None:
-            testenv.coredump.get_from_coredumpctl()
+            testenv.coredump.get_coredump()
             raise testenv.NoTraceException(f"program failed to start: {program}")
 
         # Run setup script
@@ -118,7 +118,7 @@ def check_if_crashed():
         return
 
     current_test = testenv.testsuite.get_current_test()
-    testenv.coredump.get_from_coredumpctl()
+    testenv.coredump.get_coredump()
 
     if current_test:
         logging.error(f"{daemon_name} unexpected exit during {current_test}! rc={returncode}")
