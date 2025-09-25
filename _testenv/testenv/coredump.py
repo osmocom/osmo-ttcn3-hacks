@@ -118,12 +118,13 @@ def get_backtrace():
 
     logging.info("Running gdb to get a backtrace")
 
-    cmd = "gdb"
+    cmd = "echo; gdb"
     cmd += " --batch"
     cmd += f" {shlex.quote(executable_path)}"
     cmd += f" {shlex.quote(core_path)}"
     cmd += " -ex bt"
-    cmd += f" | tee {shlex.quote(core_path)}.backtrace"
+    cmd += f" | tee {shlex.quote(core_path)}.backtrace;"
+    cmd += " echo"
 
     testenv.cmd.run(cmd)
 
