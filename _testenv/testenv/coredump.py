@@ -2,62 +2,19 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import datetime
 import fnmatch
+import glob
 import json
 import logging
-import os
+import re
 import shlex
 import shutil
 import subprocess
 import testenv
 import testenv.daemons
 import testenv.testdir
-import urllib
-import urllib.request
 
+core_path = None
 executable_path = None
-
-lxc_netdev = "eth0"
-lxc_ip_pattern = "10.0.*"
-lxc_port = 8042
-
-
-def find_lxc_host_ip():
-    cmd = ["ip", "-j", "-o", "-4", "addr", "show", "dev", lxc_netdev]
-    p = testenv.cmd.run(cmd, check=False, no_podman=True, capture_output=True, text=True)
-    ret = json.loads(p.stdout)[0]["addr_info"][0]["local"]
-    if fnmatch.fnmatch(ret, lxc_ip_pattern):
-        ret = ret.split(".")
-        ret = f"{ret[0]}.{ret[1]}.{ret[2]}.1"
-        return ret
-    return None
-
-
-def get_from_coredumpctl_lxc_host():
-    # Server implementation: osmo-ci, ansible/roles/testenv-coredump-helper
-    global executable_path
-
-    logging.info("Looking for a coredump on lxc host")
-
-    ip = os.environ.get("TESTENV_COREDUMP_FROM_LXC_HOST_IP") or find_lxc_host_ip()
-    if not ip:
-        logging.warning("Failed to get lxc host ip, can't look for coredump")
-        return
-
-    try:
-        with urllib.request.urlopen(f"http://{ip}:{lxc_port}/core") as response:
-            executable_path = dict(response.getheaders())["X-Executable-Path"]
-            with open(f"{testenv.testdir.testdir}/core", "wb") as h:
-                shutil.copyfileobj(response, h)
-            logging.debug("Coredump found and copied to log dir")
-    except urllib.error.HTTPError as e:
-        executable_path = None
-        if e.code == 404:
-            logging.debug("No coredump found")
-        else:
-            logging.error(f"Unexpected error while attempting to fetch the coredump: {e}")
-    except urllib.error.URLError as e:
-        executable_path = None
-        logging.error(f"Unexpected error while attempting to fetch the coredump: {e}")
 
 
 def executable_is_relevant(exe):
@@ -77,10 +34,11 @@ def executable_is_relevant(exe):
     return False
 
 
-def get_from_coredumpctl_local():
+def get_from_coredumpctl():
+    global core_path
     global executable_path
 
-    logging.info("Looking for a coredump")
+    logging.info("Looking for a coredump with coredumpctl")
 
     if not shutil.which("coredumpctl"):
         logging.debug("coredumpctl is not available, won't try to get coredump")
@@ -113,18 +71,49 @@ def get_from_coredumpctl_local():
     executable_path = coredump["exe"]
 
 
-def get_from_coredumpctl():
-    if os.environ.get("TESTENV_COREDUMP_FROM_LXC_HOST"):
-        get_from_coredumpctl_lxc_host()
+def get_from_file():
+    global core_path
+    global executable_path
+
+    logging.info("Looking for a coredump file")
+
+    glob_matches = glob.glob(f"{testenv.testdir.testdir}/*/core*")
+    if not glob_matches:
+        return
+
+    core_path = glob_matches[0]
+    p = testenv.cmd.run(
+        ["file", core_path],
+        no_podman=True,
+        capture_output=True,
+        text=True,
+    )
+    print(p.stdout, end="")
+
+    execfn_match = re.search(r"execfn: '(.*?)'", p.stdout)
+    if execfn_match:
+        executable_path = execfn_match.group(1)
+        logging.debug("Coredump file and execfn found")
     else:
-        get_from_coredumpctl_local()
+        logging.debug("Failed to get execfn path from coredump file")
+
+
+def get_coredump():
+    with open("/proc/sys/kernel/core_pattern") as f:
+        pattern = f.readline().rstrip()
+
+    if "systemd-coredump" in pattern:
+        get_from_coredumpctl()
+    elif pattern.startswith("core"):
+        get_from_file()
+    else:
+        logging.debug(f"Unsupported core_pattern, won't try to get coredump: {pattern}")
 
 
 def get_backtrace():
     global executable_path
 
-    core_path = f"{testenv.testdir.testdir}/core"
-    if not executable_path or not os.path.exists(core_path):
+    if not executable_path or not core_path:
         return
 
     logging.info("Running gdb to get a backtrace")

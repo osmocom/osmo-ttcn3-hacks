@@ -11,6 +11,7 @@ import testenv.testsuite
 
 def check_programs():
     programs = [
+        "file",
         "git",
     ]
 
