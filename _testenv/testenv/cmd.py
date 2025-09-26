@@ -106,6 +106,7 @@ def generate_env(env={}, podman=False):
 
     ret["PATH"] = path
     ret["HOME"] = os.environ.get("HOME")
+    ret["PYTHONUNBUFFERED"] = "1"
 
     for var in env:
         ret[var] = env[var]
