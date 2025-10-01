@@ -381,6 +381,37 @@ private altstep as_s1ap_handle_IntialCtxSetupReq_Attach_Accept() runs on ConnHdl
 	}
 }
 
+private altstep as_s1ap_handle_ERABSetupRequest_Attach_Accept() runs on ConnHdlr {
+	var S1AP_PDU rx_msg;
+	var PDU_NAS_EPS rx_nas;
+	[] S1AP.receive(tr_S1AP_RABSetupReq(g_pars.ue_pars.mme_ue_id,
+					    g_pars.ue_pars.enb_ue_id)) -> value rx_msg {
+		var template (value) E_RABSetupItemCtxtSURes rab_setup_it;
+		var template (value) E_RABSetupListCtxtSURes rab_setup_items;
+		var template (value) PDU_NAS_EPS nas;
+		var PDU_NAS_EPS_ActDefEPSBearerContextRequest act_bearer;
+		var charstring apn := char(0, 0, 0, 4) & "test" & char(0, 0, 0, 3) & "sos";
+
+		S1AP.receive(tr_NAS_ActDefEpsBearCtxReq()) -> value rx_nas;
+		act_bearer := rx_nas.ePS_messages.ePS_SessionManagement.pDU_NAS_EPS_ActDefEPSBearerContextRequest;
+		if (act_bearer.accessPointName.accessPointNameValue != char2oct(apn)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Unexpected APN: ",
+						oct2char(act_bearer.accessPointName.accessPointNameValue)));
+		}
+
+		rab_setup_it := ts_S1AP_RABSetupItemCtxtSURes(rab_id := 6,
+							      tla := oct2bit(f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip)),
+							      gtp_teid := '00000003'O);
+		rab_setup_items := ts_S1AP_RABSetupListCtxtSURes(rab_setup_it);
+		S1AP.send(ts_S1AP_InitialCtxSetupResp(g_pars.ue_pars.mme_ue_id,
+						      g_pars.ue_pars.enb_ue_id,
+						      rab_setup_items));
+		}
+	[] S1AP.receive(PDU_NAS_EPS:?) -> value rx_nas {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx Unexpected NAS PDU msg: ", rx_nas));
+	}
+}
+
 altstep as_s1ap_handle_IntialCtxSetupReq_TAU_Accept() runs on ConnHdlr {
 	var S1AP_PDU rx_msg;
 	var PDU_NAS_EPS rx_nas;
@@ -548,7 +579,8 @@ altstep as_DIA_UpdLoc() runs on ConnHdlr {
 			ts_AVP_3GPP_ApnConfigProfile({
 				ts_AVP_3GPP_ContextId(1),
 				ts_AVP_3GPP_AllApnConfigsIncl,
-				ts_AVP_3GPP_ApnConfig(1, IPv4, "*")
+				ts_AVP_3GPP_ApnConfig(1, IPv4, "*"),
+				ts_AVP_3GPP_ApnConfig(1, IPv4, "test.sos")
 			})
 			};
 
@@ -892,6 +924,37 @@ function f_attach(BIT3 att_type := '001'B, boolean exp_sgsap_lu := false) runs o
 	T.start;
 	alt {
 	[] as_GTP2C_ModifyBearer_success();
+	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+}
+
+function f_emergency_bearer() runs on ConnHdlr {
+	var template (value) EPS_MobileIdentityV mi := ts_NAS_MobileId_IMSI(g_pars.ue_pars.imsi);
+	var template (value) PDU_NAS_EPS nas_esm;
+	timer T := 5.0;
+
+	nas_esm := ts_NAS_PdnConnReq(bearer_id := '0000'B, proc_tid := int2bit(1,8),
+				     pdn_type := NAS_PDN_T_IPv4, req_type := '100'B);
+
+	var template (value) S1AP_PDU tx;
+	tx := ts_S1AP_UlNasTransport(mme_id := g_pars.ue_pars.mme_ue_id,
+				     enb_id := g_pars.ue_pars.enb_ue_id,
+				     p_nasPdu := enc_PDU_NAS_EPS(valueof(nas_esm)),
+				     p_eUTRAN_CGI := ts_enb_S1AP_CGI(g_pars.enb_pars[g_pars.mme_idx]),
+				     p_tAI := ts_enb_S1AP_TAI(g_pars.enb_pars[g_pars.mme_idx]));
+	S1AP.send(tx);
+
+	/* We now expect the MME to send a Create Session Request to the SGW-C */
+	f_gtp2_register_udmsg('20'O);
+	T.start;
+	alt {
+	[] as_GTP2C_CreateSession_success();
+	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
+	}
+
+	T.start;
+	alt {
+	[] as_s1ap_handle_ERABSetupRequest_Attach_Accept() {
 	[] T.timeout { Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("No message from MME")); }
 	}
 }
