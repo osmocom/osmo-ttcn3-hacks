@@ -124,6 +124,16 @@ type record UeParams {
 	OCT4 tmsi optional
 }
 
+/* parameters of emergency support */
+type record EmergParams {
+	boolean expect_s1_emergency,
+	BIT1 s1_emergency,
+	boolean expect_number,
+	integer numbers,
+	BIT5 categories[8],
+	octetstring digits[8]
+}
+
 type record ConnHdlrPars {
 	/* copied over from MTC_CT on start of component */
 	EnbParams enb_pars[NUM_ENB],
@@ -135,7 +145,9 @@ type record ConnHdlrPars {
 	/* currently used MME (index into enb_pars, S1AP, ...) */
 	integer mme_idx,
 	/* Currently set KSI */
-	NAS_KeySetIdentifierV kset_id
+	NAS_KeySetIdentifierV kset_id,
+	/* Expected emergency parameters */
+	EmergParams emerg_pars
 }
 
 type component ConnHdlr extends S1AP_ConnHdlr, SGsAP_ConnHdlr, DIAMETER_ConnHdlr, GTP_ConnHdlr, GTP2_ConnHdlr {
@@ -306,14 +318,39 @@ private altstep as_s1ap_handle_IntialCtxSetupReq_Attach_Accept() runs on ConnHdl
 		var template (value) E_RABSetupListCtxtSURes rab_setup_items;
 		var octetstring esm_enc;
 		var template (value) PDU_NAS_EPS nas;
+		var PDU_NAS_EPS_AttachAccept attach_accept;
 		var EPS_MobileIdentityTLV mi_tlv;
+		var EPS_NetworkFeatureSupportTLV nfs_tlv;
 
 		S1AP.receive(tr_NAS_AttachAccept()) -> value rx_nas;
-		mi_tlv := rx_nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_AttachAccept.gUTI;
+		attach_accept := rx_nas.ePS_messages.ePS_MobilityManagement.pDU_NAS_EPS_AttachAccept;
+		mi_tlv := attach_accept.gUTI;
 		if (mi_tlv.ePS_MobileIdentity.ePS_MobileIdentity.typeOfIdentity != '110'B) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, log2str("Rx GUTI of unexpected MI type: ", mi_tlv));
 		}
 		g_pars.ue_pars.guti := mi_tlv.ePS_MobileIdentity.ePS_MobileIdentity.oddEvenInd_identity.guti
+		nfs_tlv := attach_accept.ePS_NetworkFeatureSupport;
+		if (g_pars.emerg_pars.expect_s1_emergency and nfs_tlv.eMCBS != g_pars.emerg_pars.s1_emergency) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Unexpected emergency support: ", nfs_tlv.eMCBS));
+		}
+		if (g_pars.emerg_pars.expect_number) {
+			var template (present) EmergencyNumberListTLV num_list_tlv;
+			var template (present) EmergencyNumberList num_list;
+			for (var integer i := 0; i < g_pars.emerg_pars.numbers; i := i + 1) {
+				num_list[i] := tr_EmergencyNumber(1 + lengthof(g_pars.emerg_pars.digits[i]),
+								  g_pars.emerg_pars.categories[i],
+								  g_pars.emerg_pars.digits[i]);
+			}
+
+			num_list_tlv := tr_EmergencyNumberListTLV(num_list);
+			if (not match(attach_accept.emergencyNumberList, num_list_tlv)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Expected emergency number list '", num_list_tlv,
+								"' does not match '", attach_accept.emergencyNumberList,
+								"'."));
+			}
+		}
 
 		rab_setup_it := ts_S1AP_RABSetupItemCtxtSURes(rab_id := 5,
 							      tla := oct2bit(f_inet_addr(g_pars.enb_pars[g_pars.mme_idx].gtp1u_local_ip)),
