@@ -24,7 +24,8 @@ echo "------ $TESTCASE ------"
 date
 
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
-	TTCN3_PCAP_PATH=/tmp
+	TTCN3_PCAP_PATH=/tmp/pcap
+	mkdir -p "$TTCN3_PCAP_PATH"
 fi
 
 kill_rm_pidfile $PIDFILE_NETCAT
