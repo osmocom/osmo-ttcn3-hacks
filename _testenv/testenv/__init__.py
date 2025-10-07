@@ -112,6 +112,12 @@ def parse_args():
         "--titan-version",
         help="which eclipse-titan version to use",
     )
+    group.add_argument(
+        "-f",
+        "--fast",
+        action="store_true",
+        help="skip recording pcaps (+ sleep before/after) and talloc reports",
+    )
 
     group = sub_run.add_argument_group("source/binary options", "All components are built from source by default.")
     group.add_argument(
