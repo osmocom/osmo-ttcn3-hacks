@@ -32,9 +32,6 @@ def run():
     testenv.requirements.check()
     testenv.testenv_cfg.init()
 
-    if not testenv.args.binary_repo:
-        testenv.osmo_dev.check_init_needed()
-
     testenv.podman_install.init()
     testenv.cmd.init_env()
     testenv.testdir.init()
@@ -52,8 +49,10 @@ def run():
     if not testenv.args.binary_repo:
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
             testenv.testenv_cfg.set_current(cfg_name)
-            testenv.osmo_dev.init(cfg)
-            testenv.osmo_dev.make(cfg)
+            if testenv.osmo_dev.get_targets(cfg):
+                testenv.osmo_dev.check_init_needed()
+                testenv.osmo_dev.init(cfg)
+                testenv.osmo_dev.make(cfg)
 
     # Run the components + testsuite
     loop_count = 0
