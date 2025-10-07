@@ -11,7 +11,14 @@ NETCAT=$(command -v nc)
 GSMTAP_PORT=4729
 
 TESTCASE=$1
+echo "$TESTCASE" > "$TTCN3_PCAP_PATH/.current_test"
 
+echo "------ $TESTCASE ------"
+date
+
+if [ "$TESTENV_FAST" = 1 ]; then
+	exit 0
+fi
 
 SUDOSTR=""
 if ! [ "$(id -u)" = "0" ]; then
@@ -19,9 +26,6 @@ if ! [ "$(id -u)" = "0" ]; then
 	# Otherwise, if sudo /usr/bin/kill, sudo /usr/bin/tcpdump cannot be run without a password prompt,
 	# and this script will hang indefinitely
 fi
-
-echo "------ $TESTCASE ------"
-date
 
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp/pcap
@@ -112,5 +116,3 @@ do
 	fi
 done
 kill $PID
-
-echo "$TESTCASE" > "$TTCN3_PCAP_PATH/.current_test"

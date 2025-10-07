@@ -151,6 +151,9 @@ def run(cfg):
         env["OSMO_SUT_HOST"] = host
         env["OSMO_SUT_PORT"] = port
 
+    if testenv.args.fast:
+        env["TESTENV_FAST"] = "1"
+
     env = testenv.cmd.generate_env(env, testenv.args.podman)
 
     cmd = [start_testsuite, suite, section_data["config"]]

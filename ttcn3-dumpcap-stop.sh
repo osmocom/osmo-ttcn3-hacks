@@ -15,6 +15,10 @@ else
 	printf "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m\n\n"
 fi
 
+if [ "$TESTENV_FAST" = 1 ]; then
+	exit 0
+fi
+
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp
 fi

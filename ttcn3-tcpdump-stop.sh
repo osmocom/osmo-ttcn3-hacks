@@ -8,19 +8,23 @@ FIFO=/tmp/cmderr
 TESTCASE=$1
 VERDICT="$2"
 
-SUDOSTR=""
-if ! [ "$(id -u)" = "0" ]; then
-	SUDOSTR="sudo -n"
-	# Otherwise, if sudo /usr/bin/kill, sudo /usr/bin/tcpdump cannot be run without a password prompt,
-	# and this script will hang indefinitely
-fi
-
 date
 
 if [ x"$VERDICT" = x"pass" ]; then
 	printf "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m\n\n"
 else
 	printf "\033[1;31m------ $TESTCASE $VERDICT ------\033[0m\n\n"
+fi
+
+if [ "$TESTENV_FAST" = 1 ]; then
+	exit 0
+fi
+
+SUDOSTR=""
+if ! [ "$(id -u)" = "0" ]; then
+	SUDOSTR="sudo -n"
+	# Otherwise, if sudo /usr/bin/kill, sudo /usr/bin/tcpdump cannot be run without a password prompt,
+	# and this script will hang indefinitely
 fi
 
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then

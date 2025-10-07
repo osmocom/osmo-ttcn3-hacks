@@ -18,6 +18,10 @@ TESTCASE=$1
 echo "------ $TESTCASE ------"
 date
 
+if [ "$TESTENV_FAST" = 1 ]; then
+	exit 0
+fi
+
 if [ "z$TTCN3_PCAP_PATH" = "z" ]; then
 	TTCN3_PCAP_PATH=/tmp/pcap
 	mkdir -p "$TTCN3_PCAP_PATH"
