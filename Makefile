@@ -139,7 +139,9 @@ $(foreach dir,$(SUBDIRS), \
 
 .PHONY: tags regen-diameter-types-ttcn clean
 tags:
-	find $(shell pwd) \
+	find deps library $(SUBDIRS) \
+		-type f -name "*.cc" -o \
+		-type f -name "*.hh" -o \
 		-type f -name "*.ttcn" -o \
 		-type f -name "*.ttcnpp" | \
 	xargs ctags
