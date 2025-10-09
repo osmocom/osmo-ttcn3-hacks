@@ -285,6 +285,9 @@ def start():
     if not os.path.exists(pkgcache):
         exec_cmd(["apt-get", "-q", "update"])
 
+    if testenv.args.install_packages:
+        exec_cmd(["apt-get", "install", "-y", "--no-install-recommends"] + testenv.args.install_packages)
+
 
 def check_titan_version():
     version, _ = testenv.testenv_cfg.get_titan_version_first_cfg()

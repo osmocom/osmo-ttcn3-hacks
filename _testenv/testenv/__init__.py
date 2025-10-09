@@ -210,6 +210,14 @@ def parse_args():
         action="store_true",
         help="run an interactive shell before stopping daemons/container",
     )
+    group.add_argument(
+        "-I",
+        "--install-package",
+        dest="install_packages",
+        action="append",
+        metavar="PACKAGE",
+        help="temporarily install a debian package in the container",
+    )
 
     group = sub_run.add_argument_group("output options")
     group.add_argument(
@@ -271,6 +279,9 @@ def verify_args_run():
 
     if args.kernel == "debian" and not args.podman:
         raise NoTraceException("--kernel-debian requires --podman")
+
+    if args.install_packages and not args.podman:
+        raise NoTraceException("--install-packages requires --podman")
 
     if args.kernel == "custom" and not os.path.exists(custom_kernel_path):
         logging.critical(
