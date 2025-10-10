@@ -80,6 +80,7 @@ RUN	set -x && \
 		python3-dev \
 		python3-pip \
 		python3-poetry-core \
+		python3-requests \
 		python3-venv \
 		qemu-system-x86 \
 		rsync \
