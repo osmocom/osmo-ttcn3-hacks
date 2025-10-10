@@ -12,6 +12,7 @@ FILES="
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
 	MAP_EncDec.cc
+	PIPEasp_PT.cc
 	SS_EncDec.cc
 	TCCConversion.cc
 	TCCEncoding.cc
@@ -26,3 +27,6 @@ CPPFLAGS_TTCN3="
 "
 
 . ../_buildsystem/regen_makefile.inc.sh
+
+# required for forkpty(3) used by PIPEasp
+sed -i -e '/^LINUX_LIBS/ s/$/ -lutil/' Makefile
