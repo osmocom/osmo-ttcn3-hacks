@@ -214,7 +214,7 @@ def wait_until_test_stopped():
         if not os.path.exists(path):
             return
 
-    raise testenv.NoTraceError("Timeout in wait_until_test_stopped()")
+    raise testenv.NoTraceException("Timeout in wait_until_test_stopped()")
 
 
 def stop():
