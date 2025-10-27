@@ -34,13 +34,41 @@ import from es2p_Types_JSON all;
 import from esx_header_Types_JSON all;
 import from ES2Plus_Tests all;
 
+/* The external function ext_RSPClient_create requires a path and a name filter as input to load test certificates.
+ * While those certificates are required for the ES9+ interface related tests (smdpp_Tests.ttcn), for the ES2+
+ * interface tests those certificates have no relevance. */
+const charstring c_es2plus_cert_path := "./sgp26/";
+const charstring c_es2plus_cert_name_filter := "NIST";
+
 /* Module Parameters */
 modulepar {
+    /* The SMDP server host name (FQDN) must match the host name of the SSL certificate of the server. To resolve the
+     * server host name to an IP address, an entry in /etc/hosts is sufficient. It should also be pointed out that this
+     * testsuite (libcurl) will also verify the presented server certificate against the related CA. To ensure that
+     * the server certificate verification is possible, ensure that the related CA certificates are made available in
+     * /etc/ssl/certs */
+    charstring mp_es2plus_server_fqdn := "testsmdpplus1.example.com";
+
+    /* Sets the server port of the ES2+ server (SM-DP+). */
+    integer mp_es2plus_server_port := 8000;
+
+    /* Sets the client certificate to be used to authenticate towards the ES2+ server (SM-DP+) */
+    charstring mp_es2plus_client_cert_path := "./test_certs/CERT_MNO_ECDSA_NIST.pem";
+
+    /* Sets the private key to be used to authenticate towards the ES2+ server (SM-DP+) */
+    charstring mp_es2plus_client_key_path := "./test_certs/SK_MNO_ECDSA_NIST.pem";
+
+    /* Sets the operator ID to be used on the ES2+ interface. (this parameter has no relation to SSL/TLS) */
+    charstring mp_es2plus_operator_id := "test.operator.com";
+
+    /* ES2+ normally uses SSL with client authentication, however for debug purposes it is possible to disable
+     * mutual authentication. */
+    boolean mp_es2plus_use_mutual_tls := true;
+
 	boolean mp_use_custom_tls_cert := true;
 	charstring mp_custom_tls_cert_path := "";  // Empty means use cert pool only
 	integer mp_es9plus_server_port_nist := 8000;
 	integer mp_es9plus_server_port_brp := 8001;
-	integer mp_es2plus_server_port := 8000;
 }
 
 /* C++ handles only crypto, TTCN-3 handles ASN.1 encoding/decoding most of the time */
@@ -349,7 +377,8 @@ type component smdpp_ConnHdlr {
 	var template integer g_http_client_id_es2p := omit;
 
 	/* C++ RSP client handle */
-	var integer g_rsp_client_handle := -1;
+	var integer g_rsp_client_handle_es9p := -1;
+	var integer g_rsp_client_handle_es2p := -1;
 
 	/* Session state */
 	var octetstring g_transactionId := ''O;
@@ -371,7 +400,7 @@ type enumerated ES9EncodingMode {
 type record smdpp_ConnHdlrPars {
 	charstring smdp_server_fqdn,
 	integer smdp_es9p_server_port,
-    integer smdp_es2p_server_port,
+	integer smdp_es2p_server_port,
 	charstring cert_path,
 	charstring cert_name_filter,
 	charstring euicc_cert_path,
@@ -460,28 +489,61 @@ private function f_init(charstring id, float t_guard := 60.0) runs on MTC_CT {
 
 /* RSP CLIENT WRAPPER FUNCTIONS */
 
+// Initialize RSP client for ES2+
+function f_init_es2plus() runs on smdpp_ConnHdlr return boolean {
+    // Initialize RSP client using imported function from smdpp_Tests
+    g_rsp_client_handle_es2p := smdpp_Tests.ext_RSPClient_create(
+        mp_es2plus_server_fqdn,
+        mp_es2plus_server_port,
+	c_es2plus_cert_path,
+	c_es2plus_cert_name_filter
+    );
+
+    if (g_rsp_client_handle_es2p < 0) {
+        setverdict(fail, "Failed to initialize RSP client for ES2+");
+        mtc.stop;
+    }
+
+    // Set authentication parameters once for all ES2+ operations
+    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
+        g_rsp_client_handle_es2p,
+        mp_es2plus_use_mutual_tls,
+        mp_es2plus_client_cert_path,
+        mp_es2plus_client_key_path
+    );
+
+    if (result != 0) {
+        setverdict(fail, "Failed to set RSP client authentication parameters for ES2+");
+        mtc.stop;
+    }
+
+    ext_logInfo("HTTP client (ES2+) configured");
+
+    return true;
+}
+
 private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
 	ext_logInfo("Initializing RSP client");
 
-	g_rsp_client_handle := ext_RSPClient_create(
+	g_rsp_client_handle_es9p := ext_RSPClient_create(
 		g_pars_smdpp.smdp_server_fqdn,
 		g_pars_smdpp.smdp_es9p_server_port,
 		g_pars_smdpp.cert_path,
 		g_pars_smdpp.cert_name_filter
 	);
 
-	if (g_rsp_client_handle < 0) {
+	if (g_rsp_client_handle_es9p < 0) {
 		ext_logError("Failed to create RSP client");
 		return false;
 	}
 
-	if (ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle, g_pars_smdpp.euicc_cert_path) != 0) {
+	if (ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle_es9p, g_pars_smdpp.euicc_cert_path) != 0) {
 		ext_logError("Failed to load eUICC certificate");
 		f_rsp_client_cleanup();
 		return false;
 	}
 
-	if (ext_RSPClient_loadEUICCKeyPair(g_rsp_client_handle, g_pars_smdpp.euicc_key_path) != 0) {
+	if (ext_RSPClient_loadEUICCKeyPair(g_rsp_client_handle_es9p, g_pars_smdpp.euicc_key_path) != 0) {
 		ext_logError("Failed to load eUICC private key");
 		f_rsp_client_cleanup();
 		return false;
@@ -489,7 +551,7 @@ private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
 
 	// Configure HTTP client
 	var integer result := ext_RSPClient_configureHttpClient(
-		g_rsp_client_handle,
+		g_rsp_client_handle_es9p,
 		mp_use_custom_tls_cert,
 		mp_custom_tls_cert_path
 	);
@@ -510,9 +572,13 @@ private function f_rsp_client_init() runs on smdpp_ConnHdlr return boolean {
 }
 
 private function f_rsp_client_cleanup() runs on smdpp_ConnHdlr {
-	if (g_rsp_client_handle >= 0) {
-		ext_RSPClient_destroy(g_rsp_client_handle);
-		g_rsp_client_handle := -1;
+	if (g_rsp_client_handle_es9p >= 0) {
+		ext_RSPClient_destroy(g_rsp_client_handle_es9p);
+		g_rsp_client_handle_es9p := -1;
+	}
+	if (g_rsp_client_handle_es2p >= 0) {
+		ext_RSPClient_destroy(g_rsp_client_handle_es2p);
+		g_rsp_client_handle_es2p := -1;
 	}
 }
 
@@ -538,7 +604,7 @@ private function f_provision_profile_via_es2plus(
     var charstring func_call_id := "TTCN3-" & oct2str(rnd_oct);
 
     var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es9p,
         true,  // useMutualTLS
         c_cert_path,
         c_key_path
@@ -553,7 +619,7 @@ private function f_provision_profile_via_es2plus(
     var JSON_ES2p_Request dl_req := {
         downloadOrderRequest := {
             header := {
-                functionRequesterIdentifier := "test.operator.com",
+                functionRequesterIdentifier := mp_es2plus_operator_id,
                 functionCallIdentifier := func_call_id & "-DL"
             },
             eid := eid,
@@ -565,7 +631,7 @@ private function f_provision_profile_via_es2plus(
     var octetstring req_enc := enc_JSON_ES2p_Request(dl_req);
     var integer status_code;
     var charstring response := ext_RSPClient_sendHttpsPostWithAuth(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es2p,
         c_path_download_order,
         oct2char(req_enc),
         g_pars_smdpp.smdp_es2p_server_port,
@@ -590,7 +656,7 @@ private function f_provision_profile_via_es2plus(
     var JSON_ES2p_Request conf_req := {
         confirmOrderRequest := {
             header := {
-                functionRequesterIdentifier := "test.operator.com",
+                functionRequesterIdentifier := mp_es2plus_operator_id,
                 functionCallIdentifier := func_call_id & "-CF"
             },
             iccid := new_iccid,
@@ -608,7 +674,7 @@ private function f_provision_profile_via_es2plus(
 
     req_enc := enc_JSON_ES2p_Request(conf_req);
     response := ext_RSPClient_sendHttpsPostWithAuth(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es2p,
         c_path_confirm_order,
         oct2char(req_enc),
         g_pars_smdpp.smdp_es2p_server_port,
@@ -680,7 +746,7 @@ const octetstring c_SGP22_VERSION := '020200'O;  /* SGP.22 v2.2.0 */
 private function f_create_initiate_authentication_request() runs on smdpp_ConnHdlr
 return RemoteProfileProvisioningRequest {
 
-	g_euiccChallenge := ext_RSPClient_generateChallenge(g_rsp_client_handle);
+	g_euiccChallenge := ext_RSPClient_generateChallenge(g_rsp_client_handle_es9p);
 	ext_logInfo("Generated eUICC challenge: " & ext_bytesToHex(g_euiccChallenge));
 
 	/* Create EUICC_INFO1 using TTCN-3 native types */
@@ -734,7 +800,7 @@ runs on smdpp_ConnHdlr return boolean {
 		return false;
 	}
 
-	if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle, enc_ServerSigned1(authOk.serverSigned1), authOk.serverSignature1, g_serverCert)) {
+	if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle_es9p, enc_ServerSigned1(authOk.serverSigned1), authOk.serverSignature1, g_serverCert)) {
 		ext_logError("Server signature validation failed");
 		return false;
 	}
@@ -762,7 +828,7 @@ runs on smdpp_ConnHdlr return InitiateAuthenticationOkEs9 {
 private function f_create_get_bound_profile_package_request(octetstring smdpSignature2) runs on smdpp_ConnHdlr
 return RemoteProfileProvisioningRequest {
 
-	var octetstring euiccOtpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+	var octetstring euiccOtpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
 	var EUICCSigned2 euiccSigned2 := {
 		transactionId := g_transactionId,
@@ -771,7 +837,7 @@ return RemoteProfileProvisioningRequest {
 	};
 
 	// Add confirmation code hash if required
-	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p);
 	ext_logInfo("Checking confirmation code hash, length: " & int2str(lengthof(ccHash)));
 	if (lengthof(ccHash) == 32) {
 		euiccSigned2.hashCc := ccHash;
@@ -784,7 +850,7 @@ return RemoteProfileProvisioningRequest {
 
 	var octetstring euiccSigned2Data := enc_EUICCSigned2(euiccSigned2);
 	var octetstring concatdata := euiccSigned2Data & smdpSignature2;
-	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
 	var PrepareDownloadResponse prepareDownloadResponse := {
 		downloadResponseOk := {
@@ -811,7 +877,7 @@ private function f_create_prepare_download_response_with_otpk(octetstring smdpSi
 		hashCc := omit  /* No confirmation code for nominal case */
 	};
 
-	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p);
 	if (lengthof(ccHash) == 32) {
 		euiccSigned2.hashCc := ccHash;
 		ext_logInfo("Added confirmation code hash to PrepareDownloadResponse: " & oct2str(ccHash));
@@ -821,7 +887,7 @@ private function f_create_prepare_download_response_with_otpk(octetstring smdpSi
 
 	var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
 	var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
-	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
 	var PrepareDownloadResponse prepareDownloadResponse := {
 		downloadResponseOk := {
@@ -918,7 +984,7 @@ runs on smdpp_ConnHdlr return template RemoteProfileProvisioningResponse {
 	var integer http_status;
 
 	var charstring response_body := ext_RSPClient_sendHttpsPost(
-		g_rsp_client_handle,
+		g_rsp_client_handle_es9p,
 		g_last_es9p_endpoint,
 		g_last_es9p_request,
         g_pars_smdpp.smdp_es9p_server_port,
@@ -977,7 +1043,7 @@ return DecodedRPPReponse_Wrap {
 
 		var integer http_status;
 		var charstring response_body := ext_RSPClient_sendHttpsPost(
-			g_rsp_client_handle,
+			g_rsp_client_handle_es9p,
 			g_last_es9p_endpoint,
 			g_last_es9p_request,
 			g_pars_smdpp.smdp_es9p_server_port,
@@ -1012,7 +1078,7 @@ return DecodedRPPReponse_Wrap {
 	var integer http_status;
 	ext_logInfo("Sending ASN.1 request to /gsma/rsp2/asn1 on port " & int2str(g_pars_smdpp.smdp_es9p_server_port));
 	var octetstring response_body := ext_RSPClient_sendHttpsPostBinary(
-		g_rsp_client_handle,
+		g_rsp_client_handle_es9p,
 		"/gsma/rsp2/asn1",
 		asn1_request,
 		g_pars_smdpp.smdp_es9p_server_port,
@@ -1237,14 +1303,14 @@ type record CertificatePair {
 
 private function f_get_certificate_pair() runs on smdpp_ConnHdlr return CertificatePair {
 	return {
-		euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
-		eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
+		euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p)),
+		eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p))
 	};
 }
 
 private function f_sign_euicc_signed1(EuiccSigned1 euiccSigned1) runs on smdpp_ConnHdlr return octetstring {
     var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-    return ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+    return ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, euiccSigned1_raw);
 }
 
 private function f_build_authenticate_client_request(
@@ -1359,7 +1425,7 @@ private function f_validate_ecdh_and_signature(InitialiseSecureChannelRequest is
                                              AuthenticateClientOk auok,
                                              RemoteProfileProvisioningRequest packageRequest)
 runs on smdpp_ConnHdlr return boolean {
-    var octetstring euiccOtpk := ext_RSPClient_getEUICCOtpk(g_rsp_client_handle);
+    var octetstring euiccOtpk := ext_RSPClient_getEUICCOtpk(g_rsp_client_handle_es9p);
     if (not ext_CertificateUtil_verifyECDHCompatible(euiccOtpk, iscReq.smdpOtpk)) {
         ext_logError("eUICC and SM-DP+ public keys are not ECDH compatible");
         return false;
@@ -1376,7 +1442,7 @@ runs on smdpp_ConnHdlr return boolean {
     var octetstring encsecr := encode_DER_InitialiseSecureChannelRequest_ver(toencsec);
     var octetstring trunc_initsec := substr(encsecr, 4, lengthof(encsecr)-4);
 
-    if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle, trunc_initsec,
+    if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle_es9p, trunc_initsec,
                                                iscReq.smdpSign, enc_Certificate(auok.smdpCertificate))) {
         ext_logError("InitialiseSecureChannelRequest signature validation failed");
         return false;
@@ -1482,7 +1548,7 @@ return JSON_ES9p_EmptyResponse {
 
     var integer http_status;
     var charstring response_body := ext_RSPClient_sendHttpsPost(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es9p,
         g_last_es9p_endpoint,
         g_last_es9p_request,
         g_pars_smdpp.smdp_es9p_server_port,
@@ -1591,7 +1657,7 @@ runs on smdpp_ConnHdlr return ProfileInstallationResult {
     }
 
     var octetstring full_encoded := encode_DER_profileInstallationResultData(pirData);
-    var octetstring euiccSignPIR := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, full_encoded);
+    var octetstring euiccSignPIR := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, full_encoded);
 
     var ProfileInstallationResult pir := {
         profileInstallationResultData := pirData,
@@ -1668,10 +1734,10 @@ private function f_buildAuthenticateClientRequest_unified(
 	};
 
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, euiccSigned1_raw);
 
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p));
 
 	return {
 		authenticateClientRequest := {
@@ -1856,7 +1922,7 @@ private function f_cancelSession(octetstring transactionId, objid smdpOid) runs 
     };
 
     var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-    cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+    cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
     var RemoteProfileProvisioningRequest cancelReq := {
         cancelSessionRequestEs9 := {
@@ -1891,10 +1957,10 @@ private function f_create_authenticate_client_request(charstring matchingId := "
 	var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
 
 	var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, euiccSigned1_raw);
 
-	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+	var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p));
+	var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p));
 
 	var RemoteProfileProvisioningRequest authReq := {
 		authenticateClientRequest := {
@@ -1915,7 +1981,7 @@ private function f_create_authenticate_client_request(charstring matchingId := "
 
 
 private function f_create_prepare_download_response(octetstring smdpSignature2) runs on smdpp_ConnHdlr return PrepareDownloadResponse {
-	var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+	var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
 	var EUICCSigned2 euiccSigned2 := {
 		transactionId := g_transactionId,
@@ -1923,7 +1989,7 @@ private function f_create_prepare_download_response(octetstring smdpSignature2) 
 		hashCc := omit
 	};
 
-	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+	var octetstring ccHash := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p);
 	if (lengthof(ccHash) == 32) {
 		euiccSigned2.hashCc := ccHash;
 		ext_logInfo("Added confirmation code hash to PrepareDownloadResponse: " & oct2str(ccHash));
@@ -1933,7 +1999,7 @@ private function f_create_prepare_download_response(octetstring smdpSignature2) 
 
 	var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
 	var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
-	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+	var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
 	var PrepareDownloadResponse prepDownloadResp := {
 		downloadResponseOk := {
@@ -2038,7 +2104,7 @@ private function f_authenticateClient_error_generic(
 
     /* Sign the data */
     var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+    var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, euiccSigned1_raw);
 
     /* Apply signature error if specified */
     if (ischosen(err_injection.sig_error) and err_injection.sig_error.corrupt_signature) {
@@ -2050,23 +2116,23 @@ private function f_authenticateClient_error_generic(
         select (err_injection.cert_error.error_type) {
         case (INVALID_EUM_SIGNATURE) {
             /* Load invalid (self-signed) EUM certificate */
-            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_INVALID.der");
+            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle_es9p, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_INVALID.der");
         }
         case (EXPIRED_EUM) {
             /* Load expired EUM certificate */
-            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_EXPIRED.der");
+            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle_es9p, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_EXPIRED.der");
         }
         case (INVALID_EUICC_SIGNATURE) {
             /* Load invalid (self-signed) eUICC certificate */
-            ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle, "./InvalidTestCases/CERT_EUICC_ECDSA_NIST_INVALID.der");
+            ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle_es9p, "./InvalidTestCases/CERT_EUICC_ECDSA_NIST_INVALID.der");
         }
         case (EXPIRED_EUICC) {
             /* Load expired eUICC certificate */
-            ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle, "./InvalidTestCases/CERT_EUICC_ECDSA_NIST_EXPIRED.der");
+            ext_RSPClient_loadEUICCCertificate(g_rsp_client_handle_es9p, "./InvalidTestCases/CERT_EUICC_ECDSA_NIST_EXPIRED.der");
         }
         case (UNKNOWN_CI_KEY) {
             /* Load EUM certificate signed by unknown CI */
-            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_UNKNOWN_CI.der");
+            ext_RSPClient_loadEUMCertificate(g_rsp_client_handle_es9p, "./InvalidTestCases/CERT_EUM_ECDSA_NIST_UNKNOWN_CI.der");
         }
         case else {
             setverdict(fail, "Unsupported certificate error type");
@@ -2076,8 +2142,8 @@ private function f_authenticateClient_error_generic(
     }
 
     /* Get certificates from RSP client */
-    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+    var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p));
+    var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p));
 
     /* Build the request */
     var RemoteProfileProvisioningRequest authClientReq := {
@@ -2147,7 +2213,7 @@ private function f_getBoundProfilePackage_error_generic(
 
     /* Step 3: PrepareDownloadResponse with error injection */
     var octetstring smdpSignature2 := authClientOk.smdpSignature2;
-    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
     /* Build EUICCSigned2 */
     var EUICCSigned2 euiccSigned2 := {
@@ -2163,9 +2229,9 @@ private function f_getBoundProfilePackage_error_generic(
     if (server_requires_cc and not ischosen(err_injection.cc_error)) {
         /* Set confirmation code and get hash */
         var charstring confirmationCode := "12345678";  /* Default test code matching server */
-        var integer result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+        var integer result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, confirmationCode);
         if (result == 0) {
-            euiccSigned2.hashCc := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+            euiccSigned2.hashCc := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p);
             ext_logInfo("Using confirmation code hash: " & oct2str(euiccSigned2.hashCc));
         }
     }
@@ -2211,7 +2277,7 @@ private function f_getBoundProfilePackage_error_generic(
     /* Sign EUICCSigned2 */
     var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
     var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
-    var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+    var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
     /* Apply signature corruption if needed */
     if (ischosen(err_injection.sig_error) and err_injection.sig_error.corrupt_signature) {
@@ -2286,7 +2352,7 @@ private function f_initiateAuth_generic(charstring id, template (omit) octetstri
     }
 
     var octetstring serverCert := enc_Certificate(authOk.serverCertificate);
-    if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle,
+    if (not ext_RSPClient_verifyServerSignature(g_rsp_client_handle_es9p,
                                                 enc_ServerSigned1(authOk.serverSigned1),
                                                 authOk.serverSignature1,
                                                 serverCert)) {
@@ -2495,10 +2561,10 @@ private function f_test_getBoundProfilePackage_generic(
 
         var EuiccSigned1 euiccSigned1 := f_create_euicc_signed1(euiccInfo2, ctxParams);
         var octetstring euiccSigned1_raw := enc_EuiccSigned1(euiccSigned1);
-        var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, euiccSigned1_raw);
+        var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, euiccSigned1_raw);
 
-        var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-        var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle));
+        var Certificate g_euicc_cert := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p));
+        var Certificate g_eum_cert := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p));
 
         var RemoteProfileProvisioningRequest authReq := {
             authenticateClientRequest := {
@@ -2535,7 +2601,7 @@ private function f_test_getBoundProfilePackage_generic(
 
             if (params.testMode == BPP_RETRY_SAME_OTPK and iter == 0) {
                 /* First iteration: generate and save OTPK */
-                euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+                euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
                 saved_euicc_otpk := euicc_otpk;
                 ext_logInfo("Generated and saved eUICC OTPK: " & oct2str(euicc_otpk));
             } else if (params.testMode == BPP_RETRY_SAME_OTPK and iter == 1) {
@@ -2544,7 +2610,7 @@ private function f_test_getBoundProfilePackage_generic(
                 ext_logInfo("Reusing saved eUICC OTPK: " & oct2str(euicc_otpk));
             } else {
                 /* Generate new OTPK for all other cases */
-                euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+                euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
                 if (params.testMode == BPP_RETRY_DIFFERENT_OTPK and iter == 1) {
                     ext_logInfo("Generated new eUICC OTPK for retry: " & oct2str(euicc_otpk));
                 }
@@ -2711,17 +2777,17 @@ private function f_test_getBoundProfilePackage_PPK_generic(
 	var RemoteProfileProvisioningRequest packageReq;
 
 	if (requireCC) {
-		var octetstring euiccOtpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+		var octetstring euiccOtpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
 		var EUICCSigned2 euiccSigned2 := {
 			transactionId := g_transactionId,
 			euiccOtpk := euiccOtpk,
-			hashCc := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle)
+			hashCc := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p)
 		};
 
 		var octetstring euiccSigned2Data := enc_EUICCSigned2(euiccSigned2);
 		var octetstring concatdata := euiccSigned2Data & authClientOk.smdpSignature2;
-		var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+		var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
 		var PrepareDownloadResponse prepDownloadResp := {
 			downloadResponseOk := {
@@ -2868,7 +2934,7 @@ private function f_TC_AuthenticateClient_RetryCases_Reuse_OTPK(charstring id) ru
     ext_logInfo("Step 3: Testing GetBoundProfilePackage with OTPK reuse");
 
     /* simulate reuse from cancelled session */
-    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
     var octetstring smdpSignature2 := authClientResp2.smdpSignature2;
     var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response_with_otpk(smdpSignature2, euicc_otpk);
@@ -2941,7 +3007,7 @@ private function f_perform_initial_session_and_cancel(
     };
 
     var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-    cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+    cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
     var RemoteProfileProvisioningRequest cancelReq := {
         cancelSessionRequestEs9 := {
@@ -2992,7 +3058,7 @@ private function f_TC_GetBoundProfilePackage_Retry_Unified(
     }
 
     if (with_cc) {
-        ext_RSPClient_setConfirmationCode(g_rsp_client_handle, "12345678");
+        ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, "12345678");
     }
 
     /* Step 3: Prepare retry based on OTPK mode */
@@ -3001,7 +3067,7 @@ private function f_TC_GetBoundProfilePackage_Retry_Unified(
 
     if (otpk_mode == RETRY_REUSE_SAME_OTPK) {
         /* Reuse OTPK from cancelled session */
-        var octetstring euicc_otpk := ext_RSPClient_getEUICCOtpk(g_rsp_client_handle);
+        var octetstring euicc_otpk := ext_RSPClient_getEUICCOtpk(g_rsp_client_handle_es9p);
         ext_logInfo("Step 3: GetBoundProfilePackage retry with SAME eUICC otPK");
         ext_logInfo("Reusing SAME eUICC otPK");
         prepDownloadResp := f_create_prepare_download_response_with_otpk(
@@ -3009,7 +3075,7 @@ private function f_TC_GetBoundProfilePackage_Retry_Unified(
         otpk_description := "same";
     } else if (otpk_mode == RETRY_SEND_NEW_OTPK) {
         /* Generate new OTPK to simulate eUICC rejection */
-        var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+        var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
         ext_logInfo("Step 3: GetBoundProfilePackage retry with NEW eUICC otPK");
         ext_logInfo("Using NEW eUICC otPK");
         prepDownloadResp := f_create_prepare_download_response_with_otpk(
@@ -3175,7 +3241,7 @@ private function f_TC_GetBoundProfilePackage_Retry_09_ConfirmationCode(charstrin
 
     /* Set transaction ID for confirmation code hash computation */
     ext_logInfo("Setting transaction ID: " & oct2str(g_transactionId));
-    var integer result := ext_RSPClient_setTransactionId(g_rsp_client_handle, g_transactionId);
+    var integer result := ext_RSPClient_setTransactionId(g_rsp_client_handle_es9p, g_transactionId);
     if (result != 0) {
         setverdict(fail, "Failed to set transaction ID");
         f_rsp_client_cleanup();
@@ -3184,7 +3250,7 @@ private function f_TC_GetBoundProfilePackage_Retry_09_ConfirmationCode(charstrin
 
     /* First attempt with wrong confirmation code */
     ext_logInfo("First attempt with wrong confirmation code");
-    ext_RSPClient_setConfirmationCode(g_rsp_client_handle, "00000000");  /* Wrong code */
+    ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, "00000000");  /* Wrong code */
 
     var PrepareDownloadResponse prepDownloadResp := f_create_prepare_download_response(authClientOk.smdpSignature2);
     var RemoteProfileProvisioningRequest packageReq := {
@@ -3207,7 +3273,7 @@ private function f_TC_GetBoundProfilePackage_Retry_09_ConfirmationCode(charstrin
 
     /* Second attempt with correct confirmation code */
     ext_logInfo("Second attempt with correct confirmation code");
-    ext_RSPClient_setConfirmationCode(g_rsp_client_handle, "12345678");  /* Correct code */
+    ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, "12345678");  /* Correct code */
 
     prepDownloadResp := f_create_prepare_download_response(authClientOk.smdpSignature2);
     packageReq.getBoundProfilePackageRequest.prepareDownloadResponse := prepDownloadResp;
@@ -3285,7 +3351,7 @@ private function f_TC_CancelSession_After_AuthenticateClient_Generic(
 	};
 
 	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
 	var RemoteProfileProvisioningRequest cancelReq := {
 		cancelSessionRequestEs9 := {
@@ -3370,7 +3436,7 @@ private function f_TC_CancelSession_After_GetBoundProfilePackage_Generic(
 	};
 
 	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
 	var RemoteProfileProvisioningRequest cancelReq := {
 		cancelSessionRequestEs9 := {
@@ -3481,7 +3547,7 @@ private function f_TC_CancelSession_After_AuthenticateClient_Error_Generic(
 	}
 
 	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
 	if (ischosen(err_injection.sig_error)) {
 		if (err_injection.sig_error.corrupt_signature) {
@@ -3578,7 +3644,7 @@ private function f_TC_CancelSession_After_GetBoundProfilePackage_Error_Generic(
 	}
 
 	var octetstring cancelSignedData := enc_EuiccCancelSessionSigned(cancelResp.cancelSessionResponseOk.euiccCancelSessionSigned);
-	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, cancelSignedData);
+	cancelResp.cancelSessionResponseOk.euiccCancelSessionSignature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, cancelSignedData);
 
 	if (ischosen(err_injection.sig_error)) {
 		if (err_injection.sig_error.corrupt_signature) {
@@ -3762,13 +3828,13 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	}
 
 	var octetstring enc_euicc_tosign := enc_EuiccSigned1(euiccSig);
-	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, enc_euicc_tosign);
+	var octetstring euiccSignature1 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, enc_euicc_tosign);
 	var AuthenticateServerResponse authresp := {
 		authenticateResponseOk := {
 			euiccSigned1 := euiccSig,
 			euiccSignature1 := euiccSignature1,
-			euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
-			eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
+			euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p)),
+			eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p))
 		}
 	}
 
@@ -3784,7 +3850,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	}
 
 	var octetstring auresp_sigdata := enc_SmdpSigned2(auok.smdpSigned2) & '5f3740'O & euiccSignature1;
-	if (not ext_RSPClient_verifyServerSignature( g_rsp_client_handle, auresp_sigdata, auok.smdpSignature2, enc_Certificate(auok.smdpCertificate))) {
+	if (not ext_RSPClient_verifyServerSignature( g_rsp_client_handle_es9p, auresp_sigdata, auok.smdpSignature2, enc_Certificate(auok.smdpCertificate))) {
 		ext_logError("Server signature validation failed");
 		setverdict(fail, "InitiateAuthentication validation failed");
 		f_rsp_client_cleanup();
@@ -3795,7 +3861,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		ext_logInfo("Confirmation code is required for this profile");
 
 		ext_logInfo("Setting transaction ID: " & oct2str(auok.transactionId));
-		var integer result := ext_RSPClient_setTransactionId(g_rsp_client_handle, auok.transactionId);
+		var integer result := ext_RSPClient_setTransactionId(g_rsp_client_handle_es9p, auok.transactionId);
 		if (result != 0) {
 			ext_logError("Failed to set transaction ID");
 		}
@@ -3804,13 +3870,13 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		if (ispresent(g_pars_smdpp.confirmation_code)) {
 			confirmationCode := g_pars_smdpp.confirmation_code;
 		}
-		result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+		result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, confirmationCode);
 		if (result != 0) {
 			ext_logError("Failed to set confirmation code");
 		}
 		ext_logInfo("Set confirmation code: " & confirmationCode);
 
-		var octetstring hashCheck := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle);
+		var octetstring hashCheck := ext_RSPClient_getConfirmationCodeHash(g_rsp_client_handle_es9p);
 		ext_logInfo("Confirmation code hash length: " & int2str(lengthof(hashCheck)));
 		if (lengthof(hashCheck) == 32) {
 			ext_logInfo("Confirmation code hash computed successfully: " & oct2str(hashCheck));
@@ -3821,8 +3887,8 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 		ext_logInfo("Confirmation code is NOT required for this profile");
 	}
 
-    var charstring eid := ext_CertificateUtil_getEID(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle));
-    var octetstring eumCert := ext_RSPClient_getEUMCertificate(g_rsp_client_handle);
+    var charstring eid := ext_CertificateUtil_getEID(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p));
+    var octetstring eumCert := ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p);
 
     if (not ext_CertificateUtil_validateEIDRange(eid, eumCert)) {
         setverdict(fail, "EID is not within permitted range of EUM certificate");
@@ -3870,9 +3936,9 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 
 	ext_logInfo("=== Validating certificate chains ===");
 
-	var octetstring ciCertificate := ext_RSPClient_getCICertificate(g_rsp_client_handle);
+	var octetstring ciCertificate := ext_RSPClient_getCICertificate(g_rsp_client_handle_es9p);
 
-	var octetstring euiccCertDer := ext_RSPClient_getEUICCCertificate(g_rsp_client_handle);
+	var octetstring euiccCertDer := ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p);
 	if (not ext_CertificateUtil_verifyCertificateChainWithIntermediate(euiccCertDer,
 																	   eumCert,
 																	   ciCertificate)) {
@@ -3901,7 +3967,7 @@ private function f_TC_rsp_complete_flow(charstring id) runs on smdpp_ConnHdlr {
 	}
 	ext_logInfo("Both certificates use curve: " & euiccCurve);
 
-	var octetstring sharedSecret := ext_RSPClient_computeSharedSecret(g_rsp_client_handle,
+	var octetstring sharedSecret := ext_RSPClient_computeSharedSecret(g_rsp_client_handle_es9p,
 																	iscReq.smdpOtpk);
 	if (lengthof(sharedSecret) == 0) {
 		setverdict(fail, "Failed to compute ECDH shared secret");
@@ -4125,13 +4191,13 @@ private function f_TC_HandleNotification_02_OtherSignedNotification(charstring i
 	};
 
 	var octetstring encoded := enc_NotificationMetadata(notifMeta);
-	var octetstring euicc_signature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, encoded);
+	var octetstring euicc_signature := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, encoded);
 
 	var OtherSignedNotification otherNotif := {
 		tbsOtherNotification := notifMeta,
 		euiccNotificationSignature := euicc_signature,
-		euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle)),
-		eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle))
+		euiccCertificate := dec_Certificate(ext_RSPClient_getEUICCCertificate(g_rsp_client_handle_es9p)),
+		eumCertificate := dec_Certificate(ext_RSPClient_getEUMCertificate(g_rsp_client_handle_es9p))
 	};
 
 	var PendingNotification pendingNotif := {
@@ -4167,7 +4233,7 @@ private function f_TC_GetBoundProfilePackage_Error_Generic(
     ext_logInfo("=== Step 3: GetBoundProfilePackage with " & test_description & " ===");
 
     var octetstring smdpSignature2 := authClientOk.smdpSignature2;
-    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle);
+    var octetstring euicc_otpk := ext_RSPClient_generateEUICCOtpk(g_rsp_client_handle_es9p);
 
     var EUICCSigned2 euiccSigned2 := {
         transactionId := g_transactionId,
@@ -4186,7 +4252,7 @@ private function f_TC_GetBoundProfilePackage_Error_Generic(
 
     var octetstring euiccSigned2_raw := enc_EUICCSigned2(euiccSigned2);
     var octetstring concatdata := euiccSigned2_raw & smdpSignature2;
-    var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle, concatdata);
+    var octetstring euiccSignature2 := ext_RSPClient_signDataWithEUICC(g_rsp_client_handle_es9p, concatdata);
 
     if (ischosen(err_injection.sig_error)) {
         if (err_injection.sig_error.corrupt_signature) {
@@ -5670,16 +5736,9 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
         return;
     }
 
-    var integer result := smdpp_Tests.ext_RSPClient_setAuthParams(
-        g_rsp_client_handle,
-        true,  // useMutualTLS
-        c_cert_path,
-        c_key_path
-    );
-
-    if (result != 0) {
-        setverdict(fail, "Failed to set authentication parameters");
-        mtc.stop;
+    if (not f_init_es2plus()) {
+        setverdict(fail, "RSP client initialization for ES2+ failed");
+        return;
     }
 
     // Step 1: Order profile via ES2+
@@ -5688,7 +5747,7 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
     var JSON_ES2p_Request dl_req := {
         downloadOrderRequest := {
             header := {
-                functionRequesterIdentifier := "test.operator.com",
+                functionRequesterIdentifier := mp_es2plus_operator_id,
                 functionCallIdentifier := "01234567890123456789012345678901"
             },
             eid := c_eid1,
@@ -5700,7 +5759,7 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
     var octetstring req_enc := enc_JSON_ES2p_Request(dl_req);
     var integer status_code;
     var charstring response := ext_RSPClient_sendHttpsPostWithAuth(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es2p,
         c_path_download_order,
         oct2char(req_enc),
         g_pars_smdpp.smdp_es2p_server_port,
@@ -5726,7 +5785,7 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
     var JSON_ES2p_Request conf_req := {
         confirmOrderRequest := {
             header := {
-                functionRequesterIdentifier := "test.operator.com",
+                functionRequesterIdentifier := mp_es2plus_operator_id,
                 functionCallIdentifier := "02234567890123456789012345678901"
             },
             iccid := new_iccid,
@@ -5740,7 +5799,7 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
 
     req_enc := enc_JSON_ES2p_Request(conf_req);
     response := ext_RSPClient_sendHttpsPostWithAuth(
-        g_rsp_client_handle,
+        g_rsp_client_handle_es2p,
         c_path_confirm_order,
         oct2char(req_enc),
         g_pars_smdpp.smdp_es2p_server_port,
@@ -5789,9 +5848,10 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
     f_validateAuthenticateClientResponse(authClientOk);
 
     // Handle confirmation code if required
+    var integer result;
     if (authClientOk.smdpSigned2.ccRequiredFlag == true) {
         log("Confirmation code is required for this profile");
-        result := ext_RSPClient_setTransactionId(g_rsp_client_handle, authClientOk.transactionId);
+        result := ext_RSPClient_setTransactionId(g_rsp_client_handle_es9p, authClientOk.transactionId);
         if (result != 0) {
             setverdict(fail, "Failed to set transaction ID");
             f_rsp_client_cleanup();
@@ -5799,7 +5859,7 @@ private function f_TC_ES2Plus_ES9Plus_FullFlow(charstring id) runs on smdpp_Conn
         }
 
         var charstring confirmationCode := "12345678";  // Default test code
-        result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle, confirmationCode);
+        result := ext_RSPClient_setConfirmationCode(g_rsp_client_handle_es9p, confirmationCode);
         if (result != 0) {
             setverdict(fail, "Failed to set confirmation code");
             f_rsp_client_cleanup();
