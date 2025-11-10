@@ -83,6 +83,7 @@ RUN	set -x && \
 		python3-requests \
 		python3-venv \
 		qemu-system-x86 \
+		redis \
 		rsync \
 		source-highlight \
 		sqlite3 \
