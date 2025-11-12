@@ -10,7 +10,7 @@ import sys
 args = None
 
 
-def wait_for_port():
+def wait_for_port_tcp():
     start_time = time.time()
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -22,6 +22,28 @@ def wait_for_port():
                 print(f"ERROR: {args.hostname}:{args.port} did not become available within {args.timeout}s!")
                 sys.exit(1)
 
+            time.sleep(0.1)
+
+
+def wait_for_port_sctp():
+    try:
+        import sctp
+    except ImportError:
+        print("python module sctp is not installed, sleeping 3s instead...")
+        time.sleep(3)
+        return
+
+    start_time = time.time()
+    while True:
+        try:
+            sk = sctp.sctpsocket_tcp(socket.AF_INET)
+            sk.connect((args.hostname, args.port))
+            sk.close()
+            sys.exit(0)
+        except ConnectionRefusedError:
+            if time.time() - start_time >= args.timeout:
+                print(f"ERROR: {args.hostname}:{args.port} did not become available within {args.timeout}s!")
+                sys.exit(1)
             time.sleep(0.1)
 
 
@@ -48,9 +70,19 @@ def parse_args():
         default=5,
         help="timeout in seconds (default: 5).",
     )
+    parser.add_argument(
+        "-P",
+        "--protocol",
+        choices=["tcp", "sctp"],
+        default="tcp",
+    )
     args = parser.parse_args()
 
 
 if __name__ == "__main__":
     parse_args()
-    wait_for_port()
+    match args.protocol:
+        case "tcp":
+            wait_for_port_tcp()
+        case "sctp":
+            wait_for_port_sctp()
