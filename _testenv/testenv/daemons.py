@@ -140,7 +140,7 @@ def stop():
 
         run_shell_on_stop = False
 
-    for daemon in daemons:
+    for daemon in reversed(daemons):
         pid = daemons[daemon].pid
         logging.info(f"Stopping {daemon} ({pid})")
         kill(pid)
