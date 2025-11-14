@@ -73,7 +73,7 @@ def add_subscr():
     print(f"PUT {url}")
     payload = {
         "auc_id": args.auc_id,
-        "default_apn": "Internet",
+        "default_apn": "internet",
         "apn_list": "1",
         "imsi": args.imsi,
         "msisdn": args.msisdn,
