@@ -16,7 +16,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(title="action", dest="action", required=True)
 
-    subparser = subparsers.add_parser("add_default_apn")
+    subparser = subparsers.add_parser("add_default_apns")
 
     subparser = subparsers.add_parser("add_subscr")
     subparser.add_argument("--imsi", required=True)
@@ -32,12 +32,28 @@ def parse_args():
     args = parser.parse_args()
 
 
-def add_default_apn():
+def add_default_apns():
     url = f"{api}/apn/"
+
     print(f"PUT {url}")
     payload = {
         "apn_id": 1,
         "apn": "internet",
+        "ip_version": 0,
+        "charging_characteristics": "0800",
+        "apn_ambr_dl": 0,
+        "apn_ambr_ul": 0,
+        "qci": 9,
+        "arp_priority": 4,
+        "arp_preemption_capability": 0,
+        "arp_preemption_vulnerability": 1,
+    }
+    session.put(url, json=payload)
+
+    print(f"PUT {url}")
+    payload = {
+        "apn_id": 2,
+        "apn": "*",
         "ip_version": 0,
         "charging_characteristics": "0800",
         "apn_ambr_dl": 0,
@@ -74,7 +90,7 @@ def add_subscr():
     payload = {
         "auc_id": args.auc_id,
         "default_apn": "internet",
-        "apn_list": "1",
+        "apn_list": "1,2",
         "imsi": args.imsi,
         "msisdn": args.msisdn,
     }

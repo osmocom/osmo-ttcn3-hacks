@@ -2,7 +2,7 @@
 wait_for_port.py -p 8080
 
 pyhss_api_helper.py \
-	add_default_apn
+	add_default_apns
 
 # Create a test subscriber with IMSI=001010000000000
 pyhss_api_helper.py \
