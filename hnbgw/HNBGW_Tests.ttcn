@@ -190,6 +190,8 @@ type component test_CT extends CTRL_Adapter_CT, StatsD_ConnHdlr, PFCP_ConnHdlr {
 	var RanOps g_ran_ops := MSC_RanOps;
 
 	var MutexDispCT vc_mutex_disp;
+
+	var boolean g_pfcp_answer_heartbeat_req := true;
 }
 
 /* global altstep for global guard timer; */
@@ -258,9 +260,9 @@ private function f_statsd_pfcp_associated() runs on test_CT return boolean
 	return pfcp_associated;
 }
 
-private function f_pfcp_wait_assoc_setup_req(boolean fail_timeout := true) runs on test_CT {
+private function f_pfcp_wait_assoc_setup_req(boolean fail_timeout := true, boolean fail_rx_others := true, float wait_timeout := 16.0) runs on PFCP_ConnHdlr {
 	var PDU_PFCP m;
-	timer T := 16.0;
+	timer T := wait_timeout;
 	/* ask PFCPEM to route all PDUs to us */
 	f_PFCPEM_subscribe_bcast();
 
@@ -271,9 +273,9 @@ private function f_pfcp_wait_assoc_setup_req(boolean fail_timeout := true) runs 
 					   ts_PFCP_Cause(REQUEST_ACCEPTED), 1234));
 			setverdict(pass);
 		}
-	[] PFCP.receive(PDU_PFCP:?) {
+	[fail_rx_others] PFCP.receive(PDU_PFCP:?) -> value m {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Got an unexpected PFCP message, was waiting for ", tr_PFCP_Assoc_Setup_Req()));
+						log2str("Got an unexpected PFCP message ", m, " vs exp ", tr_PFCP_Assoc_Setup_Req()));
 		}
 	[fail_timeout] T.timeout {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
@@ -296,7 +298,8 @@ function f_init_pfcp(charstring id) runs on test_CT {
 		pfcp_bind_port := PFCP_PORT,
 		pfcp_remote_ip := mp_pfcp_ip_remote,
 		pfcp_remote_port := PFCP_PORT,
-		role := UPF
+		role := UPF,
+		answer_heartbeat_req := g_pfcp_answer_heartbeat_req
 	};
 
 	vc_PFCP := PFCP_Emulation_CT.create(id) alive;
@@ -2699,6 +2702,36 @@ testcase TC_stat_stp_sctp_disconnected() runs on test_CT
 	f_shutdown_helper();
 }
 
+/***********************************************************************
+ * PFCP Testing
+ ***********************************************************************/
+
+friend function TC_tc_pfcp_heartbeat_timeout(charstring id) runs on ConnHdlr {
+	var RANAP_PDU tx;
+
+	activate(as_pfcp_ignore(PFCP, tr_PFCP_Heartbeat_Req));
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+	f_create_rab_ps();
+	f_pfcp_wait_assoc_setup_req(fail_timeout := true, fail_rx_others := false);
+	log("PESPIN: good!")
+
+	f_cn_iu_release_procedure(pfcp_teardown := g_pars.pfcp_pars.pfcp_enabled);
+}
+testcase TC_pfcp_heartbeat_timeout() runs on test_CT {
+	var ConnHdlr vc_conn;
+	g_num_hnbs := 1;
+	g_pfcp_answer_heartbeat_req := false;
+	f_init();
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler_with_pars(refers(TC_tc_pfcp_heartbeat_timeout), f_TestHdlrParams(7, ps_domain := true));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -2766,6 +2799,10 @@ control {
 
 	execute(TC_second_rab_assignment());
 	execute(TC_hnb_reregister_reuse_sctp_assoc());
+
+	if (mp_enable_pfcp_tests) {
+		execute(TC_pfcp_heartbeat_timeout());
+	}
 
 	/* This "nightly" if can be removed once libosmo-sigtran (osmo-stp) > 2.1.0 is released.
 	 * Currently released osmo-stp 2.1.0 ends up in in broken AS-ACTIVE+ASP-DOWN state when
