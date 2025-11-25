@@ -92,6 +92,7 @@ def init(cfg):
         "hnbgw_with_nftables.opts",
         "hnbgw_with_pfcp.opts",
         "iu.opts",
+        "libosmo-sigtran_with_tcap.opts",
         "no_dahdi.opts",
         "no_doxygen.opts",
         "no_man_pages.opts",
