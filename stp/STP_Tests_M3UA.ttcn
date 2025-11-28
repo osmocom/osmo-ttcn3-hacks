@@ -49,6 +49,12 @@ modulepar {
 	M3uaConfigs mp_m3ua_configs := {};
 	integer mp_recovery_timeout_msec := 2000;
 	charstring mp_sccp_service_type := "mtp3_itu";
+
+	/* Some PC which is known to be inaccessible for the IUT (no route) */
+	integer mp_inaccessible_pc := 666;
+
+	/* Network Indicator of the STP (IUT) network: */
+	OCT1 mp_ni := '00'O;
 }
 
 type record M3uaConfig {
@@ -178,6 +184,30 @@ runs on RAW_M3UA_CT return M3UA_RecvFrom {
 	[] T.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Timeout waiting for M3UA[", idx, "] ", msg));
+		}
+	}
+	return rx;
+}
+
+friend function f_M3UA_exp_no(integer idx, template (present) PDU_M3UA msg,
+			      float timeout_val := 5.0, boolean answer_beat := true)
+runs on RAW_M3UA_CT return M3UA_RecvFrom {
+	var M3UA_RecvFrom rx;
+	timer T := timeout_val;
+	T.start;
+	alt {
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(msg)) -> value rx {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected M3UA[", idx, "] ", rx));
+		}
+	[answer_beat] as_m3ua_beat_answer(idx);
+	[] M3UA[idx].receive(t_M3UA_RecvFrom(?)) -> value rx {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected M3UA[", idx, "] ", rx,
+						" before timeout expecting no ", msg));
+		}
+	[] T.timeout {
+		setverdict(pass);
 		}
 	}
 	return rx;
@@ -669,7 +699,7 @@ testcase TC_m3ua_sctp_srv_adm_shutdown() runs on RAW_M3UA_CT {
 /* Test if traffic is routed from idx_tx/pc_tx to idx_rx/pc_rx */
 friend function f_test_traffic(integer idx_tx, template (omit) OCT4 rctx_sender, OCT4 pc_tx,
 				integer idx_rx, template (omit) OCT4 rctx_receiver, OCT4 pc_rx,
-				OCT1 si := '23'O, OCT1 ni := '00'O, OCT1 mp := '00'O, OCT1 sls := '00'O)
+				OCT1 si := '23'O, OCT1 ni := mp_ni, OCT1 mp := '00'O, OCT1 sls := '00'O)
 runs on RAW_M3UA_CT {
 	var octetstring data := f_rnd_octstring_rnd_len(100);
 	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender,
@@ -1765,6 +1795,73 @@ testcase TC_combinedlset_loadshare() runs on RAW_M3UA_CT {
 	f_clear_m3ua();
 }
 
+private function f_tc_inaccessible_sp_duna(integer idx_tx, OCT4 pc_sender, OCT4 rctx_sender,
+					   OCT4 pc_receiver, OCT4 rctx_receiver) runs on RAW_M3UA_CT {
+	var octetstring data := f_rnd_octstring_rnd_len(100);
+	var template (value) M3UA_Protocol_Data m3ua_data;
+	/* Max for T8 is 1200 msec, so we leave some more time. to avodi race conditions:  */
+	const float c_t8_max_sec := 1.2 + 0.5;
+
+	/* bring up the sender specifying a routing context */
+	f_M3UA_asp_up_act(idx_tx, rctx := rctx_sender);
+
+	/* check if DATA is accepted without Routing Context IE */
+	m3ua_data := ts_M3UA_protocol_data(pc_sender, pc_receiver, si:= '23'O, ni := mp_ni,
+					   mp := '00'O, sls := '00'O, data := data);
+	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender, m3ua_data), 1);
+	f_M3UA_exp(idx_tx, tr_M3UA_DUNA({ts_M3UA_PC(oct2int(pc_receiver), 0)}, rctx_sender));
+
+	/* Test Q.704 timer T8: After we received the first DUNA, if we send another message we
+	 * shouldn't receive another DUNA until T8 times out. Max for T8 is 1200, so we leave
+	 * some more time. */
+	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender, m3ua_data), 1);
+	f_M3UA_exp_no(idx_tx, tr_M3UA_DUNA({ts_M3UA_PC(oct2int(pc_receiver), 0)}, rctx_sender),
+		      timeout_val := c_t8_max_sec);
+
+	/* After T8,  we should receive again a DUNA: */
+	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender, m3ua_data), 1);
+	f_M3UA_exp(idx_tx, tr_M3UA_DUNA({ts_M3UA_PC(oct2int(pc_receiver), 0)}, rctx_sender));
+
+	/* Let T8 time out again: */
+	f_M3UA_send(idx_tx, ts_M3UA_DATA(rctx_sender, m3ua_data), 1);
+	f_M3UA_exp_no(idx_tx, tr_M3UA_DUNA({ts_M3UA_PC(oct2int(pc_receiver), 0)}, rctx_sender),
+		      timeout_val := c_t8_max_sec);
+
+
+	f_clear_m3ua();
+}
+
+/* test whether the STP sends back a M3UA DUNA when receiving a pkt towards an inaccessible SP (non existing/routable PC) */
+testcase TC_inaccessible_sp_duna() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(3, 4);
+	var OCT4 pc_receiver := int2oct(mp_inaccessible_pc, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
+	/* bring up the sender specifying a routing context */
+	f_tc_inaccessible_sp_duna(0, pc_sender, rctx_sender, pc_receiver, rctx_receiver);
+}
+
+/* test whether the STP sends back a M3UA DUNA when receiving a pkt towards an
+ * inaccessible SP (PC/AS known but no active ASPs towards it). */
+testcase TC_inaccessible_sp_duna2() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
+	/* bring up the sender specifying a routing context */
+	f_tc_inaccessible_sp_duna(0, pc_sender, rctx_sender, pc_receiver, rctx_receiver);
+}
+
 control {
 	/* M3UA Tests */
 	execute( TC_connect_asp_up() );
@@ -1782,6 +1879,8 @@ control {
 	execute( TC_act_rctx_data_no_rctx() );
 	execute( TC_m3ua_sctp_srv_adm_shutdown() );
 	execute( TC_combinedlset_loadshare() );
+	execute( TC_inaccessible_sp_duna() );
+	execute( TC_inaccessible_sp_duna2() );
 
 	/* M3UA RKM tests */
 	execute( TC_rkm_reg_static_notpermitted() );
