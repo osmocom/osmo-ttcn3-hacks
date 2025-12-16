@@ -140,6 +140,10 @@ private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
 	return plmn_id & '21430001'O & imsi_suffix;
 }
 
+private function f_NG_MobileIdentity_STMSI() runs on ConnHdlr return NG_MobileIdentity {
+	return valueof(cs_NG_MobileIdentity_STMSI(omit, substr(g_pars.ue_pars.guti, 4, lengthof(g_pars.ue_pars.guti) - 4)));
+}
+
 private function f_UE_SecurityCapability() runs on ConnHdlr return NG_UE_SecurityCapability {
 	var template (value) NG_UE_SecurityCapability ue_sec_cap;
 	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
@@ -180,6 +184,22 @@ private function f_next_pti() runs on ConnHdlr return ProcedureTransactionIdenti
 		g_pars.ue_pars.pti := int2oct(i + 1, 1);
 	}
 	return g_pars.ue_pars.pti;
+}
+
+/* 3GPP TS 24.501 9.11.3.44 PDU session status */
+function f_PDU_SessionStatus() runs on ConnHdlr return PDU_SessionStatus
+{
+	var template (value) PDU_SessionStatus st;
+	var BIT1 sess_id1_active;
+
+	if (ispresent(g_pars.ue_pars.sess_pars.cn_gtpu_teid)) {
+		sess_id1_active := '1'B;
+	} else {
+		sess_id1_active := '0'B;
+	}
+
+	st := cs_PDU_SessionStatus('000000'B & sess_id1_active & '0'B, '00000000'B);
+	return valueof(st);
 }
 
 /* 3GPP TS 24.501 5.4.1.3.2, 3GPP TS 33.501 6.1.3.2 */
@@ -281,18 +301,13 @@ private altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
 	}
 }
 
-/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
-private function f_pdu_handle_session_resource_setup_item(PDUSessionResourceSetupItemCxtReq req) runs on ConnHdlr return PDUSessionResourceSetupItemCxtRes
-{
-	var PDUSessionResourceSetupItemCxtRes resp;
-	var octetstring setup_trans_enc;
-	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
-	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+/* Handle a PDUSessionResourceSetupRequestTransfer and return a Result */
+private function f_pdu_handle_PDUSessionResourceSetupRequestTransfer(NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf)
+runs on ConnHdlr return NGAP_IEs.PDUSessionResourceSetupResponseTransfer {
 	var template (value) UPTransportLayerInformation utla;
 	var template (value) QosFlowPerTNLInformation qos;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
 
-	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
-	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
 	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
 		if (setup_req_transf.protocolIEs[i].id == id_UL_NGU_UP_TNLInformation) {
 			var UPTransportLayerInformation utli := setup_req_transf.protocolIEs[i].value_.uPTransportLayerInformation;
@@ -307,17 +322,33 @@ private function f_pdu_handle_session_resource_setup_item(PDUSessionResourceSetu
 					p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
 	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(1) });
 	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
+
+	return setup_resp_transf;
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_setup_item_ctx(PDUSessionResourceSetupItemCxtReq req) runs on ConnHdlr return PDUSessionResourceSetupItemCxtRes
+{
+	var PDUSessionResourceSetupItemCxtRes resp;
+	var octetstring setup_trans_enc;
+	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+
+	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
+	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
+	setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf);
+
 	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
 	resp := valueof(m_pDUSessionResourceSetupItemCxtRes(req.pDUSessionID, setup_trans_enc));
 	return resp;
 }
 
-private function f_pdu_handle_session_resource_setup_list(PDUSessionResourceSetupListCxtReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListCxtRes
+private function f_pdu_handle_session_resource_setup_list_ctx(PDUSessionResourceSetupListCxtReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListCxtRes
 {
 	var PDUSessionResourceSetupListCxtRes li_resp;
 	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
 		var PDUSessionResourceSetupItemCxtRes it_resp;
-		it_resp := f_pdu_handle_session_resource_setup_item(li_req[i]);
+		it_resp := f_pdu_handle_session_resource_setup_item_ctx(li_req[i]);
 		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
 			li_resp := { it_resp };
 		} else {
@@ -347,11 +378,69 @@ private altstep as_ngap_handle_InitialCtxReq_withPDUSessionList() runs on ConnHd
 				continue;
 			}
 			var PDUSessionResourceSetupListCxtReq li := ctx_setup_req.protocolIEs[i].value_.pDUSessionResourceSetupListCxtReq;
-			resources := f_pdu_handle_session_resource_setup_list(li);
+			resources := f_pdu_handle_session_resource_setup_list_ctx(li);
 		}
 		NGAP.send(m_ngap_succMsg(m_n2_InitialContextSetupResponse(g_pars.ue_pars.amf_id,
 									  g_pars.ue_pars.ran_id,
 									  resources)));
+	}
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_setup_item_su(PDUSessionResourceSetupItemSUReq req) runs on ConnHdlr return PDUSessionResourceSetupItemSURes
+{
+	var PDUSessionResourceSetupItemSURes resp;
+	var octetstring setup_trans_enc;
+	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+
+	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
+	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
+	setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf);
+
+	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
+	resp := valueof(m_pDUSessionResourceSetupItemSURes(req.pDUSessionID, setup_trans_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_setup_list_su(PDUSessionResourceSetupListSUReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListSURes
+{
+	var PDUSessionResourceSetupListSURes li_resp;
+	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
+		var PDUSessionResourceSetupItemSURes it_resp;
+		it_resp := f_pdu_handle_session_resource_setup_item_su(li_req[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+/* 3GPP TS 38.413 9.2.1.1 PDU SESSION RESOURCE SETUP REQUEST */
+altstep as_ngap_handle_PDUSessionResourceSetupReq() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(f_mw_n2_PDUSessionResourceSetupRequest(g_pars.ue_pars.amf_id,
+								       g_pars.ue_pars.ran_id,
+								       p_nAS_PDU := ?,
+								       p_pDUSessionResourceSetupListSUReq := ?));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var PDUSessionResourceSetupRequest pdu := rx_ngap.initiatingMessage.value_.pDUSessionResourceSetupRequest;
+		var PDUSessionResourceSetupListSURes resources;
+
+		for (var integer i := 0; i < lengthof(pdu.protocolIEs); i := i + 1) {
+			if (pdu.protocolIEs[i].id != id_PDUSessionResourceSetupListSUReq) {
+				continue;
+			}
+			var PDUSessionResourceSetupListSUReq li := pdu.protocolIEs[i].value_.pDUSessionResourceSetupListSUReq;
+			resources := f_pdu_handle_session_resource_setup_list_su(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceSetupResponse(g_pars.ue_pars.amf_id,
+									      g_pars.ue_pars.ran_id,
+									      resources)));
 	}
 }
 
@@ -592,6 +681,64 @@ function f_periodic_register_update() runs on ConnHdlr {
 	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
 
 	as_ngap_handle_configuration_update();
+}
+
+
+/* 3GPP TS 24.501 5.6.1 Service request procedure
+ * 3GPP TS 23.502 4.2.3.2 UE Triggered Service Request */
+function f_service_request_cm_connected(template (omit) ULDataStatus ul_data_status := omit,
+					template (omit) PDU_SessionStatus pdu_sess_status := omit) runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_ULDataStatus := ul_data_status,
+					    p_PDU_SessionStatus := pdu_sess_status);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	NGAP.send(nas_ul_msg);
+}
+
+/* 3GPP TS 24.501 5.6.1 Service request procedure
+ * 3GPP TS 23.502 4.2.3.2 UE Triggered Service Request */
+function f_service_request_cm_idle(template (omit) ULDataStatus ul_data_status := omit,
+				   template (omit) PDU_SessionStatus pdu_sess_status := omit) runs on ConnHdlr {
+	var template (value) NGAP_PDU tx_pdu;
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_ULDataStatus := ul_data_status,
+					    p_PDU_SessionStatus := pdu_sess_status);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_Msg := cs_ReplayedNASMessageContainerTLV(nas_pdu));
+
+	//TODO: add a function to send a NAS_UL_MSG and receive the encoded one.
+	var BIT4 sec_hdr_t := '0001'B;
+	var integer tx_count := 0;
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	var OCT4 mac := f_NG_NAS_mac_calc(NG_NAS_ALG_IP_NIA1, f_kdf_ng_nas_int(g_keys.kamf, NG_NAS_ALG_IP_NIA1),
+					   tx_count,
+					   bit2int(tsc_NG_RegResult_3GPP),
+					   false, '00'O & nas_pdu);
+	var NG_NAS_UL_Message_Type nas_out;
+	nas_out := valueof(cs_NG_SECURITY_PROTECTED_NAS_MESSAGE(tsc_EPD_GMM,
+								sec_hdr_t,
+								mac,
+								int2oct(tx_count, 1),
+								nas_pdu));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_out));
+	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.ue_pars.ran_id,
+						       nas_pdu, /* Service request */
+						       f_ULI(),
+						       mo_Signalling));
+	NGAP.send(tx_pdu);
 }
 
 /* 3GPP TS 24.501 5.5.2.2 UE-initiated de-registration procedure,
