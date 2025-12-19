@@ -2683,31 +2683,50 @@ testcase TC_bvc_unblock_ptp() runs on test_CT
 /***********************************************************************
  * BVC-RESET procedure
  ***********************************************************************/
-private altstep as_count_bvc_reset(integer sgsn_idx, BssgpBvci bvci, inout roro_integer roroi)
-runs on test_CT {
-	var BSSGP_BVC_CT sgsn_bvc_ct := f_get_sgsn_bvc_ct(sgsn_idx, bvci);
-	[] SGSN_MGMT.receive(BssgpResetIndication:{bvci}) from sgsn_bvc_ct {
-		roroi[sgsn_idx] := roroi[sgsn_idx] & { bvci };
-		repeat;
-	}
-}
-private altstep as_ignore_status(BSSGP_BVC_MGMT_PT pt) {
-[] pt.receive(BssgpStatusIndication:?) { repeat; }
-}
 private function f_get_sgsn_bvc_ct(integer sgsn_idx, BssgpBvci bvci) runs on test_CT return BSSGP_BVC_CT {
 	for (var integer i := 0; i < lengthof(g_sgsn[sgsn_idx].cfg.bvc); i := i+1) {
 		if (g_sgsn[sgsn_idx].cfg.bvc[i].bvci == bvci) {
 			return g_sgsn[sgsn_idx].vc_BSSGP_BVC[i];
 		}
 	}
+	log("f_get_sgsn_bvc_ct(", sgsn_idx, ", ", bvci, "): null");
 	return null;
 }
+
+private function f_get_sgsn_idx_bvc_ct(BSSGP_BVC_CT sgsn_bvc_ct, BssgpBvci bvci) runs on test_CT return integer {
+	for (var integer i := 0; i < lengthof(g_sgsn); i := i+1) {
+		for (var integer j := 0; j < lengthof(g_sgsn[i].vc_BSSGP_BVC); j := j+1) {
+			if (g_sgsn[i].cfg.bvc[j].bvci == bvci and
+			    g_sgsn[i].vc_BSSGP_BVC[j] == sgsn_bvc_ct) {
+				return i;
+			}
+		}
+	}
+	log("f_get_sgsn_idx_bvc_ct(ct=", sgsn_bvc_ct, ", bvci=", bvci, "): -1");
+	return -1;
+}
+
+private altstep as_count_bvc_reset(inout roro_integer roroi)
+runs on test_CT {
+	var BssgpResetIndication rx_bssgp_reset_ind;
+	var BSSGP_BVC_CT sgsn_bvc_ct;
+	[] SGSN_MGMT.receive(BssgpResetIndication:?) -> value rx_bssgp_reset_ind sender sgsn_bvc_ct {
+		var integer sgsn_idx := f_get_sgsn_idx_bvc_ct(sgsn_bvc_ct, rx_bssgp_reset_ind.bvci);
+		if (sgsn_idx >= 0) {
+			roroi[sgsn_idx] := roroi[sgsn_idx] & { rx_bssgp_reset_ind.bvci };
+		}
+		repeat;
+	}
+}
+private altstep as_ignore_status(BSSGP_BVC_MGMT_PT pt) {
+	[] pt.receive(BssgpStatusIndication:?) { repeat; }
+}
+
 private function f_reset_ptp_bvc_from_pcu(integer pcu_idx, integer bvc_idx) runs on test_CT
 {
 	var BSSGP_BVC_CT pcu_bvc_ct := g_pcu[pcu_idx].vc_BSSGP_BVC[bvc_idx];
 	var BssgpBvcConfig bvc_cfg := g_pcu[pcu_idx].cfg.bvc[bvc_idx];
 	var Nsei nsei_pcu := g_pcu[pcu_idx].cfg.nsei;
-	var ro_default defaults;
 	var integer i;
 
 	SGSN_MGMT.clear;
@@ -2720,33 +2739,23 @@ private function f_reset_ptp_bvc_from_pcu(integer pcu_idx, integer bvc_idx) runs
 	/* block the PTP BVC from the PCU side */
 	PCU_MGMT.send(BssgpResetRequest:{cause:=BSSGP_CAUSE_OM_INTERVENTION}) to pcu_bvc_ct;
 
-	/* expect state on both PCU and SGSN side to change */
-	defaults := { activate(as_ignore_status(SGSN_MGMT)) };
-
-	/* Activate altsteps: One for each SGSN */
-	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
-		var default d := activate(as_count_bvc_reset(i, bvc_cfg.bvci, g_roroi));
-		defaults := defaults & { d };
-	}
-
 	timer T := 3.0;
 	T.start;
 	alt {
-	[] PCU_MGMT.receive(tr_BssgpStsInd(nsei_pcu, bvc_cfg.bvci, BVC_S_BLOCKED)) from pcu_bvc_ct {
+	[] PCU_MGMT.receive(tr_BssgpStsInd(nsei_pcu, bvc_cfg.bvci, BVC_S_BLOCKED)) -> sender pcu_bvc_ct {
 		g_roi := g_roi & { bvc_cfg.bvci };
 		repeat;
 		}
+	[] as_count_bvc_reset(g_roroi);
+	[] as_ignore_status(SGSN_MGMT); /* expect state on both PCU and SGSN side to change */
 	[] T.timeout;
-	}
-
-	for (i := 0; i < lengthof(defaults); i := i+1) {
-		deactivate(defaults[i]);
 	}
 
 	/* Check if BVC-RESET was received at all SGSNs */
 	for (i := 0; i < lengthof(g_sgsn); i := i+1) {
 		if (not ro_integer_contains(g_roroi[i], bvc_cfg.bvci)) {
-			setverdict(fail, "Missing SGSN[", i, "] BVC-BLOCK of BVCI=", bvc_cfg.bvci);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Missing SGSN[", i, "] BVC-BLOCK of BVCI=", bvc_cfg.bvci, ", got ", g_roroi));
 		}
 	}
 
@@ -2762,24 +2771,27 @@ testcase TC_bvc_reset_ptp_from_bss() runs on test_CT
 	f_cleanup();
 }
 
-private altstep as_count_bvc_sts(integer sgsn_idx, BssgpBvci bvci,
-				 template (present) BvcState exp_bvc_state, inout roro_integer roroi)
+private altstep as_count_bvc_sts(template (present) BvcState exp_bvc_state, inout roro_integer roroi)
 runs on test_CT {
-	var BSSGP_BVC_CT sgsn_bvc_ct := f_get_sgsn_bvc_ct(sgsn_idx, bvci);
-	[] SGSN_MGMT.receive(tr_BssgpStsInd(?, bvci, exp_bvc_state)) from sgsn_bvc_ct {
-		roroi[sgsn_idx] := roroi[sgsn_idx] & { bvci };
+	var BssgpStatusIndication rx_bssgp_st_ind;
+	var BSSGP_BVC_CT sgsn_bvc_ct;
+	[] SGSN_MGMT.receive(tr_BssgpStsInd(?, ?, exp_bvc_state)) -> value rx_bssgp_st_ind sender sgsn_bvc_ct {
+		var integer sgsn_idx := f_get_sgsn_idx_bvc_ct(sgsn_bvc_ct, rx_bssgp_st_ind.bvci);
+		if (sgsn_idx >= 0) {
+			roroi[sgsn_idx] := roroi[sgsn_idx] & { rx_bssgp_st_ind.bvci };
+		}
 		repeat;
 	}
 }
 
-private altstep as_count_bvc_block(integer sgsn_idx, BssgpBvci bvci, inout roro_integer roroi)
+private altstep as_count_bvc_block(inout roro_integer roroi)
 runs on test_CT {
-	[] as_count_bvc_sts(sgsn_idx, bvci, BVC_S_BLOCKED, roroi);
+	[] as_count_bvc_sts(BVC_S_BLOCKED, roroi);
 }
 
-private altstep as_count_bvc_unblock(integer sgsn_idx, BssgpBvci bvci, inout roro_integer roroi)
+private altstep as_count_bvc_unblock(inout roro_integer roroi)
 runs on test_CT {
-	[] as_count_bvc_sts(sgsn_idx, bvci, BVC_S_UNBLOCKED, roroi);
+	[] as_count_bvc_sts(BVC_S_UNBLOCKED, roroi);
 }
 
 /* reset the signaling BVC from one BSS; expect no signaling BVC reset on SGSN; but BVC-BLOCK for PTP */
@@ -2795,27 +2807,14 @@ testcase TC_bvc_reset_sig_from_bss() runs on test_CT {
 	/* Start BVC-RESET procedure for BVCI=0 */
 	PCU_MGMT.send(BssgpResetRequest:{cause:=BSSGP_CAUSE_OM_INTERVENTION}) to g_pcu[0].vc_BSSGP;
 
-	/* Activate altsteps: One for each PTP BVC and SGSN within that PCUs NSE */
-	var ro_default defaults := {};
-	for (var integer i := 0; i < lengthof(g_pcu[0].cfg.bvc); i := i+1) {
-		var BssgpBvcConfig bvcc := g_pcu[0].cfg.bvc[i];
-		for (var integer j := 0; j < lengthof(g_sgsn); j := j+1) {
-			var default d := activate(as_count_bvc_block(j, bvcc.bvci, g_roroi));
-			defaults := defaults & { d };
-		}
-	}
-
 	timer T := 3.0;
 	T.start;
 	alt {
 	[] SGSN_MGMT.receive(BssgpResetIndication:{0}) {
 		setverdict(fail, "BSS-side Reset of BVCI=0 should not propagate");
 		}
+	[] as_count_bvc_block(g_roroi);
 	[] T.timeout;
-	}
-
-	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
-		deactivate(defaults[i]);
 	}
 
 	/* check if BVC-block was received on all expected BVC/SGSN */
@@ -2905,11 +2904,25 @@ private altstep as_ignore_mgmt(BSSGP_BVC_MGMT_PT pt) {
 	[] pt.receive {repeat; }
 }
 
-private altstep as_count_bvc0_block(integer pcu_idx, Nsei nsei, inout ro_integer roi)
+private function f_get_pcu_idx_ct(BSSGP_CT pcu_ct) runs on test_CT return integer {
+	for (var integer i := 0; i < lengthof(g_pcu); i := i+1) {
+		if (g_pcu[i].vc_BSSGP == pcu_ct) {
+			return i;
+		}
+	}
+	log("f_get_pcu_idx_ct(ct=", pcu_ct, "): -1");
+	return -1;
+}
+
+private altstep as_count_bvc0_block(inout ro_integer roi)
 runs on test_CT {
-	var BSSGP_CT pcu_ct := g_pcu[pcu_idx].vc_BSSGP;
-	[] PCU_MGMT.receive(BssgpResetIndication:{0}) from pcu_ct {
-		roi := roi & { nsei };
+	var BSSGP_CT pcu_ct;
+	[] PCU_MGMT.receive(BssgpResetIndication:{0}) -> sender pcu_ct {
+		var integer pcu_idx := f_get_pcu_idx_ct(pcu_ct);
+		if (pcu_idx >= 0) {
+			var NSConfiguration nscfg := mp_nsconfig_pcu[pcu_idx];
+			roi := roi & { nscfg.nsei };
+		}
 		repeat;
 	}
 }
@@ -2926,23 +2939,15 @@ testcase TC_bvc_reset_sig_from_sgsn() runs on test_CT {
 	/* Start BVC-RESET procedure for BVCI=0 */
 	SGSN_MGMT.send(BssgpResetRequest:{cause:=BSSGP_CAUSE_OM_INTERVENTION}) to g_sgsn[0].vc_BSSGP;
 
-	/* Defaults match in reverse activation order, this one is a catch-all for Status indications
-	 * and reset indications sent from other components (like the ptp_bvcs). If we don't drain
-	 * the port and a different message sits at the front we wait forever and fail the test.
-	 */
-	var ro_default defaults := { activate(as_ignore_mgmt(PCU_MGMT)) };
-
-	/* Activate altsteps: One for each PCU NSE */
-	for (var integer i := 0; i < lengthof(g_pcu); i := i+1) {
-		var NSConfiguration nscfg := mp_nsconfig_pcu[i];
-		var default d := activate(as_count_bvc0_block(i, nscfg.nsei, g_roi));
-		defaults := defaults & { d };
-	}
-
-	f_sleep(3.0);
-
-	for (var integer i := 0; i < lengthof(defaults); i := i+1) {
-		deactivate(defaults[i]);
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] as_count_bvc0_block(g_roi);
+	/* This one is a catch-all for Status indications and reset indications sent from other components
+	 * (like the ptp_bvcs). If we don't drain the port and a different message sits at the front we
+	 * wait forever and fail the test.*/
+	[] as_ignore_mgmt(PCU_MGMT);
+	[] T.timeout;
 	}
 
 	/* check if BVC-block was received on all expected BVC */
