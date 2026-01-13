@@ -2,6 +2,7 @@
 # Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
 import logging
+import multiprocessing
 import os
 import sys
 import testenv
@@ -114,6 +115,11 @@ def clean():
 
 
 def main():
+    # Python 3.14 changed the default multiprocessing start method from "fork"
+    # to "forkserver", which breaks multiprocessing.Process() as used in
+    # testenv.podman.start_in_background(). Restore the previous behavior.
+    multiprocessing.set_start_method("fork")
+
     testenv.init_logging()
     testenv.init_args()
 
