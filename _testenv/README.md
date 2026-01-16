@@ -272,6 +272,11 @@ Testenv sets the following variables while running shell commands from
 * `TERM`:
   Is set to the same `TERM` passed to testenv with fallback to `dumb`.
 
+* `HOST_USER`:
+  When running in podman (`--podman`), this variable is set to the user that is
+  running podman. This is used in `_testenv/data/scripts/require_ulimit_r.sh`
+  to display a hint for setting the rtprio limit for this user.
+
 ## Eclipse-titan versions
 
 It is possible to change the eclipse-titan version that is used to build and

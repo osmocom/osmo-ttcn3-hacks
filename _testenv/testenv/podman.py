@@ -244,6 +244,8 @@ def start():
         "net.ipv4.conf.default.send_redirects=0",  # OS#6575
         "-e",
         "PODMAN=1",
+        "-e",
+        f"HOST_USER={os.getenv('USER')}",
     ]
 
     if testenv.args.binary_repo:
