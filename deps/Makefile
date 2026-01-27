@@ -8,7 +8,6 @@ OSMOGERRIT:=https://gerrit.osmocom.org
 OSMOGITEA:=https://gitea.osmocom.org/ttcn3
 
 ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
-			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
 			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
@@ -44,7 +43,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.HTTPmsg \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
-			titan.TestPorts.MTP3asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
 			titan.TestPorts.SIPmsg \
@@ -54,6 +52,8 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
+			titan.TestPorts.MTP3asp \
+			titan.ProtocolEmulations.M3UA \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
@@ -74,7 +74,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 # exact commits of deps when doing regression testing.
 nas_commit=					60a69a44cc6bbb32d96aecc4e355128ac5f95a5e
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
-titan.ProtocolEmulations.M3UA_commit=		b58f92046e48a7b1ed531e243a2319ebca53bf4c
+titan.ProtocolEmulations.M3UA_commit=		a70095b9113b23d2ea2405a5775befec18dd0fe0
 titan.ProtocolEmulations.SCCP_commit=	 	750a3e836831e58eae59d4757ef5d0c759f9ca5d
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A-4-g20cfaf8
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb175a
@@ -114,7 +114,7 @@ titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
 titan.TestPorts.HTTPmsg_commit=			R.9.B-4-g9a0dfde
 titan.TestPorts.IPL4asp_commit=			R.30.E-7-g029bccb
 titan.TestPorts.LANL2asp_commit=		R.8.C-3-gb07c265
-titan.TestPorts.MTP3asp_commit=	 		88224e93e9fffba082061b9642251551209ee567
+titan.TestPorts.MTP3asp_commit=	 		3e92ca9b24615f582741812350b0c2023f0a426c
 titan.TestPorts.PCAPasp_commit=			R.8.A-3-g9ad320f
 titan.TestPorts.PIPEasp_commit=			R.7.D-3-g8b01154
 titan.TestPorts.SCTPasp_commit=			R.11.A-8-g2e911c3
