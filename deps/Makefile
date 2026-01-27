@@ -44,6 +44,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.HTTPmsg \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
+			titan.TestPorts.MTP3asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
 			titan.TestPorts.SIPmsg \
@@ -53,7 +54,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
-			titan.TestPorts.MTP3asp \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
@@ -114,7 +114,7 @@ titan.TestPorts.Common_Components.Abstract_Socket_commit=	R.9.B-4-gbd41994
 titan.TestPorts.HTTPmsg_commit=			R.9.B-4-g9a0dfde
 titan.TestPorts.IPL4asp_commit=			R.30.E-7-g029bccb
 titan.TestPorts.LANL2asp_commit=		R.8.C-3-gb07c265
-titan.TestPorts.MTP3asp_commit=	 		1cecdad6f3641a5f19b3833703bff6e5005eff11
+titan.TestPorts.MTP3asp_commit=	 		88224e93e9fffba082061b9642251551209ee567
 titan.TestPorts.PCAPasp_commit=			R.8.A-3-g9ad320f
 titan.TestPorts.PIPEasp_commit=			R.7.D-3-g8b01154
 titan.TestPorts.SCTPasp_commit=			R.11.A-8-g2e911c3
