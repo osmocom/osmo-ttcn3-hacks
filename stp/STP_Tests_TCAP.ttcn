@@ -94,6 +94,73 @@ runs on TCAP_CT return TCAP_CT_Configurations
 	return tcap_configs;
 }
 
+private function f_get_peer_pc_list() runs on TCAP_CT return Osmocom_Types.ro_integer
+{
+	var Osmocom_Types.ro_integer peer_pc_list := {};
+
+	for (var integer i := 0; i < lengthof(g_tcap); i := i + 1) {
+		ro_integer_add_unique(peer_pc_list, g_tcap[i].sccp_pars.dpc);
+	}
+	return peer_pc_list;
+}
+
+/* Wait until none of the peer PCs is explicitly unavailable */
+private function f_wait_peers_available(float timeout_sec := 3.0)
+runs on TCAP_CT
+{
+	timer T;
+	var ASP_SCCP_N_PCSTATE_ind n_pcstate_ind;
+	var Osmocom_Types.ro_integer peer_pc_list := f_get_peer_pc_list();
+	var Osmocom_Types.ro_integer peer_st_list := {}; /* 1: available, 0: unknown, -1: unavailable */
+
+	/* Initialize state list item to "unknown": */
+	for (var integer i := 0; i < lengthof(peer_pc_list); i := i + 1) {
+		peer_st_list := peer_st_list & { 0 };
+	}
+
+	log("Waiting for SCCP peer_pc_list=", peer_pc_list, " to become available");
+	T.start(timeout_sec);
+
+	alt {
+	[] any from SCCP_TCAP.receive(t_ASP_N_PCSTATE_ind(?, ?, *, *)) -> value n_pcstate_ind {
+		var integer aff_pc := bit2int(n_pcstate_ind.affectedSP);
+		var integer idx := ro_integer_get_first_pos(peer_pc_list, aff_pc);
+		if (idx < 0) {
+			log("Waiting for SCCP peer_pc_list=", peer_pc_list, ": Rx N-PCSTATE.ind for another peer PC=", aff_pc, ", ",n_pcstate_ind);
+			repeat;
+		}
+		if (n_pcstate_ind.spStatus == SCCP_PAR_SP_Status_accessible and
+			n_pcstate_ind.remSCCPStatus == SCCP_PAR_Remote_SCCP_Status_available) {
+			log("SCCP peer PC=", aff_pc," is now available");
+			peer_st_list[idx] := 1; /* available */
+			for (var integer i := 0; i < lengthof(peer_st_list); i := i + 1) {
+				if (peer_st_list[i] != 1) {
+					log("Keep waiting for SCCP peer_pc_list=", peer_pc_list, ", peer_st_list=", peer_st_list);
+					repeat;
+				}
+			}
+			/* All peers are explicitly available, we are done */
+			T.stop;
+			break;
+		}
+		peer_st_list[idx] := -1; /* unavailable */
+		repeat;
+		}
+	[] any from SCCP_TCAP.receive {
+		log("Waiting for SCCP peer_pc_list=", peer_pc_list, ", peer_st_list=", peer_st_list, ": Discarding message");
+		repeat;
+		}
+	[] T.timeout {
+		if (ro_integer_contains(peer_st_list, -1)) {
+			/* explicitly unavailable:*/
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for SCCP peer_pc_list=", peer_pc_list, ", peer_st_list=", peer_st_list));
+		}
+		/* Done, assume PCs for which we didn't receive an explicit "unavailable" are actually available. */
+		}
+	}
+	log("Done waiting for SCCP peer_pc_list=", peer_pc_list, ", peer_st_list=", peer_st_list);
+}
 
 private function f_init_tcap(TCAP_CT_Configurations tcap_configs) runs on TCAP_CT {
 	f_init_common();
@@ -114,10 +181,7 @@ private function f_init_tcap(TCAP_CT_Configurations tcap_configs) runs on TCAP_C
 		f_sccp_adapter_start(g_tcap[i]);
 	}
 
-	/* M3UA Emulation doesn't yet signal events up the stack, so it's
-	impossible to know exactly when the ASP becomes active. Hence, wait for
-	a while here to do ASPUP+ASPAC procedures: */
-	f_sleep(3.0);
+	f_wait_peers_available();
 }
 
 private function f_asp_tx_ipa_ext_tcap_routing(template (value) IPA_EXT_TCAP_ROUTING_Message send_msg,
