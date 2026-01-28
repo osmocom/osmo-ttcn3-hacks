@@ -371,6 +371,12 @@ private altstep as_main_bssap_le() runs on BSSAP_LE_Emulation_CT {
 		var BSSAP_LE_N_CONNECT_cfm conn_cfm;
 		var BSSAP_LE_N_DATA_ind data_ind;
 		var BSSAP_LE_N_DISCONNECT_ind disc_ind;
+
+		var ASP_SCCP_N_RESET_ind n_reset_ind;
+		var ASP_SCCP_N_RESET_cfm n_reset_cfm;
+		var ASP_SCCP_N_STATE_ind n_state_ind;
+		var ASP_SCCP_N_PCSTATE_ind n_pcstate_ind;
+
 		var BSSAP_LE_Conn_Req creq;
 		var PDU_BSSAP_LE bssap;
 		var BSSAP_LE_N_UNITDATA_req bssap_ud;
@@ -427,6 +433,24 @@ private altstep as_main_bssap_le() runs on BSSAP_LE_Emulation_CT {
 				f_handle_userData(vc_conn, conn_cfm.userData);
 			}
 			}
+
+		/* SCCP -> Client: N-RESET.ind */
+		[] BSSAP_LE.receive(ASP_SCCP_N_RESET_ind:?) -> value n_reset_ind {
+			log("Discard ", n_reset_ind)
+			}
+		/* SCCP -> Client: N-RESET.cfm */
+		[] BSSAP_LE.receive(ASP_SCCP_N_RESET_cfm:?) -> value n_reset_cfm {
+			log("Discard ", n_reset_cfm)
+			}
+		/* SCCP -> Client: N-STATE.ind */
+		[] BSSAP_LE.receive(ASP_SCCP_N_STATE_ind:?) -> value n_state_ind {
+			log("Discard ", n_state_ind)
+			}
+		/* SCCP -> Client: N-PCSTATE.ind */
+		[] BSSAP_LE.receive(ASP_SCCP_N_PCSTATE_ind:?) -> value n_pcstate_ind {
+			log("Discard ", n_pcstate_ind)
+			}
+
 		[] CLIENT.receive(PDU_BSSAP_LE:?) -> value bssap sender vc_conn {
 			var integer conn_id := f_conn_id_by_comp(vc_conn);
 			/* send it to dispatcher */
@@ -506,6 +530,49 @@ private function f_ML3_patch_seq(inout ConnectionData cd, in PDU_ML3_MS_NW dtap,
 	f_ML3_patch_seq_nr(seq_nr, enc_l3);
 }
 
+function f_bssap_le_wait_sccp_peer_available(BSSAP_LE_CODEC_PT pt, integer peer_pc, float timeout_sec := 3.0)
+{
+	timer T;
+	var ASP_SCCP_N_PCSTATE_ind n_pcstate_ind;
+	var boolean rx_explicit_down := false;
+
+	log("Waiting for SCCP peer PC=", peer_pc, " to become available");
+	T.start(timeout_sec);
+
+	alt {
+	[] pt.receive(t_ASP_N_PCSTATE_ind(?, ?, *, *)) -> value n_pcstate_ind {
+		var integer aff_pc := bit2int(n_pcstate_ind.affectedSP);
+		if (aff_pc != peer_pc) {
+			log("Waiting for SCCP peer PC=", peer_pc, ": Rx N-PCSTATE.ind for another peer PC=", aff_pc, ", ",n_pcstate_ind);
+			repeat;
+		}
+		if (n_pcstate_ind.spStatus == SCCP_PAR_SP_Status_accessible and
+			n_pcstate_ind.remSCCPStatus == SCCP_PAR_Remote_SCCP_Status_available) {
+			log("SCCP peer PC=", aff_pc," is now available");
+			/* All peer is available, we are done */
+			T.stop;
+			return;
+		}
+		log("SCCP peer PC=", aff_pc," is NOT available: ", n_pcstate_ind);
+		rx_explicit_down := true;
+		repeat;
+		}
+	[] pt.receive {
+		log("Waiting for SCCP peer PC=", peer_pc, ": Discarding message");
+		repeat;
+		}
+	[] T.timeout {
+		if (rx_explicit_down) {
+			/* explicitly unavailable:*/
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for SCCP peer PC=", peer_pc));
+		}
+		/* Done, assume PCs for which we didn't receive an explicit "unavailable" are actually available. */
+		}
+	}
+	log("Done waiting for SCCP peer PC=", peer_pc);
+}
+
 function main(BssapLeOps ops, charstring id) runs on BSSAP_LE_Emulation_CT {
 
 	g_ran_id := id;
@@ -514,6 +581,9 @@ function main(BssapLeOps ops, charstring id) runs on BSSAP_LE_Emulation_CT {
 	f_expect_table_init();
 
 	if (isvalue(ops.sccp_addr_peer) and isvalue(ops.sccp_addr_local)) {
+		if (ispresent(ops.sccp_addr_peer.signPointCode)) {
+			f_bssap_le_wait_sccp_peer_available(BSSAP_LE, bit2int(ops.sccp_addr_peer.signPointCode));
+		}
 		f_bssap_le_reset(ops.sccp_addr_peer, ops.sccp_addr_local);
 	}
 
