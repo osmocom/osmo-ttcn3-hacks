@@ -1,11 +1,10 @@
-# Copyright 2026 sysmocom - s.f.m.c. GmbH
+# Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
 import logging
 import os
 import os.path
 import re
 import subprocess
-import sys
 import testenv
 import testenv.testsuite
 
@@ -80,6 +79,15 @@ def init_env():
         env_extra["TESTENV_QEMU_SCRIPTS"] = os.path.join(testenv.data_dir, "scripts/qemu")
 
 
+def exit_error_cmd(completed, error_msg):
+    """:param completed: return from run_cmd() below"""
+
+    logging.error(error_msg)
+    logging.debug(f"Command: {completed.args}")
+    logging.debug(f"Returncode: {completed.returncode}")
+    raise RuntimeError("shell command related error, find details right above this python trace")
+
+
 def generate_env(env={}, podman=False):
     ret = dict(env_extra)
     path = os.path.join(testenv.data_dir, "scripts")
@@ -131,5 +139,4 @@ def run(cmd, check=True, env={}, no_podman=False, stdin=subprocess.DEVNULL, *arg
     if p.returncode == 0 or not check:
         return p
 
-    logging.error(f"Command failed unexpectedly (returncode: {p.returncode})")
-    sys.exit(1)
+    exit_error_cmd(p, "Command failed unexpectedly")
