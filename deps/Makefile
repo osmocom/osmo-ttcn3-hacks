@@ -8,6 +8,8 @@ OSMOGERRIT:=https://gerrit.osmocom.org
 OSMOGITEA:=https://gitea.osmocom.org/ttcn3
 
 ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
+			titan.ProtocolEmulations.M3UA \
+			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
 			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
 			titan.ProtocolModules.DNS \
@@ -42,6 +44,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.HTTPmsg \
 			titan.TestPorts.IPL4asp \
 			titan.TestPorts.LANL2asp \
+			titan.TestPorts.MTP3asp \
 			titan.TestPorts.PCAPasp \
 			titan.TestPorts.PIPEasp \
 			titan.TestPorts.SIPmsg \
@@ -51,9 +54,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
-			titan.TestPorts.MTP3asp \
-			titan.ProtocolEmulations.M3UA \
-			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
