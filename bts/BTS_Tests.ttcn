@@ -115,6 +115,7 @@ modulepar {
 	integer mp_ms_power_level_exp := 7;
 	integer mp_bts_tx_nom_pwr_exp := 50; /* Expected Tx Nominal Output Power of the BTS, in dBm */
 	integer mp_bts_tx_pwr_att_exp := 20; /* Expected Tx Power attenuation wrt to Tx Nominal Output Power, in dB */
+	integer mp_rf_path_loss := 110; /* RF path loss, in dB */
 	integer mp_ms_actual_ta_exp := 0;
 	integer mp_timing_offset_256syms_exp := 512;
 	integer mp_uplink_power_target := -75;
@@ -2740,16 +2741,21 @@ private function f_TC_meas_res_periodic(charstring id) runs on ConnHdlr {
 	f_L1CTL_DM_REL_REQ(L1CTL, g_chan_nr);
 }
 
+/* calculate max. Rx power level (in dBm) expected on the Um interface */
+private function f_bts_max_rx_level_dbm() return integer {
+	return mp_bts_tx_nom_pwr_exp - mp_bts_tx_pwr_att_exp - mp_rf_path_loss;
+}
+
 /* Wait until the BTS has reached full tx power (nominal tx power minus configured attenuation) */
-private function f_wait_ramp_up() runs on ConnHdlr return integer {
+private function f_wait_ramp_up() runs on ConnHdlr {
 	var L1ctlMessage l1_dl;
-	var integer max_rx_lvl := mp_bts_tx_nom_pwr_exp - mp_bts_tx_pwr_att_exp;
+	var integer max_rx_lvl := f_bts_max_rx_level_dbm();
 	timer Tup := 10.0;
 	Tup.start;
 	alt {
 	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
-		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
-		log("Received rx_level=", rx_lvl);
+		var integer rx_lvl := rxlev2dbm(l1_dl.dl_info.rx_level);
+		log("BCCH RxLev ", rx_lvl, " dBm");
 
 		if (rx_lvl != max_rx_lvl) {
 			repeat;
@@ -2758,11 +2764,10 @@ private function f_wait_ramp_up() runs on ConnHdlr return integer {
 		}
 	[] L1CTL.receive { repeat; }
 	[] Tup.timeout {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					log2str("Didn't reach full power ", max_rx_lvl));
+		setverdict(fail, "Didn't reach full power ", max_rx_lvl, " dBm");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 		}
 	}
-	return max_rx_lvl;
 }
 
 /* verify BTS ramps power up to full tx power (nominal tx power minus configured attenuation) */
@@ -2770,37 +2775,37 @@ private function f_verify_ramp_up() runs on ConnHdlr {
 	var L1ctlMessage l1_dl;
 	var integer initial_rx_lvl := -1;
 	var integer last_rx_lvl := -1;
-	var integer max_rx_lvl := mp_bts_tx_nom_pwr_exp - mp_bts_tx_pwr_att_exp;
+	var integer max_rx_lvl := f_bts_max_rx_level_dbm();
 
 	timer T := 2.0;
 	alt {
 	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
-		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
-		log("Received rx_level=", rx_lvl);
+		var integer rx_lvl := rxlev2dbm(l1_dl.dl_info.rx_level);
+		log("BCCH RxLev ", rx_lvl, " dBm");
 		if (initial_rx_lvl == -1) {
 			initial_rx_lvl := rx_lvl;
 			last_rx_lvl := rx_lvl;
 
 			/* Expect a somehow low value during first received messages */
 			if (initial_rx_lvl >= max_rx_lvl / 2) {
-				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-							log2str("Detected high initial tx power during ramp up: ",
-								initial_rx_lvl , ", full power is ", max_rx_lvl));
+				setverdict(fail, "Detected high initial Tx power during ramp up: ",
+					   initial_rx_lvl , " dBm (full power is ", max_rx_lvl, " dBm)");
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 			}
 		}
 
 		/* received Rx level bigger than maximum allowed power by CN */
 		if (rx_lvl > max_rx_lvl) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Detected Tx power higher than full power: ",
-							rx_lvl , " > ", max_rx_lvl));
+			setverdict(fail, "Detected Tx power higher than full power: ",
+				   rx_lvl , " > ", max_rx_lvl, " dBm");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 		}
 
 		/* Make sure it never decreases, since we are rumping up */
 		if (last_rx_lvl > rx_lvl) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Detected Tx power decrease during ramp up: ",
-							last_rx_lvl , " -> ", rx_lvl));
+			setverdict(fail, "Detected Tx power decrease during ramp up: ",
+				   last_rx_lvl , " -> ", rx_lvl, " dBm");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 		}
 
 		if (rx_lvl == max_rx_lvl and not T.running) {
@@ -2819,11 +2824,11 @@ private function f_verify_ramp_up() runs on ConnHdlr {
 
 	/* We didn't increase tx power during ramp up */
 	if (initial_rx_lvl < last_rx_lvl) {
-		log("Tx power increased during ramp up: ", initial_rx_lvl , " -> ", last_rx_lvl);
+		log("Tx power increased during ramp up: ", initial_rx_lvl , " -> ", last_rx_lvl, " dBm");
 	} else {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					log2str("No Tx power increase during whole ramp up: ",
-						initial_rx_lvl , " -> ", last_rx_lvl));
+		setverdict(fail, "No Tx power increase during whole ramp up: ",
+			   initial_rx_lvl , " -> ", last_rx_lvl, " dBm");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 	}
 }
 
@@ -2836,21 +2841,21 @@ private function f_verify_ramp_down(integer max_rx_lvl) runs on ConnHdlr {
 	Tdown.start;
 	alt {
 	[] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
-		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
-		log("Received rx_level=", rx_lvl);
+		var integer rx_lvl := rxlev2dbm(l1_dl.dl_info.rx_level);
+		log("BCCH RxLev ", rx_lvl, " dBm");
 
 		/* received Rx level bigger than maximum allowed power by CN */
 		if (rx_lvl > max_rx_lvl) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Detected Tx power higher than full power: ",
-							rx_lvl , " > ", max_rx_lvl));
+			setverdict(fail, "Detected Tx power higher than full power: ",
+				   rx_lvl , " > ", max_rx_lvl, " dBm");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 		}
 
 		/* Make sure it never increases, since we are rumping down */
 		if (last_rx_lvl < rx_lvl) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Detected Tx power increase during ramp up: ",
-							last_rx_lvl , " -> ", rx_lvl));
+			setverdict(fail, "Detected Tx power increase during ramp down: ",
+				   last_rx_lvl , " -> ", rx_lvl, " dBm");
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 		}
 
 		last_rx_lvl := rx_lvl;
@@ -2866,16 +2871,16 @@ private function f_verify_ramp_down(integer max_rx_lvl) runs on ConnHdlr {
 
 	/* We didn't increase tx power during ramp down */
 	if (max_rx_lvl > last_rx_lvl) {
-		log("Tx power decreased during ramp down: ", max_rx_lvl , " -> ", last_rx_lvl);
+		log("Tx power decreased during ramp down: ", max_rx_lvl , " -> ", last_rx_lvl, " dBm");
 	} else {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					log2str("No Tx power decrease during whole ramp down: ",
-						max_rx_lvl , " -> ", last_rx_lvl));
+		setverdict(fail, "No Tx power decrease during whole ramp down: ",
+			   max_rx_lvl , " -> ", last_rx_lvl, " dBm");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 	}
 }
 
 /* verify BTS power down to rx_level 0 without ramping */
-private function f_verify_power_down(integer max_rx_lvl) runs on ConnHdlr {
+private function f_verify_power_down(GsmRxLev max_rx_lvl) runs on ConnHdlr {
 	var L1ctlMessage l1_dl;
 	var boolean first_data_ind := true;
 
@@ -2885,7 +2890,7 @@ private function f_verify_power_down(integer max_rx_lvl) runs on ConnHdlr {
 	[first_data_ind == true] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
 		first_data_ind := false;
 		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
-		log("Received rx_level=", rx_lvl);
+		log("BCCH RxLev ", rx_lvl);
 
 		/* The first data indication could still have the original power level */
 		if (rx_lvl != 0 and rx_lvl != max_rx_lvl) {
@@ -2897,7 +2902,7 @@ private function f_verify_power_down(integer max_rx_lvl) runs on ConnHdlr {
 	}
 	[first_data_ind == false] L1CTL.receive(tr_L1CTL_DATA_IND(t_RslChanNr_BCCH(0), ?)) -> value l1_dl {
 		var GsmRxLev rx_lvl := l1_dl.dl_info.rx_level;
-		log("Received rx_level=", rx_lvl);
+		log("BCCH RxLev ", rx_lvl);
 
 		/* Expect immediate power off so either rx_level == 0 or no report at all
 		   because TRX was shut down already */
@@ -2942,11 +2947,13 @@ private function f_TC_tx_power_down_bcch(charstring id) runs on ConnHdlr {
 	RSL.clear;
 
 	/* Wait until BTS is started and at full power */
-	var integer max_rx_lvl := f_wait_ramp_up();
-	log("Reached nominal level ", max_rx_lvl, ", shutting down OML link");
+	f_wait_ramp_up();
+
+	var integer max_rx_lvl := f_bts_max_rx_level_dbm();
+	log("Reached nominal level ", max_rx_lvl, " dBm, shutting down OML link");
 
 	f_vty_transceive(BSCVTY, "drop bts connection 0 oml");
-	f_verify_power_down(max_rx_lvl);
+	f_verify_power_down(dbm2rxlev(max_rx_lvl));
 
 	setverdict(pass);
 }
@@ -2974,13 +2981,14 @@ private function f_TC_tx_power_ramp_adm_state_change(charstring id) runs on Conn
 	RSL.clear;
 
 	/* Wait until BTS is started and at full power */
-	var integer max_rx_lvl := f_wait_ramp_up();
-	log("Reached nominal level ", max_rx_lvl, ", changing ADM state to LOCKED");
+	f_wait_ramp_up();
+	var integer max_rx_lvl := f_bts_max_rx_level_dbm();
+	log("Reached nominal level ", max_rx_lvl, " dBm, changing ADM state to LOCKED");
 
 	log("ADM STATE UNLOCKED->LOCKED");
 	f_vty_enter_cfg_trx(BSCVTY);
 	f_vty_transceive(BSCVTY, "rf_locked 1");
-	f_verify_ramp_down(max_rx_lvl);
+	f_verify_ramp_down(dbm2rxlev(max_rx_lvl));
 
 	/* Let some time after we received 0dBm, then check we don't receive BCCH
 	 * anymore because scheduler has stopped after ramping down */
