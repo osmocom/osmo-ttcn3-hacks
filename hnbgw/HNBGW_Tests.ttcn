@@ -2765,6 +2765,75 @@ testcase TC_pfcp_heartbeat_timeout() runs on test_CT {
 	f_shutdown_helper();
 }
 
+/* Validate IUT detects PFCP Heartbeat Recovery Timestamp change and recovers from it tearing down
+ * existing subscriber connections: */
+private function f_TC_pfcp_heartbeat_recovery_timestamp(charstring id) runs on ConnHdlr {
+	var RANAP_PDU tx;
+	var PDU_PFCP rx_pfcp, tx_pfcp;
+	var StatsDExpects expect_disconnected := {
+		{name := f_upf_ctr_prefix(0) & "pfcp_associated", mtype := "g", min := 0, max := 0}
+	};
+	var StatsDExpects expect_connected := {
+		{name := f_upf_ctr_prefix(0) & "pfcp_associated", mtype := "g", min := 1, max := 1}
+	};
+	f_statsd_reset();
+
+	/* ask PFCPEM to route all PDUs to us */
+	f_PFCPEM_subscribe_bcast();
+	var integer recovery := f_PFCPEM_get_recovery_timestamp();
+
+	PFCP.receive(tr_PFCP_Heartbeat_Req) -> value rx_pfcp;
+	tx_pfcp := valueof(ts_PFCP_Heartbeat_Resp(recovery));
+	tx_pfcp.sequence_number := rx_pfcp.sequence_number;
+	PFCP.send(tx_pfcp);
+
+	tx := f_build_initial_ue(g_pars);
+	f_iuh2iu_connect(tx);
+	f_create_rab_ps();
+
+	recovery := recovery + 1;
+	PFCP.receive(tr_PFCP_Heartbeat_Req) -> value rx_pfcp;
+	tx_pfcp := valueof(ts_PFCP_Heartbeat_Resp(recovery));
+	tx_pfcp.sequence_number := rx_pfcp.sequence_number;
+	PFCP.send(tx_pfcp);
+
+	/* Wait for IUT to detect peer went down after Heartbeat Response with changed Recovery: */
+	f_statsd_expect(expect_disconnected, wait_converge := true);
+
+	/* Expect tear down of existing conns from IUT: */
+	RUA.receive(RUA_Disc_Ind:?);
+	RAN_CONN.receive(tr_MSC_CONN_PRIM_DISC_IND);
+	as_pfcp_handle_del_req();
+
+	/* ask PFCPEM to *not* route all PDUs to us anymore */
+	f_PFCPEM_unsubscribe_bcast();
+
+	/* Wait for a 2nd ASSOC SETUP REQ after Recovery triggered: */
+	f_pfcp_wait_assoc_setup_req(fail_timeout := true, fail_rx_others := false);
+	/* After we answer the ASSOC SETUP RESP, IUT detects peer up: */
+	f_statsd_expect(expect_connected, wait_converge := true);
+
+	/* Let RAN_Emulation some time to answer RLSD with RLC: */
+	f_sleep(1.0);
+}
+testcase TC_pfcp_heartbeat_recovery_timestamp() runs on test_CT {
+	var ConnHdlr vc_conn;
+	var float guard_timeout := 90.0;
+
+	g_num_hnbs := 1;
+	g_statd_timeout := 45.0;
+	g_pfcp_answer_heartbeat_req := false;
+	f_init(guard_timeout := guard_timeout);
+	f_sleep(1.0);
+
+	vc_conn := f_start_handler_with_pars(refers(f_TC_pfcp_heartbeat_recovery_timestamp),
+					     f_TestHdlrParams(8, ps_domain := true,
+							      t_guard := guard_timeout));
+	vc_conn.done;
+
+	f_shutdown_helper();
+}
+
 control {
 	execute(TC_hnb_register());
 	execute(TC_hnb_register_duplicate());
@@ -2837,6 +2906,7 @@ control {
 
 	if (mp_enable_pfcp_tests) {
 		execute(TC_pfcp_heartbeat_timeout());
+		execute(TC_pfcp_heartbeat_recovery_timestamp());
 	}
 
 	/* Run at the end since it messes with the SCCP config */
