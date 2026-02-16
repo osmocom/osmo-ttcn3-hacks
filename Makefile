@@ -157,3 +157,4 @@ clean:
 
 clean-logs:
 	find $(SUBDIRS) -name "*.log" -print -delete
+	find $(SUBDIRS) -name "*.merged" -print -delete
