@@ -22,6 +22,7 @@ import from REMSIM_Tests all;
 
 import from Misc_Helpers all;
 import from IPA_Emulation all;
+import from IPA_Types all;
 
 import from HTTPmsg_Types all;
 import from HTTPmsg_PortType all;
@@ -176,6 +177,61 @@ testcase TC_connect_client_duplicate() runs on test_CT {
 
 	setverdict(pass);
 }
+
+/* A client connects and stops answering to IPA PING/PONGs.
+   Do a re-connect. Older version of the server will crash. */
+testcase TC_connect_client_ipa_ping_timeout_reconnect() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimClient, "foobar"));
+	var JsRoot js;
+	timer T := 60.0;
+
+	f_init();
+	g_T_guard.start(90.0);
+	f_rsres_init();
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_client_slot := valueof(ts_ClientSlot(13,1));
+
+	js := f_rsres_get("/api/backend/v1/clients");
+	if (not match(js.clients, JsClients:{})) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Initial state not empty");
+	}
+	f_rspro_connect_client(0);
+	js := f_rsres_get("/api/backend/v1/clients");
+	if (not match(js.clients[0], tr_JsClient(CONNECTED_CLIENT, rspro[0].rspro_id))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Non-matching JSON response");
+	}
+
+	/* stop answering IPA Ping */
+	var IpaCcmMsgtype ipa_ping_msg := IPAC_MSGT_PING;
+	var octetstring ipa_ping_data := int2oct(enum2int(ipa_ping_msg), 1);
+
+	f_ipa_cfg_chg_ccm_enabled(IPACFG[0], false);
+	T.start;
+	alt {
+	[] IPAPORT[0].receive(t_ASP_IPA_UD(IPAC_PROTO_CCM, ipa_ping_data)) {
+		log("Received PING. Not answering it.");
+		repeat;
+		}
+	[] RSPRO[0].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) {}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timed out. Server did not close the connection.");
+		}
+	}
+
+	/* connect a second time with the same Client ID */
+	f_rspro_init(rspro[1], mp_server_ip, mp_server_port, rspro_id, 1);
+	rspro[1].rspro_client_slot := valueof(ts_ClientSlot(13,1));
+	f_rspro_connect_client(1);
+
+	/* expect the first connection still to be active */
+	js := f_rsres_get("/api/backend/v1/clients");
+	if (not match(js.clients[0], tr_JsClient(CONNECTED_CLIENT, rspro_id))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Non-matching JSON response");
+	}
+
+	setverdict(pass);
+}
+
 
 testcase TC_connect_bank() runs on test_CT {
 	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, "foobar"));
@@ -597,6 +653,7 @@ control {
 	execute( TC_connect_and_nothing() );
 	execute( TC_connect_client() );
 	execute( TC_connect_client_duplicate() );
+	execute( TC_connect_client_ipa_ping_timeout_reconnect() ); /* crashs on version < 1.1.3 (fixed by 00dcb6b47ca6) */
 	execute( TC_connect_bank() );
 	execute( TC_connect_bank_duplicate() );
 	execute( TC_slotmap_add() );
