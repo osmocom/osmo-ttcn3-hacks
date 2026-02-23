@@ -290,6 +290,69 @@ private function f_pfcp_wait_assoc_setup_req(boolean fail_timeout := true, boole
 	f_PFCPEM_unsubscribe_bcast();
 }
 
+altstep as_pfcp_handle_heartbeat_req(integer tx_recovery_timestamp)
+runs on PFCP_ConnHdlr {
+	var PDU_PFCP m;
+
+	[] PFCP.receive(tr_PFCP_Heartbeat_Req) -> value m {
+		var PDU_PFCP tx_pfcp;
+		tx_pfcp := valueof(ts_PFCP_Heartbeat_Resp(tx_recovery_timestamp));
+		tx_pfcp.sequence_number := m.sequence_number;
+		PFCP.send(tx_pfcp);
+		}
+}
+
+/* Notify peer that we restarted, it will then try to associate again. */
+private function f_pfcp_force_assoc_setup_req(boolean fail_timeout := true,
+					       boolean fail_rx_others := true,
+					       float wait_timeout := 16.0)
+runs on PFCP_ConnHdlr {
+	var boolean rx_hb_resp := false;
+	var boolean rx_assoc_setup_req := false;
+	var integer rts := f_PFCPEM_get_recovery_timestamp();
+	var PDU_PFCP m;
+	timer T := wait_timeout;
+
+	/* ask PFCPEM to route all PDUs to us */
+	f_PFCPEM_subscribe_bcast();
+
+	T.start;
+	PFCP.send(ts_PFCP_Heartbeat_Req(rts));
+	alt {
+	[not rx_hb_resp] PFCP.receive(tr_PFCP_Heartbeat_Resp) {
+		rx_hb_resp := true;
+		if (not rx_assoc_setup_req) {
+			repeat;
+		}
+		}
+	[not rx_assoc_setup_req] PFCP.receive(tr_PFCP_Assoc_Setup_Req()) -> value m {
+		rx_assoc_setup_req := true;
+		PFCP.send(ts_PFCP_Assoc_Setup_Resp(m.sequence_number, ts_PFCP_Node_ID_fqdn(mp_pfcp_upf_node_id),
+				ts_PFCP_Cause(REQUEST_ACCEPTED), 1234));
+		if (not rx_hb_resp) {
+			repeat;
+		}
+	}
+	[] as_pfcp_handle_heartbeat_req(rts) { repeat; }
+	[fail_rx_others] PFCP.receive(PDU_PFCP:?) -> value m {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Got an unexpected PFCP message ", m, " vs exp ", tr_PFCP_Assoc_Setup_Req()));
+		}
+	[fail_timeout] T.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for PFCP ", tr_PFCP_Assoc_Setup_Req()));
+		}
+	[not fail_timeout] T.timeout {
+			log("Timeout waiting for PFCP ", tr_PFCP_Assoc_Setup_Req());
+		}
+	}
+	T.stop;
+	setverdict(pass);
+
+	/* ask PFCPEM to *not* route all PDUs to us anymore */
+	f_PFCPEM_unsubscribe_bcast();
+}
+
 function f_init_pfcp(charstring id) runs on test_CT {
 	id := id & "-PFCP";
 
@@ -312,13 +375,16 @@ function f_init_pfcp(charstring id) runs on test_CT {
 	/* Temporarily access Statsd during test startup: */
 	connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
 
-	if (not f_statsd_pfcp_associated()) {
-		connect(self:PFCP, vc_PFCP:CLIENT);
-		connect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+	connect(self:PFCP, vc_PFCP:CLIENT);
+	connect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+	/* the non-nightly path can be removed once osmo-hnbgw >1.8.1 is released. */
+	if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+		f_pfcp_force_assoc_setup_req(fail_timeout := true);
+	} else {
 		f_pfcp_wait_assoc_setup_req(fail_timeout := true);
-		disconnect(self:PFCP, vc_PFCP:CLIENT);
-		disconnect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
 	}
+	disconnect(self:PFCP, vc_PFCP:CLIENT);
+	disconnect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
 
 	disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
 }
@@ -2769,7 +2835,6 @@ testcase TC_pfcp_heartbeat_timeout() runs on test_CT {
  * existing subscriber connections: */
 private function f_TC_pfcp_heartbeat_recovery_timestamp(charstring id) runs on ConnHdlr {
 	var RANAP_PDU tx;
-	var PDU_PFCP rx_pfcp, tx_pfcp;
 	var StatsDExpects expect_disconnected := {
 		{name := f_upf_ctr_prefix(0) & "pfcp_associated", mtype := "g", min := 0, max := 0}
 	};
@@ -2782,20 +2847,14 @@ private function f_TC_pfcp_heartbeat_recovery_timestamp(charstring id) runs on C
 	f_PFCPEM_subscribe_bcast();
 	var integer recovery := f_PFCPEM_get_recovery_timestamp();
 
-	PFCP.receive(tr_PFCP_Heartbeat_Req) -> value rx_pfcp;
-	tx_pfcp := valueof(ts_PFCP_Heartbeat_Resp(recovery));
-	tx_pfcp.sequence_number := rx_pfcp.sequence_number;
-	PFCP.send(tx_pfcp);
+	as_pfcp_handle_heartbeat_req(recovery);
 
 	tx := f_build_initial_ue(g_pars);
 	f_iuh2iu_connect(tx);
 	f_create_rab_ps();
 
 	recovery := recovery + 1;
-	PFCP.receive(tr_PFCP_Heartbeat_Req) -> value rx_pfcp;
-	tx_pfcp := valueof(ts_PFCP_Heartbeat_Resp(recovery));
-	tx_pfcp.sequence_number := rx_pfcp.sequence_number;
-	PFCP.send(tx_pfcp);
+	as_pfcp_handle_heartbeat_req(recovery);
 
 	/* Wait for IUT to detect peer went down after Heartbeat Response with changed Recovery: */
 	f_statsd_expect(expect_disconnected, wait_converge := true);
