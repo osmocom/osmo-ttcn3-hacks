@@ -117,12 +117,16 @@ type record ExpectDataProc {
 signature NGAPEM_register(in AMF_UE_NGAP_ID amf_id, in RAN_UE_NGAP_ID ran_id, in NGAP_ConnHdlr hdlr);
 signature NGAPEM_register_proc(in integer procedureCode, in NGAP_ConnHdlr hdlr);
 signature NGAPEM_obtain_amf_id() return AMF_UE_NGAP_ID;
+signature NGAPEM_obtain_nus(in RAN_UE_NGAP_ID ran_id) return NG_NAS_UE_State;
+signature NGAPEM_set_nus(in RAN_UE_NGAP_ID ran_id, in NG_NAS_UE_State nus);
 //signature NGAPEM_derive_nas_token(in octetstring kasme, in NGAP_ConnHdlr hdlr, out OCT32 nas_token);
 
 type port NGAPEM_PROC_PT procedure {
 	inout NGAPEM_register;
 	inout NGAPEM_register_proc;
 	inout NGAPEM_obtain_amf_id;
+	inout NGAPEM_obtain_nus;
+	inout NGAPEM_set_nus;
 	//inout NGAPEM_derive_nas_token;
 } with { extension "internal" };
 
@@ -288,13 +292,18 @@ runs on NGAP_Emulation_CT return integer {
 	return -1; /* make ttcn3 compiler happy */
 }
 
-private function f_assoc_id_by_comp(NGAP_ConnHdlr client)
+private function f_assoc_id_by_comp(NGAP_ConnHdlr client, template (omit) RAN_UE_NGAP_ID ran_id := omit)
 runs on NGAP_Emulation_CT return integer {
 	var integer i;
 	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
-		if (NGapAssociationTable[i].comp_ref == client) {
-			return i;
+		if (NGapAssociationTable[i].comp_ref != client) {
+			continue;
 		}
+		if (not istemplatekind(ran_id, "omit") and
+		    not match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id)) {
+			continue;
+		}
+		return i;
 	}
 	setverdict(fail, "NGAP Association Table not found by component ", client);
 	mtc.stop;
@@ -481,6 +490,7 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 		var charstring vlr_name, amf_name;
 		var integer ai;
 		var octetstring kasme;
+		var NG_NAS_UE_State nus;
 
 		alt {
 		/* Configuration primitive from client */
@@ -515,6 +525,15 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 			ai := f_ngap_id_table_add(vc_conn, omit, valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg)));
 			/* Store ULI so we can use it for generating UlNasTransport from NAS */
 			NGapAssociationTable[ai].uli := msg.initiatingMessage.value_.InitialUEMessage.protocolIEs[2].value_.userLocationInformation;
+			/* Pass message through */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
+		/* NGAP from client: PathSwitch */
+		[] NGAP_CLIENT.receive(mw_ngap_initMsg(mw_n2_PathSwitchRequest)) -> value msg sender vc_conn {
+			/* create a table entry about this connection */
+			ai := f_ngap_id_table_add(vc_conn, omit, valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg)));
+			/* Store ULI so we can use it for generating UlNasTransport from NAS */
+			NGapAssociationTable[ai].uli := msg.initiatingMessage.value_.PathSwitchRequest.protocolIEs[2].value_.userLocationInformation;
 			/* Pass message through */
 			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
 			}
@@ -611,6 +630,15 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 			var integer i := f_assoc_id_by_comp(vc_conn);
 			amf_id := NGapAssociationTable[i].amf_ue_ngap_id;
 			NGAP_PROC.reply(NGAPEM_obtain_amf_id:{} value amf_id) to vc_conn;
+			}
+		[] NGAP_PROC.getcall(NGAPEM_obtain_nus:{?}) -> param(ran_id) sender vc_conn {
+			var integer i := f_assoc_id_by_comp(vc_conn, ran_id);
+			NGAP_PROC.reply(NGAPEM_obtain_nus:{ran_id} value NGapAssociationTable[i].nus) to vc_conn;
+			}
+		[] NGAP_PROC.getcall(NGAPEM_set_nus:{?, ?}) -> param(ran_id, nus) sender vc_conn {
+			var integer i := f_assoc_id_by_comp(vc_conn, ran_id);
+			NGapAssociationTable[i].nus := nus;
+			NGAP_PROC.reply(NGAPEM_set_nus:{ran_id, nus}) to vc_conn;
 			}
 //		[] NGAP_PROC.getcall(NGAPEM_derive_nas_token:{?, ?, -}) -> param(kasme, vc_conn) {
 //			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
@@ -718,6 +746,21 @@ function f_ngap_obtain_amf_id() runs on NGAP_ConnHdlr return AMF_UE_NGAP_ID {
 		[] NGAP_PROC.getreply(NGAPEM_obtain_amf_id:{}) -> value amf_id {
 			return amf_id;
 		}
+	}
+}
+
+function f_ngap_obtain_nus(RAN_UE_NGAP_ID ran_id) runs on NGAP_ConnHdlr return NG_NAS_UE_State {
+	var NG_NAS_UE_State nus;
+	NGAP_PROC.call(NGAPEM_obtain_nus:{ran_id}) {
+		[] NGAP_PROC.getreply(NGAPEM_obtain_nus:{ran_id}) -> value nus {
+			return nus;
+		}
+	}
+}
+
+function f_ngap_set_nus(RAN_UE_NGAP_ID ran_id, NG_NAS_UE_State nus) runs on NGAP_ConnHdlr {
+	NGAP_PROC.call(NGAPEM_set_nus:{ran_id, nus}) {
+		[] NGAP_PROC.getreply(NGAPEM_set_nus:{ran_id, nus});
 	}
 }
 

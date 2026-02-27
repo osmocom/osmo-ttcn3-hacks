@@ -129,4 +129,24 @@ NGAP__IEs::UEContextSuspendRequestTransfer dec__NGAP__UEContextSuspendRequestTra
 	return ret;
 }
 
+OCTETSTRING enc__NGAP__PathSwitchRequestTransfer(const NGAP__IEs::PathSwitchRequestTransfer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::PathSwitchRequestTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::PathSwitchRequestTransfer dec__NGAP__PathSwitchRequestTransfer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::PathSwitchRequestTransfer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::PathSwitchRequestTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
 }

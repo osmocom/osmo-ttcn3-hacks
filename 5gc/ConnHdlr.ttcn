@@ -49,8 +49,8 @@ import from NG_CryptoFunctions all;
 import from GTPv1U_Emulation all;
 import from UECUPS_Types all;
 
-/* (maximum) number of emulated eNBs */
-const integer NUM_NGRAN := 1;
+/* (maximum) number of emulated gNBs */
+const integer NUM_NGRAN := 2;
 
 /* parameters of emulated gNB / ng-eNB */
 type record NGRANParams {
@@ -112,7 +112,25 @@ type record ConnHdlrPars {
 	boolean exp_CoreNetworkAssistanceInformationForInactive
 }
 
+/* Kind of 3GPP TS 38.423 9.1.1.1 HANDOVER REQUEST plus
+ * 3GPP TS 38.423 8.2.4 RETRIEVE UE CONTEXT RESPONSE (see 9.1.1.9 and 9.2.1.13 too). */
+type record Handover_Xn_Pars {
+	AMF_UE_NGAP_ID source_amf_id,
+	octetstring guti,
+	ProcedureTransactionIdentifier pti,
+	PDUSessionParams sess_pars,
+	NAS_KeySetIdentifier kset_id,
+	NG_NAS_UE_State	nus /* 3GPP TS 38.423 9.2.1.13 UE Context Information */
+};
+
+type port ConnHdlr_Coord_PT message
+{
+	inout charstring, Handover_Xn_Pars;
+} with { extension "internal" };
+
 type component ConnHdlr extends NGAP_ConnHdlr, GTP1U_ConnHdlr {
+	port ConnHdlr_Coord_PT COORD;
+
 	var ConnHdlrPars g_pars;
 	var UeDerivedKeys g_keys;
 
@@ -215,6 +233,16 @@ function f_PDU_SessionStatus() runs on ConnHdlr return PDU_SessionStatus
 
 	st := cs_PDU_SessionStatus('000000'B & sess_id1_active & '0'B, '00000000'B);
 	return valueof(st);
+}
+
+function f_UESecurityCapabilities() runs on ConnHdlr return UESecurityCapabilities
+{
+	var template (value) UESecurityCapabilities cap;
+	cap := m_uESecurityCapabilities(p_nRencryptionAlgorithms := '0000000000000000'B,
+					p_nRintegrityProtectionAlgorithms := '0000000000000000'B,
+					p_eUTRAencryptionAlgorithms := '0000000000000000'B,
+					p_eUTRAintegrityProtectionAlgorithms := '0000000000000000'B);
+	return valueof(cap);
 }
 
 /* 3GPP TS 24.501 5.4.1.3.2, 3GPP TS 33.501 6.1.3.2 */
@@ -879,6 +907,43 @@ function f_ue_context_resume() runs on ConnHdlr
 	NGAP.receive(mw_ngap_succMsg(mw_n2_UEContextResumeResponse(
 					g_pars.ue_pars.amf_id,
 					g_pars.ue_pars.ran_id)));
+}
+
+/* 3GPP TS 38.413 8.4.4 Path Switch Request
+ * 3GPP TS 38.413 9.2.3.8 PATH SWITCH REQUEST
+ * 3GPP TS 23.502 4.9.1.2.2 Xn based inter NG-RAN handover without User Plane function re-allocation */
+function f_n2_path_switch(AMF_UE_NGAP_ID source_amf_id) runs on ConnHdlr
+{
+	var template (value) UPTransportLayerInformation utla;
+	var template (value) PathSwitchRequestTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceToBeSwitchedDLItem it;
+	var template (value) NGAP_PDU tx_pdu;
+	var NGAP_PDU rx_pdu;
+
+	utla := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
+				    p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
+	transfer := m_pathSwitchRequestTransfer(p_dL_NGU_UP_TNLInformation := utla,
+						p_qosFlowAcceptedList := { m_qosFlowAcceptedItem(1) },
+						p_dL_NGU_TNLInformationReused := omit,
+						p_userPlaneSecurityInformation := omit);
+	transfer_enc := enc_NGAP_PathSwitchRequestTransfer(valueof(transfer));
+	it := m_pDUSessionResourceToBeSwitchedDLItem(g_pars.ue_pars.sess_pars.id,
+						     transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(m_n2_PathSwitchRequest(
+					g_pars.ue_pars.ran_id,
+					source_amf_id,
+					f_ULI(),
+					f_UESecurityCapabilities(),
+					{ it }));
+	NGAP.send(tx_pdu);
+	NGAP.receive(mw_ngap_succMsg(mw_n2_PathSwitchRequestAcknowledge(?, g_pars.ue_pars.ran_id))) -> value rx_pdu;
+
+	/* Update amf_id: */
+	var PathSwitchRequestAcknowledge path_switch_ack := rx_pdu.successfulOutcome.value_.PathSwitchRequestAcknowledge;
+	g_pars.ue_pars.amf_id := path_switch_ack.protocolIEs[0].value_.aMF_UE_NGAP_ID;
 }
 
 /* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
