@@ -14,7 +14,7 @@ TESTCASE=$1
 echo "$TESTCASE" > "$TTCN3_PCAP_PATH/.current_test"
 
 echo "------ $TESTCASE ------"
-date
+print_date_load
 
 if [ "$TESTENV_FAST" = 1 ]; then
 	exit 0

@@ -16,7 +16,7 @@ GSMTAP_PORT=4729
 TESTCASE=$1
 
 echo "------ $TESTCASE ------"
-date
+print_date_load
 
 if [ "$TESTENV_FAST" = 1 ]; then
 	exit 0

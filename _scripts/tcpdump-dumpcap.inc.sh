@@ -13,3 +13,7 @@ kill_rm_pidfile() {
 		rm $1
 	fi
 }
+
+print_date_load() {
+	echo "($(date +%H:%M:%S)) $(uptime | grep -o "load.*")"
+}

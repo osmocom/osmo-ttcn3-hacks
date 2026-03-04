@@ -8,7 +8,7 @@ FIFO=/tmp/cmderr
 TESTCASE=$1
 VERDICT="$2"
 
-date
+print_date_load
 
 if [ x"$VERDICT" = x"pass" ]; then
 	printf "\033[1;32m====== $TESTCASE $VERDICT ======\033[0m\n\n"
