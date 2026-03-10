@@ -123,9 +123,18 @@ type record Handover_Xn_Pars {
 	NG_NAS_UE_State	nus /* 3GPP TS 38.423 9.2.1.13 UE Context Information */
 };
 
+/* Pass needed UE context state between ConnHdlr */
+type record Handover_n2_Pars {
+	octetstring guti,
+	ProcedureTransactionIdentifier pti,
+	PDUSessionParams sess_pars,
+	NAS_KeySetIdentifier kset_id,
+	NG_NAS_UE_State	nus /* 3GPP TS 38.423 9.2.1.13 UE Context Information */
+};
+
 type port ConnHdlr_Coord_PT message
 {
-	inout charstring, Handover_Xn_Pars;
+	inout charstring, Handover_Xn_Pars, Handover_n2_Pars;
 } with { extension "internal" };
 
 type component ConnHdlr extends NGAP_ConnHdlr, GTP1U_ConnHdlr {
@@ -140,7 +149,7 @@ type component ConnHdlr extends NGAP_ConnHdlr, GTP1U_ConnHdlr {
 
 type function void_fn() runs on ConnHdlr;
 
-private template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
+template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
 	pLMNIdentity := ngran_pars.global_ngran_id.globalGNB_ID.pLMNIdentity,
 	tAC := ngran_pars.supported_ta_list[0].tAC,
 	iE_Extensions := omit
@@ -180,6 +189,15 @@ private function f_ULI() runs on ConnHdlr return UserLocationInformation {
 
 	));
 	return valueof(p_ueLocInf);
+}
+
+private function f_UPTLI() runs on ConnHdlr return UPTransportLayerInformation {
+	var template (value) UPTransportLayerInformation uptli;
+
+	uptli := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
+				    p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
+	return valueof(uptli);
 }
 
 private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (present) NAS_KeySetIdentifier {
@@ -350,12 +368,19 @@ runs on ConnHdlr return NGAP_IEs.PDUSessionResourceSetupResponseTransfer {
 	var template (value) UPTransportLayerInformation utla;
 	var template (value) QosFlowPerTNLInformation qos;
 	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+	var integer qos_id := 0;
 
 	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
-		if (setup_req_transf.protocolIEs[i].id == id_UL_NGU_UP_TNLInformation) {
+		select (setup_req_transf.protocolIEs[i].id) {
+		case (id_UL_NGU_UP_TNLInformation) {
 			var UPTransportLayerInformation utli := setup_req_transf.protocolIEs[i].value_.uPTransportLayerInformation;
 			g_pars.ue_pars.sess_pars.cn_gtpu_ip := f_inet_ntoa(bit2oct(utli.gTPTunnel.transportLayerAddress));
 			g_pars.ue_pars.sess_pars.cn_gtpu_teid := utli.gTPTunnel.gTP_TEID;
+			}
+		case (id_QosFlowSetupRequestList) {
+			var QosFlowSetupRequestList qos_req_li := setup_req_transf.protocolIEs[i].value_.QosFlowSetupRequestList;
+			qos_id := qos_req_li[0].qosFlowIdentifier;
+		}
 		}
 	}
 
@@ -363,7 +388,7 @@ runs on ConnHdlr return NGAP_IEs.PDUSessionResourceSetupResponseTransfer {
 	utla := m_uPTransportLayerInformation_gTPTunnel(
 			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
 					p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
-	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(1) });
+	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(qos_id) });
 	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
 
 	return setup_resp_transf;
@@ -815,7 +840,7 @@ function f_deregister() runs on ConnHdlr {
 }
 
 /* 3GPP TS 38.413 8.3.3 UE Context Release (AMF initiated) */
-private altstep as_ngap_handle_UeContextReleaseCmd(template (present) Cause exp_cause := ?) runs on ConnHdlr {
+altstep as_ngap_handle_UeContextReleaseCmd(template (present) Cause exp_cause := ?) runs on ConnHdlr {
 	var NGAP_PDU rx_ngap;
 	var template (present) NGAP_PDU exp_ngap :=
 		mw_ngap_initMsg(mw_n2_UEContextReleaseCommand(
@@ -914,17 +939,13 @@ function f_ue_context_resume() runs on ConnHdlr
  * 3GPP TS 23.502 4.9.1.2.2 Xn based inter NG-RAN handover without User Plane function re-allocation */
 function f_n2_path_switch(AMF_UE_NGAP_ID source_amf_id) runs on ConnHdlr
 {
-	var template (value) UPTransportLayerInformation utla;
 	var template (value) PathSwitchRequestTransfer transfer;
 	var octetstring transfer_enc;
 	var template (value) PDUSessionResourceToBeSwitchedDLItem it;
 	var template (value) NGAP_PDU tx_pdu;
 	var NGAP_PDU rx_pdu;
 
-	utla := m_uPTransportLayerInformation_gTPTunnel(
-			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
-				    p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
-	transfer := m_pathSwitchRequestTransfer(p_dL_NGU_UP_TNLInformation := utla,
+	transfer := m_pathSwitchRequestTransfer(p_dL_NGU_UP_TNLInformation := f_UPTLI(),
 						p_qosFlowAcceptedList := { m_qosFlowAcceptedItem(1) },
 						p_dL_NGU_TNLInformationReused := omit,
 						p_userPlaneSecurityInformation := omit);
@@ -944,6 +965,115 @@ function f_n2_path_switch(AMF_UE_NGAP_ID source_amf_id) runs on ConnHdlr
 	/* Update amf_id: */
 	var PathSwitchRequestAcknowledge path_switch_ack := rx_pdu.successfulOutcome.value_.PathSwitchRequestAcknowledge;
 	g_pars.ue_pars.amf_id := path_switch_ack.protocolIEs[0].value_.aMF_UE_NGAP_ID;
+}
+
+/* 3GPP TS 38.413 8.4.1 Handover Preparation
+ * 3GPP TS 38.413 9.2.3.1 HANDOVER REQUIRED
+ * 3GPP TS 38.413 9.3.4.14 Handover Required Transfer */
+function f_n2_handover_required(template (value) TargetID target_id) runs on ConnHdlr
+{
+	var template (value) HandoverRequiredTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceItemHORqd it;
+	var template (value) NGAP_PDU tx_pdu;
+
+	transfer := m_handoverRequiredTransfer(omit);
+	transfer_enc := enc_NGAP_HandoverRequiredTransfer(valueof(transfer));
+	it := m_pDUSessionResourceItemHORqd(g_pars.ue_pars.sess_pars.id,
+					    transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(
+			m_n2_HandoverRequired(
+				g_pars.ue_pars.amf_id,
+				g_pars.ue_pars.ran_id,
+				intra5gs,
+				m_cause_radioNetwork(resource_optimisation_handover),
+				target_id,
+				{ it },
+				'1234'O /* random string, transparent to the AMF */));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 38.413 9.2.3.4 HANDOVER REQUEST
+ * 3GPP TS 23.502 4.9.1.3.2 step 9+10 */
+function f_n2_handover_request() runs on ConnHdlr
+{
+	var template (value) QosFlowItemWithDataForwarding qos;
+	var template (value) HandoverRequestAcknowledgeTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceAdmittedItem it;
+	var template (value) NGAP_PDU tx_pdu;
+	var NGAP_PDU rx_pdu;
+	var HandoverRequest ho_req;
+	var QosFlowIdentifier qos_id := 0;
+
+	NGAP.receive(mw_ngap_initMsg(
+			mw_n2_HandoverRequest(? /* AMF ID not known yet here*/,
+					      intra5gs))) -> value rx_pdu;
+	ho_req := rx_pdu.initiatingMessage.value_.handoverRequest;
+
+	for (var integer i := 0; i < lengthof(ho_req.protocolIEs); i := i + 1) {
+		select(ho_req.protocolIEs[i].id) {
+		case (id_AMF_UE_NGAP_ID) {
+			/* Update amf_id: */
+			g_pars.ue_pars.amf_id := ho_req.protocolIEs[i].value_.aMF_UE_NGAP_ID;
+			}
+		case (id_PDUSessionResourceSetupListHOReq) {
+			var PDUSessionResourceSetupListHOReq res_li := ho_req.protocolIEs[i].value_.PDUSessionResourceSetupListHOReq;
+			var PDUSessionResourceSetupItemHOReq res_it := res_li[0];
+			var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+			var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+			setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(res_it.handoverRequestTransfer);
+			setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf);
+			qos_id := setup_resp_transf.dLQosFlowPerTNLInformation.associatedQosFlowList[0].qosFlowIdentifier;
+			}
+		}
+	}
+
+	qos := m_qosFlowItemWithDataForwarding(qos_id);
+	transfer := m_handoverRequestAcknowledgeTransfer(f_UPTLI(), {qos});
+	transfer_enc := enc_NGAP_HandoverRequestAcknowledgeTransfer(valueof(transfer));
+	it := m_pDUSessionResourceAdmittedItem(g_pars.ue_pars.sess_pars.id, transfer_enc);
+	tx_pdu := mw_ngap_succMsg(m_n2_HandoverRequestAcknowledge(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					{ it },
+					'1234'O));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 38.413 9.2.3.2 HANDOVER COMMAND
+ * 3GPP TS 23.502 4.9.1.3.3 step 1 */
+function f_n2_handover_command() runs on ConnHdlr
+{
+	var NGAP_PDU rx_pdu;
+
+	NGAP.receive(mw_ngap_succMsg(mw_n2_HandoverCommand(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					intra5gs,
+					?))) -> value rx_pdu;
+}
+
+/* 3GPP TS 23.502 9.2.3.7 HANDOVER NOTIFY
+ * 3GPP TS 23.502 4.9.1.3.3 step 5 */
+function f_n2_handover_notify() runs on ConnHdlr
+{
+	var template (value) HandoverRequiredTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceItemHORqd it;
+	var template (value) NGAP_PDU tx_pdu;
+
+	transfer := m_handoverRequiredTransfer(omit);
+	transfer_enc := enc_NGAP_HandoverRequiredTransfer(valueof(transfer));
+	it := m_pDUSessionResourceItemHORqd(g_pars.ue_pars.sess_pars.id,
+					    transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(m_n2_HandoverNotify(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					f_ULI()));
+	NGAP.send(tx_pdu);
 }
 
 /* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */

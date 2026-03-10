@@ -154,6 +154,13 @@ runs on NGAP_Emulation_CT return NGAP_ConnHdlr {
 			return ret;
 		}
 	}
+
+	/* Try by message type. This is useful for Handover Request, where network sends a new AMF Id. */
+	ret := NGapExpectTableProc_get_conn(msg);
+	if (ret != null) {
+		return ret;
+	}
+
 	setverdict(fail, "Couldn't find Expect for ", msg);
 	mtc.stop;
 }
@@ -273,17 +280,22 @@ runs on NGAP_Emulation_CT return integer {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected call f_assoc_id_by_ngap_ids(omit, omit)");
 	}
 	for (var integer i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
-		if (not isvalue(NGapAssociationTable[i].ran_ue_ngap_id)) {
-			continue;
-		}
-		if (not istemplatekind(ran_id, "omit") and
-		    not match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id)) {
-			continue;
+		if (not istemplatekind(ran_id, "omit")) {
+			if (not ispresent(NGapAssociationTable[i].ran_ue_ngap_id)) {
+				continue;
+			}
+			if (not match(NGapAssociationTable[i].ran_ue_ngap_id, ran_id)) {
+				continue;
+			}
 		}
 		/* ran_id matched, check amf_id now: */
-		if (not istemplatekind(amf_id, "omit") and
-		    not match(NGapAssociationTable[i].amf_ue_ngap_id, amf_id)) {
-			continue;
+		if (not istemplatekind(amf_id, "omit")) {
+			if (not ispresent(NGapAssociationTable[i].amf_ue_ngap_id)) {
+				continue;
+			}
+			if (not match(NGapAssociationTable[i].amf_ue_ngap_id, amf_id)) {
+				continue;
+			}
 		}
 		return i;
 	}
@@ -317,12 +329,18 @@ runs on NGAP_Emulation_CT return AssociationData {
 
 private function f_ngap_id_table_add(NGAP_ConnHdlr comp_ref,
 				     template (omit) AMF_UE_NGAP_ID amf_id,
-				     RAN_UE_NGAP_ID ran_id)
+				     template (omit) RAN_UE_NGAP_ID ran_id)
 runs on NGAP_Emulation_CT return integer {
 	var integer i;
 	for (i := 0; i < sizeof(NGapAssociationTable); i := i+1) {
-		if (not isvalue(NGapAssociationTable[i].ran_ue_ngap_id)) {
-			NGapAssociationTable[i].ran_ue_ngap_id := ran_id;
+		if (not isvalue(NGapAssociationTable[i].ran_ue_ngap_id) and
+		    not isvalue(NGapAssociationTable[i].amf_ue_ngap_id)) {
+			if (istemplatekind(ran_id, "omit")) {
+				NGapAssociationTable[i].ran_ue_ngap_id := omit;
+			} else {
+				NGapAssociationTable[i].ran_ue_ngap_id := valueof(ran_id);
+			}
+
 			if (istemplatekind(amf_id, "omit")) {
 				NGapAssociationTable[i].amf_ue_ngap_id := omit;
 			} else {
@@ -407,9 +425,9 @@ function handle_NGAP_UeContextReleaseCmd(template (present) NGAP_PDU rel_cmd) ru
 	}
 }
 
-private function SendToNGapExpectTableProc(NGAP_PDU msg) runs on NGAP_Emulation_CT {
-	var integer procedureCode;
-	var NGAP_ConnHdlr vc_conn;
+private function ngap_pdu_get_procedure_code(NGAP_PDU msg) return integer
+{
+	var integer procedureCode := 0;
 
 	if (ispresent(msg.initiatingMessage.procedureCode)) {
 		procedureCode := msg.initiatingMessage.procedureCode;
@@ -417,9 +435,31 @@ private function SendToNGapExpectTableProc(NGAP_PDU msg) runs on NGAP_Emulation_
 		procedureCode := msg.unsuccessfulOutcome.procedureCode;
 	} else if (ispresent(msg.successfulOutcome.procedureCode)) {
 		procedureCode := msg.successfulOutcome.procedureCode;
-	} else {
-		return;
 	}
+
+	return procedureCode;
+}
+
+private function NGapExpectTableProc_get_conn(NGAP_PDU msg)
+runs on NGAP_Emulation_CT return NGAP_ConnHdlr {
+	var NGAP_ConnHdlr vc_conn;
+	var integer procedureCode := ngap_pdu_get_procedure_code(msg);
+
+	for (var integer i := 0; i < sizeof(NGapExpectTableProc); i := i+1) {
+		if (NGapExpectTableProc[i].procedureCode == procedureCode) {
+			vc_conn := NGapExpectTableProc[i].vc_conn;
+			if (vc_conn != null) {
+				return vc_conn;
+			}
+		}
+	}
+
+	return null;
+}
+
+private function SendToNGapExpectTableProc(NGAP_PDU msg) runs on NGAP_Emulation_CT {
+	var NGAP_ConnHdlr vc_conn;
+	var integer procedureCode := ngap_pdu_get_procedure_code(msg);
 
 	for (var integer i := 0; i < sizeof(NGapExpectTableProc); i := i+1) {
 		if (NGapExpectTableProc[i].procedureCode == procedureCode) {
@@ -537,6 +577,23 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 			/* Pass message through */
 			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
 			}
+		/* NGAP from client: HandoverRequestAcknowledge */
+		[] NGAP_CLIENT.receive(mw_ngap_succMsg(mw_n2_HandoverRequestAcknowledge)) -> value msg sender vc_conn {
+			/* Update table entry with ran_id; oly amf_id was known through HandoverReq so far: */
+			ai := f_assoc_id_by_ngap_ids(valueof(f_NGAP_get_AMF_UE_NGAP_ID(msg)), omit);
+			NGapAssociationTable[ai].ran_ue_ngap_id := valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg));
+			/* Pass message through */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
+		/* NGAP from client: HandoverNotify */
+		[] NGAP_CLIENT.receive(mw_ngap_initMsg(mw_n2_HandoverNotify)) -> value msg sender vc_conn {
+			/* create a table entry about this connection */
+			ai := f_assoc_id_by_ngap_ids(valueof(f_NGAP_get_AMF_UE_NGAP_ID(msg)), valueof(f_NGAP_get_RAN_UE_NGAP_ID(msg)));
+			/* Store ULI so we can use it for generating UlNasTransport from NAS */
+			NGapAssociationTable[ai].uli := msg.initiatingMessage.value_.HandoverNotify.protocolIEs[2].value_.userLocationInformation;
+			/* Pass message through */
+			NGAP.send(t_NGAP_Send(g_ngap_conn_id, msg));
+			}
 		/* NAS from client: Wrap in NGAP Uplink NAS Transport */
 		[] NGAP_CLIENT.receive(NG_NAS_UL_Message_Type:?) -> value ul_nas_msg sender vc_conn {
 			var integer assoc_id := f_assoc_id_by_comp(vc_conn);
@@ -608,7 +665,7 @@ function main(NGAPOps ops, NGAP_conn_parameters p, charstring id) runs on NGAP_E
 				} else {
 					/* if not, call create_cb so it can create new ConnHdlr */
 					vc_conn := ops.create_cb.apply(mrf.msg, amf_ue_id, ran_ue_id, id);
-					f_ngap_id_table_add(vc_conn, amf_ue_id, valueof(ran_ue_id));
+					f_ngap_id_table_add(vc_conn, amf_ue_id, ran_ue_id);
 					NGAP_CLIENT.send(mrf.msg) to vc_conn;
 				}
 				if (match(mrf.msg, mw_ngap_initMsg(mw_n2_UEContextReleaseCommand))) {
@@ -714,7 +771,7 @@ private function f_create_expect_proc(integer procedureCode,NGAP_ConnHdlr hdlr) 
 /* client/conn_hdlr side function to use procedure port to create expect (PDU) in emulation */
 function f_create_ngap_expect_proc(integer procedureCode, NGAP_ConnHdlr hdlr) runs on NGAP_ConnHdlr
 {
-	NGAP_PROC.call(NGAPEM_register_proc:{procedureCode, self}) {
+	NGAP_PROC.call(NGAPEM_register_proc:{procedureCode, hdlr}) {
 		[] NGAP_PROC.getreply(NGAPEM_register_proc:{?,?}) {};
 	}
 
