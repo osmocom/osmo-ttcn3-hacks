@@ -66,35 +66,5 @@ def check_programs():
         sys.exit(1)
 
 
-def check_fftranscode():
-    cmd = [
-        "grep",
-        "-q",
-        "fftranscode",
-        os.path.join(
-            testenv.ttcn3_hacks_dir,
-            testenv.args.testsuite,
-            "regen_makefile.sh",
-        ),
-    ]
-    if testenv.cmd.run(cmd, check=False).returncode == 1:
-        return
-
-    cmd = ["pkg-config", "--modversion", "libfftranscode"]
-    if testenv.cmd.run(cmd, check=False).returncode == 0:
-        return
-
-    logging.error("Missing library: libfftranscode")
-    logging.error(
-        "  https://osmocom.org/projects/cellular-infrastructure/wiki/Titan_TTCN3_Testsuites#Proprietary-APERlt-gtBER-transcoding-library-for-Iu-tests"
-    )
-    logging.error("  Consider installing it from here:")
-    logging.error("  https://ftp.osmocom.org/binaries/libfftranscode/")
-    sys.exit(1)
-
-
 def check():
     check_programs()
-
-    if not testenv.args.podman:
-        check_fftranscode()
