@@ -1200,6 +1200,168 @@ testcase TC_mme_pool_enb_disc_wait_s1setup_rsp() runs on test_CT {
 		       { S1APSRV_SETUP_ACCEPT });
 }
 
+
+/* Find an MME entry in the list by name; return its index, or -1 if not found */
+private function f_REST_mme_find(MmeList mmes, charstring name) return integer {
+	for (var integer i := 0; i < lengthof(mmes); i := i + 1) {
+		if (mmes[i].name == name) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+/* Restore the MME pool to its original state: delete all current entries and
+ * re-add the three static pool entries (mme0/mme1/mme2) in their original order. */
+private function f_REST_mme_pool_restore() runs on test_CT {
+	var MmeList mmes := f_REST_MmeList();
+	for (var integer i := 0; i < lengthof(mmes); i := i + 1) {
+		f_REST_MmeDelete({ name := "name:" & mmes[i].name });
+	}
+	for (var integer i := 0; i < 3; i := i + 1) {
+		f_REST_MmeAdd(valueof(ts_MmeItem(name := "mme" & int2str(i),
+						 raddr := f_mme_ip(i),
+						 laddr := "127.0.2.1")));
+	}
+}
+
+/* REST test: verify the configured MME pool is correctly reflected via REST */
+testcase TC_rest_mme_list() runs on test_CT {
+	var template (present) MmeList tr_mmes;
+	var MmeList mmes;
+
+	f_init(s1apsrv_start := false, upf_start := false);
+
+	/* this resembles the 'mme_pool' section in osmo-s1gw.config */
+	for (var integer i := 0; i < 3; i := i + 1) {
+		tr_mmes[i] := tr_MmeItem(name := "mme" & int2str(i),
+					 raddr := f_mme_ip(i),
+					 laddr := "127.0.2.1",
+					 rport := 36412,
+					 tac_list := { });
+	}
+
+	mmes := f_REST_MmeList();
+	if (not match(mmes, tr_mmes)) {
+		setverdict(fail, "Got unexpected MmeList: ", mmes);
+	}
+
+	setverdict(pass);
+}
+
+/* REST test: add an MME to the pool, verify it appears, then delete it */
+testcase TC_rest_mme_add_del() runs on test_CT {
+	var MmeList mmes;
+	var MmeItem mme;
+	var integer idx;
+
+	var template (value) MmeItem ts_mme_test := ts_MmeItem(name := "mme-test",
+							       raddr := f_mme_ip(9));
+	var template (present) MmeItem tr_mme_test := tr_MmeItem(name := "mme-test",
+								 raddr := f_mme_ip(9),
+								 laddr := "any",
+								 rport := 36412,
+								 tac_list := { });
+
+	f_init(s1apsrv_start := false, upf_start := false);
+
+	/* add the new entry and verify it appears in the list */
+	if (not f_REST_MmeAdd(valueof(ts_mme_test))) {
+		setverdict(fail, "Failed to add mme-test via REST");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	mmes := f_REST_MmeList();
+	if (lengthof(mmes) != 4) {
+		setverdict(fail, "Expected 4 MMEs after add, got ", lengthof(mmes));
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	idx := f_REST_mme_find(mmes, "mme-test");
+	if (idx == -1) {
+		setverdict(fail, "mme-test not found in MmeList after add");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	if (not match(mmes[idx], tr_mme_test)) {
+		setverdict(fail, "mme-test does not match: ", mmes[idx]);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* also verify via individual GET */
+	mme := f_REST_MmeInfo({ name := "name:mme-test" });
+	if (not match(mme, tr_mme_test)) {
+		setverdict(fail, "mme-test does not match: ", mme);
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* delete the entry and verify it's gone */
+	if (not f_REST_MmeDelete({ name := "name:mme-test" })) {
+		setverdict(fail, "Failed to delete mme-test via REST");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	mmes := f_REST_MmeList();
+	if (lengthof(mmes) != 3) {
+		setverdict(fail, "Expected 3 MMEs after delete, got ", lengthof(mmes));
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	if (f_REST_mme_find(mmes, "mme-test") != -1) {
+		setverdict(fail, "mme-test still present in MmeList after delete");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	setverdict(pass);
+}
+
+/* ConnHdlr body for TC_rest_mme_del_fallback: connect and complete S1 setup via pool */
+private function f_TC_rest_pool_connect_accept(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_s1ap_setup_pool(g_pars.pool_srvs, g_pars.pool_behaviors);
+	f_sleep(0.5);
+	f_ConnHdlr_s1ap_disconnect();
+	f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, g_s1ap_server);
+}
+
+/* REST test: delete an MME from the pool at runtime; eNB must fall back to the
+ * next available MME without attempting to connect to the deleted entry. */
+testcase TC_rest_mme_del_fallback() runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+	var MmeList mmes;
+
+	/* start 2 S1AP servers: server[0]=mme0@127.0.2.10, server[1]=mme1@127.0.2.11 */
+	f_init(num_mmes := 2);
+
+	/* delete mme0: effective pool becomes [mme1, mme2] */
+	if (not f_REST_MmeDelete({ name := "name:mme0" })) {
+		setverdict(fail, "Failed to delete mme0 via REST");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	mmes := f_REST_MmeList();
+	if (lengthof(mmes) != 2) {
+		setverdict(fail, "Expected 2 MMEs after deleting mme0, got ", lengthof(mmes));
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+	if (f_REST_mme_find(mmes, "mme0") != -1) {
+		setverdict(fail, "mme0 still present in MmeList after delete");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	/* eNB connects: S1GW must select mme1 (server[1]@127.0.2.11) directly */
+	pars := valueof(t_ConnHdlrPars);
+	pars.pool_srvs := { vc_S1APSRVs[1] };
+	pars.pool_behaviors := { S1APSRV_SETUP_ACCEPT };
+	vc_conn := f_ConnHdlr_spawn(refers(f_TC_rest_pool_connect_accept), pars);
+	vc_conn.done;
+
+	/* restore original pool state (mme0/mme1/mme2 in order) for subsequent tests */
+	f_REST_mme_pool_restore();
+	mmes := f_REST_MmeList();
+	if (lengthof(mmes) != 3) {
+		setverdict(fail, "Expected 3 MMEs after pool restore, got ", lengthof(mmes));
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+	}
+
+	setverdict(pass);
+}
+
 control {
 	execute( TC_setup() );
 	execute( TC_setup_multi() );
@@ -1241,6 +1403,13 @@ control {
 	execute( TC_mme_pool_all_reject() );
 	execute( TC_mme_pool_enb_disc_wait_s1setup_req() );
 	execute( TC_mme_pool_enb_disc_wait_s1setup_rsp() );
+
+	/* REST interface TCs */
+	if (mp_rest_enable) {
+		execute( TC_rest_mme_list() );
+		execute( TC_rest_mme_add_del() );
+		execute( TC_rest_mme_del_fallback() );
+	}
 }
 
 }
