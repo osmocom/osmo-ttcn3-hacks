@@ -1135,6 +1135,71 @@ testcase TC_mme_pool_all_reject() runs on test_CT {
 		       { S1APSRV_SETUP_REJECT, S1APSRV_SETUP_REJECT, S1APSRV_SETUP_REJECT });
 }
 
+/* MME pool test: eNB connects but disconnects before sending S1SetupReq
+ * (S1GW is in wait_s1setup_req); S1GW must handle the disconnect cleanly
+ * and must not attempt to connect to any MME. */
+function f_TC_mme_pool_enb_disc_wait_s1setup_req(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+
+	/* disconnect before S1SetupReq: S1GW is in wait_s1setup_req,
+	 * no MME connection is ever attempted */
+	f_ConnHdlr_s1ap_close();
+	setverdict(pass);
+}
+testcase TC_mme_pool_enb_disc_wait_s1setup_req() runs on test_CT {
+	f_TC_exec_pool(refers(f_TC_mme_pool_enb_disc_wait_s1setup_req), 1,
+		       { S1APSRV_SETUP_ACCEPT });
+}
+
+/* MME pool test: eNB connects, sends S1SetupReq, S1GW forwards it to an MME
+ * (S1GW is in wait_s1setup_rsp), then eNB disconnects before the response arrives.
+ * S1GW must detect the eNB disconnect and close the MME connection. */
+function f_TC_mme_pool_enb_disc_wait_s1setup_rsp(charstring id) runs on ConnHdlr {
+	var S1AP_Server_CT vc_srv := g_pars.pool_srvs[0];
+	var S1AP_PDU pdu;
+	timer T;
+
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_conn_track_disable();
+
+	/* pre-register with the pool server, then trigger MME selection */
+	f_ConnHdlr_s1ap_register_to(g_pars.genb_id, vc_srv);
+	f_ConnHdlr_tx_s1ap_from_enb(ts_S1AP_SetupReq(g_pars.genb_id, c_SupportedTAs, v32));
+
+	/* wait until S1GW has forwarded SetupReq to the MME (now in wait_s1setup_rsp) */
+	g_s1ap_server := vc_srv;
+	T.start(10.0);
+	alt {
+	[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_UP) from vc_srv { repeat; }
+	[] S1AP_CONN.receive(tr_S1AP_SetupReq) from vc_srv -> value pdu { T.stop; }
+	[] T.timeout {
+		setverdict(fail, "Timeout waiting for S1SetupReq on pool server");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	/* eNB disconnects impatient; S1GW must close the MME connection in response */
+	f_ConnHdlr_s1ap_close();
+
+	T.start(10.0);
+	alt {
+	[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_DOWN) from vc_srv {
+		T.stop;
+		setverdict(pass);
+		}
+	[] T.timeout {
+		setverdict(fail, "S1GW did not close MME connection after eNB disconnect");
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+		}
+	}
+
+	f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, vc_srv);
+}
+testcase TC_mme_pool_enb_disc_wait_s1setup_rsp() runs on test_CT {
+	f_TC_exec_pool(refers(f_TC_mme_pool_enb_disc_wait_s1setup_rsp), 1,
+		       { S1APSRV_SETUP_ACCEPT });
+}
+
 control {
 	execute( TC_setup() );
 	execute( TC_setup_multi() );
@@ -1174,6 +1239,8 @@ control {
 	execute( TC_mme_pool_reject_fallback() );
 	execute( TC_mme_pool_timeout_fallback() );
 	execute( TC_mme_pool_all_reject() );
+	execute( TC_mme_pool_enb_disc_wait_s1setup_req() );
+	execute( TC_mme_pool_enb_disc_wait_s1setup_rsp() );
 }
 
 }
