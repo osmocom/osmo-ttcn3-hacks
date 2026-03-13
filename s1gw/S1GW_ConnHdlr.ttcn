@@ -1,6 +1,6 @@
 /* OsmoS1GW (S1AP Gateway) ConnHdlr
  *
- * (C) 2024-2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * (C) 2024-2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
  * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
  *
  * All rights reserved.
@@ -49,6 +49,7 @@ type component ConnHdlr extends MutexCT, S1APSRV_ConnHdlr, PFCP_ConnHdlr, StatsD
 	port S1AP_CODEC_PT S1AP_ENB;
 	var ConnectionId g_s1ap_conn_id := -1;
 	var default conn_track := null;
+	var S1AP_Server_CT g_s1ap_server := null; /* currently active MME server */
 };
 type record of ConnHdlr ConnHdlrList;
 
@@ -59,7 +60,10 @@ type record ConnHdlrPars {
 	charstring pfcp_loc_addr,
 	charstring pfcp_rem_addr,
 	MME_UE_S1AP_ID mme_ue_id,
-	ERabList erabs
+	ERabList erabs,
+	/* optional fields for MME pool testing */
+	S1AP_ServerList pool_srvs optional,
+	S1APSRV_SetupBehaviorList pool_behaviors optional
 };
 
 template Global_ENB_ID
@@ -188,13 +192,17 @@ runs on ConnHdlr {
 
 function f_ConnHdlr_tx_s1ap_from_mme(template (value) S1AP_PDU pdu)
 runs on ConnHdlr {
-	S1AP_CONN.send(pdu);
+	if (g_s1ap_server != null) {
+		S1AP_CONN.send(pdu) to g_s1ap_server;
+	} else {
+		S1AP_CONN.send(pdu);
+	}
 }
 
 altstep as_ConnHdlr_s1ap_from_enb(out S1AP_PDU pdu,
 				  template (present) S1AP_PDU tr_pdu := ?)
 runs on ConnHdlr {
-	[] S1AP_CONN.receive(tr_pdu) -> value pdu;
+	[] S1AP_CONN.receive(tr_pdu) -> value pdu sender g_s1ap_server;
 }
 
 function f_ConnHdlr_rx_s1ap_from_enb(out S1AP_PDU pdu,
@@ -285,6 +293,94 @@ function f_ConnHdlr_s1ap_setup(Global_ENB_ID genb_id,
 					log2str("Timeout waiting for S1AP SetupReq, idx = ", g_pars.idx));
 		}
 	}
+}
+
+/* S1 Setup procedure with MME pool: iterate through pool_behaviors, attempting setup
+ * with each corresponding server.  On ACCEPT, the connection is established and
+ * g_s1ap_server is set to the accepting server.  On REJECT or TIMEOUT, the server
+ * closes the connection and S1GW tries the next MME.  Caller must have connected
+ * S1AP_CONN/S1AP_PROC to all pool servers before calling this function. */
+function f_ConnHdlr_s1ap_setup_pool(S1AP_ServerList pool_srvs,
+				    S1APSRV_SetupBehaviorList pool_behaviors,
+				    in SupportedTAs supported_tas := c_SupportedTAs)
+runs on ConnHdlr {
+	var S1AP_PDU pdu;
+	timer T_pool;
+
+	/* conn_track would fire on CONN_DOWN during pool setup: disable it */
+	f_ConnHdlr_conn_track_disable();
+
+	/* pre-register with all pool servers to avoid timing issues */
+	for (var integer i := 0; i < lengthof(pool_srvs); i := i + 1) {
+		f_ConnHdlr_s1ap_register_to(g_pars.genb_id, pool_srvs[i]);
+	}
+
+	/* send S1SetupReq once from the eNB; S1GW will forward it to each MME it tries */
+	f_ConnHdlr_tx_s1ap_from_enb(ts_S1AP_SetupReq(g_pars.genb_id, supported_tas, v32));
+
+	for (var integer i := 0; i < lengthof(pool_behaviors); i := i + 1) {
+		var S1AP_Server_CT vc_srv := pool_srvs[i];
+		var S1APSRV_SetupBehavior behavior := pool_behaviors[i];
+
+		/* wait for CONN_UP and then S1SetupReq from this specific server */
+		g_s1ap_server := vc_srv;
+		T_pool.start(10.0);
+		alt {
+		[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_UP) from vc_srv {
+			repeat;
+			}
+		[] S1AP_CONN.receive(tr_S1AP_SetupReq) from vc_srv -> value pdu {
+			T_pool.stop;
+			}
+		[] T_pool.timeout {
+			setverdict(fail, "Timeout waiting for S1SetupReq on pool server ", i);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+			}
+		}
+
+		if (behavior == S1APSRV_SETUP_ACCEPT) {
+			/* send SetupResp and verify the eNB gets it */
+			var template (value) PLMNidentity plmn_id := '00f110'O;
+			var template (value) MME_Group_ID mme_group_id := '0011'O;
+			var template (value) MME_Code mme_code := int2oct(i + 1, 1);
+			var template (value) ServedGUMMEIsItem gummei := ts_S1AP_ServedGUMMEIsItem(
+				{ plmn_id }, { mme_group_id }, { mme_code });
+			f_ConnHdlr_tx_s1ap_from_mme(ts_S1AP_SetupResp({ gummei }, 1));
+			f_ConnHdlr_rx_s1ap_from_mme(pdu, tr_S1AP_SetupResp({ gummei }, 1));
+			/* unregister from remaining (unused) servers */
+			for (var integer j := i + 1; j < lengthof(pool_srvs); j := j + 1) {
+				f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, pool_srvs[j]);
+			}
+			/* re-enable conn_track: setup is complete */
+			f_ConnHdlr_conn_track_enable();
+			return;
+		}
+
+		if (behavior == S1APSRV_SETUP_REJECT) {
+			/* send S1SetupFailure; S1GW will close connection and try next MME */
+			f_ConnHdlr_tx_s1ap_from_mme(
+				ts_S1AP_SetupFail({ radioNetwork := unspecified }));
+		}
+		/* else S1APSRV_SETUP_TIMEOUT: do nothing, wait for S1GW to time out (5s) */
+
+		/* wait for S1GW to close the connection */
+		T_pool.start(15.0);
+		alt {
+		[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_DOWN) from vc_srv {
+			T_pool.stop;
+			}
+		[] T_pool.timeout {
+			setverdict(fail, "Timeout waiting for CONN_DOWN from pool server ", i);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+			}
+		}
+
+		/* unregister from this server before moving to the next */
+		f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, vc_srv);
+	}
+
+	setverdict(fail, "Pool setup exhausted all MME behaviors without accepting");
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
 }
 
 private function f_ConnHdlr_pfcp_assoc_setup()

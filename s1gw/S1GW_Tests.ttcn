@@ -1,6 +1,6 @@
 /* OsmoS1GW (S1AP Gateway) test suite in TTCN-3
  *
- * (C) 2024-2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * (C) 2024-2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
  * Author: Vadim Yanitskiy <vyanitskiy@sysmocom.de>
  *
  * All rights reserved.
@@ -74,7 +74,7 @@ modulepar {
 type component test_CT extends StatsD_Checker_CT, http_CT {
 	timer g_Tguard;
 	var MutexDispCT vc_mutex_disp;
-	var S1AP_Server_CT vc_S1APSRV;
+	var S1AP_ServerList vc_S1APSRVs := {};
 	var PFCP_Emulation_CT vc_PFCP;
 	var StatsD_Checker_CT vc_STATSD;
 };
@@ -86,6 +86,7 @@ private altstep as_Tguard() runs on test_CT {
 }
 
 function f_init(boolean s1apsrv_start := true,
+		integer num_mmes := 1,
 		boolean upf_start := true,
 		float Tval := 20.0) runs on test_CT {
 	g_Tguard.start(Tval);
@@ -96,7 +97,7 @@ function f_init(boolean s1apsrv_start := true,
 	f_init_statsd("StatsDSRV", vc_STATSD, mp_local_statsd_ip, mp_local_statsd_port);
 
 	if (s1apsrv_start) {
-		f_init_s1ap_srv();
+		f_init_s1ap_srv(num_mmes);
 	}
 	if (upf_start) {
 		f_init_pfcp();
@@ -107,14 +108,20 @@ function f_init(boolean s1apsrv_start := true,
 	}
 }
 
-function f_init_s1ap_srv() runs on test_CT {
-	var S1APSRV_ConnParams cpars := {
-		local_ip := mp_mme_bind_ip,
-		local_port := 36412
-	};
+/* compute the IP address for pool MME server [idx]: mp_mme_bind_ip + idx */
+private function f_mme_ip(integer idx) return charstring {
+	return f_inet_ntoa(int2oct(oct2int(f_inet_addr(mp_mme_bind_ip)) + idx, 4));
+}
 
-	vc_S1APSRV := S1AP_Server_CT.create("S1APSRV-" & testcasename()) alive;
-	vc_S1APSRV.start(S1AP_Server.main(cpars));
+function f_init_s1ap_srv(integer num_mmes := 1) runs on test_CT {
+	for (var integer i := 0; i < num_mmes; i := i + 1) {
+		var S1APSRV_ConnParams cpars := {
+			local_ip := f_mme_ip(i),
+			local_port := 36412
+		};
+		vc_S1APSRVs[i] := S1AP_Server_CT.create("S1APSRV-" & int2str(i) & "-" & testcasename()) alive;
+		vc_S1APSRVs[i].start(S1AP_Server.main(cpars));
+	}
 }
 
 function f_init_pfcp() runs on test_CT {
@@ -166,7 +173,9 @@ t_ConnHdlrPars(integer idx := 0,
 	pfcp_loc_addr := pfcp_loc_addr,
 	pfcp_rem_addr := pfcp_rem_addr,
 	mme_ue_id := 4242,
-	erabs := f_gen_erab_list(idx, num_erabs)
+	erabs := f_gen_erab_list(idx, num_erabs),
+	pool_srvs := omit,
+	pool_behaviors := omit
 }
 
 private function f_gen_erab_list(integer idx, integer num_erabs)
@@ -198,9 +207,11 @@ runs on test_CT {
 	if (isbound(vc_STATSD) and vc_STATSD.running) {
 		connect(vc_conn:STATSD_PROC, vc_STATSD:STATSD_PROC);
 	}
-	if (isbound(vc_S1APSRV) and vc_S1APSRV.running) {
-		connect(vc_conn:S1AP_CONN, vc_S1APSRV:S1AP_CLIENT);
-		connect(vc_conn:S1AP_PROC, vc_S1APSRV:S1AP_PROC);
+	for (var integer i := 0; i < lengthof(vc_S1APSRVs); i := i + 1) {
+		if (vc_S1APSRVs[i].running) {
+			connect(vc_conn:S1AP_CONN, vc_S1APSRVs[i]:S1AP_CLIENT);
+			connect(vc_conn:S1AP_PROC, vc_S1APSRVs[i]:S1AP_PROC);
+		}
 	}
 	if (isbound(vc_PFCP) and vc_PFCP.running) {
 		connect(vc_conn:PFCP, vc_PFCP:CLIENT);
@@ -320,6 +331,26 @@ runs on test_CT {
 	}
 
 	f_ConnHdlrList_all_done(vc_conns);
+}
+
+/* execute a single-eNB pool test: spins up num_mmes S1AP servers, builds ConnHdlrPars
+ * with pool_srvs/pool_behaviors set, and runs fn inside a ConnHdlr */
+function f_TC_exec_pool(void_fn fn,
+			integer num_mmes,
+			S1APSRV_SetupBehaviorList behaviors,
+			float Tval := 60.0)
+runs on test_CT {
+	var ConnHdlrPars pars;
+	var ConnHdlr vc_conn;
+
+	f_init(num_mmes := num_mmes, Tval := Tval);
+
+	pars := valueof(t_ConnHdlrPars);
+	pars.pool_srvs := vc_S1APSRVs;
+	pars.pool_behaviors := behaviors;
+
+	vc_conn := f_ConnHdlr_spawn(fn, pars);
+	vc_conn.done;
 }
 
 function f_TC_setup(charstring id) runs on ConnHdlr {
@@ -1019,6 +1050,91 @@ testcase TC_pfcp_heartbeat() runs on test_CT {
 	f_TC_exec(refers(f_TC_pfcp_heartbeat));
 }
 
+/* MME pool test: eNB connects, the first MME rejects, the second one accepts */
+function f_TC_mme_pool_reject_fallback(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_s1ap_setup_pool(g_pars.pool_srvs, g_pars.pool_behaviors);
+
+	f_sleep(0.5); /* keep the connection idle for some time */
+
+	f_ConnHdlr_s1ap_disconnect();
+	f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, g_s1ap_server);
+}
+testcase TC_mme_pool_reject_fallback() runs on test_CT {
+	f_TC_exec_pool(refers(f_TC_mme_pool_reject_fallback), 2,
+		       { S1APSRV_SETUP_REJECT, S1APSRV_SETUP_ACCEPT });
+}
+
+/* MME pool test: eNB connects, the first MME times out, the second one accepts */
+function f_TC_mme_pool_timeout_fallback(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+	f_ConnHdlr_s1ap_setup_pool(g_pars.pool_srvs, g_pars.pool_behaviors);
+
+	f_sleep(0.5); /* keep the connection idle for some time */
+
+	f_ConnHdlr_s1ap_disconnect();
+	f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, g_s1ap_server);
+}
+testcase TC_mme_pool_timeout_fallback() runs on test_CT {
+	f_TC_exec_pool(refers(f_TC_mme_pool_timeout_fallback), 2,
+		       { S1APSRV_SETUP_TIMEOUT, S1APSRV_SETUP_ACCEPT });
+}
+
+/* MME pool test: eNB connects, all MMEs reject, S1GW sends S1SetupFailure to eNB */
+function f_TC_mme_pool_all_reject(charstring id) runs on ConnHdlr {
+	f_ConnHdlr_s1ap_connect(mp_enb_bind_ip, mp_s1gw_enb_ip);
+
+	/* conn_track would fire on CONN_DOWN events during the reject loop */
+	f_ConnHdlr_conn_track_disable();
+
+	/* pre-register with all pool servers */
+	for (var integer i := 0; i < lengthof(g_pars.pool_srvs); i := i + 1) {
+		f_ConnHdlr_s1ap_register_to(g_pars.genb_id, g_pars.pool_srvs[i]);
+	}
+
+	/* send S1SetupReq once from the eNB; S1GW will forward it to each MME it tries */
+	f_ConnHdlr_tx_s1ap_from_enb(ts_S1AP_SetupReq(g_pars.genb_id, c_SupportedTAs, v32));
+
+	/* S1GW will try each MME and get rejected */
+	for (var integer i := 0; i < lengthof(g_pars.pool_behaviors); i := i + 1) {
+		var S1AP_Server_CT vc_srv := g_pars.pool_srvs[i];
+		var S1AP_PDU pdu;
+		timer T;
+
+		g_s1ap_server := vc_srv;
+		T.start(10.0);
+		alt {
+		[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_UP) from vc_srv { repeat; }
+		[] S1AP_CONN.receive(tr_S1AP_SetupReq) from vc_srv -> value pdu { T.stop; }
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for S1SetupReq on pool server ", i);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+			}
+		}
+		f_ConnHdlr_tx_s1ap_from_mme(ts_S1AP_SetupFail({ radioNetwork := unspecified }));
+
+		T.start(10.0);
+		alt {
+		[] S1AP_CONN.receive(S1APSRV_Event:S1APSRV_EVENT_CONN_DOWN) from vc_srv { T.stop; }
+		[] T.timeout {
+			setverdict(fail, "Timeout waiting for CONN_DOWN from pool server ", i);
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__);
+			}
+		}
+		f_ConnHdlr_s1ap_unregister_from(g_pars.genb_id, vc_srv);
+	}
+
+	/* S1GW has exhausted all MMEs: it sends S1SetupFailure to eNB and then closes */
+	var S1AP_PDU pdu;
+	f_ConnHdlr_rx_s1ap_from_mme(pdu, tr_S1AP_SetupFail(?));
+	f_ConnHdlr_s1ap_expect_shutdown();
+	setverdict(pass);
+}
+testcase TC_mme_pool_all_reject() runs on test_CT {
+	f_TC_exec_pool(refers(f_TC_mme_pool_all_reject), 3,
+		       { S1APSRV_SETUP_REJECT, S1APSRV_SETUP_REJECT, S1APSRV_SETUP_REJECT });
+}
+
 control {
 	execute( TC_setup() );
 	execute( TC_setup_multi() );
@@ -1055,6 +1171,9 @@ control {
 	execute( TC_handover_res_alloc() );
 	execute( TC_handover_res_alloc_fail() );
 	execute( TC_pfcp_heartbeat() );
+	execute( TC_mme_pool_reject_fallback() );
+	execute( TC_mme_pool_timeout_fallback() );
+	execute( TC_mme_pool_all_reject() );
 }
 
 }
