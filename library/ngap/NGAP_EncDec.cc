@@ -109,6 +109,26 @@ NGAP__IEs::PDUSessionResourceModifyResponseTransfer dec__NGAP__PDUSessionResourc
 	return ret;
 }
 
+OCTETSTRING enc__NGAP__PDUSessionResourceModifyIndicationTransfer(const NGAP__IEs::PDUSessionResourceModifyIndicationTransfer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::PDUSessionResourceModifyIndicationTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::PDUSessionResourceModifyIndicationTransfer dec__NGAP__PDUSessionResourceModifyIndicationTransfer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::PDUSessionResourceModifyIndicationTransfer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::PDUSessionResourceModifyIndicationTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
 OCTETSTRING enc__NGAP__UEContextSuspendRequestTransfer(const NGAP__IEs::UEContextSuspendRequestTransfer &p)
 {
 	TTCN_Buffer TTCN_buf;
