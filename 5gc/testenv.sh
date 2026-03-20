@@ -38,6 +38,10 @@ add_tun_all() {
 	sudo ip link set ogstun4 up
 	sudo ip link set ogstun6 up
 	sudo ip link set ogstun46 up
+
+	# The IPv4 route is added automatically when setting the interface addr above:
+	sudo ip route add "10.45.0.0/16" dev "ogstun46" || true
+	sudo ip -6 route add "2001:db8:cafe::/48" dev "ogstun46" || true
 }
 
 del_tun() {
