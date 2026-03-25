@@ -35,6 +35,7 @@ modulepar {
 	charstring mp_run_prog_log_path := "/tmp";
 	charstring mp_run_prog_as_user := "laforge";
 	charstring mp_ping_hostname := "10.45.0.1";
+	charstring mp_ping_hostname6 := "cafe::1";
 
 	charstring mp_pcrf_local_ip := "127.0.0.9";
 	integer mp_pcrf_local_port := 3868;
@@ -117,8 +118,8 @@ type component PGW_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr {
 
 	/* Address allocation */
 	var OCT4	g_ip4_addr;
+	var OCT8	g_ip6_interface_id;
 	var OCT16	g_ip6_addr;
-	var integer	g_ip6_plen;
 
 	/* Store last received Gy message */
 	var PDU_DIAMETER g_rx_gy;
@@ -674,6 +675,58 @@ return template (omit) FullyQualifiedTEID
 	return omit;
 }
 
+private function f_create_sess_tun() runs on PGW_Session_CT
+{
+	var template (value) UECUPS_AddrType user_addr_type;
+	var template (value) OCT4_20n user_addr;
+
+	select (g_pars.pdn_type) {
+	case (GTP2C_PDN_IPv4) {
+		user_addr_type := IPV4;
+		user_addr := g_ip4_addr;
+		}
+	case (GTP2C_PDN_IPv6) {
+		user_addr_type := IPV6;
+		user_addr := g_ip6_addr;
+		}
+	case (GTP2C_PDN_IPv4v6) {
+		user_addr_type := IPV4V6;
+		user_addr := g_ip4_addr & g_ip6_addr;
+		}
+	}
+
+	var template (value) UECUPS_CreateTun uecups_create := ts_UECUPS_CreateTun(
+		tx_teid := oct2int(g_pars.bearer.teid_remote),
+		rx_teid := oct2int(g_pars.bearer.teid_local),
+		user_addr_type := user_addr_type,
+		user_addr := user_addr,
+		local_gtp_ep := ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u)),
+		remote_gtp_ep := ts_UECUPS_SockAddr(g_gtpu4_remote),
+		tun_dev_name := g_pars.tun_dev_name,
+		tun_netns_name := g_pars.tun_netns_name
+	);
+
+	/* create tunnel in daemon */
+	f_gtp1u_create_tunnel(uecups_create);
+}
+
+private function f_perform_ipv6_slaac() runs on PGW_Session_CT
+{
+	var UECUPS_IPv6SLAACInd ipv6slaac_ind;
+	var template (value) UECUPS_IPv6SLAAC ipv6slaac;
+	ipv6slaac := ts_UECUPS_IPv6SLAAC(
+		local_gtp_ep := ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u)),
+		rx_teid := oct2int(g_pars.bearer.teid_local)
+	);
+	f_gtp1u_ipv6_slaac(ipv6slaac);
+	GTP1U[0].receive(UECUPS_IPv6SLAACInd:?) -> value ipv6slaac_ind;
+	log("5GC assigned IPv6 global prefix: ", ipv6slaac_ind.ipv6_prefix, " -> ", f_inet6_ntoa(ipv6slaac_ind.ipv6_prefix & '0000000000000000'O));
+
+	/* Use the first global IPv6 address in the IPv6 prefix picked by osmo-uecups: */
+	g_ip6_addr := ipv6slaac_ind.ipv6_user_addr;
+	log("Using IPv6 global address: ", g_ip6_addr);
+}
+
 /* process one to-be-created bearer context */
 private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Session_CT
 {
@@ -702,26 +755,10 @@ private function process_bctx_create(BearerContextGrouped bctx) runs on PGW_Sess
 		g_gtpu6_remote := rx_fteid.iPv6_Address;
 	}
 
-	var template (value) UECUPS_CreateTun uecups_create := ts_UECUPS_CreateTun(
-		tx_teid := oct2int(g_pars.bearer.teid_remote),
-		rx_teid := oct2int(g_pars.bearer.teid_local),
-		user_addr_type := IPV4,
-		user_addr := '00000000'O,
-		local_gtp_ep := valueof(ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u))),
-		remote_gtp_ep := valueof(ts_UECUPS_SockAddr(g_gtpu4_remote)),
-		tun_dev_name := g_pars.tun_dev_name,
-		tun_netns_name := g_pars.tun_netns_name
-	);
-
-	/* create tunnel in daemon */
-	if (isbound(g_ip4_addr)) {
-		uecups_create.user_addr := g_ip4_addr;
-		f_gtp1u_create_tunnel(uecups_create);
-	}
-	if (isbound(g_ip6_addr)) {
-		uecups_create.user_addr_type := IPV6;
-		uecups_create.user_addr := g_ip6_addr;
-		f_gtp1u_create_tunnel(uecups_create);
+	f_create_sess_tun();
+	if (g_pars.pdn_type == GTP2C_PDN_IPv6 or
+	    g_pars.pdn_type == GTP2C_PDN_IPv4v6) {
+		f_perform_ipv6_slaac();
 	}
 }
 
@@ -780,13 +817,29 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 		var PDN_Address_and_Prefix paa := resp.pDN_AddressAllocation.pDN_Address_and_Prefix;
 		if (ischosen(paa.iPv4_Address)) {
 			g_ip4_addr := paa.iPv4_Address;
+			log("PGW assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
 		} else if (ischosen(paa.iPv6_Address)) {
-			g_ip6_addr := paa.iPv6_Address.iPv6_Address;
-			g_ip6_plen := paa.iPv6_Address.prefixLength;
+			if (paa.iPv6_Address.prefixLength != 64) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Got IPv6 Prefix Length ",
+								paa.iPv6_Address.prefixLength, " vs exp 64"));
+			}
+			g_ip6_interface_id := substr(paa.iPv6_Address.iPv6_Address, 8, 8);
+			log("PGW assigned IPv6 Interface Id: ", g_ip6_interface_id);
+			g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+			log("PGW assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
 		} else if (ischosen(paa.iPv4_IPv6)) {
+			if (paa.iPv4_IPv6.prefixLength != 64) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Got IPv6 Prefix Length ",
+								paa.iPv4_IPv6.prefixLength, " vs exp 64"));
+			}
 			g_ip4_addr := paa.iPv4_IPv6.iPv4_Address;
-			g_ip6_addr := paa.iPv4_IPv6.iPv6_Address;
-			g_ip6_plen := paa.iPv4_IPv6.prefixLength;
+			log("PGW assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
+			g_ip6_interface_id := substr(paa.iPv4_IPv6.iPv6_Address, 8, 8);
+			log("PGW assigned IPv6 Interface Id: ", g_ip6_interface_id);
+			g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+			log("PGW assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
 		}
 		var integer i;
 		for (i := 0; i < lengthof(resp.bearerContextGrouped); i := i+1) {
@@ -920,14 +973,19 @@ private function f_run_prog_unique_log_path() runs on PGW_Session_CT return char
 }
 
 /* execute ping command and wait for result */
-private function f_ping4(charstring host, integer interval := 1, integer count := 10) runs on PGW_Session_CT
+private function f_ping(charstring host, integer interval := 1, integer count := 10) runs on PGW_Session_CT
 {
-	if (not isbound(g_ip4_addr)) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "f_ping4(): g_ip4_addr is unset!");
-	}
-	/* command will be filled in by f_gtp1u_ping() below: */
+	/* command will be filled in by f_gtp1u_ping4() below: */
 	var UECUPS_StartProgram sprog := f_run_prog_init("");
-	f_gtp1u_ping(sprog, host, interval, count, f_inet_ntoa(g_ip4_addr),
+	var charstring bind_addr;
+
+	if (f_addr_is_ipv6(host)) {
+		bind_addr := f_inet6_ntoa(g_ip6_addr);
+	} else {
+		bind_addr := f_inet_ntoa(g_ip4_addr);
+	}
+
+	f_gtp1u_ping(sprog, host, interval, count, bind_addr,
 		     redirect_output := true,
 		     redirect_output_path_prefix := f_run_prog_unique_log_path());
 }
@@ -957,21 +1015,25 @@ private function f_TC_createSession() runs on PGW_Session_CT {
 }
 testcase TC_createSession() runs on PGW_Test_CT {
 	var PGW_Session_CT vc_conn;
-	var SessionPars pars := valueof(t_SessionPars('001010123456789'H, "tun22"));
+	var SessionPars pars := valueof(t_SessionPars('001010123456789'H,
+						      "tun22",
+						      pdn_type := GTP2C_PDN_IPv4));
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_createSession), pars);
 	vc_conn.done;
 }
 
-/* create a session, then execute a ping command on the user plane */
+/* create a IPv4 session, then execute a ping command on the user plane */
 private function f_TC_createSession_ping4() runs on PGW_Session_CT {
 	f_s5s8_create_session();
-	f_ping4(mp_ping_hostname);
+	f_ping(mp_ping_hostname);
 	setverdict(pass);
 }
 testcase TC_createSession_ping4() runs on PGW_Test_CT {
 	var PGW_Session_CT vc_conn;
-	var SessionPars pars := valueof(t_SessionPars('001010123456789'H, "tun23"));
+	var SessionPars pars := valueof(t_SessionPars('001010123456789'H,
+						      "tun23",
+						      pdn_type := GTP2C_PDN_IPv4));
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_createSession_ping4), pars);
 	vc_conn.done;
@@ -993,6 +1055,74 @@ testcase TC_createSession_ping4_256() runs on PGW_Test_CT {
 	}
 }
 
+/* create a IPv6 session, then execute a ping command on the user plane */
+private function f_TC_createSession_ping6() runs on PGW_Session_CT {
+	f_s5s8_create_session();
+	f_ping(mp_ping_hostname6);
+	setverdict(pass);
+}
+testcase TC_createSession_ping6() runs on PGW_Test_CT {
+	var PGW_Session_CT vc_conn;
+	var SessionPars pars := valueof(t_SessionPars('001010123456789'H,
+						      "tun23",
+						      pdn_type := GTP2C_PDN_IPv6));
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_createSession_ping6), pars);
+	vc_conn.done;
+}
+testcase TC_createSession_ping6_256() runs on PGW_Test_CT {
+	var PGW_Session_CT vc_conn[256];
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < sizeof(vc_conn); i:=i+1) {
+		var charstring tundev := "ping" & int2str(i);
+		var SessionPars pars := valueof(t_SessionPars(f_gen_imsi(i),
+						tundev,
+						pdn_type := GTP2C_PDN_IPv6));
+		vc_conn[i] := f_start_handler(refers(f_TC_createSession_ping6), pars);
+	}
+
+	for (i := 0; i < lengthof(vc_conn); i:=i+1) {
+		vc_conn[i].done;
+	}
+}
+
+/* create a IPv4v6 session, then execute a ping command on the user plane */
+private function f_TC_createSession_ping46() runs on PGW_Session_CT {
+	f_s5s8_create_session();
+	f_ping(mp_ping_hostname);
+	f_ping(mp_ping_hostname6);
+	setverdict(pass);
+}
+testcase TC_createSession_ping46() runs on PGW_Test_CT {
+	var PGW_Session_CT vc_conn;
+	var SessionPars pars := valueof(t_SessionPars('001010123456789'H,
+						      "tun23",
+						      pdn_type := GTP2C_PDN_IPv4v6));
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_createSession_ping46), pars);
+	vc_conn.done;
+}
+testcase TC_createSession_ping46_256() runs on PGW_Test_CT {
+	var PGW_Session_CT vc_conn[256];
+	var integer i;
+
+	f_init();
+
+	for (i := 0; i < sizeof(vc_conn); i:=i+1) {
+		var charstring tundev := "ping" & int2str(i);
+		var SessionPars pars := valueof(t_SessionPars(f_gen_imsi(i),
+						tundev,
+						pdn_type := GTP2C_PDN_IPv4v6));
+		vc_conn[i] := f_start_handler(refers(f_TC_createSession_ping46), pars);
+	}
+
+	for (i := 0; i < lengthof(vc_conn); i:=i+1) {
+		vc_conn[i].done;
+	}
+}
 
 /* create a session, then delete it again */
 private function f_TC_createSession_deleteSession() runs on PGW_Session_CT {
@@ -1033,7 +1163,7 @@ private function f_TC_gy_charging_cc_time() runs on PGW_Session_CT {
 	f_validate_gy_cc_report(g_rx_gy, VALIDITY_TIME, (3..4), 0, 0);
 
 	d := activate(as_DIA_Gy_CCR(UPDATE_REQUEST));
-	f_ping4(mp_ping_hostname);
+	f_ping(mp_ping_hostname);
 	/* Let the CCA reach the PGW */
 	f_sleep(0.5);
 	deactivate(d);
@@ -1126,6 +1256,10 @@ control {
 	execute( TC_createSession() );
 	execute( TC_createSession_ping4() );
 	execute( TC_createSession_ping4_256() );
+	execute( TC_createSession_ping6() );
+	execute( TC_createSession_ping6_256() );
+	execute( TC_createSession_ping46() );
+	execute( TC_createSession_ping46_256() );
 	execute( TC_createSession_deleteSession() );
 	execute( TC_deleteSession_unknown() );
 	execute( TC_gy_charging_cc_time() );
