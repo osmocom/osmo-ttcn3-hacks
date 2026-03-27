@@ -35,6 +35,13 @@ import from SCCP_Emulation all;
 import from STP_Tests_Common all;
 import from STP_Tests_M3UA all;
 
+private altstep as_M3UA_wait_tcp_conn_closed(integer idx) runs on RAW_M3UA_CT {
+	var PortEvent pev;
+	[] M3UA[idx].receive(PortEvent:{connClosed:=?}) -> value pev {
+		log("Peer closed conn: ", pev)
+	}
+}
+
 private function f_TC_m3ua_tcp(integer idx_a, integer idx_b) runs on RAW_M3UA_CT {
 	var M3uaConfig cfg_a := g_m3ua_configs[idx_a];
 	var M3uaConfig cfg_b := g_m3ua_configs[idx_b];
@@ -116,6 +123,78 @@ testcase TC_m3ua_tcp_srv_cli() runs on RAW_M3UA_CT {
 	f_TC_m3ua_tcp(0, 1);
 }
 
+/* Test administrative state, VTY "[no] shutdown" */
+testcase TC_m3ua_tcp_srv_adm_shutdown() runs on RAW_M3UA_CT {
+	var Misc_Helpers.ro_charstring asps := { "asp-sender-tcp" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit);
+	f_sleep(1.0);
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "shutdown");
+	log("ASP should now be DOWN")
+	as_M3UA_wait_tcp_conn_closed(0);
+
+	f_sleep(1.0);
+	/* Make sure SCTP conn will be closed when we connect to it. */
+	log("Connecting to ASP (expect closed):");
+	f_M3UA_connect_tcp(0);
+	timer T := 5.0;
+	T.start;
+	alt {
+	[] as_M3UA_wait_tcp_conn_closed(0);
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Expected close from ASP SCTP server!");
+		}
+	}
+
+	/* Now let the ASP be active again, it should reconnect to us: */
+	f_vty_cs7_asp_cmd(g_m3ua_configs[0], "no shutdown");
+	log("Connecting to ASP (expect success):");
+	f_M3UA_connect_tcp(0);
+	f_M3UA_asp_up_act(0, c_M3UA_TMT_override, omit, ntfy_after_up := c_M3UA_ST_I_AS_PENDING);
+
+	f_clear_m3ua();
+}
+
+/* Test administrative state, VTY "[no] shutdown" */
+testcase TC_m3ua_tcp_cli_adm_shutdown() runs on RAW_M3UA_CT {
+	var PortEvent pev;
+	var Misc_Helpers.ro_charstring asps := { "asp-client0-tcp" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+	f_init_m3ua_srv();
+
+	var OCT4 rctx := int2oct(m3ua_configs[0].routing_ctx, 4);
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
+	f_sleep(1.0);
+	f_vty_cs7_asp_cmd(m3ua_configs[0], "shutdown");
+	log("ASP should now be DOWN")
+	as_M3UA_wait_tcp_conn_closed(0);
+
+	/* Wait for a while to make sure ASP doesn't reconnect to us: */
+	timer T := 10.0;
+	T.start;
+	alt {
+	[] M3UA[0].receive(tr_ConnOpened) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Unexpected reconnect from ASP client!");
+		}
+	[] T.timeout {}
+	}
+
+	/* Now let the ASP be active again, it should reconnect to us: */
+	f_vty_cs7_asp_cmd(m3ua_configs[0], "no shutdown");
+	log("Waiting for client ASP to reconnect to us");
+	M3UA[0].receive(tr_ConnOpened) -> value pev {
+			g_m3ua_conn_id[0] := pev.connOpened.connId;
+	}
+	f_M3UA_CLNT_asp_up_act(0, rctx := rctx);
+
+	f_clear_m3ua();
+}
+
 /* Test the IUT sends heartbeat procedure when needed. */
 testcase TC_m3ua_tcp_beat_timeout() runs on RAW_M3UA_CT {
 	var Misc_Helpers.ro_charstring asps := { "asp-sender-tcp" };
@@ -134,6 +213,9 @@ control {
 	execute( TC_m3ua_tcp_cli_srv() );
 	execute( TC_m3ua_tcp_srv() );
 	execute( TC_m3ua_tcp_srv_cli() );
+
+	execute( TC_m3ua_tcp_srv_adm_shutdown() );
+	execute( TC_m3ua_tcp_cli_adm_shutdown() );
 
 	execute( TC_m3ua_tcp_beat_timeout() );
 	execute( TC_m3ua_tcp_clnt_beat_timeout() );
