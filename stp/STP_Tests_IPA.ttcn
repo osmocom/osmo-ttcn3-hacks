@@ -76,6 +76,13 @@ type component IPA_CT extends Test_CT {
 	var IpaConfigs g_ipa_configs;
 }
 
+private altstep as_IPA_wait_tcp_conn_closed(integer idx) runs on IPA_CT {
+	var ASP_IPA_Event evt;
+	[] IPA_CTRL[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_DOWN)) -> value evt {
+		log("Peer closed conn: ", evt)
+	}
+}
+
 friend function ipa_build_configs(template (omit) Misc_Helpers.ro_charstring asps := omit)
 return IpaConfigs
 {
@@ -182,6 +189,28 @@ friend function f_init_ipa(template (omit) IpaConfigs ipa_configs := omit) runs 
 	}
 }
 
+private function f_IPA_close(integer i) runs on IPA_CT {
+	var Result res;
+	if (vc_IPA[i] == null) {
+		log("Not close()ing ipacfg := ", g_ipa_configs[i], " (not connected)");
+		/* not connected */
+		return;
+	}
+	vc_IPA[i].stop;
+	vc_IPA[i] := null;
+}
+
+private function f_clear_ipa() runs on IPA_CT {
+	var integer i;
+
+	log("Clearing IPA...");
+
+	for (i := 0; i < lengthof(g_ipa_configs); i:=i+1) {
+		f_IPA_close(i);
+	}
+	setverdict(pass, "IPA cleared");
+}
+
 friend function f_connect_ipa(integer idx, boolean exp_act := true) runs on IPA_CT {
 	vc_IPA[idx].start(IPA_Emulation.main_client(mp_stp_ipa_ip,
 						    g_ipa_configs[idx].remote_port,
@@ -196,13 +225,16 @@ friend function f_connect_ipa(integer idx, boolean exp_act := true) runs on IPA_
 	}
 }
 
-friend function f_listen_ipa(integer idx) runs on IPA_CT {
-	vc_IPA[idx].start(IPA_Emulation.main_server(mp_local_ipa_ip,
-						    g_ipa_configs[idx].local_port));
+private function f_start_ipa_server(integer idx) runs on IPA_CT {
+	vc_IPA[idx].start(IPA_Emulation.main_server(mp_local_ipa_ip, g_ipa_configs[idx].local_port));
+}
+
+friend function f_listen_ipa(integer idx, float to_val := 10.0) runs on IPA_CT {
+	f_start_ipa_server(idx);
 
 	/* wait for incoming connection to IPA port before proceeding */
 	var integer st := 0;
-	timer T := 10.0;
+	timer T := to_val;
 	T.start;
 	alt {
 	[st == 0] IPA_CTRL[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP)) {
@@ -217,6 +249,22 @@ friend function f_listen_ipa(integer idx) runs on IPA_CT {
 	[] T.timeout {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("No connection to IPA[", idx, "] Port"));
+		}
+	}
+}
+
+/* Make sure no new conn is attemptent from the peer during the specified time frame: */
+private function f_exp_no_ipa_conn(integer idx, float to_val := 10.0) runs on IPA_CT {
+	timer T;
+
+	T.start(to_val);
+	alt {
+	[] IPA_CTRL[idx].receive(tr_ASP_IPA_EV(ASP_IPA_EVENT_UP)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Got unexpected connection to IPA[", idx, "] Port"));
+		}
+	[] T.timeout {
+			setverdict(pass);
 		}
 	}
 }
@@ -681,6 +729,62 @@ private function f_IPA_ping(integer idx) runs on IPA_CT
 	}
 }
 
+/* Test administrative state, VTY "[no] shutdown" */
+testcase TC_ipa_tcp_srv_adm_shutdown() runs on IPA_CT {
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-override-sender" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_connect_ipa(0);
+
+	f_sleep(1.0);
+	f_vty_cs7_ipa_asp_cmd(ipa_configs[0], "shutdown");
+	log("ASP should now be DOWN")
+	as_IPA_wait_tcp_conn_closed(0);
+	f_clear_ipa();
+	f_init_ipa(ipa_configs := ipa_configs);
+
+	f_sleep(1.0);
+	/* Make sure SCTP conn will be closed when we connect to it. */
+	log("Connecting to ASP (expect closed):");
+	f_connect_ipa(0, exp_act := false);
+	f_clear_ipa();
+
+	/* Now let the ASP be active again, it should allow us to reconnect: */
+	f_vty_cs7_ipa_asp_cmd(ipa_configs[0], "no shutdown");
+	log("Connecting to ASP (expect success):");
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_connect_ipa(0);
+	setverdict(pass);
+}
+
+/* Test administrative state, VTY "[no] shutdown" */
+testcase TC_ipa_tcp_cli_adm_shutdown() runs on IPA_CT {
+	var PortEvent pev;
+	var Misc_Helpers.ro_charstring asps := { "ipa-asp-client0" };
+	var IpaConfigs ipa_configs := ipa_build_configs(asps);
+
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_listen_ipa(0);
+	f_sleep(1.0);
+	f_vty_cs7_ipa_asp_cmd(ipa_configs[0], "shutdown");
+	log("ASP should now be DOWN")
+	as_IPA_wait_tcp_conn_closed(0);
+	f_clear_ipa();
+
+	/* Wait for a while to make sure ASP doesn't reconnect to us: */
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_start_ipa_server(0);
+	f_exp_no_ipa_conn(0, to_val := 10.0);
+	f_clear_ipa();
+
+	/* Now let the ASP be active again, it should reconnect to us: */
+	f_vty_cs7_ipa_asp_cmd(ipa_configs[0], "no shutdown");
+	log("Waiting for client ASP to reconnect to us");
+	f_init_ipa(ipa_configs := ipa_configs);
+	f_listen_ipa(0);
+	setverdict(pass);
+}
+
 testcase TC_beat() runs on IPA_CT {
 	var Misc_Helpers.ro_charstring asps := { "ipa-asp-override-sender" };
 	var IpaConfigs ipa_configs := ipa_build_configs(asps);
@@ -774,6 +878,9 @@ control {
 	execute( TC_combinedlset_loadshare() );
 	execute( TC_unknown_client_dynamic_combinedlset_loadshare() );
 	execute( TC_inaccessible_sp() );
+
+	execute( TC_ipa_tcp_srv_adm_shutdown() );
+	execute( TC_ipa_tcp_cli_adm_shutdown() );
 
 	execute( TC_beat() );
 	execute( TC_beat_timeout() );
