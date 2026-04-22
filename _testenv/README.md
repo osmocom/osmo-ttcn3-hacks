@@ -94,6 +94,11 @@ vty_port=4243
   testsuite to avoid consuming the whole RAM and freezing (or possibly getting
   killed from an out-of-memory daemon).
 
+* `podman_extra=`: optional value that can be set to add extra parameters to
+  podman. For example, it can be used to mount an additional volume to pass-
+  through USB devices. Use spaces to separate parameters, use quotes to include
+  spaces into parameters.
+
 #### Component section
 
 * `program=`: executable for starting a test component, may contain arguments.

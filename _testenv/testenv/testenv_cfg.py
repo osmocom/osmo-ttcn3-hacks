@@ -207,6 +207,11 @@ def get_titan_make_job_count():
     return testenv.args.jobs
 
 
+def get_podman_extra_first_cfg():
+    _, cfg = next(iter(cfgs.items()))
+    return cfg["testsuite"].get("podman_extra", None)
+
+
 def verify_qemu_cfgs():
     """Check if passed -C or -K args make sense with the testenv configs."""
     testsuite = testenv.args.testsuite
@@ -255,6 +260,7 @@ def verify(cfg, path):
         "program",
         "titan_min",
         "max_jobs_per_gb_ram",
+        "podman_extra",
     ]
     keys_valid_component = [
         "clean",

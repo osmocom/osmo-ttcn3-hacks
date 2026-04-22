@@ -266,6 +266,10 @@ def start():
             dest = os.readlink(testenv.custom_kernel_path)
             cmd += ["--volume", f"{dest}:{dest}:ro"]
 
+    podman_extra = testenv.testenv_cfg.get_podman_extra_first_cfg()
+    if podman_extra:
+        cmd += shlex.split(podman_extra)
+
     cmd += [
         "--volume",
         f"{testdir_topdir}:{testdir_topdir}",
