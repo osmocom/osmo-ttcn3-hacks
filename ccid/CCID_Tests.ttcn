@@ -3,6 +3,7 @@ module CCID_Tests {
 /* TTCN-3 tests for USB CCID (Chip Card Interface Device)
  *
  * (C) 2018-2019 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2026 by Andreas Eversberg <andreas@eversberg.eu>
  */
 
 import from General_Types all;
@@ -16,18 +17,33 @@ import from CCID_Types all;
 import from CCID_Templates all;
 import from CCID_Emulation all;
 
+import from SIMTRACE_Types all;
+import from SIMTRACE_Templates all;
+import from SIMTRACE_Emulation all;
+
 modulepar {
 	USB_Device_Match mp_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '6141'H } };
-	integer mp_use_slot_count := 8;
+	USB_Device_Match mp_cardem_usb_dev_match := { vid_pid := { vid := '1d50'H, pid := '60e3'H } };
+	integer mp_use_slot_count := 7;
+	integer mp_simtrace_slot := 7;
 	boolean mp_test_power_off := true;
 	boolean mp_test_set_params := false;
 	boolean mp_quirk_resetpar_returns_slotsts := false;
 }
+
 /* global test component; manages CCID device */
 type component Test_CT {
 	var CCID_Emulation_CT vc_CCID;
 	port USB_PT USB;
-	var Slot_CT vc_SLOT[NR_SLOTS];
+	var CardemSlot_CT vc_SLOT[NR_SLOTS];
+	var ST_Emulation_CT vc_cardem_ref[NR_SLOTS];
+	private var boolean Cardem_In_Use := false;
+};
+
+type component CardemSlot_CT extends Slot_CT {
+	var ST_Emulation_CT vc_Cardem := null;
+	port ST_USER_PT ST;
+	port ST_USER_PT ST_IRQ;
 };
 
 /* maximum number of slots we are supporting in the test suite */
@@ -93,28 +109,46 @@ private template (value) CCID_ProtocolData ts_ProtoDataT0(ISO7816_Fi fi, ISO7816
 	}
 };
 
-type function void_fn() runs on Slot_CT;
+type function void_fn() runs on CardemSlot_CT;
 
-/* first function inside Slot_CT; wait for CCID_EVENT_UP + call testcase-specific function */
-private function f_handler_init(void_fn fn, integer slot_nr) runs on Slot_CT {
+/* first function inside CardemSlot_CT; wait for CCID_EVENT_UP + call testcase-specific function */
+private function f_handler_init(void_fn fn, integer slot_nr, ST_Emulation_CT v_cardem_ref) runs on CardemSlot_CT {
 	g_slot_nr := slot_nr;
-	CCID.receive(CCID_Emulation_Event:{up_down:=CCID_EVENT_UP});
+	vc_Cardem := v_cardem_ref;
 	g_Tguard.start;
 	activate(as_Tguard());
+	CCID.receive(CCID_Emulation_Event:{up_down:=CCID_EVENT_UP});
 
 	fn.apply();
 }
 
 /* start a single slot handler */
-private function f_start_handler(void_fn fn, integer slot_nr) runs on Test_CT
+private function f_start_handler(void_fn fn, integer slot_nr, boolean use_cardem := false) runs on Test_CT
 {
-	var Slot_CT vc;
+	var ST_Emulation_CT vc_Cardem := null;
 
-	vc_SLOT[slot_nr] := Slot_CT.create("Slot" & int2str(slot_nr));
+	vc_SLOT[slot_nr] := CardemSlot_CT.create("Slot" & int2str(slot_nr));
 	connect(vc_SLOT[slot_nr]:CCID, vc_CCID:SLOT[slot_nr]);
-	vc_SLOT[slot_nr].start(f_handler_init(fn, slot_nr));
+
+	if (use_cardem) {
+		if (Cardem_In_Use) {
+			setverdict(fail, "Only one CCID slot handler can use Cardem.");
+			mtc.stop;
+		}
+		vc_Cardem := ST_Emulation_CT.create("Cardem");
+		map(vc_Cardem:USB, system:USB);
+		connect(vc_Cardem:INOUT, vc_SLOT[slot_nr]:ST);
+		connect(vc_Cardem:IRQ, vc_SLOT[slot_nr]:ST_IRQ);
+		Cardem_In_Use := true;
+	}
+
+	vc_cardem_ref[slot_nr] := vc_Cardem;
+
+	vc_SLOT[slot_nr].start(f_handler_init(fn, slot_nr, vc_Cardem));
+
 }
 
+/* start a single Cardem slot handler */
 private function f_wait_handlers_complete() runs on Test_CT {
 	var integer i;
 
@@ -127,9 +161,19 @@ private function f_wait_handlers_complete() runs on Test_CT {
 }
 
 private function f_start_and_wait() runs on Test_CT {
-	/* start CCID_Emulation last, it will trigger all the per-slot components */
-	var CCID_Emulation_Params cep := { usb_dev_match := mp_usb_dev_match };
-        vc_CCID.start(CCID_Emulation.main(cep));
+	var integer i;
+
+	/* start CCID_Emulation and Cardem_Emulation last, it will trigger all the per-slot components */
+	var CCID_Emulation_Params ccidp := { usb_dev_match := mp_usb_dev_match };
+	var USB_IF_Params cardemp := { usb_dev_match := mp_cardem_usb_dev_match, usb_if_nr := 0 };
+	vc_CCID.start(CCID_Emulation.main(ccidp));
+	for (i := 0; i < NR_SLOTS; i := i+1) {
+		if (vc_SLOT[i] != null) {
+			if (vc_cardem_ref[i] != null) {
+				vc_cardem_ref[i].start(SIMTRACE_Emulation.main(cardemp));
+			}
+		}
+	}
 	f_wait_handlers_complete();
 }
 
@@ -142,14 +186,97 @@ private function f_init() runs on Test_CT {
 	}
 }
 
+altstep as_cardem_any() runs on CardemSlot_CT {
+	var SIMTRACE_PDU pdu;
+	[] ST.receive(SIMTRACE_PDU:?) -> value pdu {
+		setverdict(fail, "Received unexpected CCID ", pdu);
+		self.stop;
+		}
+	[] ST.receive {
+		setverdict(fail, "Received unexpected non-CCID");
+		self.stop;
+		}
+}
 
+/* transceive a Cardem command (expect 'rx' on IN) */
+function f_cardem_receive(template (present) SIMTRACE_PDU exp_rx)
+runs on CardemSlot_CT return SIMTRACE_PDU {
+	var SIMTRACE_PDU pdu;
+
+	alt {
+	[] ST.receive(exp_rx) -> value pdu {
+		return pdu;
+		}
+	[] as_cardem_any();
+	}
+	return pdu;
+}
+
+function f_cardem_transmit(template (value) SIMTRACE_PDU tx)
+runs on CardemSlot_CT {
+	ST.send(tx);
+}
+
+altstep as_cardem_manager() runs on CardemSlot_CT {
+	var SIMTRACE_PDU pdu;
+
+	[] ST.receive(tr_SIMTRACE_CEMU_CONFIG(tr_FeatureFlags(true))) {
+		log("Got Config.");
+		repeat;
+		}
+	[] ST_IRQ.receive(tr_SIMTRACE_MODEM_STATUS()) {
+		log("Got Status.");
+		repeat;
+		}
+	[] ST.receive(tr_SIMTRACE_CEMU_PTS(?, ?)) {
+		log("Got PTS info.");
+		repeat;
+		}
+//	[] ST.receive(tr_SIMTRACE_CEMU_RX_DATA(?, ?)) -> value pdu {
+//		log("Got RX Data: ", pdu.payload.cardem_do_rxdata.data);
+//		f_cardem_transmit(ts_SIMTRACE_CEMU_TX_DATA(ts_CardEmu_DataFlags(), '6200'O));
+//		repeat;
+//		}
+//	[] ST.receive(Simtrace_PDU:?) {
+//		log("Got Something we don't want!");
+//		repeat;
+//		}	
+}
+
+function f_cardem_manager() runs on CardemSlot_CT {
+	if (vc_Cardem == null) {
+		setverdict(fail, "Please enable Cardem support first.");
+		mtc.stop;
+	}
+
+	activate(as_cardem_manager());
+
+	f_cardem_transmit(ts_SIMTRACE_CEMU_CONFIG(ts_FeatureFlags(true)));
+	f_cardem_transmit(ts_SIMTRACE_MODEM_SIM_SELECT(SIM_SELECT_REMOTE));
+	f_cardem_transmit(ts_SIMTRACE_CEMU_SET_ATR('3b00'O));
+	f_cardem_transmit(ts_SIMTRACE_CEMU_CARDINSERT(1));
+	f_cardem_transmit(ts_SIMTRACE_MODEM_RESET(MODEM_RESET_PULSE, 300));
+	f_cardem_transmit(ts_SIMTRACE_CEMU_SET_ATR('3b9f96801f878031e073fe211b674a4c753034054ba9'O));
+	f_sleep(0.2);
+}
+
+private function f_ccid_receive(template (present) CCID_PDU pdu_exp) runs on Slot_CT return CCID_PDU {
+	var CCID_PDU pdu_rx;
+	alt {
+	[] CCID.receive(pdu_exp) -> value pdu_rx {
+		}
+	[] as_ccid_any();
+	}
+
+	return pdu_rx;
+}
 
 /***********************************************************************
  * Test behavior regarding valid situations
  ***********************************************************************/
 
 /* request 100 times the slot status */
-private function f_TC_getstatus() runs on Slot_CT
+private function f_TC_getstatus() runs on CardemSlot_CT
 {
 	var integer i;
 	for (i := 0; i < 100; i := i+1) {
@@ -177,7 +304,7 @@ testcase TC_get_status() runs on Test_CT
 }
 
 
-private function f_TC_power_on() runs on Slot_CT
+private function f_TC_power_on() runs on CardemSlot_CT
 {
 	f_ccid_power_on();
 }
@@ -194,7 +321,7 @@ testcase TC_power_on() runs on Test_CT
 	f_start_and_wait();
 }
 
-private function f_TC_power_off() runs on Slot_CT
+private function f_TC_power_off() runs on CardemSlot_CT
 {
 	f_ccid_power_on();
 	f_ccid_power_off();
@@ -214,7 +341,7 @@ testcase TC_power_off() runs on Test_CT
 
 
 /* repeat IccPowerOn on slot that's already active (next warm reset ATR) */
-private function f_TC_power_on_warm() runs on Slot_CT
+private function f_TC_power_on_warm() runs on CardemSlot_CT
 {
 	var integer i;
 
@@ -240,7 +367,7 @@ testcase TC_power_on_warm() runs on Test_CT
 }
 
 /* transfer 1000 APDUs by issuing SELECT MF */
-private function f_TC_select_mf() runs on Slot_CT
+private function f_TC_select_mf() runs on CardemSlot_CT
 {
 	var integer i;
 	f_ccid_power_on();
@@ -263,7 +390,7 @@ testcase TC_select_mf() runs on Test_CT
 }
 
 /* GetParametrs: verify contents */
-private function f_TC_get_params() runs on Slot_CT
+private function f_TC_get_params() runs on CardemSlot_CT
 {
 	var CCID_PDU par;
 	f_ccid_power_on();
@@ -283,7 +410,7 @@ testcase TC_get_params() runs on Test_CT
 }
 
 /* SetParameters: verify change */
-private function f_TC_set_params() runs on Slot_CT
+private function f_TC_set_params() runs on CardemSlot_CT
 {
 	var CCID_PDU par;
 	f_ccid_power_on();
@@ -329,7 +456,7 @@ testcase TC_set_params() runs on Test_CT
 }
 
 /* ResetParameters: verify change */
-private function f_TC_reset_params() runs on Slot_CT
+private function f_TC_reset_params() runs on CardemSlot_CT
 {
 	var CCID_PDU par;
 
@@ -356,7 +483,7 @@ testcase TC_reset_params() runs on Test_CT
 }
 
 /* SetParameters: verify acceptance of unchanged setting */
-private function f_TC_set_params_nochange() runs on Slot_CT
+private function f_TC_set_params_nochange() runs on CardemSlot_CT
 {
 	var CCID_PDU set_par, get_par;
 	f_ccid_power_on();
@@ -387,7 +514,7 @@ testcase TC_set_params_nochange() runs on Test_CT
 }
 
 /* manage channel (Case 1) */
-private function f_TC_successful_case_1() runs on Slot_CT
+private function f_TC_successful_case_1() runs on CardemSlot_CT
 {
 	var octetstring res;
 
@@ -412,7 +539,7 @@ testcase TC_successful_case_1() runs on Test_CT
 }
 
 /* read binary (Case 3 + 2) */
-private function f_TC_successful_case_2_3() runs on Slot_CT
+private function f_TC_successful_case_2_3() runs on CardemSlot_CT
 {
 	var octetstring res;
 
@@ -442,7 +569,7 @@ testcase TC_successful_case_2_3() runs on Test_CT
 }
 
 /* GET RESPONSE (Case 4) */
-private function f_TC_successful_case_4() runs on Slot_CT
+private function f_TC_successful_case_4() runs on CardemSlot_CT
 {
 	var octetstring res;
 	var integer len;
@@ -474,7 +601,7 @@ testcase TC_successful_case_4() runs on Test_CT
 }
 
 /* truncated transfer */
-private function f_TC_truncated() runs on Slot_CT
+private function f_TC_truncated() runs on CardemSlot_CT
 {
 	var integer i;
 	var octetstring req;
@@ -528,7 +655,7 @@ testcase TC_truncated() runs on Test_CT
  ***********************************************************************/
 
 /* message for invalid slot number (more than we have) */
-private function f_TC_inval_slot() runs on Slot_CT {
+private function f_TC_inval_slot() runs on CardemSlot_CT {
 	CCID.send(ts_CCID_GetSlotStatus(g_slot_nr));
 	alt {
 	[] CCID.receive(tr_CCID_SlotStatus(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_SLOT_NOT_EXIST))) {
@@ -548,7 +675,7 @@ testcase TC_inval_slot() runs on Test_CT {
 }
 
 /* switch card off and then XfrBlock. Requires reader with IccPowerOff support */
-private function f_TC_xfer_off() runs on Slot_CT {
+private function f_TC_xfer_off() runs on CardemSlot_CT {
 	f_ccid_power_off();
 	CCID.send(ts_CCID_XfrBlock(g_slot_nr, c_SIM_SELECT_MF, 0));
 	alt {
@@ -570,7 +697,7 @@ testcase TC_xfer_off() runs on Test_CT {
 
 
 /* unsupported Mechanical */
-private function f_TC_unsupp_mechanical() runs on Slot_CT {
+private function f_TC_unsupp_mechanical() runs on CardemSlot_CT {
 	CCID.send(ts_CCID_Mechanical(g_slot_nr, CCID_MECH_FN_EJECT_CARD));
 	alt {
 	[] CCID.receive(tr_CCID_SlotStatus(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_CMD_NOT_SUPPORTED))) {
@@ -586,7 +713,7 @@ testcase TC_unsupp_mechanical() runs on Test_CT {
 }
 
 /* unsupported Secure */
-private function f_TC_unsupp_secure() runs on Slot_CT {
+private function f_TC_unsupp_secure() runs on CardemSlot_CT {
 	CCID.send(ts_CCID_Secure(g_slot_nr, 0, 0, ''O));
 	alt {
 	[] CCID.receive(tr_CCID_DataBlock(hdr_in := tr_CCID_HeaderIN_FAIL(CCID_ERR_CMD_NOT_SUPPORTED))) {
