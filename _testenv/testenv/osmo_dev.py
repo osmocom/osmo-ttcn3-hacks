@@ -102,6 +102,10 @@ def init(cfg):
     ] + extra_opts
 
     cwd = get_osmo_dev_dir()
+
+    print(f"CWD: {cwd}")
+    sys.exit(1)
+
     if testenv.cmd.run(cmd, cwd=cwd, check=False).returncode:
         logging.critical("gen_makefile.py from osmo-dev failed!")
         logging.critical("Your osmo-dev.git clone might be outdated, try:")
