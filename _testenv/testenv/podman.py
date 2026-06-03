@@ -9,8 +9,9 @@ import os
 import shlex
 import subprocess
 import testenv.cmd
-import testenv.testdir
 import testenv.coredump
+import testenv.testdir
+import testenv.testsrcdir_cfg
 import time
 import sys
 
@@ -296,7 +297,7 @@ def start():
 
 
 def check_titan_version():
-    version, _ = testenv.testenv_cfg.get_titan_version_first_cfg()
+    version, _ = testenv.testsrcdir_cfg.get_titan_version()
     if not testenv.cmd.run(["test", "-d", f"/opt/eclipse-titan-{version}"], check=False).returncode:
         return
 

@@ -37,7 +37,7 @@ def init():
     atexit.register(stop)
     update_deps()
 
-    titan_version, _ = testenv.testenv_cfg.get_titan_version_first_cfg()
+    titan_version, _ = testenv.testsrcdir_cfg.get_titan_version()
     ttcn3_dir = f"/opt/eclipse-titan-{titan_version}"
 
     if testenv.args.podman or os.path.exists(ttcn3_dir):
@@ -55,7 +55,7 @@ def init():
 
 
 def build():
-    titan_version, titan_reason = testenv.testenv_cfg.get_titan_version_first_cfg()
+    titan_version, titan_reason = testenv.testsrcdir_cfg.get_titan_version()
     logging.info(f"Building testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     env = copy.copy(builddir_env)
@@ -166,7 +166,7 @@ def run(cfg):
         else:
             cmd += [f"{section_data['program']}.{test_arg}"]
 
-    titan_version, titan_reason = testenv.testenv_cfg.get_titan_version_first_cfg()
+    titan_version, titan_reason = testenv.testsrcdir_cfg.get_titan_version()
     logging.info(f"Running testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     if testenv.podman.is_running():

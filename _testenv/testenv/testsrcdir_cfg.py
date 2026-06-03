@@ -1,5 +1,6 @@
 # Copyright 2026 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
+from packaging.version import Version
 import configparser
 import logging
 import math
@@ -10,7 +11,10 @@ import traceback
 
 cfg = {
     "max_jobs_per_gb_ram": None,
+    "titan_min": "11.1.0",
 }
+
+titan_version_in_path = None
 
 
 def get_titan_make_job_count():
@@ -45,6 +49,59 @@ def get_titan_make_job_count():
     return testenv.args.jobs
 
 
+def get_titan_version_in_path():
+    global titan_version_in_path
+
+    if titan_version_in_path:
+        return titan_version_in_path
+
+    ret = None
+    v = testenv.cmd.run(["ttcn3_compiler", "-v"], capture_output=True, text=True)
+    for line in v.stderr.split("\n"):
+        if line.startswith("Version: "):
+            ret = line.split(":", 1)[1].strip()
+            logging.debug(f"eclipse-titan version: {ret}")
+            break
+    titan_version_in_path = ret
+    return ret
+
+
+def get_titan_version():
+    ret_version = cfg["titan_min"]
+    ret_reason = "from titan_min= in testsrcdir.cfg"
+
+    if testenv.args.titan_version:
+        if Version(ret_version) > Version(testenv.args.titan_version):
+            logging.error(
+                f"--titan-version={testenv.args.titan_version} is lower than titan_min={ret_version} in testsrcdir.cfg"
+            )
+            sys.exit(1)
+        ret_version = testenv.args.titan_version
+        ret_reason = "from --titan-version"
+
+    if not testenv.args.podman and not os.path.exists(f"/opt/eclipse-titan-{ret_version}"):
+        path_version = get_titan_version_in_path()
+        if not path_version:
+            logging.error("Failed to parse the ttcn3_compiler version.")
+            logging.error(f"Install eclipse-titan {ret_version} or higher or use --podman.")
+            sys.exit(1)
+        if testenv.args.titan_version and ret_version != path_version:
+            logging.error(
+                f"Installed eclipse-titan version {path_version} is not the same as --titan-version={ret_version}."
+            )
+            sys.exit(1)
+        if Version(ret_version) > Version(path_version):
+            logging.error(
+                f"Installed eclipse-titan version {path_version} is lower than titan_min={ret_version} in testsrcdir.cfg."
+            )
+            logging.error(f"Install eclipse-titan {ret_version} or higher or use --podman.")
+            sys.exit(1)
+        ret_version = path_version
+        ret_reason = "installed on host system"
+
+    return ret_version, ret_reason
+
+
 def init():
     global cfg
 
@@ -71,3 +128,5 @@ def init():
             logging.error("Invalid key {key}= in {cfg_path}")
             sys.exit(1)
         cfg[key] = parser["testsrcdir"][key]
+
+    get_titan_version()

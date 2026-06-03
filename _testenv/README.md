@@ -49,7 +49,6 @@ more sections for test components.
 
 ```ini
 [testsuite]
-titan_min=9.0.0
 program=MGCP_Test
 config=MGCP_Test.cfg
 
@@ -64,10 +63,6 @@ vty_port=4243
 ### Keys
 
 #### Testsuite section
-
-* `titan_min=`: the minimum required eclipse-titan version for building and
-  running this testsuite. See the eclipse-titan versions section below for
-  details.
 
 * `program=`: the executable for starting the testsuite, without arguments.
 
@@ -177,6 +172,7 @@ testsuites in that directory. The file has one `[testsrcdir]` section.
 ```ini
 [testsrcdir]
 max_jobs_per_gb_ram=0.3
+titan_min=9.0.0
 ```
 
 ### Keys
@@ -186,6 +182,10 @@ max_jobs_per_gb_ram=0.3
   dependency sources. This is set in the 5gc testsuite to avoid consuming the
   whole RAM and freezing (or possibly getting killed from an out-of-memory
   daemon).
+
+* `titan_min=`: the minimum required eclipse-titan version for building and
+  running any of the testsuites in this directory. See the eclipse-titan
+  versions section below for details.
 
 ## Environment variables
 
@@ -307,7 +307,7 @@ versions are installed as `/opt/eclipse-titan-$VERSION` paths on the host
 system.
 
 Switching between the versions is done either by setting a `titan_min` version
-in the `[testsuite]` section, or by using `-T` / `--titan-version`.
+in `testsrcdir.cfg`, or by using `-T` / `--titan-version`.
 
 ## Troubleshooting
 
