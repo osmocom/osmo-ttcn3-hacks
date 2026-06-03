@@ -13,6 +13,7 @@ import testenv.podman
 import testenv.podman_install
 import testenv.requirements
 import testenv.testdir
+import testenv.testsrcdir_cfg
 import testenv.testenv_cfg
 import testenv.testsuite
 
@@ -31,6 +32,7 @@ def loop_continue_cond(loop_count):
 
 def run():
     testenv.requirements.check()
+    testenv.testsrcdir_cfg.init()
     testenv.testenv_cfg.init()
 
     if not testenv.args.binary_repo:

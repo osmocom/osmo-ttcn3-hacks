@@ -89,11 +89,6 @@ vty_port=4243
   depending on when the script runs. The script will not run on crash if podman
   is used, as the container gets shutdown beforehand.
 
-* `max_jobs_per_gb_ram=`: optional value that can be set to reduce the amount
-  of parallel jobs when compiling the testsuite. This is set in the 5gc
-  testsuite to avoid consuming the whole RAM and freezing (or possibly getting
-  killed from an out-of-memory daemon).
-
 * `podman_extra=`: optional value that can be set to add extra parameters to
   podman. For example, it can be used to mount an additional volume to pass-
   through USB devices. Use spaces to separate parameters, use quotes to include
@@ -170,6 +165,27 @@ For example:
 * `bts/testenv_generic.cfg`
 * `bts/testenv_hopping.cfg`
 * `bts/testenv_oml.cfg`
+
+## testsrcdir.cfg
+
+Directories can optionally also have a `testsrcdir.cfg` file next to the
+`testenv*.cfg` files. These `testsrcdir.cfg` files set configurations for all
+testsuites in that directory. The file has one `[testsrcdir]` section.
+
+### Example
+
+```ini
+[testsrcdir]
+max_jobs_per_gb_ram=0.3
+```
+
+### Keys
+
+* `max_jobs_per_gb_ram=`: optional value that can be set to reduce the amount
+  of parallel jobs when compiling testsuites from this directory and their
+  dependency sources. This is set in the 5gc testsuite to avoid consuming the
+  whole RAM and freezing (or possibly getting killed from an out-of-memory
+  daemon).
 
 ## Environment variables
 

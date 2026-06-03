@@ -12,6 +12,7 @@ import subprocess
 import testenv
 import testenv.cmd
 import testenv.testenv_cfg
+import testenv.testsrcdir_cfg
 import time
 
 builddir_env = {}
@@ -58,7 +59,7 @@ def build():
     logging.info(f"Building testsuite (eclipse-titan {titan_version}, {titan_reason})")
 
     env = copy.copy(builddir_env)
-    env["PARALLEL_MAKE"] = f"-j{testenv.testenv_cfg.get_titan_make_job_count()}"
+    env["PARALLEL_MAKE"] = f"-j{testenv.testsrcdir_cfg.get_titan_make_job_count()}"
 
     testenv.cmd.run(["make", testenv.args.testsuite], cwd=testenv.ttcn3_hacks_dir, env=env)
 
