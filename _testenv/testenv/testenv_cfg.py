@@ -74,9 +74,10 @@ def get_vty_host_port(cfg, path=None):
     return host, port
 
 
-def get_podman_extra_first_cfg():
-    _, cfg = next(iter(cfgs.items()))
-    return cfg["testsuite"].get("podman_extra", None)
+def get_podman_extra_current_cfg():
+    if current:
+        return cfgs[current]["testsuite"].get("podman_extra", None)
+    return None
 
 
 def verify_qemu_cfgs():

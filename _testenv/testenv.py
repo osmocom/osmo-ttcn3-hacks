@@ -61,17 +61,12 @@ def run():
     # Run the components + testsuite
     loop_count = 0
     while loop_continue_cond(loop_count):
-        # Restart podman container before running again
-        if testenv.args.podman and loop_count:
-            testenv.podman.stop(True)
-
-        cfg_count = 0
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
-            # Restart podman container before running with another config
-            if testenv.args.podman and cfg_count:
-                testenv.podman.stop(True)
-
             testenv.testenv_cfg.set_current(cfg_name, loop_count)
+
+            # Restart podman container after testenv_cfg.current or loop_count change
+            if testenv.args.podman:
+                testenv.podman.stop(True)
 
             if testenv.args.binary_repo:
                 testenv.podman.enable_binary_repo()
@@ -83,7 +78,6 @@ def run():
             testenv.daemons.stop()
             testenv.testdir.clean_run_scripts("finished")
 
-            cfg_count += 1
             testenv.set_log_prefix("[testenv]")
 
         loop_count += 1
