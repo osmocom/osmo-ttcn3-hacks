@@ -9,7 +9,6 @@ OSMOGITEA:=https://gitea.osmocom.org/ttcn3
 
 ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolEmulations.M3UA \
-			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSAPP_v7.3.0 \
 			titan.ProtocolModules.DIAMETER_ProtocolModule_Generator \
 			titan.ProtocolModules.DNS \
@@ -54,6 +53,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.TestPorts.UNIX_DOMAIN_SOCKETasp
 
 OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
+			titan.ProtocolEmulations.SCCP \
 			titan.ProtocolModules.BSSGP_v13.0.0
 
 OSMOGERRIT_REPOS=	osmo-uecups
@@ -75,7 +75,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 nas_commit=					c8fb0b1dd96f45fbfdc93ffc73ffb3ca6ced47cc
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		a70095b9113b23d2ea2405a5775befec18dd0fe0
-titan.ProtocolEmulations.SCCP_commit=	 	744f3eeb58d7b5bc372c9fd01db737a20bae069a
+titan.ProtocolEmulations.SCCP_commit=	 	c6d299781558b53b4487a42f39a557aabb81c1d7
 titan.ProtocolModules.BSSAPP_v7.3.0_commit=	R.2.A-4-g20cfaf8
 titan.ProtocolModules.BSSGP_v13.0.0_commit=	e97d92a8b66bec399babea52f593771b76cb175a
 titan.ProtocolModules.BSSMAP_commit=		4acb6ab5f058477f0b90c2da182d52054e3614b0
