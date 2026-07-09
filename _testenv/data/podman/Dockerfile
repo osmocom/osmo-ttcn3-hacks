@@ -168,3 +168,7 @@ RUN	set -x && \
 	cd / && \
 	rm -rf /tmp/mongodb && \
 	rm /etc/apt/sources.list.d/mongodb-org.list
+
+# Install erlang py (Erlang External Term Format)
+RUN	set -x && \
+	pip3 install erlang_py --break-system-packages
