@@ -1900,6 +1900,88 @@ testcase TC_inaccessible_sp_duna2() runs on RAW_M3UA_CT {
 	f_tc_inaccessible_sp_duna(0, pc_sender, rctx_sender, pc_receiver, rctx_receiver);
 }
 
+testcase TC_loop_guard() runs on RAW_M3UA_CT {
+	var integer i;
+	var Misc_Helpers.ro_charstring asps := { "asp-sender", "asp-receiver0", "asp-receiver1" };
+	var M3uaConfigs m3ua_configs := m3ua_build_configs(asps);
+	var OCT4 rctx_sender := int2oct(m3ua_configs[0].routing_ctx, 4);
+	var OCT4 pc_sender := int2oct(m3ua_configs[0].point_code, 4);
+	var OCT4 rctx_receiver := int2oct(m3ua_configs[1].routing_ctx, 4);
+	var OCT4 pc_receiver := int2oct(m3ua_configs[1].point_code, 4);
+
+	f_init_m3ua(m3ua_configs := m3ua_configs);
+
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "traffic-mode roundrobin");
+
+	/* bring up the 'sender' side (single ASP in AS) */
+	f_M3UA_asp_up_act(0, omit, rctx_sender);
+
+	/* activate the first 'receiver' side ASP */
+	f_M3UA_asp_up_act(1, c_M3UA_TMT_loadshare, rctx_receiver);
+
+	/* verify traffic is routed from sender to [sole] receiver */
+	for (i := 0; i < 10; i := i+1) {
+		f_test_traffic(0, rctx_sender, pc_sender, 1, rctx_receiver, pc_receiver);
+	}
+
+	/* activate the second 'receiver' side ASP (no NOTIFY) */
+	f_M3UA_asp_up_act(2, c_M3UA_TMT_loadshare, rctx_receiver, c_M3UA_ST_I_AS_ACTIVE, omit);
+
+	/* verify traffic is routed from sender to new receiver */
+	const integer iter_per_asp := 5;
+	var Integers num_rx := {};
+	for (i := 0; i < 3; i := i + 1) {
+		num_rx := num_rx & {0};
+	}
+	for (i := 0; i < 2*iter_per_asp; i := i+1) {
+		var octetstring data := f_rnd_octstring_rnd_len(100);
+		var template (value) M3UA_Protocol_Data tx_pd;
+		var template (present) M3UA_Protocol_Data rx_pd;
+		tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+		f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+		alt {
+		[] as_count_rx(1, tr_M3UA_DATA(rctx_receiver, rx_pd), num_rx[1]);
+		[] as_count_rx(2, tr_M3UA_DATA(rctx_receiver, rx_pd), num_rx[2]);
+		}
+	}
+	for (i := 1; i <= 2; i := i+1) {
+		if (num_rx[i] != iter_per_asp) {
+			setverdict(fail, "Received ", num_rx[i], " out of expected ", iter_per_asp,
+				   "M3UA DATA messages at M3UA port ", i);
+		}
+	}
+	/* create a loop guard for asps */
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "group somegroup");
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-sender m3ua"}, "group somegroup");
+
+	var octetstring data := f_rnd_octstring_rnd_len(100);
+	var template (value) M3UA_Protocol_Data tx_pd;
+	var template (present) M3UA_Protocol_Data rx_pd;
+	tx_pd := ts_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+	rx_pd := tr_M3UA_protocol_data(pc_sender, pc_receiver, '23'O, '00'O, '00'O, '00'O, data);
+	f_M3UA_send(0, ts_M3UA_DATA(rctx_sender, tx_pd), 1);
+	timer T := 3.0;
+	T.start;
+	alt {
+	[] M3UA[1].receive(t_M3UA_RecvFrom(tr_M3UA_DATA(rctx_receiver, rx_pd))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received an unexpected M3UA[1] on a loop protected AS"));
+		}
+	[] M3UA[2].receive(t_M3UA_RecvFrom(tr_M3UA_DATA(rctx_receiver, rx_pd))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received an unexpected M3UA[2] on a loop protected AS"));
+		}
+	[] T.timeout {}
+	}
+
+	setverdict(pass);
+	f_clear_m3ua();
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "no traffic-mode");
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-receiver m3ua"}, "nogroup somegroup");
+	f_vty_config2(VTY, {"cs7 instance 0", "as as-sender m3ua"}, "nogroup somegroup");
+}
+
 control {
 	/* M3UA Tests */
 	execute( TC_connect_asp_up() );
@@ -1966,6 +2048,9 @@ control {
 
 	/* put this one last as it changes the stp side config */
 	execute( TC_clnt_asp_act_tmt_loadshare() );
+
+	/* loop guard tests */
+	execute( TC_loop_guard() );
 }
 
 
