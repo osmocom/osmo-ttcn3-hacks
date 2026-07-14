@@ -26,7 +26,7 @@ FILES="IPL4asp_Functions.ttcn IPL4asp_PT.cc IPL4asp_PT.hh IPL4asp_PortType.ttcn 
 FILES+="IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
-DIR=../library/euicc
+DIR=../library/euicc-old
 FILES="PEDefinitions.asn PKIX1Explicit88.asn PKIX1Implicit88.asn RSPDefinitions.asn SGP32Definitions.asn "
 FILES+="PKIX1Explicit88_Templates.ttcn PKIX1Explicit88_Types.ttcn PKIX1Implicit88_Templates.ttcn "
 FILES+="PKIX1Implicit88_Types.ttcn RSPDefinitions_Templates.ttcn RSPDefinitions_Types.ttcn "
