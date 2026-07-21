@@ -72,6 +72,8 @@ def image_build(check_existing=True):
             "build",
             "--build-arg",
             f"DISTRO={distro}",
+            "--build-arg",
+            f"REPODIR={testenv.distros_repodirs[distro]}",
             "-t",
             image_name,
             os.path.join(testenv.data_dir, "podman"),

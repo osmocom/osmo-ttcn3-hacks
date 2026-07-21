@@ -26,6 +26,7 @@ log_prefix = "[testenv]"
 distros_repodirs = {
     "debian:bookworm": "Debian_12",
     "debian:trixie": "Debian_13",
+    "debian:unstable": "Debian_Unstable",
 }
 
 
