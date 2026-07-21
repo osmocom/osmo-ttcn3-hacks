@@ -260,6 +260,15 @@ def parse_args():
         args.podman = False
 
 
+def verify_args_init():
+    if args.action != "init":
+        return
+
+    distro_arg = getattr(args, "distro", None)
+    if distro_arg and distro_arg not in distros_repodirs:
+        raise NoTraceException(f"--distro must be one of {', '.join(distros_repodirs)}")
+
+
 def verify_args_run():
     if args.action != "run":
         return
@@ -304,6 +313,7 @@ def set_args_defaults():
 
 def init_args():
     parse_args()
+    verify_args_init()
     verify_args_run()
     set_args_defaults()
 
