@@ -119,11 +119,12 @@ RUN	set -x && \
 		&& \
 	apt-get clean
 
-# Install rebar3 as described in https://rebar3.org/docs/getting-started/
-# instead of using the Debian package, as the latter pulls in ~600 MB of GUI
-# dependencies that we don't need:
-# https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1083096
-RUN	wget https://github.com/erlang/rebar3/releases/download/3.24.0/rebar3 -O /usr/bin/rebar3 && \
+# Install rebar3 from the official release binary instead of using the Debian
+# package, as the latter pulls in ~600 MB of GUI dependencies that we don't
+# need: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1083096
+RUN	set -x && \
+	export REBAR3_VERSION=$(apt-cache madison rebar3 | awk '{print $3}' | cut -d- -f 1) && \
+	wget https://github.com/erlang/rebar3/releases/download/$REBAR3_VERSION/rebar3 -O /usr/bin/rebar3 && \
 	chmod +x /usr/bin/rebar3 && \
 	rebar3 --version
 
