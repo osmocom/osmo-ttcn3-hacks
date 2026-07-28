@@ -82,7 +82,8 @@ def image_build(check_existing=True):
     )
 
 
-def generate_env_podman(env={}):
+def generate_env_podman(env=None):
+    env = env or {}
     ret = []
 
     for key, val in testenv.cmd.generate_env(env, True).items():
@@ -136,7 +137,10 @@ def init():
         run_shell_on_stop = True
 
 
-def exec_cmd(cmd, podman_opts=[], cwd=None, env={}, *args, **kwargs):
+def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, *args, **kwargs):
+    podman_opts = podman_opts or []
+    env = env or {}
+
     if not container_name:
         raise RuntimeError(f"Attempting to execute a command in podman, but the container isn't running anymore: {cmd}")
 
@@ -159,7 +163,10 @@ def exec_cmd(cmd, podman_opts=[], cwd=None, env={}, *args, **kwargs):
     )
 
 
-def exec_cmd_background(cmd, podman_opts=[], cwd=None, env={}):
+def exec_cmd_background(cmd, podman_opts=None, cwd=None, env=None):
+    podman_opts = podman_opts or []
+    env = env or {}
+
     podman_opts = list(podman_opts) + generate_env_podman(env)
 
     if cwd:

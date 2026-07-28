@@ -88,7 +88,8 @@ def exit_error_cmd(completed, error_msg):
     raise RuntimeError("shell command related error, find details right above this python trace")
 
 
-def generate_env(env={}, podman=False):
+def generate_env(env=None, podman=False):
+    env = env or {}
     ret = dict(env_extra)
     path = os.path.join(testenv.data_dir, "scripts")
     path += f":{os.path.join(testenv.data_dir, 'scripts/qemu')}"
@@ -120,7 +121,8 @@ def generate_env(env={}, podman=False):
     return ret
 
 
-def run(cmd, check=True, env={}, no_podman=False, stdin=subprocess.DEVNULL, *args, **kwargs):
+def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, *args, **kwargs):
+    env = env or {}
     if not no_podman and testenv.args.podman:
         return testenv.podman.exec_cmd(cmd, check=check, env=env, *args, **kwargs)
 
