@@ -32,6 +32,7 @@ import from SCCP_Templates all;
 import from SCCPasp_Types all;
 import from SCCP_Emulation all;
 import from SCCP_Adapter all;
+import from SCCP_Mapping all;
 
 import from IPA_Emulation all;
 import from IPA_EXT_TCAP_ROUTING all;
@@ -67,6 +68,9 @@ type component TCAP_CT extends Test_CT {
 	port TCAP_CODEC_PT SCCP_TCAP[MAX_NUM_ASP];
 	/* Port for IPA Extension TCAP_ROUTING */
 	port IPA_TCAP_ROUTING_PT IPA_TCAP_ROUTING[MAX_NUM_ASP];
+
+	/* Used to inject Tx of SCCP UDTS, which cannot be done through SCCP primitive layer as per specs */
+	port MTP3asp_SCCP_PT MTP3;
 };
 
 private function tcap_build_configs(template (omit) Misc_Helpers.ro_charstring asps := omit)
@@ -184,6 +188,71 @@ private function f_init_tcap(TCAP_CT_Configurations tcap_configs) runs on TCAP_C
 	f_wait_peers_available();
 }
 
+/* Tx a UDTS:
+ * There's no way to trigger tx of UDTS from within SCCP User SAP, ie. there's no
+ * N_NOTICE.req, since UDTS are only triggered due to internal SCCP errors within
+ * the stack found when processing incoming messages.
+ * Hence, to emulate transmission of an UDTS we need to hook to lower layers M3UA (or IPA)
+ * and build and transmit the SCCP UDTS ourselves.
+ */
+private function f_asp_connect_mtp3_port(integer asp_idx := 0) runs on TCAP_CT
+{
+	select (g_tcap[asp_idx].cfg.transport) {
+	case (SCCP_TRANSPORT_SIGTRAN) {
+		connect(self:MTP3, g_tcap[asp_idx].vc_M3UA:MTP3_SP_PORT);
+		}
+	case (SCCP_TRANSPORT_SCCPlite) {
+		connect(self:MTP3, g_tcap[asp_idx].vc_IPA:MTP3_SP_PORT);
+		}
+	case else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected tansport!");
+		}
+	}
+}
+private function f_asp_disconnect_mtp3_port(integer asp_idx := 0) runs on TCAP_CT
+{
+	select (g_tcap[asp_idx].cfg.transport) {
+	case (SCCP_TRANSPORT_SIGTRAN) {
+		disconnect(self:MTP3, g_tcap[asp_idx].vc_M3UA:MTP3_SP_PORT);
+		}
+	case (SCCP_TRANSPORT_SCCPlite) {
+		disconnect(self:MTP3, g_tcap[asp_idx].vc_IPA:MTP3_SP_PORT);
+		}
+	case else {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Unexpected tansport!");
+		}
+	}
+}
+private function f_asp_tx_sccp_udts(template (value) TCMessage tcap_msg,
+				    SCCP_PAR_Reason_For_Return reasonForReturn := 3,
+				    integer asp_idx := 0)
+runs on TCAP_CT
+{
+	var SCCP_param_Data vl_data;
+	var template (value) PDU_SCCP_UnitdataService udts;
+	var template ASP_MTP3_TRANSFERreq_sccp req;
+
+	if (not MTP3.checkstate("Connected")) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			"MTP3 port required and not connected, call f_asp_connect_mtp3_port()!");
+	}
+
+	vl_data.data       := enc_TCAP_TCMessage(valueof(tcap_msg));
+	vl_data.paramLength := lengthof(vl_data.data);
+	udts := t_PDU_SCCP_UnitdataService(
+			   reasonForReturn,
+			   ConvertASPAddressToEncodedAddress_itu(g_tcap[asp_idx].sccp_addr_own),
+			   ConvertASPAddressToEncodedAddress_itu(g_tcap[asp_idx].sccp_addr_peer),
+			   vl_data);
+
+	req := t_ASP_MTP3_TRANSFERreq_sccp(g_tcap[asp_idx].cfg.sio,
+					g_tcap[asp_idx].cfg.own_pc,
+					g_tcap[asp_idx].cfg.peer_pc,
+					g_tcap[asp_idx].sccp_pars.sls,
+					{ udataserv := valueof(udts) });
+	MTP3.send(req);
+}
+
 private function f_asp_tx_ipa_ext_tcap_routing(template (value) IPA_EXT_TCAP_ROUTING_Message send_msg,
 					       integer asp_idx := 0, boolean exp_ack := true)
 runs on TCAP_CT
@@ -218,17 +287,6 @@ runs on TCAP_CT
 				     RETURN_OPTION_ON_ERROR)
 	SCCP_TCAP[asp_idx].send(sccp_unitdata_req);
 }
-
-private function f_asp_tx_notice(template (value) SCCP_PAR_UserData userData,
-				 SCCP_PAR_Reason_For_Return reasonForReturn,
-				 integer asp_idx := 0)
-runs on TCAP_CT
-{
-	SCCP_TCAP[asp_idx].send(t_ASP_N_NOTICE_req(g_tcap[asp_idx].sccp_addr_peer,
-						   g_tcap[asp_idx].sccp_addr_own,
-						   reasonForReturn, userData, omit));
-}
-
 
 private altstep as_asp_rx_tcap_any(template (present) TCMessage tcap_msg := ?,
 				   integer tx_asp_idx := 0)
@@ -919,9 +977,8 @@ testcase TC_tcap_loadshare_m3ua_to_ipa_udts() runs on TCAP_CT {
 }
 
 /* Test UDTS routing with TCAP load-sharing
- * If a TCAP message is returned in a UDTS and
- * * it is in the TCAP session cache/tracking
- * * then route it back to the correct IPA ASP.
+ * If a TCAP message is returned in a UDTS and it is in the TCAP session cache/tracking
+ * then route it back to the correct IPA ASP.
  */
 testcase TC_tcap_loadshare_m3ua_to_ipa_udts_routing() runs on TCAP_CT {
 	var template (value) IPA_EXT_TCAP_ROUTING_Message tcap_rt_msg;
@@ -945,15 +1002,14 @@ testcase TC_tcap_loadshare_m3ua_to_ipa_udts_routing() runs on TCAP_CT {
 	tcap_msg := ts_TCAP_Continue(int2oct(98 + (ipa_idx-2)*100, 4), int2oct(202, 4));
 	m3ua_idx := f_asp_tx_tcap_exp_alt(tcap_msg, ipa_idx, 0, 1);
 
-	/* reply with a UDTS */
-	var template (value) TCAP_N_NOTICE_req sccp_udts :=
-		ts_TCAP_N_NOTICE_req(g_tcap[m3ua_idx].sccp_addr_own,
-				     g_tcap[m3ua_idx].sccp_addr_peer,
-				     3, /* Subsystem failure */
-				     tcap_msg);
+	/* Reply with a UDTS:
+	 * Hooking to lower level port is required to transmit the UDTS:
+	 */
+	f_asp_connect_mtp3_port(m3ua_idx);
+	f_asp_tx_sccp_udts(tcap_msg, 3, m3ua_idx);
+
 	timer T := 5.0;
 	T.start;
-	SCCP_TCAP[m3ua_idx].send(sccp_udts);
 
 	var template (present) TCAP_N_NOTICE_ind exp_sccp_udts :=
 		tr_TCAP_N_NOTICE_ind(g_tcap[m3ua_idx].sccp_addr_own,
