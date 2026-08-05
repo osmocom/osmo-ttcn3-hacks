@@ -3,7 +3,20 @@ DIR="$1"
 COMMIT="$2"
 URL_PREFIX="$3"
 
-if ! [ -d "$DIR" ]; then
+update_url() {
+	local current="$(git -C "$DIR" remote get-url origin)"
+	local full_url="$URL_PREFIX"/"$DIR"
+
+	if [ "$current" != "$full_url" ]; then
+		echo "[$DIR] Updating URL to $full_url"
+		git -C "$DIR" remote set-url origin "$full_url"
+		git -C "$DIR" fetch
+	fi
+}
+
+if [ -d "$DIR" ]; then
+	update_url
+else
 	echo "[$DIR] Initial git clone"
 	git clone -q "$URL_PREFIX"/"$DIR"
 fi

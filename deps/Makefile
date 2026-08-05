@@ -140,10 +140,6 @@ $(1)/update:
 ifeq ($$($(1)_MODIFIED),1)
 	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
 else
-ifneq ($$($(1)_ORIGIN),$(2)/$(1))
-	@echo "[$(1)] Updating URL to $(2)/$(1)"
-	@cd $(1) && git remote set-url origin $(2)/$(1) && git fetch
-endif
 ifneq ($$($(1)_HEAD),$($(1)_commit))
 	@./update.sh "$(1)" "$($(1)_commit)" "$(2)"
 endif
