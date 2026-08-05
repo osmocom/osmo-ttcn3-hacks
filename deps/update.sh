@@ -1,6 +1,12 @@
 #!/bin/sh -e
 DIR="$1"
 COMMIT="$2"
+URL_PREFIX="$3"
+
+if ! [ -d "$DIR" ]; then
+	echo "[$DIR] Initial git clone"
+	git clone -q "$URL_PREFIX"/"$DIR"
+fi
 
 cd "$DIR"
 
