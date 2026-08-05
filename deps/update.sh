@@ -3,9 +3,20 @@ DIR="$1"
 COMMIT="$2"
 URL_PREFIX="$3"
 
+get_full_url() {
+	case "$URL_PREFIX" in
+		*gitlab*)
+			echo "$URL_PREFIX"/"$DIR".git
+			;;
+		*)
+			echo "$URL_PREFIX"/"$DIR"
+			;;
+	esac
+}
+
 update_url() {
 	local current="$(git -C "$DIR" remote get-url origin)"
-	local full_url="$URL_PREFIX"/"$DIR"
+	local full_url="$(get_full_url)"
 
 	if [ "$current" != "$full_url" ]; then
 		echo "[$DIR] Updating URL to $full_url"
@@ -18,7 +29,7 @@ if [ -d "$DIR" ]; then
 	update_url
 else
 	echo "[$DIR] Initial git clone"
-	git clone -q "$URL_PREFIX"/"$DIR"
+	git clone -q "$(get_full_url)"
 fi
 
 cd "$DIR"
