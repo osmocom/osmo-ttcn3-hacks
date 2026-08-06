@@ -37,6 +37,7 @@ import from HTTPmsg_PortType all;
 import from HTTP_Adapter all;
 
 import from es9p_Types_JSON all;
+import from esipa_Types_JSON all;
 import from REST_Types_JSON all;
 
 /* the PIPEasp port allows us to interact with restop.py via stdin/stdout */
@@ -81,6 +82,7 @@ modulepar {
 	charstring mp_esipa_ip := "127.0.0.1";
 	integer mp_esipa_port := 8000;
 	boolean mp_esipa_disable_ssl := false;
+	boolean mp_esipa_json := false;
 
 	/* REST API tool */
 	charstring mp_restop_path;
@@ -344,57 +346,80 @@ runs on eIM_ConnHdlr {
 /* ************* ESipa/HTTP-client ************* */
 /* ********************************************* */
 
-private function f_enc_http_req(in RemoteProfileProvisioningResponse es9p_res, out HTTPMessage http_res) {
-	var charstring json_body;
-	var HTTPResponse resp_body;
-
-	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, json_body);
-	resp_body := {
-		client_id := omit,
-		version_major := 1,
-		version_minor := 1,
-		statuscode := 200,
-		statustext := "OK",
-		/* See also SGP.32, section 6.1.1 */
-		header := {
-			{
-				header_name := "X-Admin-Protocol",
-				header_value := "gsma/rsp/v1.0.0"
-			},
-			{
-				header_name := "Content-Type",
-				header_value := "application/x-gsma-rsp-asn1"
-			},
-			{
-				header_name := "Content-Length",
-				header_value := int2str(lengthof(json_body))
-			}
-			},
-			body := json_body
-		};
-
-	http_res := { response := resp_body };
-} with { extension "prototype(fast)" }
-
-template (value) HeaderLines ts_esipa_HTTP_Header := {
-	 { header_name := "User-Agent", header_value := "TTCN3 eIM testsuite" },
+template (value) HeaderLines ts_esipa_HTTP_Header_asn1 := {
+	 { header_name := "User-Agent", header_value := "TTCN3 eIM testsuite (ASN.1)" },
 	 { header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.1.0" },
 	 { header_name := "Content-Type", header_value := "application/x-gsma-rsp-asn1" }
 };
 
+template (value) HeaderLines ts_esipa_HTTP_Header_json := {
+	 { header_name := "User-Agent", header_value := "TTCN3 eIM testsuite (JSON)" },
+	 { header_name := "X-Admin-Protocol", header_value := "gsma/rsp/v2.1.0" },
+	 { header_name := "Content-Type", header_value := "application/json;charset=UTF-8" }
+};
+
 /* Send ESipa HTTP request */
 private function f_esipa_send(EsipaMessageFromIpaToEim esipa_req) runs on eIM_ConnHdlr {
+	if (mp_esipa_json == true) {
+		f_esipa_send_json(esipa_req);
+	} else {
+		f_esipa_send_asn(esipa_req);
+	}
+}
+private function f_esipa_send_asn(EsipaMessageFromIpaToEim esipa_req) runs on eIM_ConnHdlr {
 	var octetstring esipa_req_enc;
 	esipa_req_enc := enc_EsipaMessageFromIpaToEim(esipa_req);
+
 	f_http_tx_request(url := "/gsma/rsp2/asn1",
 			  method := "POST",
-			  binary_body:= esipa_req_enc,
-			  custom_hdr := valueof(ts_esipa_HTTP_Header),
+			  binary_body := esipa_req_enc,
+			  custom_hdr := valueof(ts_esipa_HTTP_Header_asn1),
+			  client_id := g_http_client_id);
+}
+private function f_esipa_send_json(EsipaMessageFromIpaToEim esipa_req) runs on eIM_ConnHdlr {
+	var charstring esipa_req_enc;
+	var charstring url;
+	enc_EsipaMessageFromIpaToEim_to_JSON(esipa_req, esipa_req_enc);
+
+	/* Determine the HTTP URL, see also GSMA SGP.32, section 6.4.1 and
+	 * SGP32Definitions.asn:EsipaMessageFromIpaToEim */
+	if (ispresent(esipa_req.initiateAuthenticationRequestEsipa)) {
+		url := "/gsma/rsp2/esipa/initiateAuthentication";
+	} else if (ispresent(esipa_req.authenticateClientRequestEsipa)) {
+		url := "/gsma/rsp2/esipa/authenticateClient";
+	} else if (ispresent(esipa_req.getBoundProfilePackageRequestEsipa)) {
+		url := "/gsma/rsp2/esipa/getBoundProfilePackage";
+	} else if (ispresent(esipa_req.cancelSessionRequestEsipa)) {
+		url := "/gsma/rsp2/esipa/cancelSession";
+	} else if (ispresent(esipa_req.handleNotificationEsipa)) {
+		url := "/gsma/rsp2/esipa/handleNotification";
+	} else if (ispresent(esipa_req.transferEimPackageResponse)) {
+		url := "/gsma/rsp2/esipa/transferEimPackage";
+	} else if (ispresent(esipa_req.getEimPackageRequest)) {
+		url := "/gsma/rsp2/esipa/getEimPackage";
+	} else if (ispresent(esipa_req.provideEimPackageResult)) {
+		url := "/gsma/rsp2/esipa/provideEimPackageResult";
+	} else {
+		setverdict(fail, "unknown ASN.1 choice member, check specification and upgrade lookup table.");
+	}
+
+	f_http_tx_request(url := url,
+			  method := "POST",
+			  body := esipa_req_enc,
+			  custom_hdr := valueof(ts_esipa_HTTP_Header_json),
 			  client_id := g_http_client_id);
 }
 
 /* Receive ESipa HTTP response */
 private function f_esipa_receive(template EsipaMessageFromEimToIpa expected_esipa_res := omit)
+runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
+	if (mp_esipa_json == true) {
+		return f_esipa_receive_json(expected_esipa_res);
+	} else {
+		return f_esipa_receive_asn(expected_esipa_res);
+	}
+}
+private function f_esipa_receive_asn(template EsipaMessageFromEimToIpa expected_esipa_res := omit)
 runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
 	var template EsipaMessageFromEimToIpa esipa_res;
 	var HTTPMessage response_http;
@@ -423,6 +448,40 @@ runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
 	} else {
 		setverdict(fail,
 			   "unexpected ESipa response, the HTTP body did either contain no or a non binary response");
+		return omit;
+	}
+}
+private function f_esipa_receive_json(template EsipaMessageFromEimToIpa expected_esipa_res := omit)
+runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var DecodedEimToIpaMessage_Wrap esipa_res_wrap;
+	var HTTPMessage response_http;
+	response_http := f_http_rx_response(exp := ?,
+					    client_id := g_http_client_id,
+					    keep_connection := true);
+
+	if (istemplatekind(g_http_client_id, "omit")) {
+		/* Memorize client_id of the first request. The client_id will identify the HTTP connection
+		 * in all consecutive requests. */
+		g_http_client_id := f_http_client_id_from_http_response(response_http);
+	} else if (valueof(g_http_client_id) != valueof(f_http_client_id_from_http_response(response_http))) {
+		/* The client_id must not change. A sudden change of the client_id may indicate an interrupted
+		 * HTTP connection. This must not happen unexpectetly. */
+		setverdict(fail, "unexpected ESipa HTTP connection");
+	}
+
+	if (ispresent(response_http.response)) {
+		dec_EsipaMessageFromEimToIpa_from_JSON(response_http.response.body, esipa_res_wrap);
+		esipa_res := esipa_res_wrap.asn1_pdu;
+		if (not istemplatekind(expected_esipa_res, "omit")) {
+			if (not match(valueof(esipa_res), expected_esipa_res)) {
+				setverdict(fail, "unexpected response from eIM on ESipa");
+			}
+		}
+		return esipa_res;
+	} else {
+		setverdict(fail,
+			   "unexpected ESipa response, the HTTP body did either contain no or a binary (non JSON) response");
 		return omit;
 	}
 }
