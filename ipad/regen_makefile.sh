@@ -14,6 +14,7 @@ FILES="
 	TCCConversion.cc
 	TCCInterface.cc
 	VPCD_CodecPort_CtrlFunctDef.cc
+	PIPEasp_PT.cc
 "
 . ../_buildsystem/regen_makefile.inc.sh
 
