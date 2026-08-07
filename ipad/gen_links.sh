@@ -26,6 +26,10 @@ FILES="IPL4asp_Functions.ttcn IPL4asp_PT.cc IPL4asp_PT.hh IPL4asp_PortType.ttcn 
 FILES+="IPL4asp_discovery.cc IPL4asp_protocol_L234.hh"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
+FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library/euicc
 FILES="PEDefinitions.asn PKIX1Explicit88.asn PKIX1Implicit88.asn RSPDefinitions.asn SGP32Definitions.asn "
 FILES+="PKIX1Explicit88_Templates.ttcn PKIX1Explicit88_Types.ttcn PKIX1Implicit88_Templates.ttcn "
@@ -36,7 +40,8 @@ gen_links $DIR $FILES
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="VPCD_Types.ttcn VPCD_CodecPort.ttcn VPCD_CodecPort_CtrlFunct.ttcn VPCD_CodecPort_CtrlFunctDef.cc "
-FILES+="VPCD_Adapter.ttcn HTTP_Server_Emulation.ttcn"
+FILES+="VPCD_Adapter.ttcn HTTP_Server_Emulation.ttcn "
+FILES+="PIPEasp_Templates.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
