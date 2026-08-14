@@ -2,7 +2,7 @@
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: Apache-2.0
 
-ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
+ECLIPSEGITLAB:=https://gitea.osmocom.org/mirrors
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGERRIT:=https://gerrit.osmocom.org
 OSMOGITEA:=https://gitea.osmocom.org/ttcn3
