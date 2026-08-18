@@ -1,16 +1,6 @@
 #!/bin/sh -ex
 DB_URI="mongodb://127.0.0.103/open5gs"
-DBCTL="$TESTENV_CACHE_DIR/open5gs-dbctl"
-DBCTL_CMD="$DBCTL --db_uri=$DB_URI"
-
-if ! [ -e "$DBCTL" ]; then
-	wget "https://raw.githubusercontent.com/open5gs/open5gs/v2.7.1/misc/db/open5gs-dbctl" \
-		-O "$DBCTL"
-fi
-
-if ! [ -x "$DBCTL" ]; then
-	chmod +x "$DBCTL"
-fi
+DBCTL_CMD="open5gs-dbctl --db_uri=$DB_URI"
 
 # mongod needs some time to bootstrap...
 while ! mongosh --quiet $DB_URI</dev/null; do
