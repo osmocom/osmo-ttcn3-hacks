@@ -50,6 +50,7 @@ SUBDIRS= \
 	sgsn \
 	simtrace \
 	sip \
+	smf \
 	smlc \
 	smdpp \
 	stp \
