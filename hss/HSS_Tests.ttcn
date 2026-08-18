@@ -39,6 +39,8 @@ modulepar {
 	HSS_Impl mp_hss_impl := HSS_IMPL_OPEN5GS;
 }
 
+const integer DIA_S6a := 0;
+
 /* main component, we typically have one per testcase */
 type component MTC_CT {
 
@@ -58,48 +60,9 @@ altstep as_Tguard() runs on MTC_CT {
 		}
 }
 
-type component DIAMETER_ConnHdlr_CT extends DIAMETER_ConnHdlr {
-	port DIAMETER_Conn_PT DIAMETER_CLIENT;
-	port DIAMETEREM_PROC_PT DIAMETER_PROC_CLIENT;
-}
-
-function f_diam_connhldr_ct_main(hexstring imsi) runs on DIAMETER_ConnHdlr_CT {
-	var DIAMETER_ConnHdlr vc_conn_unused;
-	var PDU_DIAMETER msg;
-	var UINT32 ete_id;
-
-	f_diameter_expect_imsi(imsi);
-
-	while (true) {
-		alt {
-		[] DIAMETER_CLIENT.receive(PDU_DIAMETER:?) -> value msg {
-			DIAMETER.send(msg);
-			}
-		[] DIAMETER.receive(PDU_DIAMETER:?) -> value msg {
-			DIAMETER_CLIENT.send(msg);
-			}
-		[] DIAMETER_PROC_CLIENT.getcall(DIAMETEREM_register_eteid:{?,?}) -> param(ete_id, vc_conn_unused) {
-			DIAMETER_PROC.call(DIAMETEREM_register_eteid:{ete_id, self}) {
-				[] DIAMETER_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
-				}
-			DIAMETER_PROC_CLIENT.reply(DIAMETEREM_register_eteid:{ete_id, vc_conn_unused});
-			}
-		}
-	}
-}
-
 /* per-session component; we typically have 1..N per testcase */
-type component Cli_Session_CT extends Prometheus_Checker_CT {
+type component Cli_Session_CT extends DIAMETER_ConnHdlr, Prometheus_Checker_CT {
 	var SessionPars	g_pars;
-
-	port DIAMETER_Conn_PT S6a;
-	port DIAMETEREM_PROC_PT S6a_PROC;
-
-}
-function f_diam_connhldr_expect_eteid(UINT32 ete_id) runs on Cli_Session_CT {
-	S6a_PROC.call(DIAMETEREM_register_eteid:{ete_id, null}) {
-		[] S6a_PROC.getreply(DIAMETEREM_register_eteid:{?,?}) {};
-	}
 }
 
 /* configuration data for a given Session */
@@ -167,7 +130,6 @@ private function f_init(float guard_timeout := 60.0) runs on MTC_CT {
 function f_start_handler(void_fn fn, template (omit) SessionPars pars_tmpl := omit)
 runs on MTC_CT return Cli_Session_CT {
 	var charstring id := testcasename();
-	var DIAMETER_ConnHdlr_CT vc_conn_s6a;
 	var Cli_Session_CT vc_conn;
 	var SessionPars pars;
 
@@ -179,12 +141,8 @@ runs on MTC_CT return Cli_Session_CT {
 
 	vc_conn := Cli_Session_CT.create(id);
 
-	vc_conn_s6a := DIAMETER_ConnHdlr_CT.create(id);
-	connect(vc_conn_s6a:DIAMETER, vc_S6a:DIAMETER_CLIENT);
-	connect(vc_conn_s6a:DIAMETER_PROC, vc_S6a:DIAMETER_PROC);
-	connect(vc_conn:S6a, vc_conn_s6a:DIAMETER_CLIENT);
-	connect(vc_conn:S6a_PROC, vc_conn_s6a:DIAMETER_PROC_CLIENT);
-	vc_conn_s6a.start(f_diam_connhldr_ct_main(pars.imsi));
+	connect(vc_conn:DIAMETER[DIA_S6a], vc_S6a:DIAMETER_CLIENT);
+	connect(vc_conn:DIAMETER_PROC[DIA_S6a], vc_S6a:DIAMETER_PROC);
 
 	vc_conn.start(f_handler_init(fn, pars));
 	return vc_conn;
@@ -193,6 +151,7 @@ runs on MTC_CT return Cli_Session_CT {
 private function f_handler_init(void_fn fn, SessionPars pars)
 runs on Cli_Session_CT {
 	g_pars := valueof(pars);
+	f_diameter_expect_imsi(g_pars.imsi, idx := DIA_S6a);
 	f_prometheus_init(mp_hss_prometheus_hostname, mp_hss_prometheus_port);
 	fn.apply();
 }
@@ -207,20 +166,20 @@ private function f_dia_ulr_ula(template (present) AVP_list ula_sub_data) runs on
 	/* Unlike ULR, ULA contains no IMSI. Register ete_id in DIAMETER_Emulation,
 	 * so AIA is forwarded back to us in DIAMETER port instead of MTC_CT.DIAMETER_UNIT.
 	 */
-	f_diam_connhldr_expect_eteid(ete_id);
+	f_diameter_expect_eteid(ete_id, idx := DIA_S6a)
 
 	/* TODO: change this into a ts_DIA_ULR */
-	S6a.send(ts_DIA_ULR(g_pars.imsi, '111F11'O, sess_id,
-				mp_diam_orig_host, mp_diam_orig_realm,
-				mp_diam_dest_realm, hbh_id, ete_id));
+	DIAMETER[DIA_S6a].send(ts_DIA_ULR(g_pars.imsi, '111F11'O, sess_id,
+					  mp_diam_orig_host, mp_diam_orig_realm,
+					  mp_diam_dest_realm, hbh_id, ete_id));
 	g_pars.s6a_next_hbh_id := g_pars.s6a_next_hbh_id + 1;
 	g_pars.s6a_next_ete_id := g_pars.s6a_next_ete_id + 1;
 
 	alt {
-	[] S6a.receive(tr_DIA_ULA(ula_sub_data, sess_id, ?, ?, hbh_id, ete_id)) -> value rx_dia {
+	[] DIAMETER[DIA_S6a].receive(tr_DIA_ULA(ula_sub_data, sess_id, ?, ?, hbh_id, ete_id)) -> value rx_dia {
 		setverdict(pass);
 		}
-	[] S6a.receive(PDU_DIAMETER:?) -> value rx_dia {
+	[] DIAMETER[DIA_S6a].receive(PDU_DIAMETER:?) -> value rx_dia {
 		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 					log2str("Received unexpected DIAMETER ", rx_dia));
 		}
