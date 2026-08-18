@@ -1,0 +1,456 @@
+module SMF_Session_CT {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Native_Functions all;
+import from Misc_Helpers all;
+
+import from GTPv1U_Emulation all;
+
+import from GTPv2_Types all;
+import from GTPv2_Templates all;
+import from GTPv2_Emulation all;
+
+import from DNS_Helpers all;
+
+
+import from DIAMETER_Types all;
+import from DIAMETER_Templates all;
+import from DIAMETER_ts29_212_Templates all;
+import from DIAMETER_ts29_272_Templates all;
+import from DIAMETER_ts29_273_Templates all;
+import from DIAMETER_ts32_299_Templates all;
+import from DIAMETER_Emulation all;
+
+import from SMF_Tests all;
+
+const integer DIA_Gx := 0;
+const integer DIA_Gy := 1;
+const integer DIA_S6b := 2;
+
+/* per-session component; we typically have 1..N per testcase */
+type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr {
+	var SessionPars	g_pars;
+
+	/* GTP-U IPv4 address remote sie */
+	var OCT4	g_gtpu4_remote;
+	var OCT16	g_gtpu6_remote;
+
+	/* Address allocation */
+	var OCT4	g_ip4_addr;
+	var OCT8	g_ip6_interface_id;
+	var OCT16	g_ip6_addr;
+
+	/* Store last received Gy message */
+	var PDU_DIAMETER g_rx_gy;
+}
+
+type record BearerConfig {
+	 /* EPS Bearer ID */
+	uint4_t		ebi optional,
+	/* TEI (Data) local side */
+	OCT4 		teid_local optional,
+	/* TEI (Data) remote side */
+	OCT4 		teid_remote optional
+};
+
+type record SessionParsGy {
+	/* In seconds. 0 => disabled, !0 => grant over CC-Time period */
+	integer validity_time,
+
+	/* Result-Code to use when sending Gy CCA, usually DIAMETER_SUCCESS */
+	DIAMETER_Resultcode cca_res_code
+};
+
+/* configuration data for a given Session */
+type record SessionPars {
+	hexstring	imsi,
+	hexstring	msisdn optional,
+	// serving network
+	GTP2C_RAT_Type	rat_type,
+	// flags?
+	charstring	apn,
+	/* Apn subscribed or non-subscribed */
+	boolean		selection_mode,
+	GTP2C_PDN_Type	pdn_type,
+	/* PAA */
+	/* Max APN Restriction */
+	/* APN-AMBR */
+	octetstring	pco optional,
+	octetstring	epco optional,
+
+	/* TEI (Control) local side */
+	OCT4 		teic_local,
+	/* TEI (Control) remote side */
+	OCT4 		teic_remote optional,
+	/* Bearer Contexts to be created */
+	BearerConfig 	bearer optional,
+
+	SessionParsGy gy
+}
+
+template (value) SessionPars
+t_SessionPars(hexstring imsi,
+	     template (omit) hexstring msisdn := '1234'H,
+	     GTP2C_RAT_Type rat_type := GTP2C_RAT_EUTRAN,
+	     charstring apn := "internet",
+	     boolean selection_mode := false,
+	     GTP2C_PDN_Type pdn_type := GTP2C_PDN_IPv4) := {
+	imsi := imsi,
+	msisdn := msisdn,
+	rat_type := rat_type,
+	apn := apn,
+	selection_mode := selection_mode,
+	pdn_type := pdn_type,
+	pco := omit,
+	epco := omit,
+	teic_local := '00000000'O,
+	teic_remote := omit,
+	bearer := {
+		ebi := 5,
+		teid_local := omit,
+		teid_remote := omit
+	},
+	gy := {
+		validity_time := 0,
+		cca_res_code := DIAMETER_SUCCESS
+	}
+}
+
+
+type function void_fn() runs on SMF_Session_CT;
+
+function f_handler_init(void_fn fn, SessionPars pars)
+runs on SMF_Session_CT {
+	g_pars := valueof(pars);
+
+	if (DIAMETER_PROC[DIA_Gx].checkstate("Connected")) {
+		f_diameter_expect_imsi(g_pars.imsi, idx := DIA_Gx);
+	}
+
+	if (DIAMETER_PROC[DIA_Gy].checkstate("Connected")) {
+		f_diameter_expect_imsi(g_pars.imsi, idx := DIA_Gy);
+	}
+
+	if (DIAMETER_PROC[DIA_S6b].checkstate("Connected")) {
+		f_diameter_expect_imsi(g_pars.imsi, idx := DIA_S6b);
+	}
+
+	/* allocate + register TEI{C,D} on local side */
+	g_pars.teic_local := f_gtp2_allocate_teic();
+	g_pars.bearer.teid_local := f_gtp1u_allocate_teid();
+	fn.apply();
+}
+
+/* S6b emulation (AAA-Server) */
+private altstep as_DIA_S6b_AAR() runs on SMF_Session_CT {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER[DIA_S6b].receive(tr_DIA_S6b_AAR()) -> value rx_dia {
+		var template (value) PDU_DIAMETER tx_dia;
+		tx_dia := f_ts_DIA_S6b_AAA(rx_dia,
+					   "aaa." & mp_diam_realm,
+					   mp_diam_realm,
+					   mp_diam_realm);
+		DIAMETER[DIA_S6b].send(tx_dia);
+		setverdict(pass);
+	}
+	[] DIAMETER[DIA_S6b].receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER ", rx_dia));
+	}
+}
+
+/* Gx emulation (PCRF)*/
+altstep as_DIA_Gx_CCR(DCC_NONE_CC_Request_Type req_type) runs on SMF_Session_CT {
+	var PDU_DIAMETER rx_dia;
+	[] DIAMETER[DIA_Gx].receive(tr_DIA_Gx_CCR(req_type := req_type)) -> value rx_dia {
+		var template (value) PDU_DIAMETER tx_dia := f_ts_DIA_Gx_CCA(rx_dia);
+		DIAMETER[DIA_Gx].send(tx_dia);
+	}
+	[] DIAMETER[DIA_Gx].receive(PDU_DIAMETER:?) -> value rx_dia {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER ", rx_dia));
+	}
+}
+
+/* Gy emulation (OCS) */
+private function f_tr_DIA_Gy_CCR_sess(DCC_NONE_CC_Request_Type req_type)
+runs on SMF_Session_CT return template (present) PDU_DIAMETER
+{
+	var octetstring imsi := char2oct(f_dec_TBCD(imsi_hex2oct(g_pars.imsi)));
+	var octetstring rat_type := int2oct(enum2int(g_pars.rat_type), 1);
+	var OCT1 nsapi := int2oct(g_pars.bearer.ebi, 1);
+	var OCT4 charging_char := char2oct(oct2str('0000'O));  // f_s5s8_create_session() uses hardcoded chg_car := '0000'O
+	var template (present) octetstring msisdn := ?;
+	var charstring smf_origin_host := "smf." & mp_diam_realm;
+	var octetstring sgsn_addr := f_inet_addr(mp_pcrf_local_ip);
+	var octetstring ggsn_addr := f_inet_addr(mp_smf_hostname);
+
+	return DIAMETER_ts32_299_Templates.f_tr_DIA_Gy_CCR(req_type,
+							   imsi,
+							   msisdn,
+							   rat_type,
+							   nsapi,
+							   charging_char,
+							   smf_origin_host,
+							   mp_diam_realm,
+							   sgsn_addr,
+							   ggsn_addr);
+
+}
+
+altstep as_DIA_Gy_CCR(DCC_NONE_CC_Request_Type req_type)
+runs on SMF_Session_CT {
+	[] DIAMETER[DIA_Gy].receive(f_tr_DIA_Gy_CCR_sess(req_type := req_type)) -> value g_rx_gy {
+		var template (value) PDU_DIAMETER tx_dia;
+		var template (omit) integer validity_time := omit;
+		if (g_pars.gy.validity_time > 0) {
+			validity_time := g_pars.gy.validity_time;
+		}
+		tx_dia := DIAMETER_ts32_299_Templates.f_ts_DIA_Gy_CCA(g_rx_gy, g_pars.gy.cca_res_code, validity_time);
+		DIAMETER[DIA_Gy].send(tx_dia);
+	}
+	[] DIAMETER[DIA_Gy].receive(PDU_DIAMETER:?) -> value g_rx_gy {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected DIAMETER Gy", g_rx_gy));
+	}
+}
+
+/* GTPv2C */
+private function is_s2b_iface() runs on SMF_Session_CT return boolean {
+	return (g_pars.rat_type == GTP2C_RAT_WLAN or g_pars.rat_type == GTP2C_RAT_Virtual);
+}
+
+private function f_perform_ipv6_slaac() runs on SMF_Session_CT
+{
+	//var UECUPS_IPv6SLAACInd ipv6slaac_ind;
+	//var template (value) UECUPS_IPv6SLAAC ipv6slaac;
+	//ipv6slaac := ts_UECUPS_IPv6SLAAC(
+	//	local_gtp_ep := ts_UECUPS_SockAddr(f_inet_addr(mp_local_hostname_u)),
+	//	rx_teid := oct2int(g_pars.bearer.teid_local)
+	//);
+	//f_gtp1u_ipv6_slaac(ipv6slaac);
+	//GTP1U[0].receive(UECUPS_IPv6SLAACInd:?) -> value ipv6slaac_ind;
+	//log("5GC assigned IPv6 global prefix: ", ipv6slaac_ind.ipv6_prefix, " -> ", f_inet6_ntoa(ipv6slaac_ind.ipv6_prefix & '0000000000000000'O));
+
+	///* Use the first global IPv6 address in the IPv6 prefix picked by osmo-uecups: */
+	//g_ip6_addr := ipv6slaac_ind.ipv6_user_addr;
+	//log("Using IPv6 global address: ", g_ip6_addr);
+}
+
+/* process one to-be-created bearer context */
+private function process_bctx_create(BearerContextGrouped bctx) runs on SMF_Session_CT
+{
+	g_pars.bearer.ebi := bctx.bearerContextIEs.ePS_Bearer_ID.ePS_Bearer_ID_Value;
+	/* FIXME: Cause */
+
+	var integer exp_fteid_if_type;
+	var BIT4 exp_fteid_instance;
+	if (is_s2b_iface()) {
+		exp_fteid_if_type := 33;
+		exp_fteid_instance := '0100'B;
+	} else {
+		exp_fteid_if_type := 5;
+		exp_fteid_instance := '0010'B;
+	}
+
+	/* find F-TEID of the P-GW U side */
+	var FullyQualifiedTEID rx_fteid;
+	rx_fteid := valueof(f_GTP2C_find_teid(bctx.bearerContextIEs.fullyQualifiedTEID,
+					      exp_fteid_if_type, exp_fteid_instance));
+	g_pars.bearer.teid_remote := rx_fteid.tEID_GRE_Key;
+	if (rx_fteid.v4_Flag == '1'B) {
+		g_gtpu4_remote := rx_fteid.iPv4_Address;
+	}
+	if (rx_fteid.v6_Flag == '1'B) {
+		g_gtpu6_remote := rx_fteid.iPv6_Address;
+	}
+
+	if (g_pars.pdn_type == GTP2C_PDN_IPv6 or
+	    g_pars.pdn_type == GTP2C_PDN_IPv4v6) {
+		f_perform_ipv6_slaac();
+	}
+}
+
+/* create a session on the SMF */
+private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie,
+				  template (value) FullyQualifiedTEID fteid_u_ie,
+				  template (omit) UserLocationInfo uli_ie := omit,
+				  template (omit) APCO apco := omit,
+				  template APCO exp_apco := *) runs on SMF_Session_CT {
+	var PDU_GTPCv2 rx;
+
+	/* Defaults used for s5/s8: */
+	var boolean do_s6b := false;
+	var template APN_Restriction apn_restriction := ?;
+	/* Change behavior when on S2b: */
+	if (is_s2b_iface()) {
+		do_s6b := true;
+		apn_restriction := omit;
+	}
+
+	var template (value) PDU_GTPCv2 g2c :=
+		ts_GTP2C_CreateSessionReq(imsi := g_pars.imsi,
+					  msisdn := g_pars.msisdn,
+					  rat_type := enum2int(g_pars.rat_type),
+					  sender_fteid := fteid_c_ie,
+					  apn := f_enc_dns_hostname(g_pars.apn),
+					  pdn_type := int2bit(enum2int(g_pars.pdn_type), 3),
+					  teid_list := { fteid_u_ie },
+					  chg_car := '0000'O,
+					  bearer_id := g_pars.bearer.ebi,
+					  uli := uli_ie,
+					  apco := apco);
+	g2c.gtpcv2_pdu.createSessionRequest.servingNetwork := ts_GTP2C_ServingNetwork('001'H, '01F'H);
+
+	GTP2.send(g2c);
+	if (do_s6b and DIAMETER[DIA_S6b].checkstate("Connected")) {
+		as_DIA_S6b_AAR();
+	}
+	if (DIAMETER[DIA_Gx].checkstate("Connected")) {
+		as_DIA_Gx_CCR(INITIAL_REQUEST);
+	}
+	/* FIXME: When on S2b interface, SMF is not using the Gy interface, unknown reason. */
+	if (DIAMETER[DIA_Gy].checkstate("Connected")) {
+		as_DIA_Gy_CCR(INITIAL_REQUEST);
+	}
+	alt {
+	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid := g_pars.teic_local,
+						   cause := Request_accepted,
+						   apn_restriction := apn_restriction,
+						   exp_apco := exp_apco)) -> value rx {
+		/* extract TEIDs */
+		var CreateSessionResponse resp := rx.gtpcv2_pdu.createSessionResponse;
+		g_pars.teic_remote := resp.fullyQualifiedTEID[0].tEID_GRE_Key;
+
+		/* extract allocated address[es] */
+		var PDN_Address_and_Prefix paa := resp.pDN_AddressAllocation.pDN_Address_and_Prefix;
+		if (ischosen(paa.iPv4_Address)) {
+			g_ip4_addr := paa.iPv4_Address;
+			log("SMF assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
+		} else if (ischosen(paa.iPv6_Address)) {
+			if (paa.iPv6_Address.prefixLength != 64) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Got IPv6 Prefix Length ",
+								paa.iPv6_Address.prefixLength, " vs exp 64"));
+			}
+			g_ip6_interface_id := substr(paa.iPv6_Address.iPv6_Address, 8, 8);
+			log("SMF assigned IPv6 Interface Id: ", g_ip6_interface_id);
+			g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+			log("SMF assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
+		} else if (ischosen(paa.iPv4_IPv6)) {
+			if (paa.iPv4_IPv6.prefixLength != 64) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("Got IPv6 Prefix Length ",
+								paa.iPv4_IPv6.prefixLength, " vs exp 64"));
+			}
+			g_ip4_addr := paa.iPv4_IPv6.iPv4_Address;
+			log("SMF assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
+			g_ip6_interface_id := substr(paa.iPv4_IPv6.iPv6_Address, 8, 8);
+			log("SMF assigned IPv6 Interface Id: ", g_ip6_interface_id);
+			g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+			log("SMF assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
+		}
+		var integer i;
+		for (i := 0; i < lengthof(resp.bearerContextGrouped); i := i+1) {
+			var BearerContextGrouped bctx := resp.bearerContextGrouped[i];
+			select (bctx.instance) {
+			case ('0000'B) { // created
+				process_bctx_create(bctx);
+				}
+			case ('0001'B) { // removed
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							"We don't expect removed bearer contexts yet");
+				}
+			}
+		}
+		}
+	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid:=g_pars.teic_local, cause:=?)) -> value rx {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected  CreateSessionResp(cause=",
+						rx.gtpcv2_pdu.createSessionResponse.cause.causeValue, ")"));
+		}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Unexpected GTPv2 while waiting for CreateSessionResp");
+		}
+	}
+
+}
+
+/* create a session on the SMF on a S5/S8 interface (from SGW )*/
+function f_s5s8_create_session() runs on SMF_Session_CT {
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) UserLocationInfo uli_ie;
+
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
+					f_inet_addr(mp_local_hostname_c), omit);
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPU, g_pars.bearer.teid_local, 2,
+					f_inet_addr(mp_local_hostname_u), omit);
+
+
+	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
+	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
+	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
+	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+
+	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie);
+
+}
+
+/* create a session on the SMF on a S2b interface (from ePDG)*/
+function f_s2b_create_session(template (omit) APCO apco := omit,
+			      template APCO exp_apco := *) runs on SMF_Session_CT {
+	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+	var template (value) UserLocationInfo uli_ie;
+
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic_local, 0,
+					f_inet_addr(mp_local_hostname_c), omit);
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.bearer.teid_local, 5,
+					f_inet_addr(mp_local_hostname_u), omit);
+
+	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
+	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
+	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+
+	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie := uli_ie, apco := apco, exp_apco := exp_apco);
+
+}
+
+/* delete the session from the SMF */
+function f_delete_session(template (omit) GTP2C_Cause tx_cause := omit,
+			  template (present) GTP2C_Cause exp_cause,
+			  boolean expect_diameter := true) runs on SMF_Session_CT {
+	var template (value) FullyQualifiedTEID fteid_c_ie
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
+					f_inet_addr(mp_local_hostname_c), omit);
+	var template PDU_GTPCv2 g2c :=
+		ts_GTP2C_DeleteSessionReq(d_teid := g_pars.teic_remote, cause := tx_cause,
+					  sender_fteid := fteid_c_ie,
+					  teid_list := {}, bearer_id := g_pars.bearer.ebi);
+
+	GTP2.send(g2c);
+	if (DIAMETER[DIA_Gx].checkstate("Connected") and expect_diameter) {
+		as_DIA_Gx_CCR(TERMINATION_REQUEST);
+	}
+	if (DIAMETER[DIA_Gy].checkstate("Connected") and expect_diameter) {
+		as_DIA_Gy_CCR(TERMINATION_REQUEST);
+	}
+	alt {
+	[] GTP2.receive(tr_GTP2C_DeleteSessionResp(d_teid := g_pars.teic_local, cause := exp_cause)) {
+		setverdict(pass);
+		}
+	[] GTP2.receive(tr_GTP2C_DeleteSessionResp(?, ?)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Unexpected  DeleteSessionResp");
+		}
+	[] GTP2.receive {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					"Unexpected GTPv2 while waiting for DeleteSessionResp");
+		}
+	}
+}
+
+}
