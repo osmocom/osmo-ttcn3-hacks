@@ -3,7 +3,7 @@ export PYHSS_CONFIG=config.yaml
 
 if [ "$TESTENV_INSTALL_DIR" = "/" ]; then
 	# Installed via debian package
-	. /opt/venvs/pyhss/bin/activate
+	export PATH=/opt/venvs/pyhss/bin:"$PATH"
 else
 	# Built with osmo-dev
 	. "$TESTENV_INSTALL_DIR"/venv/bin/activate
