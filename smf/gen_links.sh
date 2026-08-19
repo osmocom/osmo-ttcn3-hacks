@@ -7,6 +7,7 @@ BASEDIR=../deps
 DIR=$BASEDIR/titan.Libraries.TCCUsefulFunctions/src
 FILES="TCCInterface_Functions.ttcn TCCConversion_Functions.ttcn TCCConversion.cc TCCInterface.cc TCCInterface_ip.h"
 FILES+=" TCCEncoding_Functions.ttcn TCCEncoding.cc " # BCD coding
+FILES+="TCCDateTime.cc TCCDateTime_Functions.ttcn " # NTP_Functions (NTP timestamp)
 gen_links $DIR $FILES
 
 DIR=$BASEDIR/titan.TestPorts.Common_Components.Socket-API/src
@@ -49,6 +50,10 @@ DIR=$BASEDIR/titan.ProtocolModules.GTPv2_v13.7.0/src
 FILES="GTPv2_Types.ttcn"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.PFCP_v15.1.0/src
+FILES="PFCP_Types.ttcn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
 FILES="DIAMETER_EncDec.cc"
 gen_links $DIR $FILES
@@ -63,6 +68,7 @@ FILES+="DNS_Helpers.ttcn "
 FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct.ttcn DIAMETER_CodecPort_CtrlFunctDef.cc DIAMETER_Emulation.ttcn "
 FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc4004_Templates.ttcn DIAMETER_rfc5447_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_229_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn DIAMETER_ts29_273_Templates.ttcn DIAMETER_ts32_299_Templates.ttcn "
 FILES+="SCTP_Templates.ttcn "
+FILES+="NTP_Functions.ttcn PFCP_Templates.ttcn PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
