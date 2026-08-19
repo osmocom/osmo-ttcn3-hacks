@@ -329,7 +329,7 @@ class ColorFormatter(logging.Formatter):
     }
 
     def __init__(self):
-        for color in self.colors.keys():
+        for color in self.colors:
             env_var = f"TESTENV_COLOR_{color.upper()}"
             if env_var in os.environ:
                 self.colors[color] = os.environ.get(env_var)

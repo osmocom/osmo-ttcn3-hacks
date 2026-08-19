@@ -138,7 +138,7 @@ except testenv.NoTraceException as e:
     testenv.podman.stop()
     sys.exit(2)
 except KeyboardInterrupt:
-    print("")  # new line
+    print()  # new line
     test = testenv.testsuite.get_current_test()
     if test:
         logging.critical(f"^C during {test}")

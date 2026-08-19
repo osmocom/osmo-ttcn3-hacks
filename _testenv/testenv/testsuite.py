@@ -210,7 +210,7 @@ def wait_until_test_stopped():
 
     logging.debug("Waiting until test has stopped...")
 
-    for i in range(0, 1200):
+    for i in range(1200):
         time.sleep(0.1)
         if not os.path.exists(path):
             return

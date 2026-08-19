@@ -87,7 +87,7 @@ def verify_qemu_cfgs():
     qemu_required = False
 
     for basename, cfg in cfgs.items():
-        for section in cfg.keys():
+        for section in cfg:
             if "qemu" in cfg[section]:
                 qemu_supported = True
                 if cfg[section]["qemu"] == "required":
@@ -171,7 +171,7 @@ def verify(cfg, path):
         exit_error_readme()
 
     for section in cfg:
-        for key in cfg[section].keys():
+        for key in cfg[section]:
             valid = keys_valid_component
             if section == "testsuite":
                 valid = keys_valid_testsuite

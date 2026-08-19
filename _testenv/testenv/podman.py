@@ -57,13 +57,11 @@ def image_up_to_date():
 
 
 def image_build(check_existing=True):
-    if check_existing:
-        if image_exists() and image_up_to_date():
-            logging.debug(f"Podman image is up-to-date: {image_name}")
-            if testenv.args.force:
-                logging.debug("Building anyway since --force was used")
-            else:
-                return
+    if check_existing and image_exists() and image_up_to_date():
+        logging.debug(f"Podman image is up-to-date: {image_name}")
+        if not testenv.args.force:
+            return
+        logging.debug("Building anyway since --force was used")
 
     logging.info(f"Building podman image: {image_name}")
     testenv.cmd.run(
@@ -348,10 +346,7 @@ def is_running():
         return False
 
     cmd = ["podman", "ps", "-q", "--filter", f"name={container_name}"]
-    if not subprocess.run(cmd, capture_output=True, text=True, check=False).stdout:
-        return False
-
-    return True
+    return bool(subprocess.run(cmd, capture_output=True, text=True, check=False).stdout)
 
 
 def stop(restart=False):
