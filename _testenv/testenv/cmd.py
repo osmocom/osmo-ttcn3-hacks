@@ -121,10 +121,10 @@ def generate_env(env=None, podman=False):
     return ret
 
 
-def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, *args, **kwargs):
+def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, **kwargs):
     env = env or {}
     if not no_podman and testenv.args.podman:
-        return testenv.podman.exec_cmd(cmd, check=check, env=env, *args, **kwargs)
+        return testenv.podman.exec_cmd(cmd, check=check, env=env, **kwargs)
 
     logging.debug(f"+ {cmd}")
 
@@ -135,7 +135,6 @@ def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, *a
         shell=isinstance(cmd, str),
         stdin=stdin,
         check=False,
-        *args,
         **kwargs,
     )
 

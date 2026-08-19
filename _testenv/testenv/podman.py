@@ -137,7 +137,7 @@ def init():
         run_shell_on_stop = True
 
 
-def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, *args, **kwargs):
+def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, **kwargs):
     podman_opts = podman_opts or []
     env = env or {}
 
@@ -158,7 +158,6 @@ def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, *args, **kwargs):
     return testenv.cmd.run(
         ["podman", "exec"] + podman_opts + [container_name] + cmd,
         no_podman=True,
-        *args,
         **kwargs,
     )
 
