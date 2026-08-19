@@ -189,7 +189,11 @@ def feed_watchdog_loop():
     try:
         while True:
             time.sleep(2)
-            p = subprocess.run(["podman", "exec", container_name, "touch", "/tmp/watchdog"], stderr=subprocess.DEVNULL)
+            p = subprocess.run(
+                ["podman", "exec", container_name, "touch", "/tmp/watchdog"],
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
             if p.returncode:
                 logging.debug("feed_watchdog_loop: podman container has stopped")
                 return
@@ -345,7 +349,7 @@ def is_running():
         return False
 
     cmd = ["podman", "ps", "-q", "--filter", f"name={container_name}"]
-    if not subprocess.run(cmd, capture_output=True, text=True).stdout:
+    if not subprocess.run(cmd, capture_output=True, text=True, check=False).stdout:
         return False
 
     return True

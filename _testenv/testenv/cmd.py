@@ -134,6 +134,7 @@ def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, *a
         env=generate_env(env),
         shell=isinstance(cmd, str),
         stdin=stdin,
+        check=False,
         *args,
         **kwargs,
     )

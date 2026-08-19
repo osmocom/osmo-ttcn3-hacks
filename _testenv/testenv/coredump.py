@@ -49,7 +49,7 @@ def get_from_coredumpctl():
     cmd = ["coredumpctl", "-q", "-S", since, "--json=short", "-n1"]
     logging.debug(f"+ {cmd}")
 
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if p.returncode != 0:
         logging.debug("No coredump found")
         return

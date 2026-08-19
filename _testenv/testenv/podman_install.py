@@ -66,7 +66,7 @@ def apt_get_dbg_pkgs(pkgs):
                 for dbg_pkg in get_dbg_pkgs(dep):
                     # Use subprocess.run so we don't get lots of log messages.
                     # Also we don't need to run grep through podman.
-                    grep = subprocess.run(["grep", "-q", f"^{dbg_pkg}$", dbg_pkgs_all])
+                    grep = subprocess.run(["grep", "-q", f"^{dbg_pkg}$", dbg_pkgs_all], check=False)
 
                     if grep.returncode == 0:
                         dbg_pkgs[dep] = dbg_pkg
