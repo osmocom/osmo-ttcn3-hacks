@@ -597,4 +597,4 @@ if __name__ == "__main__":
     print("\nGenerated certificates in ./InvalidTestCases/:")
     for cert in certificates_generated:
         print(f"  • {cert}")
-    print("\nTotal: {} certificates generated".format(len(certificates_generated)))
+    print(f"\nTotal: {len(certificates_generated)} certificates generated")
