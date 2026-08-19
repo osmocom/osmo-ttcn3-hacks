@@ -23,6 +23,11 @@ import from DIAMETER_ts29_273_Templates all;
 import from DIAMETER_ts32_299_Templates all;
 import from DIAMETER_Emulation all;
 
+import from PFCP_Types all;
+import from PFCP_Emulation all;
+import from PFCP_Templates all;
+import from PFCP_CodecPort all;
+
 import from SMF_Session_CT all;
 
 modulepar {
@@ -40,10 +45,14 @@ modulepar {
 	integer mp_aaa_local_port := 3870;
 
 	charstring mp_diam_realm := "localdomain";
+
+	/* IP address at which we listen for PFCP to emulate a UPF in ttcn3 */
+	charstring mp_pfcp_ip_local := "127.0.0.7";
+	charstring mp_pfcp_upf_node_id := "\07osmocom\03org";
 }
 
 /* main component, we typically have one per testcase */
-type component SMF_Test_CT extends GTP2_ConnHdlr {
+type component SMF_Test_CT extends GTP2_ConnHdlr, PFCP_ConnHdlr {
 	var GTPv2_Emulation_CT vc_GTP2;
 	port GTP2EM_PT TEIC0;
 	var GTPv1U_Emulation_CT vc_GTP1U;
@@ -61,6 +70,11 @@ type component SMF_Test_CT extends GTP2_ConnHdlr {
 	var DIAMETER_Emulation_CT vc_S6b;
 	port DIAMETER_PT S6b_UNIT;
 	port DIAMETEREM_PROC_PT S6b_PROC;
+
+	/* emulated UPF */
+	var PFCP_Emulation_CT vc_PFCP;
+	var boolean g_pfcp_answer_heartbeat_req := true;
+
 	/* global test case guard timer (actual timeout value is set in f_init()) */
 	timer T_guard;
 }
@@ -178,12 +192,50 @@ private function f_init_gtp1u() runs on SMF_Test_CT {
 	vc_GTP1U.start(GTPv1U_Emulation.main(cfg));
 }
 
+function f_init_pfcp(charstring id) runs on SMF_Test_CT {
+	id := id & "-PFCP";
+
+	var PFCP_Emulation_Cfg pfcp_cfg := {
+		pfcp_bind_ip := mp_pfcp_ip_local,
+		pfcp_bind_port := PFCP_PORT,
+		pfcp_remote_ip := mp_smf_hostname,
+		pfcp_remote_port := PFCP_PORT,
+		role := UPF,
+		answer_heartbeat_req := g_pfcp_answer_heartbeat_req
+	};
+
+	vc_PFCP := PFCP_Emulation_CT.create(id) alive;
+	vc_PFCP.start(PFCP_Emulation.main(pfcp_cfg));
+
+	/* Temporarily access Statsd during test startup: */
+	//connect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+
+	connect(self:PFCP, vc_PFCP:CLIENT);
+	connect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+	/* the non-nightly path can be removed once osmo-hnbgw >1.8.1 is released. */
+	//if (Misc_Helpers.f_osmo_repo_is("nightly")) {
+	f_pfcp_force_assoc_setup_req(ts_PFCP_Node_ID_ipv4(f_inet_addr(mp_pfcp_ip_local)),
+				     fail_timeout := true);
+	//} else {
+	//	if (not f_statsd_pfcp_associated()) {
+	//		f_pfcp_wait_assoc_setup_req(mp_pfcp_upf_node_id, fail_timeout := true);
+	//	}
+	//}
+	disconnect(self:PFCP, vc_PFCP:CLIENT);
+	disconnect(self:PFCP_PROC, vc_PFCP:CLIENT_PROC);
+
+	//disconnect(self:STATSD_PROC, vc_STATSD:STATSD_PROC);
+}
+
 private function f_init(float guard_timeout := 60.0) runs on SMF_Test_CT {
 	T_guard.start(guard_timeout);
 	activate(as_Tguard());
+	var charstring id := testcasename();
 
 	f_init_gtp2c();
 	f_init_gtp1u();
+
+	f_init_pfcp(id);
 
 	if (mp_pcrf_local_ip != "") {
 		f_init_diameter(testcasename());

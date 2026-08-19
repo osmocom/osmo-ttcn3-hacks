@@ -23,6 +23,7 @@ FILES="
 	TCCInterface.cc
 	TCCEncoding.cc
 	UDP_EncDec.cc
+	PFCP_CodecPort_CtrlFunctDef.cc
 "
 
 CPPFLAGS_TTCN3=""
