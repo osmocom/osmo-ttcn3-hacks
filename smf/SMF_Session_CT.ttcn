@@ -15,7 +15,6 @@ import from GTPv2_Emulation all;
 
 import from DNS_Helpers all;
 
-
 import from DIAMETER_Types all;
 import from DIAMETER_Templates all;
 import from DIAMETER_ts29_212_Templates all;
@@ -24,14 +23,23 @@ import from DIAMETER_ts29_273_Templates all;
 import from DIAMETER_ts32_299_Templates all;
 import from DIAMETER_Emulation all;
 
+import from PFCP_Types all;
+import from PFCP_Emulation all;
+import from PFCP_Templates all;
+import from PFCP_CodecPort all;
+
+import from Mutex all;
+
 import from SMF_Tests all;
 
 const integer DIA_Gx := 0;
 const integer DIA_Gy := 1;
 const integer DIA_S6b := 2;
 
+const OCT8 c_SEID0 := '0000000000000000'O;
+
 /* per-session component; we typically have 1..N per testcase */
-type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr {
+type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr, PFCP_ConnHdlr, MutexCT {
 	var SessionPars	g_pars;
 
 	/* GTP-U IPv4 address remote sie */
@@ -64,6 +72,63 @@ type record SessionParsGy {
 	DIAMETER_Resultcode cca_res_code
 };
 
+type record FTeids {
+	F_TEID local,
+	F_TEID remote optional
+}
+template (value) FTeids t_FTeids(template (value) F_TEID local,
+				 template (omit) F_TEID remote) := {
+	local := local,
+	remote := remote
+}
+
+/* 'local' and 'remote' refer to the GTP information from the UPF's point of view:
+ * HNB                             UPF                 CN
+ * access.remote <---> access.local | core.local <---> core.remote
+ */
+type record Gtp1uParameters {
+	FTeids core,
+	FTeids access
+}
+template (value) Gtp1uParameters
+t_Gtp1uParameters_default(uint32_t idx := 1,
+			  charstring mp_pfcp_ip_local) := {
+	core := {
+		local := ts_PFCP_F_TEID_ipv4(int2oct(idx + 8192, 4),
+					     f_inet_addr(mp_pfcp_ip_local)),
+		remote := omit
+	},
+	access := {
+		local := ts_PFCP_F_TEID_ipv4(int2oct(idx, 4),
+					     f_inet_addr(mp_pfcp_ip_local)),
+		remote := omit
+	}
+}
+
+type record PfcpParameters {
+	charstring pfcp_local_addr,
+	Node_ID local_node_id,
+	F_SEID local_f_seid,
+	F_SEID remote_cp_f_seid optional,
+	Gtp1uParameters gtp1u_pars
+}
+
+
+function f_t_PfcpParams(uint32_t idx := 1,
+			charstring pfcp_local_addr := mp_pfcp_ip_local,
+			template (value) Node_ID local_node_id := ts_PFCP_Node_ID_ipv4(f_inet_addr(mp_pfcp_ip_local)))
+return PfcpParameters {
+	var uint64_t local_f_seid := idx;
+	var template (value) PfcpParameters pfcp_pars := {
+		pfcp_local_addr := pfcp_local_addr,
+		local_node_id := local_node_id,
+		local_f_seid := ts_PFCP_F_SEID_ipv4(f_inet_addr(pfcp_local_addr), int2oct(local_f_seid, 8)),
+		remote_cp_f_seid := omit,
+		gtp1u_pars := t_Gtp1uParameters_default(idx, pfcp_local_addr)
+	}
+	return valueof(pfcp_pars);
+}
+
 /* configuration data for a given Session */
 type record SessionPars {
 	hexstring	imsi,
@@ -88,7 +153,9 @@ type record SessionPars {
 	/* Bearer Contexts to be created */
 	BearerConfig 	bearer optional,
 
-	SessionParsGy gy
+	SessionParsGy gy,
+
+	PfcpParameters pfcp_pars
 }
 
 template (value) SessionPars
@@ -97,7 +164,8 @@ t_SessionPars(hexstring imsi,
 	     GTP2C_RAT_Type rat_type := GTP2C_RAT_EUTRAN,
 	     charstring apn := "internet",
 	     boolean selection_mode := false,
-	     GTP2C_PDN_Type pdn_type := GTP2C_PDN_IPv4) := {
+	     GTP2C_PDN_Type pdn_type := GTP2C_PDN_IPv4,
+	     template (value) PfcpParameters pfcp_pars := f_t_PfcpParams(1)) := {
 	imsi := imsi,
 	msisdn := msisdn,
 	rat_type := rat_type,
@@ -116,7 +184,8 @@ t_SessionPars(hexstring imsi,
 	gy := {
 		validity_time := 0,
 		cca_res_code := DIAMETER_SUCCESS
-	}
+	},
+	pfcp_pars := pfcp_pars
 }
 
 
@@ -305,6 +374,22 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 					  apco := apco);
 	g2c.gtpcv2_pdu.createSessionRequest.servingNetwork := ts_GTP2C_ServingNetwork('001'H, '01F'H);
 
+
+///////////////////////
+	/* This code block cannot be executed by more than one component at a time because
+	 * the RANAP RAB Ass Request triggers the IUT to send PFCP Session Establishment
+	 * Request PDU(s), which needs to be routed to the respective ConnHdlr component (us).
+	 * As per 3GPP TS 29.244, section 7.2.2.4.2, these PFCP PDUs shall all have SEID=0,
+	 * so that the PFCPEM component cannot route them unambiguously.   This is why we
+	 * need to ensure that only one ConnHdlr is triggering PFCP session establishment
+	 * at the given moment of time. */
+	f_Mutex_lock(__BFILE__, __LINE__);
+
+	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
+	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
+	f_PFCPEM_subscribe_seid(c_SEID0);
+///////////////////////
+
 	GTP2.send(g2c);
 	if (do_s6b and DIAMETER[DIA_S6b].checkstate("Connected")) {
 		as_DIA_S6b_AAR();
@@ -316,6 +401,25 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 	if (DIAMETER[DIA_Gy].checkstate("Connected")) {
 		as_DIA_Gy_CCR(INITIAL_REQUEST);
 	}
+
+///////////////////////
+	var PDU_PFCP m;
+	/* Expect PFCP Session Establishment Request. */
+	m := f_pfcp_expect(tr_PFCP_Session_Est_Req());
+	log("PFCP Session Establishment Request received!", m)
+	/* Ask PFCPEM to route PDUs with to be indicated F-SEID to us. */
+	f_PFCPEM_subscribe_seid(g_pars.pfcp_pars.local_f_seid.seid);
+	/* We're done establishing PFCP sessions, so at this point we no longer expect to
+	 * receive Session Establishment Request PDUs with SEID=0.  Unregister and unlock
+	 * the mutex, enabling other components to establish PFCP sessions after us. */
+	f_PFCPEM_unsubscribe_seid(c_SEID0);
+	f_Mutex_unlock(__BFILE__, __LINE__);
+
+	log("DONE PROCESSING PFCP Session Establishment Request")
+	f_pfcp_sess_est_resp(m);
+///////////////////////
+
+
 	alt {
 	[] GTP2.receive(tr_GTP2C_CreateSessionResp(d_teid := g_pars.teic_local,
 						   cause := Request_accepted,
@@ -451,6 +555,49 @@ function f_delete_session(template (omit) GTP2C_Cause tx_cause := omit,
 					"Unexpected GTPv2 while waiting for DeleteSessionResp");
 		}
 	}
+}
+
+function f_pfcp_expect(template (present) PDU_PFCP exp_rx, float wait_time := 5.0) runs on SMF_Session_CT return PDU_PFCP
+{
+	var PDU_PFCP rx;
+	timer T := wait_time;
+	T.start;
+	alt {
+	[] PFCP.receive(exp_rx) -> value rx {
+			setverdict(pass);
+		}
+	[] PFCP.receive(PDU_PFCP:?) {
+			setverdict(fail, "Got an unexpected PFCP message, was waiting for ", exp_rx);
+			mtc.stop;
+		}
+	[] T.timeout {
+			setverdict(fail, "Timeout waiting for PFCP ", exp_rx);
+			mtc.stop;
+		}
+	}
+	T.stop;
+	return rx;
+}
+
+function f_pfcp_sess_est_resp(PDU_PFCP req) runs on SMF_Session_CT {
+	//TODO: send SessEstResp back!!!! See hnbgw/ConnHdlr.ttcn:
+	var PFCP_Session_Establishment_Request serq := req.message_body.pfcp_session_establishment_request;
+	/* Store peer's F-SEID for later: */
+	g_pars.pfcp_pars.remote_cp_f_seid := serq.CP_F_SEID;
+
+	/* Acting as UPF, invent a new PFCP SEID to send to the peer. Respond to the Session Establishment.
+	 * The PFCP response must have the same sequence_number as the request. */
+	var Gtp1uParameters gtp1_pars := g_pars.pfcp_pars.gtp1u_pars;
+	var template Created_PDR pdr1 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[0].grouped_ie.pdr_id,
+							     local_F_TEID := gtp1_pars.core.local);
+	var template Created_PDR pdr2 := ts_PFCP_Created_PDR(pdr_id := serq.create_PDR_list[1].grouped_ie.pdr_id,
+							     local_F_TEID := gtp1_pars.access.local);
+	var template PDU_PFCP r := ts_PFCP_Session_Est_Resp(seq_nr := req.sequence_number,
+							    node_id := g_pars.pfcp_pars.local_node_id,
+							    seid := g_pars.pfcp_pars.remote_cp_f_seid.seid,
+							    f_seid := g_pars.pfcp_pars.local_f_seid,
+							    created_pdr := {pdr1, pdr2});
+	PFCP.send(r);
 }
 
 }

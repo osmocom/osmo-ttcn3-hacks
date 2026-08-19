@@ -68,6 +68,7 @@ FILES+="DIAMETER_Types.ttcn DIAMETER_CodecPort.ttcn DIAMETER_CodecPort_CtrlFunct
 FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc4004_Templates.ttcn DIAMETER_rfc5447_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_212_Templates.ttcn DIAMETER_ts29_229_Templates.ttcn DIAMETER_ts29_272_Templates.ttcn DIAMETER_ts29_273_Templates.ttcn DIAMETER_ts32_299_Templates.ttcn "
 FILES+="SCTP_Templates.ttcn "
 FILES+="PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn PFCP_Templates.ttcn "
+FILES+="Mutex.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
