@@ -19,6 +19,7 @@ FILES="
 	SDP_EncDec.cc
 	StatsD_CodecPort_CtrlFunctdef.cc
 	TCCConversion.cc
+	TCCDateTime.cc
 	TCCEncoding.cc
 	TCCInterface.cc
 	TELNETasp_PT.cc
