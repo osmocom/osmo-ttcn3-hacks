@@ -309,6 +309,19 @@ system.
 Switching between the versions is done either by setting a `titan_min` version
 in `testsrcdir.cfg`, or by using `-T` / `--titan-version`.
 
+## Automatic backtraces for coredumps
+
+When your SUT crashes with a coredump, testenv automatically runs `gdb` to get
+a backtrace, displays it in the output and writes it next to other logs into a
+`.backtrace` file.
+
+For this to work, you either need to have `systemd-coredump` set up, or
+alternatively have a core pattern in `/proc/sys/kernel/core_pattern` starting
+with `core`.
+
+Executables that do not start with a relevant prefix (`osmo-` or `open5gs-`)
+get ignored, see `testenv.coredump.executable_is_relevant()`.
+
 ## Troubleshooting
 
 ### Timeout waiting for RESET-ACK after sending RESET
