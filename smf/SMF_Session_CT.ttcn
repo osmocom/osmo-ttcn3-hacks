@@ -111,14 +111,16 @@ t_Gtp1uParameters_default(uint32_t idx := 1,
 type record Session_URR {
 	URR_ID urr_id,
 	integer ur_seqn,
-	integer start_time /* In system clock, call  */
+	integer start_time, /* In system clock */
+	integer last_report_time /* In system clock */
 }
 type record of Session_URR Session_URR_List;
 template (value) Session_URR
 ts_Session_URR(template (value) URR_ID urr_id, integer start_time) := {
 	urr_id := urr_id,
 	ur_seqn := 0,
-	start_time := start_time
+	start_time := start_time,
+	last_report_time := start_time
 }
 type record PfcpParameters {
 	charstring pfcp_local_addr,
@@ -584,9 +586,12 @@ return Start_Time {
 	return valueof(ts_PFCP_Start_Time(int2oct(f_time_to_ntp32(urr.start_time), 4)));
 }
 
-private function f_Session_URR_Duration_Measurement(Session_URR urr)
+private function f_Session_URR_Duration_Measurement(inout Session_URR urr)
 return Duration_Measurement {
-	return valueof(ts_PFCP_Duration_Measurement(f_time() - urr.start_time));
+	var integer now := f_time();
+	var integer duration := now - urr.last_report_time;
+	urr.last_report_time := now;
+	return valueof(ts_PFCP_Duration_Measurement(duration));
 }
 
 private function f_Session_URR_Usage_Report_Deletion_Response(Session_URR urr)
@@ -597,6 +602,18 @@ return Usage_Report_Deletion_Response {
 							 ts_PFCP_Usage_Report_Trigger(termr := '1'B),
 							 start_time := f_Session_URR_Start_Time(urr),
 							 end_time := f_End_Time_now());
+	return valueof(usage_report);
+}
+
+private function f_Session_URR_Usage_Report_Report_Request(inout Session_URR urr)
+return Usage_Report_Report_Request {
+	var template (value) Usage_Report_Report_Request usage_report;
+	usage_report := ts_Usage_Report_Report_Request(urr.urr_id,
+						       urr.ur_seqn,
+						       ts_PFCP_Usage_Report_Trigger(quvti := '1'B),
+						       start_time := f_Session_URR_Start_Time(urr),
+						       end_time := f_End_Time_now(),
+						       duration_measurement := f_Session_URR_Duration_Measurement(urr));
 	return valueof(usage_report);
 }
 
@@ -622,10 +639,28 @@ function f_pfcp_expect(template (present) PDU_PFCP exp_rx, float wait_time := 5.
 	return rx;
 }
 
+function f_Session_tr_PFCP_Session_Est_Req() runs on SMF_Session_CT return template (present) PDU_PFCP
+{
+	var template Create_URR_list create_urr := *;
+
+	if (g_pars.gy.validity_time > 0) {
+		create_urr := {
+			tr_PFCP_Create_URR(urr_id := ?,
+					   measurement_method := tr_PFCP_Measurement_Method(durat := '1'B),
+					   reporting_triggers := tr_PFCP_Reporting_Triggers(quvti := '1'B),
+					   quota_validity_time := tr_Quota_Validity_Time(g_pars.gy.validity_time),
+					   measurement_information := tr_Measurement_Information(istm := '1'B))
+		};
+	}
+
+	return tr_PFCP_Session_Est_Req(create_urr := create_urr);
+}
+
 private altstep as_pfcp_sess_est_req()
 runs on SMF_Session_CT {
+	var template (present) PDU_PFCP exp_req := f_Session_tr_PFCP_Session_Est_Req();
 	var PDU_PFCP req;
-	[] PFCP.receive(tr_PFCP_Session_Est_Req()) -> value req {
+	[] PFCP.receive(exp_req) -> value req {
 		f_pfcp_sess_est_resp(req);
 	}
 }
@@ -669,7 +704,31 @@ function f_pfcp_sess_est_resp(PDU_PFCP req) runs on SMF_Session_CT {
 	PFCP.send(resp);
 }
 
-private altstep as_pfcp_sess_del_req(template (value) PFCP_Types.Cause resp_cause := ts_PFCP_Cause(REQUEST_ACCEPTED))
+
+function f_Session_tr_PFCP_Session_Mod_Req() runs on SMF_Session_CT return template (present) PDU_PFCP
+{
+	return tr_PFCP_Session_Mod_Req(g_pars.pfcp_pars.local_f_seid.seid);
+}
+
+altstep as_pfcp_sess_mod_req()
+runs on SMF_Session_CT {
+	var template (present) PDU_PFCP exp_req := f_Session_tr_PFCP_Session_Mod_Req();
+	var PDU_PFCP req;
+	[] PFCP.receive(exp_req) -> value req {
+		f_pfcp_sess_mod_resp(req);
+	}
+}
+
+function f_pfcp_sess_mod_resp(PDU_PFCP req) runs on SMF_Session_CT {
+	var template (value) PDU_PFCP resp;
+	resp := ts_PFCP_Session_Mod_Resp(seq_nr := req.sequence_number,
+					 seid := g_pars.pfcp_pars.remote_cp_f_seid.seid,
+					 cause := ts_PFCP_Cause(REQUEST_ACCEPTED));
+	PFCP.send(resp);
+}
+
+
+altstep as_pfcp_sess_del_req(template (value) PFCP_Types.Cause resp_cause := ts_PFCP_Cause(REQUEST_ACCEPTED))
 runs on SMF_Session_CT {
 	var PDU_PFCP req;
 	[] PFCP.receive(tr_PFCP_Session_Del_Req(g_pars.pfcp_pars.local_f_seid.seid)) -> value req {
@@ -684,11 +743,34 @@ runs on SMF_Session_CT {
 	var template (omit) Usage_Report_Deletion_Response_list usage_reports := omit;
 
 	for(var integer i := 0; i < lengthof(g_pars.pfcp_pars.urr_list); i := i +1) {
-		var Session_URR urr := g_pars.pfcp_pars.urr_list[i];
-		usage_reports[i] := f_Session_URR_Usage_Report_Deletion_Response(urr);
+		usage_reports[i] := f_Session_URR_Usage_Report_Deletion_Response(g_pars.pfcp_pars.urr_list[i]);
 	}
 	resp := ts_PFCP_Session_Del_Resp(req.sequence_number, g_pars.pfcp_pars.remote_cp_f_seid.seid, resp_cause, usage_report := usage_reports)
 	PFCP.send(resp);
+}
+
+/* Send a PFCP Session Report Request (Quota Vality Time triggered) */
+function f_pfcp_sess_report_req() runs on SMF_Session_CT {
+	var template (value) PDU_PFCP req;
+	var template (omit) Usage_Report_Report_Request_list usage_reports := omit;
+	for(var integer i := 0; i < lengthof(g_pars.pfcp_pars.urr_list); i := i +1) {
+		usage_reports[i] := f_Session_URR_Usage_Report_Report_Request(g_pars.pfcp_pars.urr_list[i]);
+	}
+
+	req := ts_PFCP_Session_Report_Request(g_pars.pfcp_pars.remote_cp_f_seid.seid,
+						ts_Report_Type(usar := '1'B),
+						usage_report := usage_reports)
+	PFCP.send(req);
+	as_pfcp_sess_report_resp();
+}
+
+private altstep as_pfcp_sess_report_resp(template (present) PFCP_Types.Cause resp_cause := tr_PFCP_Cause(REQUEST_ACCEPTED))
+runs on SMF_Session_CT {
+	var PDU_PFCP resp;
+	[] PFCP.receive(tr_PFCP_Session_Report_Resp(g_pars.pfcp_pars.local_f_seid.seid,
+						    resp_cause)) -> value resp {
+		setverdict(pass);
+	}
 }
 
 }
