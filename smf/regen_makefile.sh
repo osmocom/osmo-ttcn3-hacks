@@ -2,7 +2,7 @@
 
 NAME=SMF_Tests
 
-FILES="
+FILES=" *.asn
 	*.ttcn
 	*.ttcnpp
 	BSSGP_EncDec.cc
@@ -13,6 +13,8 @@ FILES="
 	GTPv1C_CodecPort_CtrlFunctDef.cc
 	GTPv1U_CodecPort_CtrlFunctDef.cc
 	GTPv2_CodecPort_CtrlFunctDef.cc
+	HTTP2_EncDec.cc
+	HTTP2_CodecPort_CtrlFunctDef.cc
 	ICMP_EncDec.cc
 	ICMPv6_EncDec.cc
 	IPL4asp_PT.cc

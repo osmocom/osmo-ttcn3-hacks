@@ -2,7 +2,7 @@
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: Apache-2.0
 
-ECLIPSEGITLAB:=https://gitea.osmocom.org/mirrors
+ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGERRIT:=https://gerrit.osmocom.org
 OSMOGITEA:=https://gitea.osmocom.org/ttcn3
@@ -16,10 +16,12 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.GRE \
 			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
+			titan.ProtocolModules.HTTP2 \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
 			titan.ProtocolModules.ISUP_Q.762 \
+			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.M3UA \
@@ -58,6 +60,7 @@ OSMOGITHUB_REPOS=	titan.TestPorts.SCTPasp \
 OSMOGERRIT_REPOS=	osmo-uecups
 
 OSMOGITEA_REPOS=	nas \
+			osmo-ttcn3-openapi-generator \
 			titan.ProtocolModules.BSSMAP \
 			titan.ProtocolModules.MAP \
 			titan.TestPorts.AF_PACKET \
@@ -72,6 +75,7 @@ ALL_REPOS=		$(ECLIPSEGITLAB_REPOS) \
 # Use tag names from 'git describe --tags' or commit hashes. This way we get
 # exact commits of deps when doing regression testing.
 nas_commit=					8915a3b55bf21349a116eb8b4395e10e38d72135
+osmo-ttcn3-openapi-generator_commit=		47a66af829eba96dbc4c145bd15270c3a8f9d086
 titan.Libraries.TCCUsefulFunctions_commit=	R.35.B-6-gb3687da
 titan.ProtocolEmulations.M3UA_commit=		a70095b9113b23d2ea2405a5775befec18dd0fe0
 titan.ProtocolEmulations.SCCP_commit=	 	744f3eeb58d7b5bc372c9fd01db737a20bae069a
@@ -82,10 +86,12 @@ titan.ProtocolModules.DNS_commit=		R.7.B
 titan.ProtocolModules.GRE_commit=		R.2.A-5-g654c446
 titan.ProtocolModules.GTP_v13.5.0_commit=	6b769f985eb91bf5a4332f29faa4a043b23ce62e
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A-5-g85cb124
+titan.ProtocolModules.HTTP2_commit=		297ac60099b567c8819ad349e22f185ec89a9c58
 titan.ProtocolModules.ICMP_commit=		e49d9fb9f7de637b4bf4803dc6b6e911a8661640
 titan.ProtocolModules.ICMPv6_commit=		46f4d9b6e1e3c794294a92588401a81e4881dd27
 titan.ProtocolModules.IP_commit=		1be86705f39ae38f3c04b2109806ee20d25e91d0
 titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A-5-g42d428b
+titan.ProtocolModules.JSON_v07_2006_commit=	R.2.A
 titan.ProtocolModules.L2TP_commit=		17e76d3662bd0bb815158e8a9de1ec413f21b530
 titan.ProtocolModules.LLC_v7.1.0_commit=	09817f113255d7fb56f1d45d3dd629a093d9248d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d

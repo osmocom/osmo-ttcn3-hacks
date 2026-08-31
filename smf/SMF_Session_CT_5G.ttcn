@@ -1,0 +1,457 @@
+module SMF_Session_CT_5G {
+
+import from General_Types all;
+import from Osmocom_Types all;
+import from Native_Functions all;
+import from Misc_Helpers all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from TS29518_Namf_Communication all;
+import from TS29503_Nudm_SDM all;
+import from TS29502_Nsmf_PDUSession all;
+import from TS29512_Npcf_SMPolicyControl all;
+
+import from TS29518_Namf_Communication_Templates all;
+import from TS29503_Nudm_SDM_Templates all;
+import from TS29502_Nsmf_PDUSession_Templates all;
+import from TS29512_Npcf_SMPolicyControl_Templates all;
+
+import from PFCP_Emulation all;
+import from Mutex all;
+
+import from SMF_Session_CT all;
+import from SMF_Tests all;
+
+/* Index in SMF_Session_CT inherited HTTP2_ConnHdlr ports HTTP2_CONN[] and HTTP2_CONN_PROC[] */
+const integer HTTP2_CONN_SCP := 0;
+
+function f_handler_init_5G()
+runs on SMF_Session_CT {
+	/* Create SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register();
+}
+
+/********************************************
+ * N11 Nsmf (SBI): Requests towards IUT SMF
+ ********************************************/
+
+function f_n11_init() runs on SMF_Session_CT {
+	f_http2_adapter_init();
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, -1);
+
+	var template (value) HTTP2_Setting_list settings := {
+		ts_HTTP2_Setting_ENABLE_PUSH(0),
+		ts_HTTP2_Setting_INITIAL_WINDOW_SIZE(4194304),
+		ts_HTTP2_Setting_MAX_HEADER_LIST_SIZE(10485760)
+	}
+	f_http2_adapter_send(ts_HTTP2_Frame_Settings(settings := settings));
+
+	f_http2_adapter_send(ts_HTTP2_Frame_Window_Update(0, 1073741824));
+}
+
+function f_http2_header_block_encode(HTTP2_header_block hb) return octetstring
+{
+	var HTTP2_comp_context ctx := HTTP2_comp_context_init();
+	var integer rc;
+	var octetstring data := ''O;
+
+	rc := HTTP2_comp_context_encode(ctx, hb, data);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("HTTP2_comp_context_encode returned ", rc));
+	}
+	HTTP2_comp_context_free(ctx);
+	return data;
+}
+
+function f_http2_encode_body_multipart_json_5gnas(octetstring json_encoded,
+						  octetstring nas_ecnoded,
+						  charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg==") return octetstring
+{
+	var charstring boundary_ext := "\r\n--" & boundary & "\r\n";
+	var octetstring boundary_enc := char2oct(boundary_ext);
+
+	return  boundary_enc &
+		char2oct("Content-Type: application/json\r\n\r\n") &
+		json_encoded &
+		boundary_enc &
+		char2oct("Content-Id: 5gnas-sm\r\n") &
+		char2oct("Content-Type: application/vnd.3gpp.5gnas\r\n\r\n") &
+		nas_ecnoded &
+		boundary_enc;
+}
+
+/* Nsmf_PDUSession_CreateSMContext Request/response
+ * 3GPP TS 23.502 Figure 4.3.2.2.1-1
+ * 3GPP TS 29.502 6.1.3.2 */
+function f_n11_create_session()
+runs on SMF_Session_CT {
+	var octetstring hdr_enc;
+	var template (value) HTTP2_pseudo_headers pseudo_hdr;
+	var template (value) HTTP2_header_list hdr_li;
+	var template (value) HTTP2_header_block hb;
+	var template (value) octetstring body;
+	var template (value) TS29502_Nsmf_PDUSession.PlmnId plmn_id := TS29502_Nsmf_PDUSession_Templates.ts_PlmnId("001", "001");
+	var template (value) TS29502_Nsmf_PDUSession.PlmnIdNid plmn_id_nid := TS29502_Nsmf_PDUSession_Templates.ts_PlmnIdNid(plmn_id.mcc, plmn_id.mnc);
+	var integer pduSessionId := 1;
+
+	var template (value) SmContextCreateData sm_contexts;
+	var octetstring sm_contexts_enc;
+	sm_contexts := ts_SmContextCreateData(supi := "imsi-" & g_pars.imsi_str,
+					      pei := "imeisv-0790219824011594",
+					      pduSessionId := pduSessionId,
+					      dnn := "internet",
+					      sNssai := TS29502_Nsmf_PDUSession_Templates.ts_Snssai(1),
+					      servingNfId := "foobar",
+					      guami := ts_Guami(plmnId := plmn_id_nid,
+								amfId := "020040"),
+					      servingNetwork := plmn_id_nid,
+					      n1SmMsg := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("5gnas-sm"),
+					      anType := ThreeGPP_ACCESS,
+					      ratType := ts_RatType(NR),
+					      ueLocation := ts_UserLocation(nrLocation := ts_NrLocation(tai := ts_Tai(plmn_id, "000001"),
+					      								ncgi := ts_Ncgi(plmn_id, "000000000"))),
+					      smContextStatusUri := f_amf_callback_uri(g_pars.imsi_str, "sm-context-status", pduSessionId));
+	sm_contexts_enc := f_enc_SmContextCreateData(valueof(sm_contexts));
+
+	var charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
+	var octetstring nas_enc := '2e0101c1ffff91a1'O;
+	body := f_http2_encode_body_multipart_json_5gnas(sm_contexts_enc, nas_enc, boundary);
+
+	pseudo_hdr := ts_HTTP2_pseudo_headers("POST",
+					      "http",
+					      mp_smf_hostname & ":" & int2str(mp_smf_sbi_port),
+					      "/nsmf-pdusession/v1/sm-contexts");
+	hdr_li := {
+		ts_HTTP2_Hdr_content_type("multipart/related; boundary=\"" & boundary & "\""),
+		ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
+		ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
+		ts_HTTP2_Hdr_content_length(int2str(lengthof(body))),
+		ts_HTTP2_Hdr_accept_encoding("gzip")
+	};
+	hb := ts_HTTP2_header_block(pseudo_hdr, hdr_li);
+	hdr_enc := f_http2_header_block_encode(valueof(hb));
+	f_http2_adapter_send(ts_HTTP2_Frame_Header(3,
+						   end_stream_flag := false,
+						   end_header_flag := true,
+						   header_block_fragment := hdr_enc
+						   ));
+
+
+	/////////// START MUTUAL EXCLUSION ZONE ////////////
+	/* This code block cannot be executed by more than one component at a time because
+	 * the RANAP RAB Ass Request triggers the IUT to send PFCP Session Establishment
+	 * Request PDU(s), which needs to be routed to the respective ConnHdlr component (us).
+	 * As per 3GPP TS 29.244, section 7.2.2.4.2, these PFCP PDUs shall all have SEID=0,
+	 * so that the PFCPEM component cannot route them unambiguously.   This is why we
+	 * need to ensure that only one ConnHdlr is triggering PFCP session establishment
+	 * at the given moment of time. */
+	f_Mutex_lock(__BFILE__, __LINE__);
+	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
+	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
+	f_PFCPEM_subscribe_seid(c_SEID0);
+
+	f_http2_adapter_send(ts_HTTP2_Frame_Data(3,
+						 end_stream_flag := true,
+						 data := body));
+
+	/* Expect UDM to receive GET sm-data: */
+	as_nudm_sdm_get_sm_data();
+	/* Expect UDM to receive POST sdm-subscriptions: */
+	as_nudm_sdm_post_sdm_subscriptions();
+	/* Expect PCF to receive POST sm-policies: */
+	as_npcf_smpolicycontrol_post_sm_policies();
+
+	/* Expect PFCP Session Establishment Request. */
+	as_pfcp_sess_est_req();
+	/* Ask PFCPEM to route PDUs with to be indicated F-SEID to us. */
+	f_PFCPEM_subscribe_seid(g_pars.pfcp_pars.local_f_seid.seid);
+	/* We're done establishing PFCP sessions, so at this point we no longer expect to
+	 * receive Session Establishment Request PDUs with SEID=0.  Unregister and unlock
+	 * the mutex, enabling other components to establish PFCP sessions after us. */
+	f_PFCPEM_unsubscribe_seid(c_SEID0);
+	f_Mutex_unlock(__BFILE__, __LINE__);
+	/////////// END MUTUAL EXCLUSION ZONE ////////////
+
+	as_namf_comm_post_n1n2_messages();
+	setverdict(pass);
+	f_sleep(3.0);
+}
+
+function f_n11_delete_session()
+runs on SMF_Session_CT {
+	log("f_n11_delete_session(): TODO");
+}
+
+/**************************************
+ * N11 Namf (SBI): Emulated AMF
+ **************************************/
+
+const charstring Namf_Communication_API_PREFIX := "/namf-comm/v1"
+
+function f_namf_comm_uri_imsi_prefix(charstring imsi)
+return charstring {
+	return Namf_Communication_API_PREFIX & "/ue-contexts" & "/imsi-" & imsi
+}
+
+/* 3GPP TS 29.518:
+ * 6.1.3.5 Resource: N1N2 Messages Collection */
+function f_tr_Namf_Communication_post_n1n2_messages()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers(method := "POST",
+						  path := f_namf_comm_uri_imsi_prefix(g_pars.imsi_str) & "/n1-n2-messages");
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := ? /* multipart */));
+	return http2_msg;
+}
+
+private function f_multipart_content_json_get_value(charstring part)
+return charstring {
+	var ro_charstring sp := f_str_split(part, "\r\n");
+	for (var integer i := 0; i < lengthof(sp); i := i + 1) {
+		if (sp[i] == "") {
+			continue;
+		}
+		if (f_str_startswith(sp[i], "Content-Type:")) {
+			continue;
+		}
+		return sp[i];
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unable to finf JSON part in multipart value ", part));
+	return "";
+}
+
+/* 5.2.2.3.1 N1N2MessageTransfer */
+private altstep as_namf_comm_post_n1n2_messages()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Namf_Communication_post_n1n2_messages()) -> value http2_rx {
+		var N1N2MessageTransferReqData n1n2msg_req;
+		var template (value) N1N2MessageTransferRspData n1n2msg_rsp;
+		var template (value) HTTP2_Msg http2_tx;
+		var octetstring body_enc;
+		log("PESPIN: rx http2! ", http2_rx);
+
+		/* Split http2_rx.body.data into chunks since it is a multipart message: */
+		var charstring content_type_val := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_content_type));
+		var charstring boundary := f_HTTP2_header_content_type_multipart_val_get_boundary(content_type_val)
+		var ro_octetstring parts := f_str_oct_split(http2_rx.body.data, char2oct("--" & boundary))
+		var charstring json_str := f_multipart_content_json_get_value(oct2char(parts[0]))
+
+		f_dec_N1N2MessageTransferReqData(char2oct(json_str), n1n2msg_req); // TODO: check returned integer.
+		log("PESPIN: N1N2MessageTransferReqData:", n1n2msg_req);
+
+		n1n2msg_rsp := ts_N1N2MessageTransferRspData(cause := ts_N1N2MessageTransferCause(N1_N2_TRANSFER_INITIATED))
+		body_enc := f_enc_N1N2MessageTransferRspData(valueof(n1n2msg_rsp));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json; charset=utf-8")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/*************************************
+ * N10 Nudm (SBI): Emulated UDM
+ *************************************/
+
+const charstring Nudm_SDM_API_PREFIX := "/nudm-sdm/v2"
+
+function f_nudm_sdm_uri_imsi_prefix(charstring imsi)
+return charstring {
+	return Nudm_SDM_API_PREFIX & "/imsi-" & imsi
+}
+
+function f_nudm_sdm_uri_imsi_subscr_prefix(charstring imsi, charstring opcode, integer pduSessionId)
+return charstring {
+	return f_nudm_sdm_uri_imsi_prefix(imsi) & "/" & opcode & "/" & int2str(pduSessionId);
+}
+
+/* 3GPP TS 29.503:
+ * 5.2.2.2.5 Session Management Subscription Data Retrieval
+ * 6.1.3.8 Resource: SessionManagementSubscriptionData (Document) */
+function f_tr_Nudm_SDM_get_sm_data()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers(method := "GET",
+						  path := pattern Nudm_SDM_API_PREFIX & "/imsi-" & g_pars.imsi_str & "/sm-data*");
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb, body := omit);
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.2.2.2.5 Session Management Subscription Data Retrieval */
+private altstep as_nudm_sdm_get_sm_data()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_SDM_get_sm_data()) -> value http2_rx {
+		var template (value) SessionManagementSubscriptionData1 sm_sub_data;
+		var template (value) DnnConfiguration1 dnn_cfg;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		dnn_cfg := ts_DnnConfiguration1(pduSessionTypes := ts_PduSessionTypes1(defaultSessionType := ts_PduSessionType1(IPV4),
+										       allowedSessionTypes := { ts_PduSessionType1(IPV4) }),
+						sscModes := ts_SscModes1(defaultSscMode := ts_SscMode1(SSC_MODE_1),
+									 allowedSscModes := { ts_SscMode1(SSC_MODE_1),
+									 		      ts_SscMode1(SSC_MODE_2),
+											      ts_SscMode1(SSC_MODE_3)}),
+						fivegQosProfile := ts_SubscribedDefaultQos1(fiveqi := 9,
+											    arp := ts_Arp(priorityLevel := ts_ArpPriorityLevel(8),
+													  preemptCap := ts_PreemptionCapability(NOT_PREEMPT),
+													  preemptVuln := ts_PreemptionVulnerability(NOT_PREEMPTABLE)),
+											    priorityLevel := 8),
+						sessionAmbr := ts_Ambr1(uplink := "1000 Kbps",
+									downlink := "1000 Kbps")
+		);
+
+		sm_sub_data := ts_SessionManagementSubscriptionData1(
+			singleNssai := TS29503_Nudm_SDM_Templates.ts_Snssai1(1),
+			dnnConfigurations := {{"internet", dnn_cfg}}
+		);
+		body_enc := f_enc_SmSubsData1(valueof(ts_SmSubsData1({sm_sub_data})));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json; charset=utf-8")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+
+/* 3GPP TS 29.503:
+ * 6.1.3.3 Resource: SdmSubscriptions (Collection)*/
+function f_tr_Nudm_SDM_post_sdm_subscriptions()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers(method := "POST",
+						  path := f_nudm_sdm_uri_imsi_prefix(g_pars.imsi_str) & "/sdm-subscriptions");
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_SdmSubscription1));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.2.2.3.2 Subscription to notifications of data change */
+private altstep as_nudm_sdm_post_sdm_subscriptions()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_SDM_post_sdm_subscriptions()) -> value http2_rx {
+		var SdmSubscription1 sdm_subscription;
+		var template (value) HTTP2_Msg http2_tx;
+		var octetstring body_enc;
+
+		f_dec_SdmSubscription1(http2_rx.body.data, sdm_subscription); // TODO: check returned integer.
+
+		/* Add subscriptionId to received object and transmit it back: */
+		sdm_subscription.subscriptionId := "1";
+		body_enc := f_enc_SdmSubscription1(sdm_subscription);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							     ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
+							     ts_HTTP2_Hdr_location(f_scp_uri_prefix() & f_nudm_sdm_uri_imsi_subscr_prefix(g_pars.imsi_str, "sdm-subscriptions", 1))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									         end_stream_flag := true,
+									         data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/*************************************
+ * N8 NPcf (SBI): Emulated PCF
+ *************************************/
+
+const charstring Npcf_SMPolicyControl_API_PREFIX := "/npcf-smpolicycontrol/v1"
+
+function f_npcf_smpolicycontrol_uri_imsi_prefix(charstring imsi)
+return charstring {
+	return Npcf_SMPolicyControl_API_PREFIX & "/imsi-" & imsi
+}
+
+/* 3GPP TS 29.512:
+ * 5.3.2 Resource: SM Policies */
+function f_tr_Npcf_SMPolicyControl_post_sm_policies()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers(method := "POST",
+						  path := Npcf_SMPolicyControl_API_PREFIX & "/sm-policies");
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_SmPolicyContextData1));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.512 4.2.2.2 SM Policy Association establishment */
+private altstep as_npcf_smpolicycontrol_post_sm_policies()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Npcf_SMPolicyControl_post_sm_policies()) -> value http2_rx {
+		var SmPolicyContextData1 smpol_ctx_data;
+		var template (value) SmPolicyDecision1 smpol_decision;
+		var template (value) HTTP2_Msg http2_tx;
+		var octetstring body_enc;
+		var integer sessRuleId := 1;
+
+		f_dec_SmPolicyContextData1(http2_rx.body.data, smpol_ctx_data); // TODO: check returned integer.
+
+		smpol_decision := ts_SmPolicyDecision1();
+		body_enc := f_enc_SmPolicyDecision1(valueof(smpol_decision));
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							     ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
+							     ts_HTTP2_Hdr_location(f_scp_uri_prefix() & Npcf_SMPolicyControl_API_PREFIX & "/sm-policies/imsi-" & g_pars.imsi_str & "-" & int2str(sessRuleId))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									         end_stream_flag := true,
+									         data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+}
