@@ -2,7 +2,7 @@
 # Copyright 2018 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: Apache-2.0
 
-ECLIPSEGITLAB:=https://gitea.osmocom.org/mirrors
+ECLIPSEGITLAB:=https://gitlab.eclipse.org/eclipse/titan
 OSMOGITHUB:=https://github.com/osmocom
 OSMOGERRIT:=https://gerrit.osmocom.org
 OSMOGITEA:=https://gitea.osmocom.org/ttcn3
@@ -16,6 +16,7 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.GRE \
 			titan.ProtocolModules.GTP_v13.5.0 \
 			titan.ProtocolModules.GTPv2_v13.7.0 \
+			titan.ProtocolModules.HTTP2 \
 			titan.ProtocolModules.ICMP \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
@@ -82,6 +83,7 @@ titan.ProtocolModules.DNS_commit=		R.7.B
 titan.ProtocolModules.GRE_commit=		R.2.A-5-g654c446
 titan.ProtocolModules.GTP_v13.5.0_commit=	6b769f985eb91bf5a4332f29faa4a043b23ce62e
 titan.ProtocolModules.GTPv2_v13.7.0_commit=	R.2.A-5-g85cb124
+titan.ProtocolModules.HTTP2_commit=		297ac60099b567c8819ad349e22f185ec89a9c58
 titan.ProtocolModules.ICMP_commit=		e49d9fb9f7de637b4bf4803dc6b6e911a8661640
 titan.ProtocolModules.ICMPv6_commit=		46f4d9b6e1e3c794294a92588401a81e4881dd27
 titan.ProtocolModules.IP_commit=		1be86705f39ae38f3c04b2109806ee20d25e91d0

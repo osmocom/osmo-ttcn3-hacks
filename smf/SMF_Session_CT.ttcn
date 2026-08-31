@@ -31,6 +31,10 @@ import from PFCP_CodecPort all;
 
 import from NTP_Functions all;
 
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Adapter all;
+
 import from Mutex all;
 
 import from SMF_Tests all;
@@ -42,7 +46,8 @@ const integer DIA_S6b := 2;
 const OCT8 c_SEID0 := '0000000000000000'O;
 
 /* per-session component; we typically have 1..N per testcase */
-type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr, PFCP_ConnHdlr, MutexCT {
+type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr,
+				      PFCP_ConnHdlr, MutexCT, HTTP2_CT {
 	var SessionPars	g_pars;
 
 	/* GTP-U IPv4 address remote sie */
@@ -789,6 +794,82 @@ runs on SMF_Session_CT {
 						    resp_cause)) -> value resp {
 		setverdict(pass);
 	}
+}
+
+
+/*****************
+ * N11 Nsmf (SBI)
+ *****************/
+
+function f_n11_init() runs on SMF_Session_CT {
+	f_http2_adapter_init();
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_sbi_ip_local, -1);
+
+	var template (value) HTTP2_Setting_list settings := {
+		ts_HTTP2_Setting_ENABLE_PUSH(0),
+		ts_HTTP2_Setting_INITIAL_WINDOW_SIZE(4194304),
+		ts_HTTP2_Setting_MAX_HEADER_LIST_SIZE(10485760)
+	}
+	f_http2_adapter_send(ts_HTTP2_Frame_Settings(settings := settings));
+
+	f_http2_adapter_send(ts_HTTP2_Frame_Window_Update(0, 1073741824));
+}
+
+function f_http2_header_block_encode(HTTP2_header_block hb) return octetstring
+{
+	var HTTP2_comp_context ctx := HTTP2_comp_context_init();
+	var integer rc;
+	var octetstring data := ''O;
+
+	rc := HTTP2_comp_context_encode(ctx, hb, data);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("HTTP2_comp_context_encode returned ", rc));
+	}
+	HTTP2_comp_context_free(ctx);
+	return data;
+}
+
+function f_n11_create_session()
+runs on SMF_Session_CT {
+	var octetstring hdr_enc;
+	var template (value) HTTP2_pseudo_headers pseudo_hdr;
+	var template (value) HTTP2_header_list hdr_li;
+	var template (value) HTTP2_header_block hb;
+	var template (value) octetstring body;
+
+	body := '2d2d3d2d304556566a7863575746594e64314a5868314f5145673d3d0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f6a736f6e0d0a0d0a7b2273757069223a22696d73692d393939373030303030303030303030222c22706569223a22696d656973762d30373930323139383234303131353934222c2270647553657373696f6e4964223a312c22646e6e223a22696e7465726e6574222c22734e73736169223a7b22737374223a317d2c2273657276696e674e664964223a2237393636396637362d613632352d343166312d383436342d386466323965633533663462222c226775616d69223a7b22706c6d6e4964223a7b226d6363223a22393939222c226d6e63223a223730227d2c22616d664964223a22303230303430227d2c2273657276696e674e6574776f726b223a7b226d6363223a22393939222c226d6e63223a223730227d2c227265717565737454797065223a22494e495449414c5f52455155455354222c226e31536d4d7367223a7b22636f6e74656e744964223a2235676e61732d736d227d2c22616e54797065223a22334750505f414343455353222c2272617454797065223a224e52222c2275654c6f636174696f6e223a7b226e724c6f636174696f6e223a7b22746169223a7b22706c6d6e4964223a7b226d6363223a22393939222c226d6e63223a223730227d2c22746163223a22303030303031227d2c226e636769223a7b22706c6d6e4964223a7b226d6363223a22393939222c226d6e63223a223730227d2c226e7243656c6c4964223a22303030303030303030227d2c2275654c6f636174696f6e54696d657374616d70223a22323032362d30392d30315431363a35323a31322e3338383831385a227d7d2c22756554696d655a6f6e65223a222b30303a3030222c22736d436f6e74657874537461747573557269223a22687474703a2f2f3132372e302e302e353a373737372f6e616d662d63616c6c6261636b2f76312f696d73692d3939393730303030303030303030302f736d2d636f6e746578742d7374617475732f31222c227063664964223a2237393438636463302d613632352d343166312d613030332d633736383865313138666337227d0d0a2d2d3d2d304556566a7863575746594e64314a5868314f5145673d3d0d0a436f6e74656e742d49643a2035676e61732d736d0d0a436f6e74656e742d547970653a206170706c69636174696f6e2f766e642e336770702e35676e61730d0a0d0a2e0101c1ffff91a10d0a2d2d3d2d304556566a7863575746594e64314a5868314f5145673d3d2d2d0d0a'O;
+
+
+	pseudo_hdr := ts_HTTP2_pseudo_headers("POST",
+					      "http",
+					      mp_smf_hostname & ":" & int2str(mp_smf_sbi_port),
+					      "/nsmf-pdusession/v1/sm-contexts");
+	hdr_li := {
+		ts_HTTP2_Hdr_content_type("multipart/related; boundary=\"=-0EVVjxcWWFYNd1JXh1OQEg==\""),
+		ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
+		ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
+		ts_HTTP2_Hdr_content_length(int2str(lengthof(body))),
+		ts_HTTP2_Hdr_accept_encoding("gzip")
+	};
+	hb := ts_HTTP2_header_block(pseudo_hdr, hdr_li);
+	hdr_enc := f_http2_header_block_encode(valueof(hb));
+	f_http2_adapter_send(ts_HTTP2_Frame_Header(3,
+						   end_stream_flag := false,
+						   end_header_flag := true,
+						   header_block_fragment := hdr_enc
+						   //header_block_fragment := '418b089d5c0b8170dc13ed85ef83459362a1d32ac43d34b1dc2c22d8d04b0d5a4c7a91865f8b1d75d0620d263d4c7441ea538b1d75d0620d263d4c7441ea7a93d5596a875e45b116a2d8349ec602b81703131f5c0331333550839bd9ab'O
+						   ));
+
+	f_http2_adapter_send(ts_HTTP2_Frame_Data(3,
+						 end_stream_flag := true,
+						 data := body));
+	f_sleep(3.0);
+}
+
+function f_n11_delete_session()
+runs on SMF_Session_CT {
+	log("TODO");
 }
 
 }
