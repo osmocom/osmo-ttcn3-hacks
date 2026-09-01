@@ -505,6 +505,33 @@ private altstep as_M3UA_wait_sctp_conn_closed(integer idx) runs on RAW_M3UA_CT {
  * Test the STP in M3UA SG role (we are ASP)
  ***********************************************************************/
 
+private function f_M3UA_split_rctxs(octetstring rctx_raw) return Osmocom_Types.ro_integer
+{
+	var Osmocom_Types.ro_integer rctx_list := {};
+	while (lengthof(rctx_raw) >= 4) {
+		var OCT4 rctx := substr(rctx_raw, 0, 4);
+		ro_integer_add_unique(rctx_list, oct2int(rctx));
+		rctx_raw := substr(rctx_raw, 4, lengthof(rctx_raw) - 4);
+	}
+	return rctx_list;
+}
+friend function f_M3UA_wait_NOTIFY_all_rctx(integer idx, octetstring rctx, OCT2 st_change := c_M3UA_ST_I_AS_INACTIVE)
+runs on RAW_M3UA_CT {
+	var M3UA_RecvFrom rx;
+	var Osmocom_Types.ro_integer exp_rctx_list := f_M3UA_split_rctxs(rctx);
+	var Osmocom_Types.ro_integer rx_rctx_list;
+
+	while (lengthof(exp_rctx_list) > 0) {
+		log("Waiting to receive NOTIFY ", st_change, " for RCTX ", exp_rctx_list);
+		rx := f_M3UA_exp(idx, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, st_change, *));
+		rx_rctx_list := f_M3UA_split_rctxs(rx.msg.m3UA_NOTIFY.messageParameters.routing_Context.routingContext);
+		for (var integer i := 0; i < (lengthof(rx_rctx_list)); i := i + 1) {
+			ro_integer_del(exp_rctx_list, rx_rctx_list[i]);
+		}
+	}
+	log ("Done waiting to receive NOTIFY ", st_change)
+}
+
 /* perform an outbound ASP-UP procedure */
 friend function f_M3UA_asp_up(integer idx, template (omit) OCT4 aspid := omit,
 			      template (omit) OCT2 ntfy_after_up := c_M3UA_ST_I_AS_INACTIVE) runs on RAW_M3UA_CT {
@@ -1189,6 +1216,7 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	var OCT4 rctxA := int2oct(1234, 4);
 	var OCT3 dpcB := f_m3ua_config_get_pc_OCT3(m3ua_configs[0]); // must match config
 	var OCT4 rctxB := f_m3ua_config_get_rctx(m3ua_configs[0]); // must match config
+	var octetstring rctx := rctxA & rctxB;
 
 	f_init_common();
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation dynamic-permitted");
@@ -1197,18 +1225,18 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	/* first register the routing key */
 	f_M3UA_rkm_register(0, local_id:='30000099'O, dpc:=dpcA, rctx:=rctxA, ntfy_after_reg := omit);
 
-	/* then activate the ASP, this turns the 2 AS (one for each rctx, 1234 and default 1023)
-	 * INACTIVE, handle the 2 NOTIFY manually afterwards: */
+	/* then activate the 2 AS (one for each rctx, 1234 and default 1023)
+	 * handle the 2 NOTIFY manually afterwards: */
 	f_M3UA_asp_up(0, ntfy_after_up := omit);
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, (rctxA & rctxB, rctxB & rctxA)));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_INACTIVE, (rctxA & rctxB, rctxB & rctxA)));
-	f_M3UA_asp_act(0, omit, rctxB, ntfy_after_act := omit);
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, (rctxA & rctxB, rctxB & rctxA)));
+	f_M3UA_wait_NOTIFY_all_rctx(0, rctx, c_M3UA_ST_I_AS_INACTIVE);
+
+	f_M3UA_asp_act(0, omit, rctx, ntfy_after_act := omit);
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, rctxB));
 	f_M3UA_exp(0, tr_M3UA_DAVA({ts_M3UA_PC(oct2int(dpcB))}, rctxA));
 	if (g_iut_supports_rfc666_4_5_1_duna_after_act) {
 		f_M3UA_exp(0, tr_M3UA_DUNA({*}, rctxB));
 	}
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, (rctxA & rctxB, rctxB & rctxA)));
+	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_ACTIVE, rctxA));
 	f_M3UA_exp(0, tr_M3UA_DAVA({ts_M3UA_PC(oct2int(dpcA))}, rctxB));
 	if (g_iut_supports_rfc666_4_5_1_duna_after_act) {
 		f_M3UA_exp(0, tr_M3UA_DUNA({*}, rctxA));
@@ -1221,8 +1249,7 @@ testcase TC_rkm_unreg_active() runs on RAW_M3UA_CT {
 	/* deactivate ASP and properly de-register to clean up */
 	f_M3UA_asp_inact(0);
 	f_M3UA_send(0, ts_M3UA_DEREG_REQ(ts_M3UA_routing_ctx(rctxA)));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, (rctxA & rctxB, rctxB & rctxA)));
-	f_M3UA_exp(0, tr_M3UA_NOTIFY(c_M3UA_ST_T_STATE_CHG, c_M3UA_ST_I_AS_PENDING, (rctxA & rctxB, rctxB & rctxA)));
+	f_M3UA_wait_NOTIFY_all_rctx(0, rctx, c_M3UA_ST_I_AS_PENDING);
 	f_M3UA_exp(0, tr_M3UA_DEREG_RSP({tr_M3UA_dereg_res(?,c_m3UA_DEREGSTS_SUCCESS)}));
 
 	f_vty_config2(VTY, {"cs7 instance 0"}, "xua rkm routing-key-allocation static-only");
