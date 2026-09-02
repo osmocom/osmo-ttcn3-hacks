@@ -1,0 +1,400 @@
+/* HTTP2 Emulation in TTCN-3
+ *
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * This module implements a HTTP/HTTPs 2.0 server,
+ */
+
+module HTTP2_Server_Emulation {
+
+import from HTTP2_Types all;
+import from HTTP2_CodecPort all;
+import from HTTP2_CodecPort_CtrlFunct all;
+import from IPL4asp_Types all;
+import from IPL4asp_PortType all;
+import from Socket_API_Definitions all;
+
+import from HTTP2_Templates all;
+
+import from Native_Functions all;
+import from Misc_Helpers all;
+
+
+/***************
+ * HTTP2_Msg
+ **************/
+
+type record HTTP2_Msg {
+	IPL4asp_Types.ConnectionId conn_id,
+	integer stream_id,
+	HTTP2_header_block hb,
+	HTTP2_Data_frame body optional
+}
+
+template (present) HTTP2_Msg
+tr_HTTP2_Msg(template (present) IPL4asp_Types.ConnectionId conn_id := ?,
+	     template (present) integer stream_id := ?,
+	     template (present) HTTP2_header_block hb := ?,
+	     template HTTP2_Data_frame body := *) := {
+	conn_id := conn_id,
+	stream_id := stream_id,
+	hb := hb,
+	body := body
+}
+
+template (value) HTTP2_Msg
+ts_HTTP2_Msg(template (value) IPL4asp_Types.ConnectionId conn_id,
+	     template (value) integer stream_id,
+	     template (value) HTTP2_header_block hb,
+	     template (omit) HTTP2_Data_frame body := omit) := {
+	conn_id := conn_id,
+	stream_id := stream_id,
+	hb := hb,
+	body := body
+}
+
+/*********************
+ * HTTP2_Server_Conn
+ ********************/
+type enumerated HTTP2_Server_Conn_State {
+    HTTP2_SERVER_CONN_ST_UNUSED,
+    HTTP2_SERVER_CONN_ST_WAIT_PREFACE,
+    HTTP2_SERVER_CONN_ST_WAIT_HEADER,
+    HTTP2_SERVER_CONN_ST_WAIT_BODY
+}
+
+/* An HTTP2 connection established against the HTTP2 Server */
+type record HTTP2_Server_Conn {
+	IPL4asp_Types.ConnectionId conn_id,
+	HTTP2_Server_Conn_State state
+}
+
+private function f_HTTP2_Server_Conn_init(inout HTTP2_Server_Conn conn)
+{
+	conn := {
+		conn_id := -1,
+		state := HTTP2_SERVER_CONN_ST_UNUSED
+	};
+}
+
+private function f_HTTP2_Server_Conn_str(in HTTP2_Server_Conn conn) return charstring {
+	return "HTTP2_Server_Conn(" & int2str(conn.conn_id) & "," & log2str(conn.state) & ")";
+}
+
+private function f_HTTP2_Server_Conn_st_change(inout HTTP2_Server_Conn conn, HTTP2_Server_Conn_State state)
+{
+	log(f_HTTP2_Server_Conn_str(conn), ": state change to ", state);
+	conn.state := state
+}
+
+private function f_HTTP2_Server_Conn_comp_decode(inout HTTP2_Server_Conn conn, octetstring header_block_fragment)
+return HTTP2_header_block
+{
+	var HTTP2_header_block pl_hblock;
+	var HTTP2_comp_context ctx;
+	var integer rc;
+
+	ctx := HTTP2_comp_context_init();
+	rc := HTTP2_comp_context_decode(ctx, pl_hblock, header_block_fragment);
+	HTTP2_comp_context_free(ctx);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(f_HTTP2_Server_Conn_str(conn),
+					": HTTP2_comp_context_encode returned ", rc));
+	}
+
+	return pl_hblock;
+}
+
+/***********************************************************************
+ * Main Emulation Component (HTTP2 Server)
+ ***********************************************************************/
+
+type record Http2ServerEmulationCfg {
+	charstring http2_bind_ip,
+	integer http2_bind_port
+};
+
+type component HTTP2_Server_Emulation_CT {
+	/* Communication with underlying HTTP2 CodecPort */
+	port HTTP2_CODEC_PT HTTP2;
+
+	/* Communication with Clients */
+	port HTTP2_CONN_PT CONN;
+	port HTTP2_CONN_PROC_PT CONN_PROC;
+
+	/* Configuration by the user */
+	var Http2ServerEmulationCfg g_http2_cfg;
+
+	/* Connection identifier of the server itself */
+	var IPL4asp_Types.ConnectionId g_self_conn_id := -1;
+	var HTTP2_Server_Conn conn_table[16];
+	var HTTP2_ConnHdlr vc_ConnHdlr_table[16];
+};
+
+private function f_conn_table_init()
+runs on HTTP2_Server_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(conn_table); i := i + 1) {
+		f_HTTP2_Server_Conn_init(conn_table[i]);
+	}
+}
+
+private function f_conn_table_find_by_conn_id(IPL4asp_Types.ConnectionId conn_id)
+runs on HTTP2_Server_Emulation_CT return integer {
+	var integer i;
+	for (i := 0; i < sizeof(conn_table); i := i + 1) {
+		if (conn_table[i].conn_id == conn_id) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+private function f_conn_table_find_free()
+runs on HTTP2_Server_Emulation_CT return integer {
+	return f_conn_table_find_by_conn_id(-1);
+}
+
+private function f_vc_ConnHdlr_table_add(HTTP2_ConnHdlr vc_conn)
+runs on HTTP2_Server_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
+		if (not isbound(vc_ConnHdlr_table[i])) {
+			vc_ConnHdlr_table[i] := vc_conn;
+			return;
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("No Space in vc_ConnHdlr_table[i] for ", vc_conn));
+}
+
+private function f_http2_adapter_getMsgLen(in octetstring pl_stream,
+					   inout Socket_API_Definitions.ro_integer args)
+return integer {
+	var HTTP2_ro_integer args_unused := {};
+	return f_HTTP2_msglen(pl_stream, args_unused);
+}
+
+
+private function f_set_tcp_segmentation()
+runs on HTTP2_Server_Emulation_CT {
+	/* Set function for dissecting the binary stream into packets */
+	var f_IPL4_getMsgLen vl_f := refers(f_http2_adapter_getMsgLen);
+	HTTP2_CodecPort_CtrlFunct.f_IPL4_setGetMsgLen(HTTP2, g_self_conn_id, vl_f, {});
+}
+
+/* Function to use to connect as client to a remote HTTP2 Server */
+function f_bind(charstring local_host, IPL4asp_Types.PortNumber local_port)
+runs on HTTP2_Server_Emulation_CT {
+	var IPL4asp_Types.Result res;
+	res := HTTP2_CodecPort_CtrlFunct.f_IPL4_listen(HTTP2, local_host, local_port, { tcp:={} });
+	if (not ispresent(res.connId)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Could not listen HTTP2 socket ",
+						local_host, ":", local_port,
+						", check your configuration"));
+	}
+	g_self_conn_id := res.connId;
+}
+
+private function f_init(Http2ServerEmulationCfg cfg)
+runs on HTTP2_Server_Emulation_CT {
+
+	g_http2_cfg := cfg;
+
+	f_conn_table_init();
+
+	/* Start HTTP2 server */
+	map(self:HTTP2, system:HTTP2_CODEC_PT);
+	f_bind(g_http2_cfg.http2_bind_ip, g_http2_cfg.http2_bind_port);
+
+	f_set_tcp_segmentation();
+}
+
+/* Forward request to all registered clients */
+private function forward_http2_msg(HTTP2_Msg http2_msg)
+runs on HTTP2_Server_Emulation_CT {
+
+	for (var integer i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
+		if (isbound(vc_ConnHdlr_table[i])) {
+			CONN.send(http2_msg) to vc_ConnHdlr_table[i];
+		}
+	}
+}
+
+private function f_HTTP2_Server_Conn_rx_http2(inout HTTP2_Server_Conn conn, HTTP2_Recv http2_rx)
+runs on HTTP2_Server_Emulation_CT {
+	var template (value) HTTP2_Msg http2_msg;
+
+	if (ispresent(http2_rx.pl_error_descr)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(f_HTTP2_Server_Conn_str(conn), ": Rx HTTP2 decode error: ", http2_rx));
+	}
+
+	select (conn.state) {
+		case (HTTP2_SERVER_CONN_ST_UNUSED) { // created
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(f_HTTP2_Server_Conn_str(conn), ": Rx in unexpected state: ", http2_rx));
+		}
+		case (HTTP2_SERVER_CONN_ST_WAIT_PREFACE) {
+			/* We expect to receive an empty frame, signalled by HTTP2_Codec_port meaning the magic/preface was received. */
+			if (ispresent(http2_rx.frame) or ispresent(http2_rx.pl_error_descr)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str(conn, ": Rx in unexpected state: ", http2_rx));
+			}
+			f_HTTP2_Server_Conn_st_change(conn, HTTP2_SERVER_CONN_ST_WAIT_HEADER);
+			return;
+		}
+		case (HTTP2_SERVER_CONN_ST_WAIT_HEADER) {
+			if (not ispresent(http2_rx.frame)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str(f_HTTP2_Server_Conn_str(conn), ": Rx unexpected: ", http2_rx));
+			}
+			if (not match(http2_rx.frame, tr_HTTP2_Frame_Header()))  {
+
+				return; /* TODO: we should only allow WINDOW_UPDATE and SETTINGS here... */
+			}
+
+			var HTTP2_header_block hb;
+			hb :=  f_HTTP2_Server_Conn_comp_decode(conn, http2_rx.frame.header_frame.header_block_fragment);
+			/* TODO: store header in Conn or send to ConNHdlr? */
+			log(f_HTTP2_Server_Conn_str(conn), ": Decompressed header: ", hb);
+			if (not http2_rx.frame.header_frame.end_stream_flag) {
+				f_HTTP2_Server_Conn_st_change(conn, HTTP2_SERVER_CONN_ST_WAIT_BODY);
+				return;
+			}
+
+			http2_msg := ts_HTTP2_Msg(conn.conn_id, http2_rx.frame.header_frame.stream_id, hb, omit);
+			forward_http2_msg(valueof(http2_msg));
+			return;
+		}
+		case (HTTP2_SERVER_CONN_ST_WAIT_BODY) {
+			if (not ispresent(http2_rx.frame)) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str(f_HTTP2_Server_Conn_str(conn), ": Rx unexpected: ", http2_rx));
+			}
+			if (not match(http2_rx.frame, tr_HTTP2_Frame_Data()))  {
+				return; /* TODO: we should only allow WINDOW_UPDATE and SETTINGS here... */
+			}
+			/* TODO: pass request to Connhdlr? */
+			return;
+		}
+		case else {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(f_HTTP2_Server_Conn_str(conn), ": Rx in unexpected state: ", http2_rx));
+		}
+	}
+}
+
+function main(Http2ServerEmulationCfg cfg)
+runs on HTTP2_Server_Emulation_CT {
+
+	var HTTP2_ConnHdlr vc_conn;
+	var ASP_Event asp_evt;
+	var HTTP2_Recv http2_rx;
+	var HTTP2_Send http2_tx;
+	var HTTP2_Msg http2_msg;
+	var integer idx;
+
+	f_init(cfg);
+
+	while(true) {
+	alt {
+
+	/* server only */
+	[] HTTP2.receive(ASP_Event:{connOpened:=?}) -> value asp_evt {
+		//log("HTTP2_Server: Rx ", asp_evt);
+		log("HTTP2_Server: Established a new connection (conn_id=", asp_evt.connOpened.connId, ")");
+		idx := f_conn_table_find_by_conn_id(asp_evt.connOpened.connId);
+		if (idx >= 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx connOpened for already existing conn_id ",
+							asp_evt.connOpened.connId));
+		}
+		idx := f_conn_table_find_free();
+		if (idx < 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "No more space in conn_table!");
+		}
+		conn_table[idx].conn_id := asp_evt.connOpened.connId;
+		f_HTTP2_Server_Conn_st_change(conn_table[idx], HTTP2_SERVER_CONN_ST_WAIT_PREFACE);
+	}
+
+	[] HTTP2.receive(ASP_Event:{connClosed:=?}) -> value asp_evt {
+		//log("HTTP2_Server: Rx ", asp_evt);
+		idx := f_conn_table_find_by_conn_id(asp_evt.connClosed.connId);
+		if (idx < 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx connClosed for unknown conn_id ",
+							asp_evt.connClosed.connId));
+		}
+		// TODO: Notify/Remove ConnHdlrs?
+		f_HTTP2_Server_Conn_init(conn_table[idx]);
+	}
+
+	[] HTTP2.receive(HTTP2_Recv:?) -> value http2_rx {
+		//log("HTTP2_Server: Rx ", http2_rx);
+		idx := f_conn_table_find_by_conn_id(http2_rx.connId);
+		if (idx < 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx HTTP2_Recv ", http2_rx, " for unknown conn_id ",
+							asp_evt.connClosed.connId));
+		}
+		f_HTTP2_Server_Conn_rx_http2(conn_table[idx], http2_rx);
+	}
+
+	[] CONN.receive(HTTP2_Msg:?) -> value http2_msg sender vc_conn {
+		//log("HTTP2_Server: Tx ", http2_msg);
+		log("HTTP2_Server: TODO!!!!! Encode HTTP2_msg and send it! ", http2_msg);
+		//HTTP2.send(http2_tx);
+		}
+	[] CONN_PROC.getcall(HTTP2EM_register:{}) -> sender vc_conn {
+		//log("HTTP2_Server: Register ", vc_conn);
+		f_vc_ConnHdlr_table_add(vc_conn);
+		CONN_PROC.reply(HTTP2EM_register:{}) to vc_conn;
+		}
+	}
+	}
+
+}
+
+
+/***********************************************************************
+ * Interaction between Main and Client Components
+ ***********************************************************************/
+
+type port HTTP2_CONN_PT message {
+	inout HTTP2_Msg;
+} with { extension "internal" };
+
+signature HTTP2EM_register();
+
+type port HTTP2_CONN_PROC_PT procedure {
+	inout HTTP2EM_register;
+} with { extension "internal" };
+
+
+/***********************************************************************
+ * Client Component
+ ***********************************************************************/
+
+type component HTTP2_ConnHdlr {
+	/* These ports are not connected to anything in this component, they
+	 * serve as connection points for the component that extends this
+	 * coponent. */
+	port HTTP2_CONN_PT HTTP2_CONN[16];
+	port HTTP2_CONN_PROC_PT HTTP2_CONN_PROC[16];
+};
+
+function f_http2_server_emu_register(integer id := 0) runs on HTTP2_ConnHdlr {
+	HTTP2_CONN_PROC[id].call(HTTP2EM_register:{}) {
+		[] HTTP2_CONN_PROC[id].getreply(HTTP2EM_register:{});
+	}
+}
+
+}
