@@ -28,10 +28,6 @@ DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
 FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
-FILES="JSON_EncDec.cc JSON_Types.ttcn "
-gen_links $DIR $FILES
-
 DIR=$BASEDIR/titan.TestPorts.PIPEasp/src
 FILES="PIPEasp_PT.cc PIPEasp_PT.hh PIPEasp_Types.ttcn PIPEasp_PortType.ttcn "
 gen_links $DIR $FILES

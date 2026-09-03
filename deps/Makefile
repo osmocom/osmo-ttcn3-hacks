@@ -20,7 +20,6 @@ ECLIPSEGITLAB_REPOS=	titan.Libraries.TCCUsefulFunctions \
 			titan.ProtocolModules.ICMPv6 \
 			titan.ProtocolModules.IP \
 			titan.ProtocolModules.ISUP_Q.762 \
-			titan.ProtocolModules.JSON_v07_2006 \
 			titan.ProtocolModules.L2TP \
 			titan.ProtocolModules.LLC_v7.1.0 \
 			titan.ProtocolModules.M3UA \
@@ -87,7 +86,6 @@ titan.ProtocolModules.ICMP_commit=		e49d9fb9f7de637b4bf4803dc6b6e911a8661640
 titan.ProtocolModules.ICMPv6_commit=		46f4d9b6e1e3c794294a92588401a81e4881dd27
 titan.ProtocolModules.IP_commit=		1be86705f39ae38f3c04b2109806ee20d25e91d0
 titan.ProtocolModules.ISUP_Q.762_commit=	R.8.A-5-g42d428b
-titan.ProtocolModules.JSON_v07_2006_commit=	R.1.A
 titan.ProtocolModules.L2TP_commit=		17e76d3662bd0bb815158e8a9de1ec413f21b530
 titan.ProtocolModules.LLC_v7.1.0_commit=	09817f113255d7fb56f1d45d3dd629a093d9248d
 titan.ProtocolModules.MAP_commit=		R.2.A-1-g79c6a3d

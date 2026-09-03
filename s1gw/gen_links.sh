@@ -34,10 +34,6 @@ DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
 FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
-FILES="JSON_EncDec.cc JSON_Types.ttcn "
-gen_links $DIR $FILES
-
 DIR=../library/s1ap
 FILES="S1AP_CommonDataTypes.asn S1AP_Constants.asn S1AP_Containers.asn S1AP_IEs.asn "
 FILES+="S1AP_PDU_Contents.asn S1AP_PDU_Descriptions.asn "

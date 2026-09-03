@@ -47,10 +47,6 @@ DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
 FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
 gen_links $DIR $FILES
 
-DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
-FILES="JSON_EncDec.cc JSON_Types.ttcn "
-gen_links $DIR $FILES
-
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc "
 FILES+="HTTP_Adapter.ttcn "

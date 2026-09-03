@@ -11,7 +11,6 @@ FILES="
 	HTTPmsg_PT.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
-	JSON_EncDec.cc
 	Native_FunctionDefs.cc
 	SABP_CodecPort_CtrlFunctDef.cc
 	SABP_EncDec.cc

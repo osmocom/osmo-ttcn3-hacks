@@ -12,7 +12,6 @@ FILES="
 	IPA_CodecPort_CtrlFunctDef.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
-	JSON_EncDec.cc
 	Native_FunctionDefs.cc
 	PIPEasp_PT.cc
 	RSPRO_EncDec.cc
