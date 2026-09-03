@@ -140,6 +140,12 @@ $(1)/update:
 ifeq ($$($(1)_MODIFIED),1)
 	@echo "WARNING: $(1) skipped because it contains uncommitted modifications!"
 else
+ifeq ($($(1)_commit),)
+	@echo
+	@echo "ERROR: missing $(1)_commit!"
+	@echo
+	@exit 1
+endif
 ifneq ($$($(1)_HEAD),$($(1)_commit))
 	@./update.sh "$(1)" "$($(1)_commit)" "$(2)"
 endif
