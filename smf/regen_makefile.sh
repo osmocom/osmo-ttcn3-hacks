@@ -2,7 +2,7 @@
 
 NAME=SMF_Tests
 
-FILES="
+FILES=" *.asn
 	*.ttcn
 	*.ttcnpp
 	BSSGP_EncDec.cc
