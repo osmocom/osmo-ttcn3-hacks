@@ -34,7 +34,7 @@ def get_titan_make_job_count():
             if max_jobs < 1:
                 raise RuntimeError(f"max_jobs is invalid: max_jobs={max_jobs}, gb_ram={gb_ram}")
 
-        except Exception as ex:
+        except (FileNotFoundError, ValueError, RuntimeError) as ex:
             traceback.print_exception(type(ex), ex, ex.__traceback__)
             logging.error(f"Calculating max jobs with max_jobs_per_gb_ram={max_jobs_per_gb_ram} failed, assuming 4")
             max_jobs = 4
