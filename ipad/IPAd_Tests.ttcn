@@ -104,14 +104,21 @@ type component IPAd_Launcher extends VPCD_Adapter_CT {
 	port PIPEasp_PT PIPE;
 };
 
-type record IPAd_ConnHdlrPars {
-     /* TODO: add some useful parameters */
+type record EimConfigParam {
+	charstring eim_id,
+	charstring eim_fqdn optional
 };
 
-private function f_init_pars()
+type record of EimConfigParam EimConfigParamList;
+
+type record IPAd_ConnHdlrPars {
+	EimConfigParamList eim_list
+};
+
+private function f_init_pars(EimConfigParamList eim_list := { { eim_id := "myEIM", eim_fqdn := omit } })
 runs on MTC_CT return IPAd_ConnHdlrPars {
 	var IPAd_ConnHdlrPars pars := {
-	    /* TODO: fill parameters with meaninful values */
+		eim_list := eim_list
 	};
 	return pars;
 }
@@ -320,7 +327,6 @@ private function f_vpcd_transceive(octetstring response,
 private function f_es10x_init(boolean iot := true,
 			      boolean eim_init := true,
 			      OCT1 dev_capa := '00'O) runs on IPAd_ConnHdlr {
-	var charstring eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
 	var octetstring term_capa;
 
 	/* If we decide not to use vpcd, then we must not initialize anything here */
@@ -353,12 +359,34 @@ private function f_es10x_init(boolean iot := true,
 
 	/* Not all tests expect IPAd to query eUICC data and notfications before talking to eIM. */
 	if (eim_init) {
-		/* Expect the IPAd to query the eIM configuration data from the eUICC */
-		f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(ts_getEimConfigurationDataResponse(eim_fqdn))), 'BF5500'O);
-
-		/* Expect the IPAd to query the eUICC for pending notifications, we respond with an empty list */
-		f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse_empty)), 'BF2B00'O);
+		f_eim_init();
 	}
+}
+
+private function f_eim_init() runs on IPAd_ConnHdlr {
+	var charstring default_eim_fqdn := mp_esipa_ip & ":" & int2str(mp_esipa_port);
+	var template (value) GetEimConfigurationDataResponse v_getEimConfigurationDataResponse := {
+		eimConfigurationDataList := {}
+	};
+	var integer i;
+
+	for (i := 0; i < sizeof(g_pars.eim_list); i := i + 1) {
+		var charstring eim_fqdn := default_eim_fqdn;
+
+		if (ispresent(g_pars.eim_list[i].eim_fqdn)) {
+			eim_fqdn := g_pars.eim_list[i].eim_fqdn;
+		}
+		v_getEimConfigurationDataResponse.eimConfigurationDataList[i] := ts_eimConfigurationData(
+			eimFqdn := eim_fqdn,
+			eimId := g_pars.eim_list[i].eim_id
+		);
+	}
+
+	/* Expect the IPAd to query the eIM configuration data from the eUICC */
+	f_vpcd_transceive(enc_GetEimConfigurationDataResponse(valueof(v_getEimConfigurationDataResponse)), 'BF5500'O);
+
+	/* Expect the IPAd to query the eUICC for pending notifications, we respond with an empty list */
+	f_vpcd_transceive(enc_RetrieveNotificationsListResponse(valueof(ts_retrieveNotificationsListResponse_empty)), 'BF2B00'O);
 }
 
 /* Handle the closing of logical channel 1 */
@@ -773,14 +801,26 @@ private function f_package_euicc_data_req(charstring id) runs on IPAd_ConnHdlr {
 	f_respond_empty_notifications();
 }
 private function f_TC_proc_euicc_data_req(charstring id) runs on IPAd_ConnHdlr {
+	var integer i;
+	var boolean do_next_eim := false;
+
 	f_exec_ipad();
 	f_es10x_init();
 	f_http_register();
 
-	f_package_euicc_data_req(id);
+	for (i := 0; i < sizeof(g_pars.eim_list); i := i + 1) {
+		if (do_next_eim) {
+			/* Expect the IPAd to query the eUICC for pending notifications, we respond with an empty list */
+			f_respond_empty_notifications();
+		}
 
-	/* IPAd will poll for eIM package. */
-	f_terminate_poll_cycle();
+		f_package_euicc_data_req(id);
+
+		/* IPAd will poll for eIM package. */
+		f_terminate_poll_cycle();
+
+		do_next_eim := true;
+	}
 
 	/* Wait some time until the the last HTTP response is actually delivered */
 	f_sleep(2.0);
