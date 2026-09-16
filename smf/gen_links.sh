@@ -70,6 +70,11 @@ DIR=$BASEDIR/osmo-ttcn3-openapi-generator/openapi-specs/3GPP_5GC_Rel19/ttcn3
 FILES="TS29571_CommonData.ttcn TS29502_Nsmf_PDUSession.ttcn TS29503_Nudm_SDM.ttcn TS29512_Npcf_SMPolicyControl.ttcn TS29518_Namf_Communication.ttcn "
 gen_links $DIR $FILES
 
+DIR=../library/ngap
+FILES="NGAP_CommonDataTypes.asn  NGAP_Constants.asn  NGAP_Containers.asn  NGAP_IEs.asn  NGAP_PDU_Contents.asn  NGAP_PDU_Descriptions.asn "
+FILES+="NGAP_EncDec.cc NGAP_Types.ttcn NGAP_Pixits.ttcn NGAP_Templates.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn IPCP_Templates.ttcn PAP_Types.ttcn "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1C_Templates.ttcn Osmocom_Gb_Types.ttcn "

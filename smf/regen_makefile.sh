@@ -21,6 +21,7 @@ FILES=" *.asn
 	IPL4asp_discovery.cc
 	IP_EncDec.cc
 	Native_FunctionDefs.cc
+	NGAP_EncDec.cc
 	TCCConversion.cc
 	TCCDateTime.cc
 	TCCInterface.cc
