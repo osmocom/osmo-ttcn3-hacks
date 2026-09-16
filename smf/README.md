@@ -13,13 +13,18 @@ digraph G {
   rankdir=LR;
   ATS [label="ATS\nSMF_Tests.ttcn"];
   SMF [label="AMF\open5gs-smfd",shape="box"];
-  NRF [label="SMF\nopen5gs-nrfd"];
 
-  ATS -> SMF [label="N11"];
-  ATS -> SMF [label="N4"];
-  ATS -> SMF [label="Gx"];
-  ATS -> SMF [label="Gy"];
-  ATS -> SMF [label="S6b"];
-  SMF -> NRF [label="SBI"];
+  ATS -> SMF [dir="both",label="N4 (PFCP)"];
+  ATS -> SMF [dir="both",label="Gx (Diameter)"];
+  ATS -> SMF [dir="both",label="Gy (Diameter)"];
+  ATS -> SMF [dir="both",label="S6b (Diameter)"];
+  #4G:
+  ATS -> SMF [label="S5/S8 (GTPv2C)"];
+  ATS -> SMF [label="S2b (GTPv2C)"];
+  # 5G:
+  ATS -> SMF [label="Nsmf (SBI)"];
+  SMF -> ATS [label="Namf (SBI, over SCP)"];
+  SMF -> ATS [label="Nudm (SBI, over SCP)"];
+  SMF -> ATS [label="Npcf (SBI, over SCP)"];
 }
 %}

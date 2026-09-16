@@ -1,9 +1,11 @@
 module HTTP2_Functions {
 
+import from TCCConversion_Functions all; //f_strstr(), f_strstr_oct()
+
+import from Misc_Helpers all;
+
 import from HTTP2_Types all;
 import from HTTP2_Templates all;
-
-import from TCCConversion_Functions all; //f_strstr()
 
 function f_HTTP2_header_list_find_header(HTTP2_header_list headers, charstring header_name)
 return template (omit) charstring {
@@ -26,6 +28,68 @@ return charstring {
 	// -1: Remove trailing "\""
 	boundary := substr(content_type_val, pos, lengthof(content_type_val) - pos - 1);
 	return boundary;
+}
+
+type record HTTP2_multipart_part {
+	HTTP2_header_list headers,
+	octetstring data
+}
+type record of HTTP2_multipart_part HTTP2_multipart_part_list;
+
+private function f_HTTP2_multipart_msg_parse_part_headers(octetstring data)
+return HTTP2_header_list {
+	var HTTP2_header_list li := {};
+	var charstring data_str := oct2char(data);
+	var charstring delim := "\r\n";
+	var ro_charstring sp := f_str_split(data_str, delim);
+	var charstring line_regexp := "([A-Za-z][A-Za-z0-9-]+):\s#()(?+)\s#()";
+	for (var integer i := 0; i < lengthof(sp); i := i + 1) {
+		if (sp[i] == "") {
+			continue;
+		}
+		var charstring header_name := regexp(sp[i], line_regexp, 0);
+		var charstring header_value := regexp(sp[i], line_regexp, 1);
+		li := li & { valueof(ts_HTTP2_header_field(header_name, header_value)) };
+	}
+	return li;
+}
+
+private function f_HTTP2_multipart_msg_parse_part(octetstring data)
+return HTTP2_multipart_part {
+	var HTTP2_multipart_part part;
+	var octetstring delim := char2oct("\r\n\r\n");
+
+	/* 0..off is headers, off+lengthof(delim)..end is the data. */
+	var integer off := f_strstr_oct(data, delim, 0);
+	var octetstring header := substr(data, 0, off);
+	off := off + lengthof(delim);
+	part := {
+		headers := f_HTTP2_multipart_msg_parse_part_headers(header),
+		data := substr(data, off, lengthof(data) - off)
+	}
+	return part;
+}
+
+function f_HTTP2_multipart_msg_parse(octetstring data, charstring boundary)
+return HTTP2_multipart_part_list {
+	var HTTP2_multipart_part_list li := {};
+	var octetstring token := char2oct("--" & boundary);
+	var ro_octetstring parts;
+
+	/* Split multiparts based on boundary: */
+	parts := f_str_oct_split(data, token);
+
+	/* Last chunk (after last boundary) should contain "--\r\n": */
+	if (lengthof(parts) < 2 or parts[lengthof(parts) - 1] != char2oct("--\r\n")) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+			log2str("Unexpected parsing multipart ", data, " into ", parts));
+	}
+
+	/* Parse each part and put it in the list: */
+	for (var integer i := 0; i < lengthof(parts) - 1; i := i + 1) {
+		li := li & { f_HTTP2_multipart_msg_parse_part(parts[i]) };
+	}
+	return li;
 }
 
 

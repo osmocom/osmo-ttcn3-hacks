@@ -58,6 +58,18 @@ DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
 FILES="DIAMETER_EncDec.cc"
 gen_links $DIR $FILES
 
+DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
+FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
+FILES="JSON_Generic_Null_Def.asn JSON_Generic.ttcn"
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/osmo-ttcn3-openapi-generator/openapi-specs/3GPP_5GC_Rel19/ttcn3
+FILES="TS29571_CommonData.ttcn TS29502_Nsmf_PDUSession.ttcn TS29503_Nudm_SDM.ttcn TS29512_Npcf_SMPolicyControl.ttcn TS29518_Namf_Communication.ttcn "
+gen_links $DIR $FILES
+
 DIR=../library
 FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Native_Functions.ttcn Native_FunctionDefs.cc IPCP_Types.ttcn IPCP_Templates.ttcn PAP_Types.ttcn "
 FILES+="GTPv1C_CodecPort.ttcn GTPv1C_CodecPort_CtrlFunct.ttcn GTPv1C_CodecPort_CtrlFunctDef.cc GTPv1C_Templates.ttcn Osmocom_Gb_Types.ttcn "
@@ -70,6 +82,8 @@ FILES+="DIAMETER_Templates.ttcn DIAMETER_rfc4004_Templates.ttcn DIAMETER_rfc5447
 FILES+="SCTP_Templates.ttcn "
 FILES+="NTP_Functions.ttcn PFCP_Templates.ttcn PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn "
 FILES+="Mutex.ttcn "
+FILES+="HTTP2_CodecPort.ttcn HTTP2_CodecPort_CtrlFunct.ttcn HTTP2_CodecPort_CtrlFunctDef.cc HTTP2_Templates.ttcn HTTP2_Functions.ttcn HTTP2_Adapter.ttcn HTTP2_Server_Emulation.ttcn "
+FILES+="TS29503_Nudm_SDM_Templates.ttcn TS29502_Nsmf_PDUSession_Templates.ttcn TS29512_Npcf_SMPolicyControl_Templates.ttcn TS29518_Namf_Communication_Templates.ttcn"
 gen_links $DIR $FILES
 
 gen_links_finish
