@@ -6,6 +6,7 @@ FILES=" *.asn
 	*.ttcn
 	*.ttcnpp
 	BSSGP_EncDec.cc
+	common_ext.cc
 	DIAMETER_CodecPort_CtrlFunctDef.cc
 	DIAMETER_EncDec.cc
 	GTPC_EncDec.cc
@@ -33,3 +34,5 @@ FILES=" *.asn
 CPPFLAGS_TTCN3=""
 
 . ../_buildsystem/regen_makefile.inc.sh
+
+sed -i -e 's/^LINUX_LIBS = -lxml2 -lsctp/LINUX_LIBS = -lxml2 -lsctp -lgnutls/' Makefile
