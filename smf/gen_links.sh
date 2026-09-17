@@ -70,6 +70,45 @@ DIR=$BASEDIR/osmo-ttcn3-openapi-generator/openapi-specs/3GPP_5GC_Rel19/ttcn3
 FILES="TS29571_CommonData.ttcn TS29502_Nsmf_PDUSession.ttcn TS29503_Nudm_SDM.ttcn TS29512_Npcf_SMPolicyControl.ttcn TS29518_Namf_Communication.ttcn "
 gen_links $DIR $FILES
 
+
+####################
+# NG_NAS start
+####################
+DIR=$BASEDIR/nas/ccsrc/Externals
+FILES="common_ext.cc "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/Common
+FILES="CommonDefs.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/PicsPixit
+FILES="EUTRA_NR_Parameters.ttcn  NAS_5GC_Parameters.ttcn  Parameters.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/CommonIP
+FILES="CommonIP.ttcn  LoopbackIP_PacketFilterTest.ttcn LoopbackIP.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/EPS_NAS
+FILES="EPS_NAS_LoopBack_TypeDefs.ttcn  EPS_NAS_TypeDefs.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/Common4G5G
+FILES="Common4G5G_LoopBack.ttcn  Common4G5G.ttcn  EUTRA_NR_SecurityFunctions.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/NAS
+FILES="NAS_AuthenticationCommon.ttcn NAS_AuxiliaryDefsAndFunctions.ttcn NAS_CommonTemplates.ttcn NAS_CommonTypeDefs.ttcn SMS_Templates.ttcn SMS_TypeDefs.ttcn "
+gen_links $DIR $FILES
+
+DIR=$BASEDIR/nas/ttcn/Lib3GPP/NG_NAS
+FILES="EAP_TypeDefs.ttcn NG_NAS_Common.ttcn NG_NAS_MsgContainers.ttcn NG_NAS_Templates.ttcn NG_NAS_TypeDefs.ttcn NG_V2X_MsgContainers.ttcn NG_V2X_TypeDefs.ttcn "
+gen_links $DIR $FILES
+####################
+# NG_NAS end
+####################
+
 DIR=../library/ngap
 FILES="NGAP_CommonDataTypes.asn  NGAP_Constants.asn  NGAP_Containers.asn  NGAP_IEs.asn  NGAP_PDU_Contents.asn  NGAP_PDU_Descriptions.asn "
 FILES+="NGAP_EncDec.cc NGAP_Types.ttcn NGAP_Pixits.ttcn NGAP_Templates.ttcn "
@@ -88,7 +127,8 @@ FILES+="SCTP_Templates.ttcn "
 FILES+="NTP_Functions.ttcn PFCP_Templates.ttcn PFCP_CodecPort.ttcn PFCP_CodecPort_CtrlFunct.ttcn PFCP_CodecPort_CtrlFunctDef.cc PFCP_Emulation.ttcn "
 FILES+="Mutex.ttcn "
 FILES+="HTTP2_CodecPort.ttcn HTTP2_CodecPort_CtrlFunct.ttcn HTTP2_CodecPort_CtrlFunctDef.cc HTTP2_Templates.ttcn HTTP2_Functions.ttcn HTTP2_Adapter.ttcn HTTP2_Server_Emulation.ttcn "
-FILES+="TS29503_Nudm_SDM_Templates.ttcn TS29502_Nsmf_PDUSession_Templates.ttcn TS29512_Npcf_SMPolicyControl_Templates.ttcn TS29518_Namf_Communication_Templates.ttcn"
+FILES+="TS29503_Nudm_SDM_Templates.ttcn TS29502_Nsmf_PDUSession_Templates.ttcn TS29512_Npcf_SMPolicyControl_Templates.ttcn TS29518_Namf_Communication_Templates.ttcn "
+FILES+="NG_NAS_Osmo_Types.ttcn NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
