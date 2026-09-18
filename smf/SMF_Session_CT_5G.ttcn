@@ -69,15 +69,6 @@ template (present) charstring tr_Nsmf_PDUSession_uri_sm_contexts(template charst
 function f_n11_init() runs on SMF_Session_CT {
 	f_http2_adapter_init();
 	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, -1);
-
-	var template (value) HTTP2_Setting_list settings := {
-		ts_HTTP2_Setting_ENABLE_PUSH(0),
-		ts_HTTP2_Setting_INITIAL_WINDOW_SIZE(4194304),
-		ts_HTTP2_Setting_MAX_HEADER_LIST_SIZE(10485760)
-	}
-	f_http2_adapter_send(ts_HTTP2_Frame_Settings(settings := settings));
-
-	f_http2_adapter_send(ts_HTTP2_Frame_Window_Update(0, 1073741824));
 }
 
 function f_http2_encode_body_multipart_json_5gnas(octetstring json_encoded,
@@ -103,13 +94,17 @@ runs on SMF_Session_CT {
 	var octetstring hdr_enc;
 	var template (value) HTTP2_pseudo_headers pseudo_hdr;
 	var template (value) HTTP2_header_list hdr_li;
-	var template (value) HTTP2_header_block hb;
+	var template (value) HTTP2_header_block tx_hb;
+	var template (present) HTTP2_header_block exp_rx_hb;
+	var HTTP2_header_block rx_hb;
 	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
 	var ProcedureTransactionIdentifier pti := f_next_pti();
 	var template (value) octetstring body;
+	var HTTP2_Frame rx_http_frame;
 	var template (value) TS29502_Nsmf_PDUSession.PlmnId plmn_id := TS29502_Nsmf_PDUSession_Templates.ts_PlmnId("001", "001");
 	var template (value) TS29502_Nsmf_PDUSession.PlmnIdNid plmn_id_nid := TS29502_Nsmf_PDUSession_Templates.ts_PlmnIdNid(plmn_id.mcc, plmn_id.mnc);
 	var integer pdu_sess_id := 1;
+	var integer http2_stream_id := 3;
 
 	var template (value) SmContextCreateData sm_contexts;
 	var octetstring sm_contexts_enc;
@@ -151,9 +146,9 @@ runs on SMF_Session_CT {
 		ts_HTTP2_Hdr_content_length(int2str(lengthof(body))),
 		ts_HTTP2_Hdr_accept_encoding("gzip")
 	};
-	hb := ts_HTTP2_header_block(pseudo_hdr, hdr_li);
-	hdr_enc := f_HTTP2_header_block_encode(valueof(hb));
-	f_http2_adapter_send(ts_HTTP2_Frame_Header(3,
+	tx_hb := ts_HTTP2_header_block(pseudo_hdr, hdr_li);
+	hdr_enc := f_HTTP2_header_block_encode(valueof(tx_hb));
+	f_http2_adapter_send(ts_HTTP2_Frame_Header(http2_stream_id,
 						   end_stream_flag := false,
 						   end_header_flag := true,
 						   header_block_fragment := hdr_enc
@@ -181,6 +176,27 @@ runs on SMF_Session_CT {
 	as_nudm_sdm_get_sm_data();
 	/* Expect UDM to receive POST sdm-subscriptions: */
 	as_nudm_sdm_post_sdm_subscriptions();
+
+	/* Expect to receive "201 Created body={}" answer to our Nsmf sm-contexts request: */
+	as_http2_adapter_receive(rx_http_frame,
+				 tr_HTTP2_Frame_Header(stream_id := http2_stream_id,
+						       end_stream_flag := false,
+						       end_header_flag := true,
+						       header_block_fragment := ?));
+	rx_hb := f_HTTP2_header_block_decode(rx_http_frame.header_frame.header_block_fragment);
+	exp_rx_hb := tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201),
+					   headers := {*, tr_HTTP2_Hdr_location(tr_Nsmf_PDUSession_uri_sm_contexts), *});
+	if (not match(rx_hb, exp_rx_hb)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx unexpected HTTP2 response hdr: ", rx_hb, " vs exp ", exp_rx_hb));
+
+	}
+	as_http2_adapter_receive(rx_http_frame,
+				 tr_HTTP2_Frame_Data(stream_id := http2_stream_id,
+						     end_stream_flag := true,
+						     data := char2oct("{}")));
+	f_http2_adapter_close();
+
 	/* Expect PCF to receive POST sm-policies: */
 	as_npcf_smpolicycontrol_post_sm_policies();
 
