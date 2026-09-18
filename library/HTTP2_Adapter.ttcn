@@ -20,6 +20,8 @@ import from IPL4asp_PortType all;
 import from Socket_API_Definitions all;
 
 import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
 
 import from Native_Functions all;
 import from Misc_Helpers all;
@@ -120,10 +122,10 @@ runs on HTTP2_CT {
 		ts_HTTP2_Setting_INITIAL_WINDOW_SIZE(4194304),
 		ts_HTTP2_Setting_MAX_HEADER_LIST_SIZE(10485760)
 	}
-	f_http2_adapter_send(ts_HTTP2_Frame_Settings(settings := settings), idx := idx);
-	as_http2_adapter_receive(rx_http_frame, tr_HTTP2_Frame_Settings(ack_flag := false), idx := idx);
-	as_http2_adapter_receive(rx_http_frame, tr_HTTP2_Frame_Settings(ack_flag := true), idx := idx);
-	f_http2_adapter_send(ts_HTTP2_Frame_Window_Update(0, 1073741824), idx := idx);
+	f_http2_adapter_send_frame(ts_HTTP2_Frame_Settings(settings := settings), idx := idx);
+	as_http2_adapter_receive_frame(rx_http_frame, tr_HTTP2_Frame_Settings(ack_flag := false), idx := idx);
+	as_http2_adapter_receive_frame(rx_http_frame, tr_HTTP2_Frame_Settings(ack_flag := true), idx := idx);
+	f_http2_adapter_send_frame(ts_HTTP2_Frame_Window_Update(0, 1073741824), idx := idx);
 }
 
 function f_http2_adapter_close(integer idx := 0)
@@ -133,21 +135,79 @@ runs on HTTP2_CT {
 	g_self_conn_id[idx] := -1;
 }
 
-function f_http2_adapter_send(template (value) HTTP2_Frame http2_frame,
-			      integer idx := 0)
+private function f_http2_adapter_send_frame(template (value) HTTP2_Frame http2_frame,
+					    integer idx := 0)
 runs on HTTP2_CT
 {
 	HTTP2[idx].send(ts_HTTP2_Send(g_self_conn_id[idx], http2_frame));
 }
 
-altstep as_http2_adapter_receive(out HTTP2_Frame rx_http_frame,
-				 template (present) HTTP2_Frame exp_http2_frame := ?,
-				 integer idx := 0)
+function f_http2_adapter_send(template (value) HTTP2_Msg http2_msg)
+runs on HTTP2_CT
+{
+	var HTTP2_Msg msg := valueof(http2_msg);
+	var template (value) HTTP2_Frame http2_frame;
+	var integer last_stream_id := msg.stream_id;
+	var octetstring hdr_enc;
+	var integer idx := msg.conn_id;
+
+	/* Send Header: */
+	f_HTTP2_Msg_append_hdr_content_length(msg);
+	hdr_enc := f_HTTP2_header_block_encode(msg.hb);
+	http2_frame := ts_HTTP2_Frame_Header(msg.stream_id,
+					     end_stream_flag := not ispresent(msg.body),
+					     end_header_flag := true,
+					     header_block_fragment := hdr_enc);
+	f_http2_adapter_send_frame(http2_frame, idx := idx);
+
+	/* Send body: */
+	if (ispresent(msg.body)) {
+		http2_frame := ts_HTTP2_Frame_Data(msg.body.stream_id,
+						   msg.body.end_stream_flag,
+						   msg.body.data,
+						   msg.body.padding);
+		f_http2_adapter_send_frame(http2_frame, idx := idx);
+	}
+}
+
+private altstep as_http2_adapter_receive_frame(out HTTP2_Frame rx_http2_frame,
+					       template (present) HTTP2_Frame exp_http2_frame := ?,
+					       integer idx := 0)
 runs on HTTP2_CT
 {
 	var HTTP2_Recv http2_rx;
 	[] HTTP2[idx].receive(tr_HTTP2_Recv(g_self_conn_id[idx], exp_http2_frame, omit)) -> value http2_rx {
-		rx_http_frame := http2_rx.frame;
+		rx_http2_frame := http2_rx.frame;
+	}
+}
+
+altstep as_http2_adapter_receive(out HTTP2_Msg http2_rx_msg,
+				 template (present) HTTP2_Msg http2_exp_msg := ?,
+				 integer idx := 0)
+runs on HTTP2_CT
+{
+	var HTTP2_Frame rx_http2_frame;
+	[] as_http2_adapter_receive_frame(rx_http2_frame,
+					  tr_HTTP2_Frame_Header(stream_id := http2_exp_msg.stream_id,
+								header_block_fragment := ?),
+					  idx := idx) {
+		var template (omit) HTTP2_Data_frame body := omit;
+		var HTTP2_header_block hb;
+
+		hb := f_HTTP2_header_block_decode(rx_http2_frame.header_frame.header_block_fragment);
+		if (not rx_http2_frame.header_frame.end_stream_flag) { /* Expect body */
+			var HTTP2_Frame body_frame;
+			as_http2_adapter_receive_frame(body_frame, HTTP2_Frame:{ data_frame := http2_exp_msg.body });
+			body := body_frame.data_frame;
+		} else if (not istemplatekind(http2_exp_msg.body, "*") and
+			   not istemplatekind(http2_exp_msg.body, "omit")) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str(idx, ": Expecting body but header came with end_stream_flag = true!"));
+		}
+		http2_rx_msg := valueof(ts_HTTP2_Msg(idx,
+						     rx_http2_frame.header_frame.stream_id,
+						     hb,
+						     body));
 	}
 }
 

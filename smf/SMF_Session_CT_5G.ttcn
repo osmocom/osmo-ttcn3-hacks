@@ -91,21 +91,17 @@ function f_http2_encode_body_multipart_json_5gnas(octetstring json_encoded,
  * 3GPP TS 29.502 6.1.3.2 */
 function f_n11_create_session()
 runs on SMF_Session_CT {
-	var octetstring hdr_enc;
-	var template (value) HTTP2_pseudo_headers pseudo_hdr;
-	var template (value) HTTP2_header_list hdr_li;
-	var template (value) HTTP2_header_block tx_hb;
-	var template (present) HTTP2_header_block exp_rx_hb;
-	var HTTP2_header_block rx_hb;
 	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
 	var ProcedureTransactionIdentifier pti := f_next_pti();
 	var template (value) octetstring body;
-	var HTTP2_Frame rx_http_frame;
 	var template (value) TS29502_Nsmf_PDUSession.PlmnId plmn_id := TS29502_Nsmf_PDUSession_Templates.ts_PlmnId("001", "001");
 	var template (value) TS29502_Nsmf_PDUSession.PlmnIdNid plmn_id_nid := TS29502_Nsmf_PDUSession_Templates.ts_PlmnIdNid(plmn_id.mcc, plmn_id.mnc);
 	var integer pdu_sess_id := 1;
 	var integer http2_idx;
 	var integer http2_stream_id := 3;
+	var template (value) HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
 
 	var template (value) SmContextCreateData sm_contexts;
 	var octetstring sm_contexts_enc;
@@ -135,30 +131,26 @@ runs on SMF_Session_CT {
 	var octetstring nas_enc := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
 
 	body := f_http2_encode_body_multipart_json_5gnas(sm_contexts_enc, nas_enc, boundary);
-
-	pseudo_hdr := ts_HTTP2_pseudo_headers_Req(method := "POST",
-						  scheme := "http",
-						  authority := Nsmf_uri_hostport,
-						  path := Nsmf_PDUSession_path_sm_contexts);
-	hdr_li := {
-		ts_HTTP2_Hdr_content_type("multipart/related; boundary=\"" & boundary & "\""),
-		ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
-		ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
-		ts_HTTP2_Hdr_content_length(int2str(lengthof(body))),
-		ts_HTTP2_Hdr_accept_encoding("gzip")
-	};
-	tx_hb := ts_HTTP2_header_block(pseudo_hdr, hdr_li);
-	hdr_enc := f_HTTP2_header_block_encode(valueof(tx_hb));
-
 	http2_idx := f_http2_adapter_find_free_idx();
-	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, -1, idx := http2_idx);
-	f_http2_adapter_send(ts_HTTP2_Frame_Header(http2_stream_id,
-						   end_stream_flag := false,
-						   end_header_flag := true,
-						   header_block_fragment := hdr_enc
-						   ),
-			     idx := http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := Nsmf_uri_hostport,
+										      path := Nsmf_PDUSession_path_sm_contexts),
+					headers := {
+						ts_HTTP2_Hdr_content_type("multipart/related; boundary=\"" & boundary & "\""),
+						ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := body));
 
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, -1, idx := http2_idx);
 
 	/////////// START MUTUAL EXCLUSION ZONE ////////////
 	/* This code block cannot be executed by more than one component at a time because
@@ -173,10 +165,7 @@ runs on SMF_Session_CT {
 	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
 	f_PFCPEM_subscribe_seid(c_SEID0);
 
-	f_http2_adapter_send(ts_HTTP2_Frame_Data(3,
-						 end_stream_flag := true,
-						 data := body),
-			     idx := http2_idx);
+	f_http2_adapter_send(http2_tx);
 
 	/* Expect UDM to receive GET sm-data: */
 	as_nudm_sdm_get_sm_data();
@@ -184,25 +173,14 @@ runs on SMF_Session_CT {
 	as_nudm_sdm_post_sdm_subscriptions();
 
 	/* Expect to receive "201 Created body={}" answer to our Nsmf sm-contexts request: */
-	as_http2_adapter_receive(rx_http_frame,
-				 tr_HTTP2_Frame_Header(stream_id := http2_stream_id,
-						       end_stream_flag := false,
-						       end_header_flag := true,
-						       header_block_fragment := ?),
-				 idx := http2_idx);
-	rx_hb := f_HTTP2_header_block_decode(rx_http_frame.header_frame.header_block_fragment);
-	exp_rx_hb := tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201),
-					   headers := {*, tr_HTTP2_Hdr_location(tr_Nsmf_PDUSession_uri_sm_contexts), *});
-	if (not match(rx_hb, exp_rx_hb)) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					log2str("Rx unexpected HTTP2 response hdr: ", rx_hb, " vs exp ", exp_rx_hb));
-
-	}
-	as_http2_adapter_receive(rx_http_frame,
-				 tr_HTTP2_Frame_Data(stream_id := http2_stream_id,
-						     end_stream_flag := true,
-						     data := char2oct("{}")),
-				 idx := http2_idx);
+	http2_exp_rx := tr_HTTP2_Msg(http2_idx,
+				     http2_stream_id,
+				     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201),
+							   headers := {*, tr_HTTP2_Hdr_location(tr_Nsmf_PDUSession_uri_sm_contexts), *}),
+				     tr_HTTP2_Data_frame(stream_id := http2_stream_id,
+							 end_stream_flag := true,
+							 data := char2oct("{}")));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_idx);
 	f_http2_adapter_close(idx := http2_idx);
 
 	/* Expect PCF to receive POST sm-policies: */
