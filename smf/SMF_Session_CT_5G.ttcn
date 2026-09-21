@@ -56,24 +56,28 @@ runs on SMF_Session_CT {
 const charstring SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
 const charstring SCP_uri_prefix := "http://" & SCP_uri_hostport;
 
-/********************************************
- * N11 Nsmf (SBI): Requests towards IUT SMFs
- ********************************************/
+/************************************************************
+ * N11 Nsmf (SBI): Requests towards IUT SMFs, 3GPP TS 29.502
+ ************************************************************/
 
 const charstring Nsmf_uri_hostport := mp_smf_hostname & ":" & int2str(mp_smf_sbi_port);
 const charstring Nsmf_uri_prefix := "http://" & Nsmf_uri_hostport;
 const charstring Nsmf_PDUSession_path_api_prefix := "/nsmf-pdusession/v1"
 const charstring Nsmf_PDUSession_path_sm_contexts := Nsmf_PDUSession_path_api_prefix & "/sm-contexts";
 
+/* 6.1.3.2 Resource: SM contexts collection */
 template (value) charstring ts_Nsmf_PDUSession_path_sm_contexts(template (value) charstring smContextRef) :=
 	Nsmf_PDUSession_path_sm_contexts & "/" & valueof(smContextRef);
 
+/* 6.1.3.3 Resource: Individual SM context */
 template (present) charstring tr_Nsmf_PDUSession_uri_sm_contexts(template charstring smContextRef := pattern "\d+") :=
 	pattern Nsmf_uri_prefix & Nsmf_PDUSession_path_sm_contexts & "/" & smContextRef;
 
 template (value) charstring ts_Nsmf_PDUSession_path_sm_context_modify(template (value) charstring smContextRef) :=
 	Nsmf_PDUSession_path_sm_contexts & "/" & valueof(smContextRef) & "/modify";
 
+template (value) charstring ts_Nsmf_PDUSession_path_sm_context_release(template (value) charstring smContextRef) :=
+	Nsmf_PDUSession_path_sm_contexts & "/" & valueof(smContextRef) & "/release";
 
 function f_n11_init() runs on SMF_Session_CT {
 	f_http2_adapter_init();
@@ -253,7 +257,6 @@ runs on SMF_Session_CT {
 /* 3GPP TS 29.502 5.2.2.3 Update SM Context service operation */
 function f_n11_update_sm_context()
 runs on SMF_Session_CT {
-
 	var template (value) SmContextUpdateData sm_ctx_update;
 	var octetstring sm_ctx_update_enc;
 	var template (value) octetstring body_enc;
@@ -306,9 +309,63 @@ runs on SMF_Session_CT {
 	setverdict(pass);
 }
 
+/* 5.2.2.4 Release SM Context service operation */
 function f_n11_delete_session()
 runs on SMF_Session_CT {
-	log("f_n11_delete_session(): TODO");
+	var template (value) SmContextReleaseData sm_ctx_rel;
+	var octetstring sm_ctx_rel_enc;
+	var template (value) octetstring body_enc;
+	var charstring http2_boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
+	var integer http2_idx;
+	var integer http2_stream_id := 3;
+	var template (value) HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+
+	sm_ctx_rel := ts_SmContextReleaseData(ueLocation := f_ts_UserLocation(),
+						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("N2SmInfo"),
+						n2SmInfoType := ts_N2SmInfoType(PDU_RES_SETUP_RSP));
+	sm_ctx_rel_enc := f_enc_SmContextReleaseData(valueof(sm_ctx_rel));
+
+	/* TODO: generate and encode ngap: */
+	var octetstring ngap_enc := f_ngap_pdu_gen_PDUSessionResourceSetupResponseTransfer();
+
+	body_enc := f_http2_encode_body_multipart_json_ngap(sm_ctx_rel_enc, ngap_enc, http2_boundary);
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := Nsmf_uri_hostport,
+										      path := ts_Nsmf_PDUSession_path_sm_context_release(g_pars.nsmf.smContextRef)),
+					headers := {
+						ts_HTTP2_Hdr_content_type_multipart(http2_boundary),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := body_enc));
+
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, -1, idx := http2_idx);
+	f_http2_adapter_send(http2_tx);
+
+	/* SMF deletes PDU Session on UPF: */
+	as_pfcp_sess_del_req();
+
+	/* SMF deletes policy in PCF: */
+	as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination();
+
+	/* SMF deregisters on UDM: */
+	as_nudm_sdm_delete_IndividualSubscription();
+	as_nudm_uecm_delete_IndividualSmfRegistration();
+
+	/* Successful answer with no content: */
+	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_idx);
+	f_http2_adapter_close(idx := http2_idx);
+	setverdict(pass);
 }
 
 /**************************************
@@ -410,30 +467,41 @@ const charstring Nudm_UECM_path_api_prefix := "/nudm-uecm/v1"
 const charstring Nudm_SDM_path_api_prefix := "/nudm-sdm/v2"
 
 /* 6.2.3.5 Resource: IndividualSmfRegistration */
-template (present) charstring tr_Nudm_UECM_path_individual_smf_registration(template (present) charstring imsi := pattern "\d+",
-									    template (present) charstring smf_reg := pattern "\d+") :=
-	pattern Nudm_UECM_path_api_prefix & "/imsi-" & imsi & "/registrations/smf-registrations/" & smf_reg;
+template (present) charstring
+tr_Nudm_UECM_path_individual_smf_registration(template (present) charstring imsi := pattern "\d+",
+					      template (present) charstring smf_reg := pattern "\d+")
+:= pattern Nudm_UECM_path_api_prefix & "/imsi-" & imsi & "/registrations/smf-registrations/" & smf_reg;
 
-template (value) charstring ts_Nudm_UECM_path_individual_smf_registration(template (value) charstring imsi,
-									  template (value) charstring smf_reg) :=
-	Nudm_UECM_path_api_prefix & "/imsi-" & valueof(imsi) & "/registrations/smf-registrations/" & valueof(smf_reg);
+template (value) charstring
+ts_Nudm_UECM_path_individual_smf_registration(template (value) charstring imsi,
+					      template (value) charstring smf_reg)
+:= Nudm_UECM_path_api_prefix & "/imsi-" & valueof(imsi) & "/registrations/smf-registrations/" & valueof(smf_reg);
 
-template (value) charstring ts_Nudm_UECM_uri_individual_smf_registration(template (value) charstring imsi,
-									  template (value) charstring smf_reg) :=
-	Nudm_uri_prefix & valueof(ts_Nudm_UECM_path_individual_smf_registration(imsi, smf_reg));
+template (value) charstring
+ts_Nudm_UECM_uri_individual_smf_registration(template (value) charstring imsi,
+					     template (value) charstring smf_reg)
+:= Nudm_uri_prefix & valueof(ts_Nudm_UECM_path_individual_smf_registration(imsi, smf_reg));
 
+/* 6.1.3.3 Resource: SdmSubscriptions (Collection) */
+template (value) charstring
+ts_Nudm_SDM_path_sdm_subscriptions(template (value) charstring imsi)
+:= Nudm_SDM_path_api_prefix & "/imsi-" & valueof(imsi) & "/sdm-subscriptions";
 
-template (value) charstring ts_Nudm_SDM_path_sdm_imsi(template (value) charstring imsi) :=
-	Nudm_SDM_path_api_prefix & "/imsi-" & valueof(imsi);
+/* 6.1.3.4 Resource: Individual subscription (Document) */
+template (present) charstring
+tr_Nudm_SDM_path_individual_subscription(template (present) charstring imsi := pattern "\d+",
+					 template (present) charstring subscr_id := pattern "\d+")
+:= pattern Nudm_SDM_path_api_prefix & "/imsi-" & imsi & "/sdm-subscriptions/" & subscr_id;
 
-template (value) charstring ts_Nudm_SDM_path_sdm_imsi_sdm_subscriptions(template (value) charstring imsi) :=
-	Nudm_SDM_path_api_prefix & "/imsi-" & valueof(imsi) & "/sdm-subscriptions";
+template (value) charstring
+ts_Nudm_SDM_path_individual_subscription(template (value) charstring imsi,
+					 template (value) charstring subscr_id)
+:= valueof(ts_Nudm_SDM_path_sdm_subscriptions(imsi)) & "/" & valueof(subscr_id);
 
-template (value) charstring ts_Nudm_SDM_path_sdm_imsi_sdm_subscriptions_id(template (value) charstring imsi, template (value) charstring subscr_id) :=
-	Nudm_SDM_path_api_prefix & "/imsi-" & valueof(imsi) & "/sdm-subscriptions/" & valueof(subscr_id);
-
-template (value) charstring ts_Nudm_SDM_uri_sdm_imsi_sdm_subscriptions_id(template (value) charstring imsi, template (value) charstring subscr_id) :=
-	Nudm_uri_prefix & Nudm_SDM_path_api_prefix & "/imsi-" & valueof(imsi) & "/sdm-subscriptions/" & valueof(subscr_id);
+template (value) charstring
+ts_Nudm_SDM_uri_individual_subscription(template (value) charstring imsi,
+					template (value) charstring subscr_id)
+:= Nudm_uri_prefix & valueof(ts_Nudm_SDM_path_individual_subscription(imsi, subscr_id));
 
 /* 3GPP TS 29.503 6.2.3.5.2.1  */
 function f_tr_Nudm_UECM_put_IndividualSmfRegistration()
@@ -475,6 +543,44 @@ runs on SMF_Session_CT {
 						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
 									         end_stream_flag := true,
 									         data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 3GPP TS 29.503 6.2.3.5.2.2 DELETE */
+function f_tr_Nudm_UECM_delete_IndividualSmfRegistration()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "DELETE",
+						      path := tr_Nudm_UECM_path_individual_smf_registration(g_pars.imsi_str,
+													    g_pars.nudm.smf_subscription_id));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.3.2.4.4 SMF deregistration */
+private altstep as_nudm_uecm_delete_IndividualSmfRegistration()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_UECM_delete_IndividualSmfRegistration()) -> value http2_rx {
+		var template (value) HTTP2_Msg http2_tx;
+
+		http2_tx := ts_HTTP2_Msg_204_No_Content(http2_rx.conn_id,
+							http2_rx.stream_id,
+							headers := {
+								ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
+								ts_HTTP2_Hdr_location(ts_Nudm_UECM_uri_individual_smf_registration(g_pars.imsi_str,
+																   g_pars.nudm.smf_subscription_id))
+							},
+							body := omit);
 		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
 		setverdict(pass);
 	}
@@ -552,7 +658,7 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 	var template HTTP2_header_list headers := *;
 
 	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
-						      path := ts_Nudm_SDM_path_sdm_imsi_sdm_subscriptions(g_pars.imsi_str));
+						      path := ts_Nudm_SDM_path_sdm_subscriptions(g_pars.imsi_str));
 	hb := tr_HTTP2_header_block(pseudo_headers, headers);
 	http2_msg := tr_HTTP2_Msg(?, ?,
 				  hb := hb,
@@ -579,7 +685,8 @@ runs on SMF_Session_CT {
 						     http2_rx.stream_id,
 						     headers := {
 							     ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
-							     ts_HTTP2_Hdr_location(ts_Nudm_SDM_uri_sdm_imsi_sdm_subscriptions_id(g_pars.imsi_str, int2str(1)))
+							     ts_HTTP2_Hdr_location(ts_Nudm_SDM_uri_individual_subscription(g_pars.imsi_str,
+															   g_pars.nudm.smf_subscription_id))
 						     },
 						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
 									         end_stream_flag := true,
@@ -589,13 +696,68 @@ runs on SMF_Session_CT {
 	}
 }
 
-/*************************************
- * N8 NPcf (SBI): Emulated PCF
- *************************************/
+
+/* 3GPP TS 29.503:
+ * 6.1.3.3 Resource: SdmSubscriptions (Collection)*/
+function f_tr_Nudm_SDM_delete_IndividualSubscription()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "DELETE",
+						      path := tr_Nudm_SDM_path_individual_subscription(g_pars.imsi_str,
+												       g_pars.nudm.smf_subscription_id));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.2.2.3.2 Subscription to notifications of data change */
+private altstep as_nudm_sdm_delete_IndividualSubscription()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_SDM_delete_IndividualSubscription()) -> value http2_rx {
+		var template (value) HTTP2_Msg http2_tx;
+
+		http2_tx := ts_HTTP2_Msg_204_No_Content(http2_rx.conn_id,
+							http2_rx.stream_id,
+							headers := {
+								ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
+								ts_HTTP2_Hdr_location(ts_Nudm_SDM_uri_individual_subscription(g_pars.imsi_str,
+															      g_pars.nudm.smf_subscription_id))
+							},
+							body := omit);
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/**********************************************
+ * N8 NPcf (SBI): Emulated PCF, 3GPP TS 29.512
+ **********************************************/
 
 const charstring Npcf_uri_prefix := SCP_uri_prefix;
 const charstring Npcf_SMPolicyControl_path_api_prefix := "/npcf-smpolicycontrol/v1"
-const charstring Npcf_SMPolicyControl_path__sm_policies := Npcf_SMPolicyControl_path_api_prefix & "/sm-policies";
+
+/* 5.3.2 Resource: SM Policies */
+const charstring Npcf_SMPolicyControl_path_sm_policies := Npcf_SMPolicyControl_path_api_prefix & "/sm-policies";
+
+/* 5.3.3 Resource: Individual SM Policy */
+template (present) charstring
+tr_Npcf_SMPolicyControl_path_individual_sm_policy_delete(template (present) charstring sm_policy_id := pattern "?+")
+:= pattern Npcf_SMPolicyControl_path_sm_policies & "/" & sm_policy_id & "/delete";
+
+template (value) charstring
+ts_Npcf_SMPolicyControl_path_individual_sm_policy(template (value) charstring sm_policy_id)
+:= Npcf_SMPolicyControl_path_sm_policies & "/" & valueof(sm_policy_id);
+
+template (value) charstring
+ts_Npcf_SMPolicyControl_uri_individual_sm_policy(template (value) charstring sm_policy_id)
+:= Npcf_uri_prefix & valueof(ts_Npcf_SMPolicyControl_path_individual_sm_policy(sm_policy_id));
 
 /* 3GPP TS 29.512:
  * 5.3.2 Resource: SM Policies */
@@ -607,7 +769,7 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 	var template HTTP2_header_list headers := *;
 
 	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
-						      path := Npcf_SMPolicyControl_path__sm_policies);
+						      path := Npcf_SMPolicyControl_path_sm_policies);
 	hb := tr_HTTP2_header_block(pseudo_headers, headers);
 	http2_msg := tr_HTTP2_Msg(?, ?,
 				  hb := hb,
@@ -624,7 +786,6 @@ runs on SMF_Session_CT {
 		var template (value) SmPolicyDecision1 smpol_decision;
 		var template (value) HTTP2_Msg http2_tx;
 		var octetstring body_enc;
-		var integer sessRuleId := 1;
 
 		f_dec_SmPolicyContextData1(http2_rx.body.data, smpol_ctx_data); // TODO: check returned integer.
 
@@ -635,7 +796,7 @@ runs on SMF_Session_CT {
 						     http2_rx.stream_id,
 						     headers := {
 							     ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
-							     ts_HTTP2_Hdr_location(Npcf_uri_prefix & Npcf_SMPolicyControl_path_api_prefix & "/sm-policies/imsi-" & g_pars.imsi_str & "-" & int2str(sessRuleId))
+							     ts_HTTP2_Hdr_location(ts_Npcf_SMPolicyControl_uri_individual_sm_policy(g_pars.npcf.sm_policy_id))
 						     },
 						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
 									         end_stream_flag := true,
@@ -645,6 +806,44 @@ runs on SMF_Session_CT {
 	}
 }
 
+/* 3GPP TS 29.503 5.3.3.4.2 Operation: delete */
+function f_tr_SMPolicyControl_post_IndividualSMPolicyTermination()
+runs on SMF_Session_CT return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := tr_Npcf_SMPolicyControl_path_individual_sm_policy_delete(g_pars.npcf.sm_policy_id));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_SmPolicyDeleteData1));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 4.2.5.2 SM Policy Association termination */
+private altstep as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_SMPolicyControl_post_IndividualSMPolicyTermination()) -> value http2_rx {
+		var SmPolicyDeleteData1 del_data;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_SmPolicyDeleteData1(http2_rx.body.data, del_data);
+
+		http2_tx := ts_HTTP2_Msg_204_No_Content(http2_rx.conn_id,
+							http2_rx.stream_id,
+							headers := {
+								ts_HTTP2_Hdr_content_type("application/json; charset=utf-8"),
+								ts_HTTP2_Hdr_location(ts_Npcf_SMPolicyControl_uri_individual_sm_policy(g_pars.npcf.sm_policy_id))
+							},
+							body := omit);
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
 
 /************
  * NGAP
