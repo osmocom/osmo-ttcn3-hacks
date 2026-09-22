@@ -44,10 +44,24 @@ import from SMF_Tests all;
 /* Index in SMF_Session_CT inherited HTTP2_ConnHdlr ports HTTP2_CONN[] and HTTP2_CONN_PROC[] */
 const integer HTTP2_CONN_SCP := 0;
 
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match()
+runs on SMF_Session_CT return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.imsi_str & "*";
+	var charstring sm_policy_id_match := valueof(ts_Npcf_SMPolicyControl_path_individual_sm_policy(g_pars.npcf.sm_policy_id)) & "/*";
+	var charstring path_match := "(" & imsi_match & ")|(" & sm_policy_id_match & ")";
+	return path_match;
+}
+
 function f_handler_init_5G()
 runs on SMF_Session_CT {
-	/* Create SCP HTTP2 sever, where IUT will send all SBI requests: */
-	f_http2_server_emu_register(idx := HTTP2_CONN_SCP);
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+}
+
+function f_handler_cleanup_5G()
+runs on SMF_Session_CT {
+	f_http2_server_emu_unregister(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
 }
 
 /********************************************
@@ -206,12 +220,16 @@ runs on SMF_Session_CT {
 	 * so that the PFCPEM component cannot route them unambiguously.   This is why we
 	 * need to ensure that only one ConnHdlr is triggering PFCP session establishment
 	 * at the given moment of time. */
-	f_Mutex_lock(__BFILE__, __LINE__);
+	f_Mutex_lock(__BFILE__, __LINE__, Tval := 30.0);
 	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
 	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
 	f_PFCPEM_subscribe_seid(c_SEID0);
 
 	f_http2_adapter_send(http2_tx);
+
+	/* PCF: register to rx generic path. We take advantage of the fact that
+	 * we are inside a mutual exclusion zone, so only one session can be here at a time. */
+	f_http2_server_emu_register(Npcf_SMPolicyControl_path_sm_policies, idx := HTTP2_CONN_SCP);
 
 	/* Expect UDM to receive GET sm-data: */
 	as_nudm_sdm_get_sm_data();
@@ -230,11 +248,15 @@ runs on SMF_Session_CT {
 	/* Store obtained smContextRef:*/
 	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
 	g_pars.nsmf.smContextRef := regexp(created_location, Nsmf_uri_prefix & Nsmf_PDUSession_path_sm_contexts & "/(?+)", 0);
+	/* Prepare expect for the smContextRef: */
+	f_http2_server_emu_register(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
+				    idx := HTTP2_CONN_SCP);
 	/* Close HTTP2 conn: */
 	f_http2_adapter_close(idx := http2_idx);
 
 	/* Expect PCF to receive POST sm-policies: */
 	as_npcf_smpolicycontrol_post_sm_policies();
+	f_http2_server_emu_unregister(Npcf_SMPolicyControl_path_sm_policies, idx := HTTP2_CONN_SCP);
 
 	/* Expect PFCP Session Establishment Request. */
 	as_pfcp_sess_est_req();
@@ -364,6 +386,8 @@ runs on SMF_Session_CT {
 
 	/* Successful answer with no content: */
 	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_idx);
+	f_http2_server_emu_unregister(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
+				      idx := HTTP2_CONN_SCP);
 	f_http2_adapter_close(idx := http2_idx);
 	setverdict(pass);
 }
