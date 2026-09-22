@@ -26,6 +26,9 @@ import from HTTP2_Msg all;
 import from Native_Functions all;
 import from Misc_Helpers all;
 
+const integer HTTP2_SERVER_EMU_MAX_NUM_CONNS := 16;
+const integer HTTP2_SERVER_EMU_MAX_NUM_CONNHDLR := HTTP2_SERVER_EMU_MAX_NUM_CONNS * 3;
+
 /*********************
  * HTTP2_Server_Conn
  ********************/
@@ -72,6 +75,19 @@ type record Http2ServerEmulationCfg {
 	integer http2_bind_port
 };
 
+type record HTTP2_ConnHdlr_Entry {
+	HTTP2_ConnHdlr vc_conn,
+	charstring path_pattern
+};
+
+private function f_HTTP2_ConnHdlr_Entry_init(inout HTTP2_ConnHdlr_Entry entry)
+{
+	entry := {
+		vc_conn := null,
+		path_pattern := ""
+	};
+}
+
 type component HTTP2_Server_Emulation_CT {
 	/* Communication with underlying HTTP2 CodecPort */
 	port HTTP2_CODEC_PT HTTP2;
@@ -85,8 +101,8 @@ type component HTTP2_Server_Emulation_CT {
 
 	/* Connection identifier of the server itself */
 	var IPL4asp_Types.ConnectionId g_self_conn_id := -1;
-	var HTTP2_Server_Conn conn_table[16];
-	var HTTP2_ConnHdlr vc_ConnHdlr_table[16];
+	var HTTP2_Server_Conn conn_table[HTTP2_SERVER_EMU_MAX_NUM_CONNS];
+	var HTTP2_ConnHdlr_Entry vc_ConnHdlr_table[HTTP2_SERVER_EMU_MAX_NUM_CONNHDLR];
 };
 
 private function f_conn_table_init()
@@ -94,6 +110,14 @@ runs on HTTP2_Server_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(conn_table); i := i + 1) {
 		f_HTTP2_Server_Conn_init(conn_table[i]);
+	}
+}
+
+private function f_vc_ConnHdlr_table_init()
+runs on HTTP2_Server_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
+		f_HTTP2_ConnHdlr_Entry_init(vc_ConnHdlr_table[i]);
 	}
 }
 
@@ -113,17 +137,36 @@ runs on HTTP2_Server_Emulation_CT return integer {
 	return f_conn_table_find_by_conn_id(-1);
 }
 
-private function f_vc_ConnHdlr_table_add(HTTP2_ConnHdlr vc_conn)
+private function f_vc_ConnHdlr_table_add(HTTP2_ConnHdlr vc_conn, charstring path_pattern)
 runs on HTTP2_Server_Emulation_CT {
 	var integer i;
 	for (i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
-		if (not isbound(vc_ConnHdlr_table[i])) {
-			vc_ConnHdlr_table[i] := vc_conn;
+		if (vc_ConnHdlr_table[i].vc_conn == null) {
+			vc_ConnHdlr_table[i] := {
+				vc_conn := vc_conn,
+				path_pattern := path_pattern
+			};
 			return;
 		}
 	}
 	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-				log2str("No Space in vc_ConnHdlr_table[i] for ", vc_conn));
+				log2str("No Space in vc_ConnHdlr_table[i] for ",
+					vc_conn, " path_pattern ", path_pattern));
+}
+
+private function f_vc_ConnHdlr_table_del(HTTP2_ConnHdlr vc_conn, charstring path_pattern)
+runs on HTTP2_Server_Emulation_CT {
+	var integer i;
+	for (i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
+		if (vc_ConnHdlr_table[i].vc_conn == vc_conn and
+		    vc_ConnHdlr_table[i].path_pattern == path_pattern) {
+			f_HTTP2_ConnHdlr_Entry_init(vc_ConnHdlr_table[i]);
+			return;
+		}
+	}
+	Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("Not found in vc_ConnHdlr_table[i] for ",
+					vc_conn, " path_pattern ", path_pattern));
 }
 
 private function f_http2_adapter_getMsgLen(in octetstring pl_stream,
@@ -161,6 +204,7 @@ runs on HTTP2_Server_Emulation_CT {
 	g_http2_cfg := cfg;
 
 	f_conn_table_init();
+	f_vc_ConnHdlr_table_init();
 
 	/* Start HTTP2 server */
 	map(self:HTTP2, system:HTTP2_CODEC_PT);
@@ -169,14 +213,27 @@ runs on HTTP2_Server_Emulation_CT {
 	f_set_tcp_segmentation();
 }
 
-/* Forward request to all registered clients */
-private function forward_http2_msg(HTTP2_Msg http2_msg)
+/* Forward request to all registered matching clients */
+private function forward_http2_msg(inout HTTP2_Server_Conn conn, HTTP2_Msg http2_msg)
 runs on HTTP2_Server_Emulation_CT {
-
+	var boolean forwarded := false;
 	for (var integer i := 0; i < sizeof(vc_ConnHdlr_table); i := i + 1) {
-		if (isbound(vc_ConnHdlr_table[i])) {
-			CONN.send(http2_msg) to vc_ConnHdlr_table[i];
+		if (vc_ConnHdlr_table[i].vc_conn != null) {
+			var charstring path_pattern := vc_ConnHdlr_table[i].path_pattern;
+			if (match(http2_msg.hb.pseudo_headers.path, pattern path_pattern)) {
+				/* log(f_HTTP2_Server_Conn_str(conn), ": '", http2_msg.hb.pseudo_headers.path,
+				    "' matches: ", path_pattern); */
+				CONN.send(http2_msg) to vc_ConnHdlr_table[i].vc_conn;
+				forwarded := true;
+			} else {
+				/* log(f_HTTP2_Server_Conn_str(conn), ": '", http2_msg.hb.pseudo_headers.path,
+				    "' didn't match: ", path_pattern); */
+			}
 		}
+	}
+
+	if (not forwarded) {
+		log(f_HTTP2_Server_Conn_str(conn), ": Discarding received HTTP2 msg with no registered match: ", http2_msg);
 	}
 }
 
@@ -254,7 +311,7 @@ runs on HTTP2_Server_Emulation_CT {
 			}
 
 			http2_msg := ts_HTTP2_Msg(conn.conn_id, http2_rx.frame.header_frame.stream_id, hb, omit);
-			forward_http2_msg(valueof(http2_msg));
+			forward_http2_msg(conn, valueof(http2_msg));
 			return;
 		}
 		case (HTTP2_SERVER_CONN_ST_WAIT_BODY) {
@@ -273,7 +330,7 @@ runs on HTTP2_Server_Emulation_CT {
 						  http2_rx.frame.data_frame.stream_id,
 						  conn.rx_hb,
 						  http2_rx.frame.data_frame);
-			forward_http2_msg(valueof(http2_msg));
+			forward_http2_msg(conn, valueof(http2_msg));
 			return;
 		}
 		case else {
@@ -293,6 +350,7 @@ runs on HTTP2_Server_Emulation_CT {
 	var HTTP2_Msg http2_msg;
 	var template (value) HTTP2_Frame http2_frame;
 	var integer idx;
+	var charstring path_pattern;
 
 	f_init(cfg);
 
@@ -371,10 +429,15 @@ runs on HTTP2_Server_Emulation_CT {
 		/* Send GOAWAY since we are finished: */
 		f_HTTP2_Server_Conn_tx(conn_table[idx], ts_HTTP2_Frame_Goaway(last_stream_id, 0 /* NO_ERROR */));
 		}
-	[] CONN_PROC.getcall(HTTP2EM_register:{}) -> sender vc_conn {
-		//log("HTTP2_Server: Register ", vc_conn);
-		f_vc_ConnHdlr_table_add(vc_conn);
-		CONN_PROC.reply(HTTP2EM_register:{}) to vc_conn;
+	[] CONN_PROC.getcall(HTTP2EM_register:{?}) -> param(path_pattern) sender vc_conn {
+		log("HTTP2_Server: Register ", vc_conn, "path: ", path_pattern);
+		f_vc_ConnHdlr_table_add(vc_conn, path_pattern);
+		CONN_PROC.reply(HTTP2EM_register:{path_pattern}) to vc_conn;
+		}
+	[] CONN_PROC.getcall(HTTP2EM_unregister:{?}) -> param(path_pattern) sender vc_conn {
+		log("HTTP2_Server: Unregister ", vc_conn, "path: ", path_pattern);
+		f_vc_ConnHdlr_table_del(vc_conn, path_pattern);
+		CONN_PROC.reply(HTTP2EM_unregister:{path_pattern}) to vc_conn;
 		}
 	}
 	}
@@ -390,10 +453,12 @@ type port HTTP2_CONN_PT message {
 	inout HTTP2_Msg;
 } with { extension "internal" };
 
-signature HTTP2EM_register();
+signature HTTP2EM_register(in charstring path_pattern);
+signature HTTP2EM_unregister(in charstring path_pattern);
 
 type port HTTP2_CONN_PROC_PT procedure {
 	inout HTTP2EM_register;
+	inout HTTP2EM_unregister;
 } with { extension "internal" };
 
 
@@ -409,9 +474,15 @@ type component HTTP2_ConnHdlr {
 	port HTTP2_CONN_PROC_PT HTTP2_CONN_PROC[16];
 };
 
-function f_http2_server_emu_register(integer idx := 0) runs on HTTP2_ConnHdlr {
-	HTTP2_CONN_PROC[idx].call(HTTP2EM_register:{}) {
-		[] HTTP2_CONN_PROC[idx].getreply(HTTP2EM_register:{});
+function f_http2_server_emu_register(charstring path_pattern := "?+", integer idx := 0) runs on HTTP2_ConnHdlr {
+	HTTP2_CONN_PROC[idx].call(HTTP2EM_register:{path_pattern}) {
+		[] HTTP2_CONN_PROC[idx].getreply(HTTP2EM_register:{path_pattern});
+	}
+}
+
+function f_http2_server_emu_unregister(charstring path_pattern := "?+", integer idx := 0) runs on HTTP2_ConnHdlr {
+	HTTP2_CONN_PROC[idx].call(HTTP2EM_unregister:{path_pattern}) {
+		[] HTTP2_CONN_PROC[idx].getreply(HTTP2EM_unregister:{path_pattern});
 	}
 }
 
