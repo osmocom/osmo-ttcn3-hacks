@@ -19,6 +19,7 @@ import from IPL4asp_Types all;
 import from IPL4asp_PortType all;
 import from Socket_API_Definitions all;
 
+import from HTTP2_Types all;
 import from HTTP2_Templates all;
 import from HTTP2_Functions all;
 import from HTTP2_Msg all;
@@ -35,6 +36,10 @@ type component HTTP2_CT {
 
 	/* Connection identifier of the client / server itself */
 	var IPL4asp_Types.ConnectionId g_self_conn_id[HTTP2_MAX_NUM_CLIENTS];
+
+	/* Header block compress enc/dec: */
+	var HTTP2_comp_context g_http2_ctx_dec[HTTP2_MAX_NUM_CLIENTS];
+	var HTTP2_comp_context g_http2_ctx_enc[HTTP2_MAX_NUM_CLIENTS];
 };
 
 type record HTTP2_Adapter_Params {
@@ -94,6 +99,35 @@ runs on HTTP2_CT return integer {
 	return -1;
 }
 
+private function f_http2_adapter_header_block_encode(HTTP2_header_block hb,
+						     integer idx := 0)
+runs on HTTP2_CT return octetstring {
+	var octetstring data := ''O;
+	var integer rc;
+
+	rc := HTTP2_comp_context_encode(g_http2_ctx_enc[idx], hb, data);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("HTTP2_comp_context_encode(", hb, ") returned ", rc));
+	}
+	return data;
+}
+
+private function f_http2_adapter_header_block_decode(octetstring header_block_fragment,
+						     integer idx := 0)
+runs on HTTP2_CT return HTTP2_header_block {
+	var HTTP2_header_block pl_hblock;
+	var integer rc;
+
+	rc := HTTP2_comp_context_decode(g_http2_ctx_dec[idx], pl_hblock, header_block_fragment);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("HTTP2_comp_context_decode(", header_block_fragment, ") returned ", rc));
+	}
+
+	return pl_hblock;
+}
+
 /* Function to use to connect as client to a remote IPA Server */
 function f_http2_adapter_connect(charstring remote_host, IPL4asp_Types.PortNumber remote_port,
 		   charstring local_host, IPL4asp_Types.PortNumber local_port := 0, boolean use_ssl := false, integer idx := 0)
@@ -108,6 +142,8 @@ runs on HTTP2_CT {
 	}
 	g_self_conn_id[idx] := res.connId;
 	g_http2_pars[idx] := valueof(ts_HTTP2_Adapter_Params(idx, remote_host, remote_port, local_host, local_port, use_ssl));
+	g_http2_ctx_dec[idx] := HTTP2_comp_context_init();
+	g_http2_ctx_enc[idx] := HTTP2_comp_context_init();
 
 	f_set_tcp_segmentation(idx := idx);
 	HTTP2[idx].send(ts_HTTP2_Send_magic(g_self_conn_id[idx]));
@@ -133,6 +169,8 @@ runs on HTTP2_CT {
 	var IPL4asp_Types.Result res;
 	res := HTTP2_CodecPort_CtrlFunct.f_IPL4_close(HTTP2[idx], g_self_conn_id[idx], {tcp := {}});
 	g_self_conn_id[idx] := -1;
+	HTTP2_comp_context_free(g_http2_ctx_dec[idx]);
+	HTTP2_comp_context_free(g_http2_ctx_enc[idx]);
 }
 
 private function f_http2_adapter_send_frame(template (value) HTTP2_Frame http2_frame,
@@ -152,7 +190,7 @@ runs on HTTP2_CT
 
 	/* Send Header: */
 	f_HTTP2_Msg_append_hdr_content_length(msg);
-	hdr_enc := f_HTTP2_header_block_encode(msg.hb);
+	hdr_enc := f_http2_adapter_header_block_encode(msg.hb, idx := idx);
 	http2_frame := ts_HTTP2_Frame_Header(msg.stream_id,
 					     end_stream_flag := not ispresent(msg.body),
 					     end_header_flag := true,
@@ -193,7 +231,8 @@ runs on HTTP2_CT
 		var template (omit) HTTP2_Data_frame body := omit;
 		var HTTP2_header_block hb;
 
-		hb := f_HTTP2_header_block_decode(rx_http2_frame.header_frame.header_block_fragment);
+		hb := f_http2_adapter_header_block_decode(rx_http2_frame.header_frame.header_block_fragment,
+							  idx := idx);
 		if (not rx_http2_frame.header_frame.end_stream_flag) { /* Expect body */
 			var HTTP2_Frame body_frame;
 			as_http2_adapter_receive_frame(body_frame, HTTP2_Frame:{ data_frame := http2_exp_msg.body });

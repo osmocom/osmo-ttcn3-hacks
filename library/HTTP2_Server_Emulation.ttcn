@@ -44,6 +44,8 @@ type enumerated HTTP2_Server_Conn_State {
 type record HTTP2_Server_Conn {
 	IPL4asp_Types.ConnectionId conn_id,
 	HTTP2_Server_Conn_State state,
+	HTTP2_comp_context ctx_dec,
+	HTTP2_comp_context ctx_enc,
 	HTTP2_header_block rx_hb optional /* Contains received header while in HTTP2_SERVER_CONN_ST_WAIT_BODY */
 }
 
@@ -52,8 +54,17 @@ private function f_HTTP2_Server_Conn_init(inout HTTP2_Server_Conn conn)
 	conn := {
 		conn_id := -1,
 		state := HTTP2_SERVER_CONN_ST_UNUSED,
+		ctx_dec := HTTP2_comp_context_init(),
+		ctx_enc := HTTP2_comp_context_init(),
 		rx_hb := omit
 	};
+}
+
+private function f_HTTP2_Server_Conn_release(inout HTTP2_Server_Conn conn)
+{
+	HTTP2_comp_context_free(conn.ctx_dec);
+	HTTP2_comp_context_free(conn.ctx_enc);
+	f_HTTP2_Server_Conn_init(conn);
 }
 
 private function f_HTTP2_Server_Conn_str(in HTTP2_Server_Conn conn) return charstring {
@@ -64,6 +75,37 @@ private function f_HTTP2_Server_Conn_st_change(inout HTTP2_Server_Conn conn, HTT
 {
 	log(f_HTTP2_Server_Conn_str(conn), ": state change to ", state);
 	conn.state := state
+}
+
+private function f_HTTP2_Server_Conn_header_block_decode(inout HTTP2_Server_Conn conn,
+							 octetstring header_block_fragment)
+return HTTP2_header_block {
+	var HTTP2_header_block pl_hblock;
+	var integer rc;
+
+	rc := HTTP2_comp_context_decode(conn.ctx_dec, pl_hblock, header_block_fragment);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(f_HTTP2_Server_Conn_str(conn),
+						": HTTP2_comp_context_decode(", header_block_fragment, ") returned ", rc));
+	}
+
+	return pl_hblock;
+}
+
+private function f_HTTP2_Server_Conn_header_block_encode(inout HTTP2_Server_Conn conn,
+							 HTTP2_header_block hb)
+return octetstring {
+	var octetstring data := ''O;
+	var integer rc;
+
+	rc := HTTP2_comp_context_encode(conn.ctx_enc, hb, data);
+	if (rc != 0) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str(f_HTTP2_Server_Conn_str(conn),
+						": HTTP2_comp_context_encode(", hb, ") returned ", rc));
+	}
+	return data;
 }
 
 /***********************************************************************
@@ -301,7 +343,7 @@ runs on HTTP2_Server_Emulation_CT {
 			}
 
 			var HTTP2_header_block hb;
-			hb := f_HTTP2_header_block_decode(http2_rx.frame.header_frame.header_block_fragment);
+			hb := f_HTTP2_Server_Conn_header_block_decode(conn, http2_rx.frame.header_frame.header_block_fragment);
 			/* TODO: store header in Conn or send to ConNHdlr? */
 			log(f_HTTP2_Server_Conn_str(conn), ": Decompressed header: ", hb);
 			if (not http2_rx.frame.header_frame.end_stream_flag) {
@@ -384,7 +426,7 @@ runs on HTTP2_Server_Emulation_CT {
 							asp_evt.connClosed.connId));
 		}
 		// TODO: Notify/Remove ConnHdlrs?
-		f_HTTP2_Server_Conn_init(conn_table[idx]);
+		f_HTTP2_Server_Conn_release(conn_table[idx]);
 	}
 
 	[] HTTP2.receive(HTTP2_Recv:?) -> value http2_rx {
@@ -411,7 +453,7 @@ runs on HTTP2_Server_Emulation_CT {
 
 		/* Send Header: */
 		f_HTTP2_Msg_append_hdr_content_length(http2_msg);
-		var octetstring hdr_enc := f_HTTP2_header_block_encode(http2_msg.hb);
+		var octetstring hdr_enc := f_HTTP2_Server_Conn_header_block_encode(conn_table[idx], http2_msg.hb);
 		http2_frame := ts_HTTP2_Frame_Header(http2_msg.stream_id,
 						     end_stream_flag := not ispresent(http2_msg.body),
 						     end_header_flag := true,
