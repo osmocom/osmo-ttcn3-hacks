@@ -44,6 +44,8 @@ type enumerated HTTP2_Server_Conn_State {
 type record HTTP2_Server_Conn {
 	IPL4asp_Types.ConnectionId conn_id,
 	HTTP2_Server_Conn_State state,
+	integer last_stream_id,
+	boolean goaway_sent,
 	HTTP2_comp_context ctx_dec,
 	HTTP2_comp_context ctx_enc,
 	HTTP2_header_block rx_hb optional /* Contains received header while in HTTP2_SERVER_CONN_ST_WAIT_BODY */
@@ -54,6 +56,9 @@ private function f_HTTP2_Server_Conn_init(inout HTTP2_Server_Conn conn)
 	conn := {
 		conn_id := -1,
 		state := HTTP2_SERVER_CONN_ST_UNUSED,
+		/* rfc7540 6.8: "The last stream identifier can be set to 0 if no streams were processed." */
+		last_stream_id := 0,
+		goaway_sent := false,
 		ctx_dec := HTTP2_comp_context_init(),
 		ctx_enc := HTTP2_comp_context_init(),
 		rx_hb := omit
@@ -114,7 +119,9 @@ return octetstring {
 
 type record Http2ServerEmulationCfg {
 	charstring http2_bind_ip,
-	integer http2_bind_port
+	integer http2_bind_port,
+	/* If enabled, GOAWAY will be sent after first full request is received. */
+	boolean one_req_per_conn
 };
 
 type record HTTP2_ConnHdlr_Entry {
@@ -286,6 +293,24 @@ runs on HTTP2_Server_Emulation_CT {
 	HTTP2.send(http2_tx);
 }
 
+/* Handle and forward a full request up the stack: */
+private function f_HTTP2_Server_Conn_rx_http2_msg(inout HTTP2_Server_Conn conn, HTTP2_Msg http2_msg)
+runs on HTTP2_Server_Emulation_CT {
+	if (not conn.goaway_sent) {
+		conn.last_stream_id := http2_msg.stream_id;
+		if (g_http2_cfg.one_req_per_conn) {
+			/* Send GOAWAY to avoid receiving more requests on this conn: */
+			f_HTTP2_Server_Conn_tx(conn, ts_HTTP2_Frame_Goaway(conn.last_stream_id, 0 /* NO_ERROR */));
+			conn.goaway_sent := true;
+		}
+	} else if (http2_msg.stream_id > conn.last_stream_id) {
+		log(f_HTTP2_Server_Conn_str(conn), ": Ignoring received msg since we already sent GOAWAY(",
+			conn.last_stream_id, "): ", http2_msg);
+		return;
+	}
+	forward_http2_msg(conn, valueof(http2_msg));
+}
+
 private function f_HTTP2_Server_Conn_rx_http2(inout HTTP2_Server_Conn conn, HTTP2_Recv http2_rx)
 runs on HTTP2_Server_Emulation_CT {
 	var template (value) HTTP2_Msg http2_msg;
@@ -338,22 +363,20 @@ runs on HTTP2_Server_Emulation_CT {
 							log2str(f_HTTP2_Server_Conn_str(conn), ": Rx unexpected: ", http2_rx));
 			}
 			if (not match(http2_rx.frame, tr_HTTP2_Frame_Header()))  {
-
-				return; /* TODO: we should only allow WINDOW_UPDATE and SETTINGS here... */
+				return;
 			}
 
 			var HTTP2_header_block hb;
 			hb := f_HTTP2_Server_Conn_header_block_decode(conn, http2_rx.frame.header_frame.header_block_fragment);
-			/* TODO: store header in Conn or send to ConNHdlr? */
 			log(f_HTTP2_Server_Conn_str(conn), ": Decompressed header: ", hb);
+
 			if (not http2_rx.frame.header_frame.end_stream_flag) {
 				conn.rx_hb := hb;
 				f_HTTP2_Server_Conn_st_change(conn, HTTP2_SERVER_CONN_ST_WAIT_BODY);
 				return;
 			}
-
 			http2_msg := ts_HTTP2_Msg(conn.conn_id, http2_rx.frame.header_frame.stream_id, hb, omit);
-			forward_http2_msg(conn, valueof(http2_msg));
+			f_HTTP2_Server_Conn_rx_http2_msg(conn, valueof(http2_msg));
 			return;
 		}
 		case (HTTP2_SERVER_CONN_ST_WAIT_BODY) {
@@ -362,17 +385,28 @@ runs on HTTP2_Server_Emulation_CT {
 							log2str(f_HTTP2_Server_Conn_str(conn), ": Rx unexpected: ", http2_rx));
 			}
 			if (not match(http2_rx.frame, tr_HTTP2_Frame_Data()))  {
-				return; /* TODO: we should only allow WINDOW_UPDATE and SETTINGS here... */
+				if (match(http2_rx.frame, tr_HTTP2_Frame_Header()))  {
+					log(f_HTTP2_Server_Conn_str(conn),
+					    ": FIXME: Multiple concurrent active streams not supported! requires updating HTTP2_Server_Conn to use a list of streams!");
+					setverdict(fail);
+					return;
+				}
+				return;
 			}
 			if (not http2_rx.frame.data_frame.end_stream_flag) {
-				log("FIXME: Multiple DATA blocks not supported! requires updating HTTP2_Msg.body to be a list!");
+				log(f_HTTP2_Server_Conn_str(conn),
+				    ": FIXME: Multiple DATA blocks not supported! requires updating HTTP2_Msg.body to be a list!");
 				setverdict(fail);
+				return;
+			} else {
+				f_HTTP2_Server_Conn_st_change(conn, HTTP2_SERVER_CONN_ST_WAIT_HEADER);
 			}
+
 			http2_msg := ts_HTTP2_Msg(conn.conn_id,
 						  http2_rx.frame.data_frame.stream_id,
 						  conn.rx_hb,
 						  http2_rx.frame.data_frame);
-			forward_http2_msg(conn, valueof(http2_msg));
+			f_HTTP2_Server_Conn_rx_http2_msg(conn, valueof(http2_msg));
 			return;
 		}
 		case else {
@@ -442,7 +476,6 @@ runs on HTTP2_Server_Emulation_CT {
 
 	[] CONN.receive(HTTP2_Msg:?) -> value http2_msg sender vc_conn {
 		//log("HTTP2_Server: Tx ", http2_msg);
-		var integer last_stream_id := http2_msg.stream_id;
 
 		idx := f_conn_table_find_by_conn_id(http2_msg.conn_id);
 		if (idx < 0) {
@@ -468,8 +501,6 @@ runs on HTTP2_Server_Emulation_CT {
 							   http2_msg.body.padding);
 			f_HTTP2_Server_Conn_tx(conn_table[idx], http2_frame);
 		}
-		/* Send GOAWAY since we are finished: */
-		f_HTTP2_Server_Conn_tx(conn_table[idx], ts_HTTP2_Frame_Goaway(last_stream_id, 0 /* NO_ERROR */));
 		}
 	[] CONN_PROC.getcall(HTTP2EM_register:{?}) -> param(path_pattern) sender vc_conn {
 		log("HTTP2_Server: Register ", vc_conn, "path: ", path_pattern);
