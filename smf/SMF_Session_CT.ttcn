@@ -8,10 +8,16 @@ import from Osmocom_Types all;
 import from Native_Functions all;
 import from Misc_Helpers all;
 
+import from GTPv1U_Templates all;
+import from GTPv1U_CodecPort all;
 import from GTPv1U_Emulation all;
 import from GTPv2_Types all;
 import from GTPv2_Templates all;
 import from GTPv2_Emulation all;
+
+import from IP_Types all;
+import from ICMPv6_Types all;
+import from ICMPv6_Templates all;
 
 import from DIAMETER_Types all;
 import from DIAMETER_Templates all;
@@ -45,10 +51,6 @@ const OCT8 c_SEID0 := '0000000000000000'O;
 type component SMF_Session_CT extends GTP2_ConnHdlr, GTP1U_ConnHdlr, DIAMETER_ConnHdlr,
 				      PFCP_ConnHdlr, MutexCT, HTTP2_CT, HTTP2_ConnHdlr {
 	var SessionPars	g_pars;
-
-	/* GTP-U IPv4 address remote sie */
-	var OCT4	g_gtpu4_remote;
-	var OCT16	g_gtpu6_remote;
 
 	/* Address allocation */
 	var OCT4	g_ip4_addr;
@@ -92,7 +94,8 @@ template (value) FTeids t_FTeids(template (value) F_TEID local,
  */
 type record Gtp1uParameters {
 	FTeids core,
-	FTeids access
+	FTeids access,
+	FTeids cp
 }
 template (value) Gtp1uParameters
 t_Gtp1uParameters_default(uint32_t idx := 0,
@@ -104,6 +107,11 @@ t_Gtp1uParameters_default(uint32_t idx := 0,
 	},
 	access := {
 		local := ts_PFCP_F_TEID_ipv4(int2oct(idx + 1, 4),
+					     f_inet_addr(mp_pfcp_ip_local)),
+		remote := omit
+	},
+	cp := {
+		local := ts_PFCP_F_TEID_ipv4(int2oct(idx + 1 + 16384, 4),
 					     f_inet_addr(mp_pfcp_ip_local)),
 		remote := omit
 	}
@@ -246,11 +254,11 @@ return SessionPars {
 		pdn_type := pdn_type,
 		pco := omit,
 		epco := omit,
-		teic_local := '00000000'O,
+		teic_local := int2oct(idx + 1, 4),
 		teic_remote := omit,
 		bearer := {
 			ebi := 5,
-			teid_local := omit,
+			teid_local := int2oct(idx + 1, 4),
 			teid_remote := omit
 		},
 		gy := {
@@ -291,6 +299,9 @@ type function void_fn() runs on SMF_Session_CT;
 function f_handler_init(void_fn fn, SessionPars pars)
 runs on SMF_Session_CT {
 	g_pars := valueof(pars);
+
+	/* No need to register g_pars.pfcp_pars.gtp1u_pars.{access,core}.local.teid since we don't expect any message on it */
+	f_gtp1u_register_teid(g_pars.pfcp_pars.gtp1u_pars.cp.local.teid);
 
 	f_handler_init_4G();
 	f_handler_init_5G();
@@ -377,7 +388,35 @@ function f_pfcp_expect(template (present) PDU_PFCP exp_rx, float wait_time := 5.
 
 function f_Session_tr_PFCP_Session_Est_Req() runs on SMF_Session_CT return template (present) PDU_PFCP
 {
+	var template (present) Create_PDR_list create_pdr := ?;
+	var template (present) Create_FAR_list create_far := ?;
 	var template Create_URR_list create_urr := *;
+
+	if (g_pars.pdn_type == GTP2C_PDN_IPv6) {
+		/* On IPv6, validate a PDR and FAR to forward IPv6 SLAAC UPF->SMF is set up: */
+		var template octetstring flow_description := '7065726D6974206F75742035382066726F6D20666630323A3A*2F31323820746F2061737369676E6564'O; // ("permit out 58 from ff02::*/128 to assigned");
+		create_pdr := {
+			*,
+			tr_PFCP_Create_PDR(pdr_id := 4,
+					   pdi := tr_PFCP_PDI(src_iface := ACCESS,
+							      local_F_TEID := tr_PFCP_F_TEID(?, ?, '1'B, '1'B, omit, omit, omit, ?),
+							      network_instance := tr_PFCP_Network_Instance(g_pars.apn),
+							      sdf_filter_list := { tr_PFCP_SDF_Filter(fd := '1'B,
+												      flow_description := flow_description) },
+							      source_interface_type := tr_PFCP_ThreeGPP_Interface_Type(11 /* N3 3GPP Access */)),
+					  ohr := tr_PFCP_Outer_Header_Removal(GTP_U_UDP_IP),
+					  far_id := 3)
+			, *
+		}
+		create_far := {
+			*,
+			tr_PFCP_Create_FAR(far_id := 3,
+					   aa := tr_PFCP_Apply_Action(forw := '1'B),
+					   fp := tr_PFCP_Forwarding_Parameters(dest_iface := CP_FUNCTION,
+									       ohc := tr_PFCP_Outer_Header_Creation_GTP_ipv4(?, f_inet_addr(mp_smf_hostname))))
+			, *
+		}
+	}
 
 	if (g_pars.gy.validity_time > 0) {
 		create_urr := {
@@ -389,7 +428,9 @@ function f_Session_tr_PFCP_Session_Est_Req() runs on SMF_Session_CT return templ
 		};
 	}
 
-	return tr_PFCP_Session_Est_Req(create_urr := create_urr);
+	return tr_PFCP_Session_Est_Req(create_pdr := create_pdr,
+				       create_far := create_far,
+				       create_urr := create_urr);
 }
 
 altstep as_pfcp_sess_est_req()
@@ -405,9 +446,14 @@ function f_pfcp_sess_est_resp(PDU_PFCP req) runs on SMF_Session_CT {
 	var template PDU_PFCP resp;
 	var PFCP_Session_Establishment_Response.created_PDR_list pdrs := {};
 	var PFCP_Session_Establishment_Request serq := req.message_body.pfcp_session_establishment_request;
+	var Outer_Header_Creation ohc := serq.create_FAR_list[2].grouped_ie.forwarding_parameters.grouped_ie.outer_header_creation;
 
 	/* Store peer's F-SEID for later: */
 	g_pars.pfcp_pars.remote_cp_f_seid := serq.CP_F_SEID;
+
+	/* TODO: store CP GTP1U endpoint IPaddr+TEID FAR, it will be used later to send a Router Solicitation UPF->SMF
+	 * sand expect a Router Advertisement back. */
+	g_pars.pfcp_pars.gtp1u_pars.cp.remote := valueof(ts_PFCP_F_TEID_ipv4(ohc.teid, ohc.ipv4));
 
 	var integer now := f_time();
 	for (var integer i := 0; i < lengthof(serq.create_URR_list); i := i + 1) {
@@ -507,6 +553,92 @@ runs on SMF_Session_CT {
 						    resp_cause)) -> value resp {
 		setverdict(pass);
 	}
+}
+
+
+/**********************************
+ * GTP1U (UPF<->SMF), CP-FUNCTION
+ *********************************/
+
+template (value) Gtp1uPeer ts_GtpPeerU(charstring ip) := {
+	connId := 1,
+	remName := ip,
+	remPort := GTP1U_PORT
+}
+
+private function f_gtp1u_send(octetstring payload) runs on SMF_Session_CT {
+	var Gtp1uPeer peer := valueof(ts_GtpPeerU(f_inet_ntoa(g_pars.pfcp_pars.gtp1u_pars.cp.remote.ipv4_address)));
+	GTP1U[0].send(ts_GTP1U_GPDU(peer, omit /*opt_part*/, g_pars.pfcp_pars.gtp1u_pars.cp.remote.teid, payload));
+}
+
+/* Wait for ICMPv6 from GTP */
+private function f_gtp1u_wait_icmp6(template (present) PDU_ICMPv6 expected,
+				    float t_timeout := 3.0)
+runs on SMF_Session_CT {
+	var Gtp1uUnitdata ud;
+	timer T_default := t_timeout;
+	T_default.start;
+	alt {
+		[] GTP1U[0].receive(tr_GTPU_GPDU(ts_GtpPeerU(f_inet_ntoa(g_pars.pfcp_pars.gtp1u_pars.cp.remote.ipv4_address)), ?)) -> value ud {
+			var octetstring gpdu := ud.gtpu.gtpu_IEs.g_PDU_IEs.data;
+			var IPv6_packet ip6 := f_IPv6_dec(gpdu);
+			if (ip6.header.ver != 6 or ip6.header.nexthead != 58) {
+				repeat;
+			}
+			var PDU_ICMPv6 icmp6 := f_dec_PDU_ICMPv6(ip6.payload);
+			if (not match(icmp6, expected)) {
+				repeat;
+			}
+			/* We are waiting for RA */
+			if (match(icmp6, tr_ICMPv6_RA(?))) {
+				for (var integer i := 0; i < lengthof(icmp6.routerAdvertisement.options); i := i + 1) {
+					var OptionField opt := icmp6.routerAdvertisement.options[i];
+					if (ischosen(opt.prefixInformation)) {
+						log("SMF assigned IPv6 global prefix (len=", opt.prefixInformation.prefixLength, "): ", opt.prefixInformation.prefix, " -> ",
+						    f_inet6_ntoa(opt.prefixInformation.prefix & '0000000000000000'O));
+						/* Assume prefixLen will be multiple of 8, it's usually 64... */
+						var OCT8 prefix := substr(opt.prefixInformation.prefix, 0, opt.prefixInformation.prefixLength / 8);
+						/* Pick second address in the prefix and use it as global IPv6 address: */
+						g_ip6_addr := f_pad_oct(prefix, 16, '00'O);
+						g_ip6_addr[15] := '02'O;
+						log("Using IPv6 global address: ", g_ip6_addr, " -> ", f_inet6_ntoa(g_ip6_addr));
+						setverdict(pass)
+						return;
+					}
+				}
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx ICMPv6 RA contain no Prefix Information option: ", icmp6));
+			}
+		}
+		[] GTP1U[0].receive(tr_GTPU_GPDU(?, ?)) { repeat; }
+		[] GTP1U[0].receive  {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Received unexpected GTPU while waiting for ICMPv6: ", expected));
+		}
+		[] T_default.timeout {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Timeout waiting for ICMPv6: ", expected));
+		}
+	}
+	T_default.stop;
+}
+
+/* wait for GGSN to send us an ICMPv6 router advertisement */
+private function f_gtp1u_wait_rtr_adv(template integer mtu := *) runs on SMF_Session_CT {
+	var template (present) OptionField opt_prefix := tr_ICMP6_OptPrefix(?, 64);
+	var template (present) Options opts;
+	if (istemplatekind(mtu, "*")) {
+		opts := ( { opt_prefix }, { opt_prefix, tr_ICMP6_OptMTU(?) } );
+	} else {
+		opts := { opt_prefix, tr_ICMP6_OptMTU(mtu) };
+	}
+	f_gtp1u_wait_icmp6(tr_ICMPv6_RA(opts));
+}
+
+function f_gtp1u_perform_ipv6_slaac() runs on SMF_Session_CT
+{
+	f_gtp1u_send(f_gen_icmpv6_router_solicitation(g_ip6_addr));
+	f_gtp1u_wait_rtr_adv();
 }
 
 }
