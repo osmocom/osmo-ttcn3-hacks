@@ -4,6 +4,7 @@ import from General_Types all;
 import from Osmocom_Types all;
 import from Native_Functions all;
 import from Misc_Helpers all;
+import from DNS_Helpers all;
 
 import from HTTP2_Types all;
 import from HTTP2_Templates all;
@@ -30,11 +31,13 @@ import from NGAP_Types all;
 import from NGAP_Templates all;
 
 import from NAS_CommonTypeDefs all;
+import from NG_NAS_TypeDefs all;
 import from NG_NAS_MsgContainers all;
 import from NG_NAS_Osmo_Types all;
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 
+import from PFCP_Templates all;
 import from PFCP_Emulation all;
 import from Mutex all;
 
@@ -156,8 +159,6 @@ function f_http2_encode_body_multipart_json_ngap(octetstring json_encoded,
  * 3GPP TS 29.502 6.1.3.2 */
 function f_n11_create_session()
 runs on SMF_Session_CT {
-	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
-	var ProcedureTransactionIdentifier pti := f_next_pti();
 	var template (value) octetstring body;
 	var integer http2_idx;
 	var integer http2_stream_id := 3;
@@ -184,11 +185,7 @@ runs on SMF_Session_CT {
 
 	var charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
 
-	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV(int2oct(g_pars.namf.pdu_sess_id, 1)), pti,
-							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
-							      p_PDU_SessionType := cs_PDU_SessionTypeTV(c_PDU_SessionType_IPv4),
-							      p_SSC_Mode := cs_SSC_ModeTV('001'B));
-	var octetstring nas_enc := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	var octetstring nas_enc := f_ng_nas_gen_session_establishment_request();
 
 	body := f_http2_encode_body_multipart_json_5gnas(sm_contexts_enc, nas_enc, boundary);
 	http2_idx := f_http2_adapter_find_free_idx();
@@ -272,6 +269,11 @@ runs on SMF_Session_CT {
 	as_namf_comm_post_n1n2_messages();
 
 	f_n11_update_sm_context();
+
+	if (g_pars.pdn_type == c_PFCP_PDN_Type_IPv6 or
+	    g_pars.pdn_type == c_PFCP_PDN_Type_IPv4v6) {
+		f_gtp1u_perform_ipv6_slaac();
+	}
 	setverdict(pass);
 }
 
@@ -439,7 +441,6 @@ runs on SMF_Session_CT {
 		var N1N2MessageTransferReqData n1n2msg_req;
 		var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
 		var template (value) N1N2MessageTransferRspData n1n2msg_rsp;
-		var template (present) NG_NAS_DL_SM_Message_Type exp_rx_nas;
 		var NG_NAS_DL_SM_Message_Type dl_nas;
 		var template (value) HTTP2_Msg http2_tx;
 		var octetstring body_enc;
@@ -454,12 +455,7 @@ runs on SMF_Session_CT {
 
 		/* Decode 2nd part: NG-NAS: */
 		dl_nas := dec_NG_NAS_DL_SM_Message_Type(parts[1].data);
-		exp_rx_nas := cr_NG_PDU_SESSION_ESTABLISHMENT_ACCEPT();
-		if (not match(dl_nas, exp_rx_nas)) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Rx unexpected DL NG-NAS: ", dl_nas, " vs exp ", exp_rx_nas));
-		}
-		g_pars.nas.qos_rules := dl_nas.pdu_Session_Establishment_Accept.authorizedQoSRules.listofQoSRules;
+		f_ng_nas_handle_session_establishment_accept(dl_nas);
 
 		/* Decode 3rd part: NGAP: */
 		setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(parts[2].data);
@@ -526,6 +522,15 @@ template (value) charstring
 ts_Nudm_SDM_uri_individual_subscription(template (value) charstring imsi,
 					template (value) charstring subscr_id)
 := Nudm_uri_prefix & valueof(ts_Nudm_SDM_path_individual_subscription(imsi, subscr_id));
+
+/* 3GPP TS 29.244 8.2.79 PDN Type -> 3GPP TS 29.503 PduSessionType */
+private function f_pfcp_pdn_type_2_Nudm_SDM_pdu_session_type(INT3b pfcp_pdn_type)
+return TS29503_Nudm_SDM.PduSessionType1_enum {
+	/* They are *mostly* the same, simply decrement one and convert INT3b -> PduSessionType1_enum: */
+	var TS29503_Nudm_SDM.PduSessionType1_enum pe;
+	int2enum(pfcp_pdn_type - 1, pe);
+	return pe;
+}
 
 /* 3GPP TS 29.503 6.2.3.5.2.1  */
 function f_tr_Nudm_UECM_put_IndividualSmfRegistration()
@@ -636,18 +641,19 @@ runs on SMF_Session_CT {
 		var template (value) DnnConfiguration1 dnn_cfg;
 		var octetstring body_enc;
 		var template (value) HTTP2_Msg http2_tx;
+		var TS29503_Nudm_SDM.PduSessionType1_enum pdu_sess_type := f_pfcp_pdn_type_2_Nudm_SDM_pdu_session_type(g_pars.pfcp_pars.pdn_type);
 
-		dnn_cfg := ts_DnnConfiguration1(pduSessionTypes := ts_PduSessionTypes1(defaultSessionType := ts_PduSessionType1(IPV4),
-										       allowedSessionTypes := { ts_PduSessionType1(IPV4) }),
+		dnn_cfg := ts_DnnConfiguration1(pduSessionTypes := ts_PduSessionTypes1(defaultSessionType := ts_PduSessionType1(pdu_sess_type),
+										       allowedSessionTypes := { ts_PduSessionType1(pdu_sess_type) }),
 						sscModes := ts_SscModes1(defaultSscMode := ts_SscMode1(SSC_MODE_1),
 									 allowedSscModes := { ts_SscMode1(SSC_MODE_1),
 									 		      ts_SscMode1(SSC_MODE_2),
 											      ts_SscMode1(SSC_MODE_3)}),
-						fivegQosProfile := ts_SubscribedDefaultQos1(fiveqi := 9,
-											    arp := ts_Arp(priorityLevel := ts_ArpPriorityLevel(8),
+						fivegQosProfile := ts_SubscribedDefaultQos1(fiveqi := g_pars.nudm.fiveqi,
+											    arp := ts_Arp(priorityLevel := ts_ArpPriorityLevel(g_pars.nudm.prio_lvl),
 													  preemptCap := ts_PreemptionCapability(NOT_PREEMPT),
 													  preemptVuln := ts_PreemptionVulnerability(NOT_PREEMPTABLE)),
-											    priorityLevel := 8),
+											    priorityLevel := g_pars.nudm.prio_lvl),
 						sessionAmbr := ts_Ambr1(uplink := "1000 Kbps",
 									downlink := "1000 Kbps")
 		);
@@ -873,9 +879,35 @@ runs on SMF_Session_CT {
  * NGAP
 **************/
 
+/* 3GPP TS 29.244 8.2.79 PDN Type -> 3GPP TS 29.503 PduSessionType */
+private function f_pfcp_pdn_type_2_ngap_pdu_session_type(INT3b pfcp_pdn_type)
+return NGAP_IEs.PDUSessionType {
+	/* They are *mostly* the same, simply decrement one and convert INT3b -> PduSessionType1_enum: */
+	var NGAP_IEs.PDUSessionType pe;
+	int2enum(pfcp_pdn_type - 1, pe);
+	return pe;
+}
+
 /* Handle a PDUSessionResourceSetupRequestTransfer and return a Result */
 private function f_ngap_pdu_handle_PDUSessionResourceSetupRequestTransfer(NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf)
 runs on SMF_Session_CT {
+	var template (present) QosFlowLevelQosParameters exp_qos;
+	var template (present) PDUSessionResourceSetupRequestTransfer exp;
+
+	exp_qos := mw_qosFlowLevelQosParameters(p_qosCharacteristics := mw_qosCharacteristics_nonDynamic5QI(mw_nonDynamic5QIDescriptor(p_fiveQI := g_pars.nudm.fiveqi)),
+						p_allocationAndRetentionPriority := mw_allocationAndRetentionPriority(p_priorityLevelARP := g_pars.nudm.prio_lvl));
+
+	exp := f_mw_n2_PDUSessionResourceSetupRequestTransfer(p_pDUSessionAggregateMaximumBitRate := ?,
+							      p_uPTransportLayerInformation := mw_uPTransportLayerInformation_gTPTunnel(mw_gTPTunnel(p_tla := oct2bit(g_pars.pfcp_pars.gtp1u_pars.access.local.ipv4_address),
+																		     p_gtp_teid := g_pars.pfcp_pars.gtp1u_pars.access.local.teid)),
+							      p_pDUSessionType := f_pfcp_pdn_type_2_ngap_pdu_session_type(g_pars.pdn_type),
+							      p_qosFlowSetupRequestList := { mw_qosFlowSetupRequestItem(p_qosFlowIdentifier := 1,
+															p_qosFlowLevelQosParameters := exp_qos) })
+	if (not match(setup_req_transf, exp)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx unexpected DL NGAP: ", setup_req_transf, " vs exp ", exp));
+	}
+
 	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
 		select (setup_req_transf.protocolIEs[i].id) {
 		case (id_UL_NGU_UP_TNLInformation) {
@@ -885,7 +917,6 @@ runs on SMF_Session_CT {
 			}
 		case (id_QosFlowSetupRequestList) {
 			var QosFlowSetupRequestList qos_req_li := setup_req_transf.protocolIEs[i].value_.QosFlowSetupRequestList;
-			/* TODO: validate received QoS */
 		}
 		}
 	}
@@ -923,5 +954,79 @@ private function f_next_pti() runs on SMF_Session_CT return ProcedureTransaction
 	return g_pars.nas.pti;
 }
 
+/* 3GPP TS 29.244 8.2.79 PDN Type -> 3GPP TS 24.501 9.11.4.11 PDU session type */
+private function f_pfcp_pdn_type_2_ng_nas_pdu_session_type(INT3b pfcp_pdn_type)
+return BIT3 {
+	/* Surprise surprise, they are the same, simply convert INT3b -> BIT3: */
+	return int2bit(pfcp_pdn_type, 3);
+}
+
+private function f_ng_nas_gen_session_establishment_request()
+runs on SMF_Session_CT return octetstring {
+	var BIT3 pdu_sess_type := f_pfcp_pdn_type_2_ng_nas_pdu_session_type(g_pars.pfcp_pars.pdn_type);
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var octetstring nas_enc;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV(int2oct(g_pars.namf.pdu_sess_id, 1)),
+							      pti,
+							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
+							      p_PDU_SessionType := cs_PDU_SessionTypeTV(pdu_sess_type),
+							      p_SSC_Mode := cs_SSC_ModeTV('001'B));
+	nas_enc := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	return nas_enc;
+}
+
+private function f_ng_nas_handle_session_establishment_accept(NG_NAS_DL_SM_Message_Type dl_nas)
+runs on SMF_Session_CT {
+	var template (present) NG_NAS_DL_SM_Message_Type exp_rx_nas;
+	var BIT3 pdu_sess_type := f_pfcp_pdn_type_2_ng_nas_pdu_session_type(g_pars.pfcp_pars.pdn_type);
+
+	exp_rx_nas := cr_NG_PDU_SESSION_ESTABLISHMENT_ACCEPT(p_PDU_SessionId := cs_NG_PDU_SessionIdV(int2oct(g_pars.namf.pdu_sess_id, 1)),
+							     p_PDU_SessionType := cs_PDU_SessionTypeV(pdu_sess_type),
+							     p_QoS_Rules := ?,
+							     p_PDU_Address := cr_PDU_AddressTLV(typeValue := pdu_sess_type,
+												adressInfo := ?),
+							     p_DNN := cr_DNN_TLV(f_enc_dns_hostname(g_pars.apn)));
+	if (not match(dl_nas, exp_rx_nas)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Rx unexpected DL NG-NAS: ", dl_nas, " vs exp ", exp_rx_nas));
+	}
+	g_pars.nas.qos_rules := dl_nas.pdu_Session_Establishment_Accept.authorizedQoSRules.listofQoSRules;
+
+	var PDU_Address paddr := dl_nas.pdu_Session_Establishment_Accept.pduAddress;
+	select (g_pars.pfcp_pars.pdn_type) {
+	case (c_PFCP_PDN_Type_IPv4) {
+		if (not match(paddr, cr_PDU_AddressTLV('0'B, pdu_sess_type, ? length (4), omit))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Got unexpected IPv4 UE addr", paddr));
+		}
+		g_ip4_addr := paddr.adressInfo;
+		log("SMF assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
+	}
+	case (c_PFCP_PDN_Type_IPv6) {
+		if (not match(paddr, cr_PDU_AddressTLV(?, pdu_sess_type, ? length (8), *))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Got unexpected IPv6 UE addr", paddr));
+		}
+		g_ip6_interface_id := paddr.adressInfo;
+		log("SMF assigned IPv6 Interface Id: ", g_ip6_interface_id);
+		g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+		log("SMF assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
+	}
+	case (c_PFCP_PDN_Type_IPv4v6) {
+		if (not match(paddr, cr_PDU_AddressTLV(?, pdu_sess_type, ? length (12), *))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Got unexpected IPv4v6 UE addr", paddr));
+		}
+		g_ip6_interface_id := substr(paddr.adressInfo, 0, 8);
+		log("SMF assigned IPv6 Interface Id: ", g_ip6_interface_id);
+		g_ip6_addr := 'FE80000000000000'O & g_ip6_interface_id;
+		log("SMF assigned IPv6 link-local Address: ", f_inet6_ntoa(g_ip6_addr));
+		g_ip4_addr := substr(paddr.adressInfo, 8 , 4);
+		log("SMF assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
+	}
+	}
+}
 
 }
