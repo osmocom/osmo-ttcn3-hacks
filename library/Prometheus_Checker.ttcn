@@ -16,6 +16,8 @@ import from Socket_API_Definitions all;
 import from General_Types all;
 import from Osmocom_Types all;
 
+import from TCCConversion_Functions all;
+
 import from HTTP_Adapter all;
 import from HTTPmsg_Types all;
 
@@ -26,9 +28,16 @@ type enumerated PrometheusMetricType {
 	GAUGE
 };
 
+type record PrometheusMetricLabel {
+	charstring name,
+	charstring val
+};
+type record of PrometheusMetricLabel PrometheusMetricLabels;
+
 type record PrometheusMetricKey {
 	charstring name,
-	PrometheusMetricType mtype
+	PrometheusMetricType mtype,
+	PrometheusMetricLabels labels optional
 };
 type set of PrometheusMetricKey PrometheusMetricKeys;
 
@@ -66,25 +75,29 @@ type component Prometheus_Checker_CT extends http_CT {
 
 template (value) PrometheusMetricKey
 ts_PrometheusMetricKey(template (value) charstring name,
-		       template (value) PrometheusMetricType mtype) := {
+		       template (value) PrometheusMetricType mtype,
+		       template (omit) PrometheusMetricLabels labels := omit) := {
 	name := name,
-	mtype := mtype
+	mtype := mtype,
+	labels := labels
 };
 
 template (value) PrometheusMetric
 ts_PrometheusMetric(template (value) charstring name,
 		    template (value) PrometheusMetricType mtype,
+		    template (omit) PrometheusMetricLabels labels := omit,
 		    template (value) integer val := 0) := {
-	key := ts_PrometheusMetricKey(name, mtype),
+	key := ts_PrometheusMetricKey(name, mtype, labels),
 	val := val
 };
 
 template (value) PrometheusExpect
 ts_PrometheusExpect(template (value) charstring name,
 		    template (value) PrometheusMetricType mtype,
+		    template (omit) PrometheusMetricLabels labels := omit,
 		    template (value) integer min,
 		    template (value) integer max) := {
-	key := ts_PrometheusMetricKey(name, mtype),
+	key := ts_PrometheusMetricKey(name, mtype, labels),
 	min := min,
 	max := max
 };
@@ -112,40 +125,89 @@ private function f_prometheus_metric_mtype_from_string(charstring str) return Pr
 	return mtype;
 }
 
+/* Parse labels from eg. "plmnid="001001",snssai="1"" */
+private function prometheus_parse_metric_labels(charstring str) return PrometheusMetricLabels
+{
+	var PrometheusMetricLabels labels := {};
+	var Misc_Helpers.ro_charstring tokens := f_str_split(str, ",");
+	for (var integer i := 0; i < lengthof(tokens); i := i + 1) {
+		var PrometheusMetricLabel l;
+		l.name := regexp(tokens[i],"(?+)=\"(?+)\"", 0);
+		l.val := regexp(tokens[i],"(?+)=\"(?+)\"", 1);
+		labels := labels & { l };
+	}
+	return labels;
+}
+
+/* Value line, example: "cx_rx_unknown 0" or "fivegs_smffunction_sm_pdusessioncreationreq{plmnid="001001",snssai="1"} 1" */
+private function f_prometheus_parse_metric_val_line(inout PrometheusMetric metric, charstring line)
+{
+	var integer pos0, pos1;
+	if (not f_str_startswith(line, metric.key.name)) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Failed parsing Prometheus HTTP response line: ", line));
+	}
+	var Misc_Helpers.ro_charstring tokens := f_str_split(line, " ", skip_empty_chunks := true);
+	if (lengthof(tokens) != 2) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Failed parsing Prometheus HTTP response line: ", line));
+	}
+
+	pos0 := f_strstr(tokens[0], "{", 0);
+	if (pos0 > 0) {
+		/* Labeled key, parse labels: */
+		pos1 := f_strstr(tokens[0], "}", pos0);
+		if (pos1 < 0) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Failed parsing Prometheus HTTP response line: ", line));
+		}
+		var charstring labels_str := substr(tokens[0], pos0, pos1 - pos0);
+		metric.key.labels := prometheus_parse_metric_labels(labels_str);
+	} else {
+		metric.key.labels := omit;
+	}
+
+	/* Finally, fill in value: */
+	metric.val := str2int(tokens[1]);
+}
+
 private function f_prometheus_parse_http_response(charstring body) return PrometheusMetrics
 {
 	var PrometheusMetrics metrics := {};
 	var Misc_Helpers.ro_charstring lines := f_str_split(body, "\n", skip_empty_chunks := true);
-	for (var integer i := 0; i + 2 < lengthof(lines); i := i + 3) {
+	var integer i := 0;
+	while (i < lengthof(lines)) {
 		var PrometheusMetric it;
+
 		/* HELP line, example: "# HELP cx_rx_unknown Received Cx unknown messages" */
 		if (not f_str_startswith(lines[i], "# HELP ")) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 						log2str("Failed parsing Prometheus HTTP response line: ", lines[i]));
 		}
+		i := i + 1;
+		if (i >= lengthof(lines)) {
+			break;
+		}
 
 		/* TYPE line, example: "# TYPE cx_rx_unknown counter" */
-		if (not f_str_startswith(lines[i + 1], "# TYPE ")) {
+		if (not f_str_startswith(lines[i], "# TYPE ")) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Failed parsing Prometheus HTTP response line: ", lines[i + 1]));
+						log2str("Failed parsing Prometheus HTTP response line: ", lines[i]));
 		}
-		var Misc_Helpers.ro_charstring type_tokens := f_str_split(lines[i + 1], " ", skip_empty_chunks := true);
+		var Misc_Helpers.ro_charstring type_tokens := f_str_split(lines[i], " ", skip_empty_chunks := true);
 		if (lengthof(type_tokens) < 4) {
 			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
 						log2str("Failed parsing Prometheus HTTP response line: ", type_tokens));
 		}
 		it.key.name := type_tokens[2];
 		it.key.mtype := f_prometheus_metric_mtype_from_string(type_tokens[3]);
+		i := i + 1;
 
-		/* Value line, example: "cx_rx_unknown 0" */
-		if (not f_str_startswith(lines[i + 2], it.key.name)) {
-			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-						log2str("Failed parsing Prometheus HTTP response line: ", lines[i + 2]));
+		while (i < lengthof(lines) and f_str_startswith(lines[i], it.key.name)) {
+			f_prometheus_parse_metric_val_line(it, lines[i]);
+			metrics := metrics & { it };
+			i := i + 1;
 		}
-		var Misc_Helpers.ro_charstring value_tokens := f_str_split(lines[i + 2], " ", skip_empty_chunks := true);
-		it.val := str2int(value_tokens[1]);
-
-		metrics := metrics & { it };
 	}
 	return metrics;
 }
@@ -171,7 +233,7 @@ private function f_prometheus_get_metrics() runs on Prometheus_Checker_CT return
 private function f_prometheus_metrics_update_value(inout PrometheusMetrics metrics, inout Booleans seen, PrometheusMetric it) return boolean
 {
 	for (var integer i := 0; i < lengthof(metrics); i := i + 1) {
-		if (it.key.name != metrics[i].key.name or it.key.mtype != metrics[i].key.mtype) {
+		if (not match(it.key, metrics[i].key)) {
 			continue;
 		}
 		metrics[i] := it;
@@ -207,7 +269,7 @@ function f_prometheus_snapshot(PrometheusMetricKeys keys, float time_out := 10.0
 	}
 
 	for (var integer i := 0; i < lengthof(keys); i := i + 1) {
-		metrics := metrics & {valueof(ts_PrometheusMetric(keys[i].name, keys[i].mtype, 0))};
+		metrics := metrics & {valueof(ts_PrometheusMetric(keys[i].name, keys[i].mtype, keys[i].labels, 0))};
 		seen := seen & {false};
 		seen_remain := seen_remain + 1;
 	}
@@ -244,14 +306,10 @@ function f_prometheus_snapshot(PrometheusMetricKeys keys, float time_out := 10.0
 	return metrics;
 }
 
-private function f_compare_PrometheusMetricKey(PrometheusMetricKey a, PrometheusMetricKey b) return boolean {
-	return a.name == b.name and a.mtype == b.mtype;
-}
-
 private function get_val_from_snapshot(inout integer val, PrometheusMetric metric, PrometheusMetrics snapshot) return boolean
 {
 	for (var integer i := 0; i < lengthof(snapshot); i := i + 1) {
-		if (not f_compare_PrometheusMetricKey(metric.key, snapshot[i].key)) {
+		if (not match(metric.key, snapshot[i].key)) {
 			continue;
 		}
 		val := snapshot[i].val;
@@ -267,7 +325,7 @@ private function f_compare_expect(PrometheusMetric metric,
 				  boolean use_snapshot := false,
 				  PrometheusMetrics snapshot := {}) return boolean {
 	var integer val := 0;
-	if (not f_compare_PrometheusMetricKey(metric.key, expect.key)) {
+	if (not match(metric.key, expect.key)) {
 		return false;
 	}
 	if (use_snapshot) {
@@ -300,7 +358,7 @@ return PrometheusExpectResult {
 
 	for (var integer i := 0; i < lengthof(expects); i := i + 1) {
 		var PrometheusExpect exp := expects[i];
-		if (exp.key.name != metric.key.name) {
+		if (not match(metric.key, exp.key)) {
 			continue;
 		}
 		if (not f_compare_expect(metric, exp, use_snapshot, snapshot)) {
