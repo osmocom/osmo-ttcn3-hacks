@@ -54,6 +54,16 @@ DIR=$BASEDIR/titan.ProtocolModules.DIAMETER_ProtocolModule_Generator/src
 FILES="DIAMETER_EncDec.cc"
 gen_links $DIR $FILES
 
+# Needed by HTTP_Adapter (Prometheus_Checker.ttcn metrics):
+DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
+FILES="Abstract_Socket.cc Abstract_Socket.hh "
+gen_links $DIR $FILES
+
+# Needed by HTTP_Adapter (Prometheus_Checker.ttcn metrics):
+DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
+FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
 FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
 gen_links $DIR $FILES
@@ -126,6 +136,7 @@ FILES+="Mutex.ttcn "
 FILES+="HTTP2_CodecPort.ttcn HTTP2_CodecPort_CtrlFunct.ttcn HTTP2_CodecPort_CtrlFunctDef.cc HTTP2_Templates.ttcn HTTP2_Functions.ttcn HTTP2_Msg.ttcn HTTP2_Adapter.ttcn HTTP2_Server_Emulation.ttcn "
 FILES+="TS29503_Nudm_UECM_Templates.ttcn TS29503_Nudm_SDM_Templates.ttcn TS29502_Nsmf_PDUSession_Templates.ttcn TS29512_Npcf_SMPolicyControl_Templates.ttcn TS29518_Namf_Communication_Templates.ttcn "
 FILES+="NG_NAS_Osmo_Types.ttcn NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
+FILES+="HTTP_Adapter.ttcn Prometheus_Checker.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish

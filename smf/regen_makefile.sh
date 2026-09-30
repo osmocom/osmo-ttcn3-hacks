@@ -5,6 +5,7 @@ NAME=SMF_Tests
 FILES=" *.asn
 	*.ttcn
 	*.ttcnpp
+	Abstract_Socket.cc
 	BSSGP_EncDec.cc
 	common_ext.cc
 	DIAMETER_CodecPort_CtrlFunctDef.cc
@@ -14,6 +15,8 @@ FILES=" *.asn
 	GTPv1C_CodecPort_CtrlFunctDef.cc
 	GTPv1U_CodecPort_CtrlFunctDef.cc
 	GTPv2_CodecPort_CtrlFunctDef.cc
+	HTTPmsg_MessageLen_Function.cc
+	HTTPmsg_PT.cc
 	HTTP2_EncDec.cc
 	HTTP2_CodecPort_CtrlFunctDef.cc
 	ICMPv6_EncDec.cc
