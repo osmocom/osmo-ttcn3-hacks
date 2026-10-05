@@ -264,7 +264,8 @@ def start():
             "-e",
             "TESTENV_BINARY_REPO=1",
         ]
-    else:
+
+    if os.path.exists(osmo_dev_dir):
         cmd += [
             "--volume",
             f"{osmo_dev_dir}:{osmo_dev_dir}",
