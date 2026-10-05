@@ -111,7 +111,7 @@ def init(cfg):
     ] + extra_opts
 
     cwd = get_osmo_dev_dir()
-    if testenv.cmd.run(cmd, cwd=cwd, check=False).returncode:
+    if testenv.cmd.run(cmd, cwd=cwd, check=False, envtype="osmo_dev").returncode:
         logging.critical("gen_makefile.py from osmo-dev failed!")
         logging.critical("Your osmo-dev.git clone might be outdated, try:")
         logging.critical(f"$ git -C {shlex.quote(cwd)} pull")
@@ -141,4 +141,4 @@ def make(cfg):
         sys.exit(1)
 
     logging.info("Building test components")
-    testenv.cmd.run(["make"] + targets, cwd=testenv.cmd.make_dir)
+    testenv.cmd.run(["make"] + targets, cwd=testenv.cmd.make_dir, envtype="osmo_dev")

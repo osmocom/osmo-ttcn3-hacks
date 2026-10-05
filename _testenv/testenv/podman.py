@@ -80,11 +80,11 @@ def image_build(check_existing=True):
     )
 
 
-def generate_env_podman(env=None):
+def generate_env_podman(env=None, envtype="binary_repo"):
     env = env or {}
     ret = []
 
-    for key, val in testenv.cmd.generate_env(env, True).items():
+    for key, val in testenv.cmd.generate_env(env, True, envtype=envtype).items():
         ret += ["-e", f"{key}={val}"]
 
     return ret
@@ -135,7 +135,7 @@ def init():
         run_shell_on_stop = True
 
 
-def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, **kwargs):
+def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, envtype="binary_repo", **kwargs):
     podman_opts = podman_opts or []
     env = env or {}
 
@@ -143,7 +143,7 @@ def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, **kwargs):
         raise RuntimeError(f"Attempting to execute a command in podman, but the container isn't running anymore: {cmd}")
 
     podman_opts = list(podman_opts)
-    podman_opts += generate_env_podman(env)
+    podman_opts += generate_env_podman(env, envtype)
     # Attach a fake tty (eclipse-titan won't print colored output otherwise)
     podman_opts += ["-t"]
 
@@ -160,11 +160,11 @@ def exec_cmd(cmd, podman_opts=None, cwd=None, env=None, **kwargs):
     )
 
 
-def exec_cmd_background(cmd, podman_opts=None, cwd=None, env=None):
+def exec_cmd_background(cmd, podman_opts=None, cwd=None, env=None, envtype="binary_repo"):
     podman_opts = podman_opts or []
     env = env or {}
 
-    podman_opts = list(podman_opts) + generate_env_podman(env)
+    podman_opts = list(podman_opts) + generate_env_podman(env, envtype)
 
     if cwd:
         podman_opts += ["-w", cwd]

@@ -105,7 +105,10 @@ vty_port=4243
 
 * `package=`: debian package(s) to be installed for running a test component
   and the script in `prepare=`. Multiple values separated by spaces. Set to
-  `package=no` to not install any package.
+  `package=no` to not install any package, in which case osmo-dev will be used
+  to build the `make=` target. With both `package=no` and `make=no`, testenv
+  assumes that nothing needs to be installed or built before the test component
+  can be started.
 
 * `prepare=`: optional script to run before staring the program (after files
   are copied to the test directory). Typically this is used to create configs

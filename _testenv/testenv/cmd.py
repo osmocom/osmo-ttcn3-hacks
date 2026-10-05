@@ -144,7 +144,7 @@ def run(cmd, check=True, env=None, no_podman=False, stdin=subprocess.DEVNULL, en
         envtype = "binary_repo" if getattr(testenv.args, "binary_repo", True) else "osmo_dev"
 
     if not no_podman and testenv.args.podman:
-        return testenv.podman.exec_cmd(cmd, check=check, env=env, **kwargs)
+        return testenv.podman.exec_cmd(cmd, check=check, env=env, envtype=envtype, **kwargs)
 
     logging.debug(f"+ {cmd}")
 
