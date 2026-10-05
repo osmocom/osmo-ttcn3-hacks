@@ -59,11 +59,15 @@ def start(cfg):
         if testenv.args.io_uring:
             env["LIBOSMO_IO_BACKEND"] = "IO_URING"
 
+        envtype = "osmo_dev"
+        if testenv.args.binary_repo and section_data["package"] != "no":
+            envtype = "binary_repo"
+
         if testenv.args.podman:
-            daemons[section] = testenv.podman.exec_cmd_background(cmd, cwd=cwd, env=env)
+            daemons[section] = testenv.podman.exec_cmd_background(cmd, cwd=cwd, env=env, envtype=envtype)
         else:
             logging.debug(f"+ {cmd}")
-            daemons[section] = subprocess.Popen(cmd, cwd=cwd, env=testenv.cmd.generate_env(env))
+            daemons[section] = subprocess.Popen(cmd, cwd=cwd, env=testenv.cmd.generate_env(env, envtype))
 
         # Wait 200ms and check if it is still running
         time.sleep(0.2)
