@@ -146,41 +146,6 @@ def clone_project(project):
     show_commit(project, git_dir_project)
 
 
-def from_source_sccp_demo_user():
-    sccp_dir = os.path.join(git_dir, "libosmo-sigtran")
-    sccp_demo_user_path = os.path.join(sccp_dir, "examples/sccp_demo_user")
-
-    # Install libraries even if not building sccp_demo_user, because it gets
-    # linked dynamically against them.
-    apt_install(
-        [
-            "libosmo-netif-dev",
-            "libosmocore-dev",
-        ]
-    )
-
-    clone_project("libosmo-sigtran")
-    if not os.path.exists(sccp_demo_user_path):
-        logging.info("Building sccp_demo_user")
-        testenv.cmd.run(["autoreconf", "-fi"], cwd=sccp_dir)
-
-        configure_cmd = ["./configure"]
-        if testenv.args.binary_repo.endswith(":asan"):
-            configure_cmd += ["--enable-sanitize"]
-        testenv.cmd.run(configure_cmd, cwd=sccp_dir)
-
-        testenv.cmd.run(
-            ["make", "-j", f"{jobs}", "libosmo-sigtran.la"],
-            cwd=os.path.join(sccp_dir, "src"),
-        )
-        testenv.cmd.run(
-            ["make", "-j", f"{jobs}", "sccp_demo_user"],
-            cwd=os.path.join(sccp_dir, "examples"),
-        )
-
-    testenv.cmd.run(["ln", "-s", sccp_demo_user_path, "/usr/local/bin/sccp_demo_user"])
-
-
 def from_source_osmo_ns_dummy():
     libosmocore_dir = os.path.join(git_dir, "libosmocore")
     osmo_ns_dummy_path = os.path.join(libosmocore_dir, "utils/osmo-ns-dummy")
@@ -204,8 +169,6 @@ def from_source_osmo_ns_dummy():
 
 def from_source(cfg, cfg_name, section):
     program = cfg[section]["program"].split(" ", 1)[0]
-    if program == "run_sccp_demo_user.sh":
-        return from_source_sccp_demo_user()
     if program == "run_osmo_ns_dummy.sh":
         return from_source_osmo_ns_dummy()
 
