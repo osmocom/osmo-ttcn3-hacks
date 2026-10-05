@@ -146,32 +146,7 @@ def clone_project(project):
     show_commit(project, git_dir_project)
 
 
-def from_source_osmo_ns_dummy():
-    libosmocore_dir = os.path.join(git_dir, "libosmocore")
-    osmo_ns_dummy_path = os.path.join(libosmocore_dir, "utils/osmo-ns-dummy")
-
-    clone_project("libosmocore")
-    if not os.path.exists(osmo_ns_dummy_path):
-        logging.info("Building osmo-ns-dummy")
-        testenv.cmd.run(["autoreconf", "-fi"], cwd=libosmocore_dir)
-
-        configure_cmd = ["./configure"]
-        if testenv.args.binary_repo.endswith(":asan"):
-            configure_cmd += ["--enable-sanitize"]
-        testenv.cmd.run(configure_cmd, cwd=libosmocore_dir)
-
-        testenv.cmd.run(
-            [os.path.join(testenv.data_dir, "scripts/build_osmo_ns_dummy.sh"), str(jobs)], cwd=libosmocore_dir
-        )
-
-    testenv.cmd.run(["ln", "-s", osmo_ns_dummy_path, "/usr/local/bin/osmo-ns-dummy"])
-
-
 def from_source(cfg, cfg_name, section):
-    program = cfg[section]["program"].split(" ", 1)[0]
-    if program == "run_osmo_ns_dummy.sh":
-        return from_source_osmo_ns_dummy()
-
     logging.error(f"Can't install {section}! Fix this by either:")
     logging.error(f"* Adding package= to [{section}] in {cfg_name}")
     logging.error("  (if it can be installed from binary packages)")
