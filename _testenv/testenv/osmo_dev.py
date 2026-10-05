@@ -86,7 +86,7 @@ def init(cfg):
         "--build-debug",
         "--no-make-check",
         "--install-prefix",
-        testenv.cmd.install_dir,
+        testenv.cmd.install_dir["osmo_dev"],
         "--make-dir",
         testenv.cmd.make_dir,
         "--no-ldconfig",
