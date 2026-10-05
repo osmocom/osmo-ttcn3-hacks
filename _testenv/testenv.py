@@ -40,7 +40,10 @@ def run():
         testenv.osmo_dev.check_init_needed()
 
     testenv.podman_install.init()
-    testenv.cmd.init_env()
+    if osmo_dev_has_any_targets:
+        testenv.cmd.init_env_osmo_dev()
+    if testenv.args.binary_repo:
+        testenv.cmd.init_env_binary_repo()
     testenv.testdir.init()
     testenv.daemons.init()
 
