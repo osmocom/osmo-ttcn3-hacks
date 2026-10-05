@@ -59,9 +59,18 @@ def get_targets(cfg):
             continue
 
         if "make" in section_data and section_data["make"] != "no" and section_data["make"] not in ret:
+            if testenv.args.binary_repo and section_data.get("package", "no") != "no":
+                continue
             ret += [section_data["make"]]
 
     return ret
+
+
+def has_any_targets():
+    for cfg in testenv.testenv_cfg.cfgs.values():
+        if get_targets(cfg):
+            return True
+    return False
 
 
 def init(cfg):

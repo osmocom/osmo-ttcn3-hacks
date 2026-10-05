@@ -35,7 +35,8 @@ def run():
     testenv.testsrcdir_cfg.init()
     testenv.testenv_cfg.init()
 
-    if not testenv.args.binary_repo:
+    osmo_dev_has_any_targets = testenv.osmo_dev.has_any_targets()
+    if osmo_dev_has_any_targets:
         testenv.osmo_dev.check_init_needed()
 
     testenv.podman_install.init()
@@ -52,7 +53,7 @@ def run():
     testenv.testsuite.build()
 
     # Build all components first
-    if not testenv.args.binary_repo:
+    if osmo_dev_has_any_targets:
         for cfg_name, cfg in testenv.testenv_cfg.cfgs.items():
             testenv.testenv_cfg.set_current(cfg_name)
             testenv.osmo_dev.init(cfg)
