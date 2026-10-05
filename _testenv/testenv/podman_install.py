@@ -1,37 +1,13 @@
 # Copyright 2024 sysmocom - s.f.m.c. GmbH
 # SPDX-License-Identifier: GPL-3.0-or-later
 import logging
-import multiprocessing
 import os
-import packaging.version
-import re
 import shlex
 import string
 import subprocess
 import sys
 import testenv.cmd
 import testenv.podman
-
-git_dir = None
-jobs = None
-
-
-def init():
-    global git_dir
-    global jobs
-
-    # Make the git dir we clone into specific to the repository we build
-    # against. Replace ":" because the libtool scripts fail to escape it when
-    # setting LD_LIBRARY_PATH, leading to "cannot open shared object file"
-    # errors.
-    git_dir = os.path.join(testenv.args.cache, "git", f"build_against_{testenv.args.binary_repo}".replace(":", "_"))
-
-    if testenv.args.jobs:
-        jobs = testenv.args.jobs
-    else:
-        jobs = multiprocessing.cpu_count()
-
-    os.makedirs(git_dir, exist_ok=True)
 
 
 def get_dbg_pkgs(dep):
@@ -99,61 +75,6 @@ def apt_install(pkgs):
     testenv.cmd.run(["apt-get", "-q", "install", "-y", "--no-install-recommends"] + pkgs)
 
 
-def show_commit(project, cwd):
-    cmd = ["git", "-P", "-C", cwd, "-c", "color.ui=always", "log", "-1", "--oneline"]
-    logging.info(f"{project}: showing current commit")
-    testenv.cmd.run(cmd, no_podman=True)
-
-
-def clone_project(project):
-    git_dir_project = os.path.join(git_dir, project)
-    if os.path.exists(git_dir_project):
-        logging.debug(f"{project}: already cloned")
-        show_commit(project, git_dir_project)
-        return
-
-    branch = "master"
-    url = f"https://gerrit.osmocom.org/{project}"
-    if testenv.args.binary_repo.endswith(":latest"):
-        ls_remote = testenv.cmd.run(["git", "ls-remote", "--tags", url], capture_output=True, text=True, no_podman=True)
-        tags = []
-        pattern = re.compile("^\\d+\\.\\d+\\.\\d+$")
-        for line in ls_remote.stdout.split("\n"):
-            if "refs/tags/" in line:
-                tag = line.split("refs/tags/")[1].split("^")[0]
-                if pattern.match(tag):
-                    tags += [tag]
-        tags.sort(key=packaging.version.Version, reverse=True)
-        branch = tags[0]
-
-    logging.info(f"{project}: cloning {branch}")
-    testenv.cmd.run(
-        [
-            "git",
-            "-c",
-            "advice.detachedHead=false",
-            "-C",
-            git_dir,
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            branch,
-            url,
-        ],
-        no_podman=True,
-    )
-    show_commit(project, git_dir_project)
-
-
-def from_source(cfg, cfg_name, section):
-    logging.error(f"Can't install {section}! Fix this by either:")
-    logging.error(f"* Adding package= to [{section}] in {cfg_name}")
-    logging.error("  (if it can be installed from binary packages)")
-    logging.error("* Editing from_source() in testenv/podman_install.py")
-    sys.exit(1)
-
-
 def packages(cfg, cfg_name):
     packages = []
 
@@ -166,6 +87,8 @@ def packages(cfg, cfg_name):
                 continue
             packages += section_data["package"].split(" ")
         else:
-            from_source(cfg, cfg_name, section)
+            logging.error(f"Missing package= line in [{section}] of {cfg_name}!")
+            logging.error("See _testenv/README.md for more information.")
+            sys.exit(1)
 
     apt_install(packages)

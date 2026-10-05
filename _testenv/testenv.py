@@ -39,7 +39,6 @@ def run():
     if osmo_dev_has_any_targets:
         testenv.osmo_dev.check_init_needed()
 
-    testenv.podman_install.init()
     if osmo_dev_has_any_targets:
         testenv.cmd.init_env_osmo_dev()
     if testenv.args.binary_repo:
