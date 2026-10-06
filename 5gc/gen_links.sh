@@ -22,6 +22,21 @@ DIR=$BASEDIR/titan.ProtocolModules.GTP_v13.5.0/src
 FILES="GTPU_EncDec.cc GTPU_Types.ttcn "
 gen_links $DIR $FILES
 
+# Needed by HTTP_Adapter (OGS_UEInfo.ttcn metrics):
+DIR=$BASEDIR/titan.TestPorts.Common_Components.Abstract_Socket/src
+FILES="Abstract_Socket.cc Abstract_Socket.hh "
+gen_links $DIR $FILES
+
+# Needed by HTTP_Adapter (OGS_UEInfo.ttcn metrics):
+DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
+FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
+gen_links $DIR $FILES
+
+# Needed by OGS_UEInfo.ttcn metrics:
+DIR=$BASEDIR/titan.ProtocolModules.JSON_v07_2006/src
+FILES="JSON_Generic_Null_Def.asn JSON_Generic.ttcn"
+gen_links $DIR $FILES
+
 DIR=$BASEDIR/osmo-uecups/ttcn3
 FILES="UECUPS_CodecPort.ttcn  UECUPS_CodecPort_CtrlFunct.ttcn  UECUPS_CodecPort_CtrlFunctDef.cc UECUPS_Types.ttcn "
 gen_links $DIR $FILES
@@ -89,6 +104,8 @@ FILES+="NGAP_CodecPort.ttcn NGAP_CodecPort_CtrlFunctDef.cc NGAP_CodecPort_CtrlFu
 FILES+="NG_NAS_Osmo_Types.ttcn NG_NAS_Osmo_Templates.ttcn NG_NAS_Functions.ttcn "
 FILES+="NG_CryptoFunctionDefs.cc NG_CryptoFunctions.ttcn "
 FILES+="GTPv1U_CodecPort.ttcn GTPv1U_CodecPort_CtrlFunct.ttcn GTPv1U_CodecPort_CtrlFunctDef.cc GTPv1U_Templates.ttcn GTPv1U_Emulation.ttcnpp "
+FILES+="HTTP_Adapter.ttcn "
+FILES+="JSON_Generic_Templates.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
