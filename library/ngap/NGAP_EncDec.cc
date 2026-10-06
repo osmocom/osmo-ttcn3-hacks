@@ -229,4 +229,24 @@ NGAP__IEs::SecondaryRATDataUsageReportTransfer dec__NGAP__SecondaryRATDataUsageR
 	return ret;
 }
 
+OCTETSTRING enc__NGAP__SourceNGRANNode__ToTargetNGRANNode__TransparentContainer(const NGAP__IEs::SourceNGRANNode__ToTargetNGRANNode__TransparentContainer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::SourceNGRANNode__ToTargetNGRANNode__TransparentContainer_descr_, TTCN_buf,
+		 TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::SourceNGRANNode__ToTargetNGRANNode__TransparentContainer dec__NGAP__SourceNGRANNode__ToTargetNGRANNode__TransparentContainer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::SourceNGRANNode__ToTargetNGRANNode__TransparentContainer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::SourceNGRANNode__ToTargetNGRANNode__TransparentContainer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
 }
