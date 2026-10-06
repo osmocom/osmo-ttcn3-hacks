@@ -209,10 +209,21 @@ def from_source(cfg, cfg_name, section):
     if program == "run_osmo_ns_dummy.sh":
         return from_source_osmo_ns_dummy()
 
-    logging.error(f"Can't install {section}! Fix this by either:")
-    logging.error(f"* Adding package= to [{section}] in {cfg_name}")
-    logging.error("  (if it can be installed from binary packages)")
-    logging.error("* Editing from_source() in testenv/podman_install.py")
+    logging.error(f"Running with --binary-packages (-b), but can't install {section}! Fix this by either:")
+    logging.error("")
+    logging.error(f"Set the debian package name with package= in [{section}] in {cfg_name}:")
+    logging.error("* The debian package will be installed.")
+    logging.error("")
+    logging.error(f"Set package=no in [{section}] in {cfg_name}:")
+    logging.error("* osmo-dev will be used to build the test component from source.")
+    logging.error("* Jenkins will always use current master.")
+    logging.error("")
+    logging.error("Edit from_source() in testenv/podman_install.py:")
+    logging.error("* Dependency packages will be installed from the configured")
+    logging.error("  binary repository (e.g. -b osmocom:latest).")
+    logging.error("* The git repository for the test component will be cloned and")
+    logging.error("  the version matching the binary repository will be built")
+    logging.error("  (-b osmocom:latest => latest tagged version, otherwise master).")
     sys.exit(1)
 
 
