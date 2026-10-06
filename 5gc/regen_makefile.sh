@@ -7,6 +7,7 @@ FILES="
 	*.c
 	*.ttcn
 	*.ttcnpp
+	Abstract_Socket.cc
 	IPL4asp_PT.cc
 	IPL4asp_discovery.cc
 	Native_FunctionDefs.cc
@@ -21,6 +22,8 @@ FILES="
 	TCCInterface.cc
 	GTPU_EncDec.cc
 	GTPv1U_CodecPort_CtrlFunctDef.cc
+	HTTPmsg_MessageLen_Function.cc
+	HTTPmsg_PT.cc
 	UECUPS_CodecPort_CtrlFunctDef.cc
 "
 
