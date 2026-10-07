@@ -60,7 +60,7 @@ def start(cfg):
             env["LIBOSMO_IO_BACKEND"] = "IO_URING"
 
         envtype = "osmo_dev"
-        if testenv.args.binary_repo and section_data["package"] != "no":
+        if testenv.args.binary_repo and section_data.get("package") != "no":
             envtype = "binary_repo"
 
         if testenv.args.podman:

@@ -58,10 +58,24 @@ def get_targets(cfg):
             # Gets built with testenv.testsuite.build()
             continue
 
-        if "make" in section_data and section_data["make"] != "no" and section_data["make"] not in ret:
-            if testenv.args.binary_repo and section_data.get("package", "no") != "no":
+        if "make" not in section_data or section_data["make"] == "no":
+            # No osmo-dev make target listed in testenv.cfg
+            continue
+
+        if section_data["make"] in ret:
+            # Already decided that this target will be built while parsing a
+            # previous section
+            continue
+
+        if testenv.args.binary_repo:
+            if "package" not in section_data:
+                # Gets built with testenv.podman_install.from_source()
                 continue
-            ret += [section_data["make"]]
+            if section_data["package"] != "no":
+                # Gets installed from a debian package
+                continue
+
+        ret += [section_data["make"]]
 
     return ret
 
