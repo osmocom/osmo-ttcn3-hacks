@@ -45,6 +45,7 @@ import from PIPEasp_PortType all;
 import from PIPEasp_Types all;
 
 import from SGP23_Constants all;
+import from esx_header_Types_JSON all;
 
 type component MTC_CT {
 	timer g_Tguard;
@@ -128,7 +129,7 @@ runs on MTC_CT return eIM_ConnHdlr {
 	return vc_conn;
 }
 
-private function f_init(charstring id, float t_guard := 40.0) runs on MTC_CT {
+private function f_init(charstring id, float t_guard := 60.0) runs on MTC_CT {
 	g_Tguard.start(t_guard);
 	activate(as_Tguard());
 
@@ -194,6 +195,7 @@ runs on eIM_ConnHdlr return RemoteProfileProvisioningRequest {
 
 	if (not istemplatekind(expected_es9p_req, "omit") and not match(request, expected_es9p_req)) {
 		setverdict(fail, "unexpected request from eIM on ES9+");
+		log(request);
 	}
 
 	return request;
@@ -203,6 +205,15 @@ runs on eIM_ConnHdlr return RemoteProfileProvisioningRequest {
 private function f_es9p_send(RemoteProfileProvisioningResponse es9p_res) runs on eIM_ConnHdlr  {
 	var charstring es9p_res_json;
 	enc_RemoteProfileProvisioningResponse_to_JSON(es9p_res, es9p_res_json);
+	HTTP_SRV[0].send(ts_http_resp(es9p_res_json));
+}
+
+/* Send Es9p HTTP response (error) */
+private function f_es9p_send_err(template JSON_ESx_ResponseHeader json_err) runs on eIM_ConnHdlr  {
+	var charstring es9p_res_json;
+	var JSON_ES9p_RemoteProfileProvisioningResponse json_pdu;
+	json_pdu.emptyResponse.header := valueof(json_err);
+	es9p_res_json := oct2char(enc_JSON_ES9p_RemoteProfileProvisioningResponse(json_pdu));
 	HTTP_SRV[0].send(ts_http_resp(es9p_res_json));
 }
 
@@ -420,7 +431,8 @@ private function f_esipa_send_json(EsipaMessageFromIpaToEim esipa_req) runs on e
 }
 
 /* Receive ESipa HTTP response */
-private function f_esipa_receive(template EsipaMessageFromEimToIpa expected_esipa_res := omit)
+private function f_esipa_receive(template EsipaMessageFromEimToIpa expected_esipa_res := omit,
+				 template JSON_ESx_FunctionExecutionStatusCodeData expected_json_err := omit)
 runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
 	var template EsipaMessageFromEimToIpa esipa_res;
 	var DecodedEimToIpaMessage_Wrap esipa_res_wrap; /* JSON */
@@ -455,13 +467,39 @@ runs on eIM_ConnHdlr return template EsipaMessageFromEimToIpa {
 	} else if (ispresent(response_http.response)) {
 		if (mp_esipa_json == true) {
 			dec_EsipaMessageFromEimToIpa_from_JSON(response_http.response.body, esipa_res_wrap);
-			esipa_res := esipa_res_wrap.asn1_pdu;
-			if (not istemplatekind(expected_esipa_res, "omit")) {
-				if (not match(valueof(esipa_res), expected_esipa_res)) {
-					setverdict(fail, "unexpected response (JSON) from eIM on ESipa");
+			if (isbound(esipa_res_wrap.asn1_pdu)) {
+				esipa_res := esipa_res_wrap.asn1_pdu;
+
+				if (not istemplatekind(expected_esipa_res, "omit")) {
+					/* The JSON message definition of the ProvideEimPackageResultResponse contains
+					 * only one optional field (eimAcknowledgements). When this field is missing,
+					 * the ProvideEimPackageResultResponse becomes indistinguishable from an empty
+					 * response and is decoded as such. In case an expected_esipa_res is given, we
+					 * can check if a ProvideEimPackageResultResponse is expected. When this is the
+					 * case and the decoded response (esipa_res) was empty, we may infer the
+					 * appropriate ProvideEimPackageResultResponse. */
+					if (ispresent(expected_esipa_res.provideEimPackageResultResponse) and istemplatekind(esipa_res, "omit")) {
+						esipa_res := { provideEimPackageResultResponse := { emptyResponse := { } } }
+					}
+					if (not match(valueof(esipa_res), expected_esipa_res)) {
+						setverdict(fail, "unexpected response (JSON) from eIM on ESipa");
+						log(valueof(esipa_res));
+					}
 				}
+				return esipa_res;
+			} else if (isbound(esipa_res_wrap.err)) {
+				if (not istemplatekind(expected_json_err, "omit")) {
+					if (not match(valueof(esipa_res_wrap.err), expected_json_err)) {
+						setverdict(fail, "unexpected error response (JSON) from eIM on ESipa");
+					}
+				}
+				return omit;
+			} else {
+			  /* The decoder should always either return an error result or a decoded asn1_pdu, but the
+			   * result should never be completely empty. */
+			  setverdict(fail, "unexpected empty decoding result while decoding received response (JSON) from eIM on ESipa");
+			  return omit;
 			}
-			return esipa_res;
 		} else {
 			setverdict(fail, "unexpected response from eIM on ESipa (response is ASN.1 instead of JSON?)");
 			return omit;
@@ -983,7 +1021,321 @@ testcase TC_proc_notifyStateChange() runs on MTC_CT {
 	setverdict(pass);
 }
 
+/* See SGP.33-3, section 4.2.12.2.1, Test Sequence #01 and SGP.23, section 4.4.23.2.1, Test Sequence #01 */
+private function f_TC_eIM_AuthenticateClient_Nominal_without_Confirmation_Code(charstring id) runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var octetstring eim_transaction_id;
+	var charstring smdpp_addr := mp_es9p_ip & ":" & int2str(mp_es9p_port)
+	var charstring activationCode := f_SGP23_ACTIVATION_CODE_1(test_dp_address := smdpp_addr);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("download", ts_JSON_REST_download_order(SGP23_EID1, activationCode));
+
+	/* Check the eIM for new eIM packages, we expect to get a profileDownloadTriggerRequest that contains the
+	 * activationCode that we have created the download with (see above) */
+	esipa_res := f_esipa_transceive(valueof(ts_getEimPackageRequest(SGP23_EID1)),
+					        tr_getEimPackageResponse_dnlTrigReq(tr_profileDownloadTriggerRequest(activationCode)));
+	eim_transaction_id := valueof(esipa_res.getEimPackageResponse.profileDownloadTriggerRequest.eimTransactionId);
+
+
+	/* Step IC1/IC2: */
+	f_esipa_send(valueof(ts_initiateAuthenticationRequestEsipa(euiccChallenge := SGP23_S_EUICC_CHALLENGE,
+								   smdpAddress := smdpp_addr,
+								   eimTransactionId := eim_transaction_id)));
+	f_es9p_receive(tr_initiateAuthenticationRequest(euiccChallenge := SGP23_S_EUICC_CHALLENGE,
+							smdpAddress := smdpp_addr));
+
+	/* Step 1a Initiate Authentication Response */
+	var template RemoteProfileProvisioningResponse INITIATE_AUTH_OK :=
+		ts_initiateAuthenticationResponse(
+			transactionId := SGP23_S_TRANSACTION_ID,
+			serverSigned1 := ts_serverSigned1(transactionId := SGP23_S_TRANSACTION_ID,
+							  euiccChallenge := SGP23_S_EUICC_CHALLENGE,
+							  serverAddress := smdpp_addr,
+							  serverChallenge := SGP23_SMDP_CHALLENGE),
+			serverSignature1 := SGP23_SERVER_SIGNATURE1,
+			euiccCiPKIdToBeUsed := SGP23_EUICC_CI_PK_ID_TO_BE_USED,
+			serverCertificate := ts_cert_s_sm_dpauth_nist);
+	f_es9p_send(valueof(INITIATE_AUTH_OK));
+	var template EsipaMessageFromEimToIpa R_INITIATE_AUTH_OK :=
+		tr_initiateAuthenticationResponseEsipa(transactionId := SGP23_S_TRANSACTION_ID,
+						       serverSigned1 := tr_serverSigned1,
+						       serverSignature1 := SGP23_SERVER_SIGNATURE1,
+						       euiccCiPKIdentifierToBeUsed := SGP23_EUICC_CI_PK_ID_TO_BE_USED,
+						       serverCertificate := ?,
+						       matchingId := omit,
+						       ctxParams1 := omit)
+	f_esipa_receive(R_INITIATE_AUTH_OK);
+
+	/* Step 1b: Authenticatate Server Response */
+	var template SGP32_AuthenticateServerResponse SGP32_S_AUTH_SERVER_MATCH_ID_DEV_INFO :=
+		ts_SGP32_authenticateServerResponse(
+			euiccSigned1 := ts_SGP32_euiccSigned1(transactionId := SGP23_S_TRANSACTION_ID,
+							      serverAddress := smdpp_addr,
+							      serverChallenge := SGP23_SMDP_CHALLENGE,
+							      ctxParams1 := ts_ctxParams1(matchingId := SGP23_MATCHING_ID_1,
+											  imei := SGP23_S_IMEI,
+											  tac := SGP23_S_TAC)
+							     ),
+			euiccSignature1 := SGP23_EUICC_SIGNATURE1,
+			euiccCertificate := ts_cert_euicc_nist,
+			eumCertificate := ts_cert_eum_nist);
+	f_esipa_send(valueof(ts_authenticateClientRequestEsipa(authenticateServerResponse :=
+		SGP32_S_AUTH_SERVER_MATCH_ID_DEV_INFO)));
+	var template AuthenticateServerResponse R_AUTH_SERVER_MATCH_ID_DEV_INFO :=
+		tr_authenticateServerResponse(transactionId := SGP23_S_TRANSACTION_ID,
+					  serverAddress := smdpp_addr,
+					  serverChallenge := SGP23_SMDP_CHALLENGE,
+					  ctxParams1 := tr_ctxParams1(matchingId := SGP23_MATCHING_ID_1,
+								      imei := SGP23_S_IMEI, tac := SGP23_S_TAC),
+					  euiccSignature1 := SGP23_EUICC_SIGNATURE1,
+					  euiccCertificate := ?,
+					  eumCertificate := ?);
+	f_es9p_receive(tr_authenticateClientRequest(transactionId := SGP23_S_TRANSACTION_ID,
+						    authenticateServerResponse := R_AUTH_SERVER_MATCH_ID_DEV_INFO));
+
+	/* Step 2a: Download profile normally */
+	f_es9p_send(valueof(ts_authenticateClientResponseEs9));
+	f_esipa_receive(tr_authenticateClientResponseEsipa_dpe);
+	f_esipa_send(valueof(ts_getBoundProfilePackageRequestEsipa));
+	f_es9p_transceive(valueof(ts_getBoundProfilePackageResponse), tr_getBoundProfilePackageRequest);
+	f_esipa_receive(tr_getBoundProfilePackageResponseEsipa);
+
+	/* Step 2b: Remove rest resource
+	 * (Even though the profile package is downloaded at this point, the transaction will still linger because
+	 *  the eIM is waiting for the notification that confirms the success or failure of the download. When we
+	 *  delete the rest resource, this lingering transaction is also removed from the eIM and the testcase
+	 *  should exit with a clean state) */
+	f_rest_delete_resource(resource_id, "download");
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_eIM_AuthenticateClient_Nominal_without_Confirmation_Code() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_eIM_AuthenticateClient_Nominal_without_Confirmation_Code), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* See SGP.33-3, section 4.2.12.2.2, Test Sequence #01-#14 */
+private function f_TC_eIM_AuthenticateClient_ErrorCases_Error(charstring id, charstring subjectCode, charstring reasonCode)
+runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var template JSON_REST_Results expected_outcome := { { authenticateClientError := "undefinedError" } };
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var octetstring eim_transaction_id;
+	var charstring smdpp_addr := mp_es9p_ip & ":" & int2str(mp_es9p_port)
+	var charstring activation_code := f_SGP23_ACTIVATION_CODE_1(test_dp_address := smdpp_addr);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("download", ts_JSON_REST_download_order(SGP23_EID1, activation_code));
+
+	/* Check the eIM for new eIM packages, we expect to get a profileDownloadTriggerRequest that contains the
+	 * activationCode that we have created the download with (see above) */
+	esipa_res := f_esipa_transceive(valueof(ts_getEimPackageRequest(SGP23_EID1)),
+					        tr_getEimPackageResponse_dnlTrigReq(tr_profileDownloadTriggerRequest(activation_code)));
+	eim_transaction_id := valueof(esipa_res.getEimPackageResponse.profileDownloadTriggerRequest.eimTransactionId);
+
+	/* Step IC1/IC2: */
+	f_esipa_send(valueof(ts_initiateAuthenticationRequestEsipa(smdpAddress := smdpp_addr,
+								   eimTransactionId := eim_transaction_id)));
+	f_es9p_receive(tr_initiateAuthenticationRequest);
+
+	/* Step 1 Initiate Authentication Response */
+	f_es9p_send(valueof(ts_initiateAuthenticationResponse));
+	f_esipa_receive(tr_initiateAuthenticationResponseEsipa);
+	f_esipa_send(valueof(ts_authenticateClientRequestEsipa));
+	f_es9p_receive(tr_authenticateClientRequest);
+
+	/* Step 2a: SM-DP+ error response */
+	f_es9p_send_err(ts_responseHeader(status := "Failed",
+					  statusCodeData := ts_statusCodeData(subjectCode := subjectCode,
+									      reasonCode := reasonCode)));
+	f_esipa_receive(tr_authenticateClientResponseEsipa_err, tr_statusCodeData);
+
+	/* Step 2a: Check outcome and remove rest resource */
+	f_rest_lookup_resource(resource_id, "download", tr_JSON_REST_success(outcome := expected_outcome) );
+	f_rest_delete_resource(resource_id, "download");
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+
+/* See SGP.33-3, section 4.2.12.2.2, Test Sequence #01 and SGP.23, section 4.4.23.2.2, Test Sequence #01 */
+/* TODO: Implement remaining test sequences (#02-#14) when useful. At the moment those test sequences are not
+ * implemented because they would not increase the test coverage. The code paths inside the eIM do not change when a
+ * different subjectCode or reasonCode is sent. */
+private function f_TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_EUM_Certificate(charstring id)
+runs on eIM_ConnHdlr {
+	f_TC_eIM_AuthenticateClient_ErrorCases_Error(id, "8.1.2", "6.1");
+}
+testcase TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_EUM_Certificate() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_EUM_Certificate), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* See SGP.33-3, section 4.2.12.2.2, Test Sequence #15-#18 */
+private function f_TC_eIM_AuthenticateClient_ErrorCases_Error_ipad(template RemoteProfileProvisioningResponse invalid_authenticateClientResponseEs9)
+runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var template JSON_REST_Results expected_outcome := { { eimProcedureError := "stuckOrder" } };
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var octetstring eim_transaction_id;
+	var charstring smdpp_addr := mp_es9p_ip & ":" & int2str(mp_es9p_port)
+	var charstring activation_code := f_SGP23_ACTIVATION_CODE_1(test_dp_address := smdpp_addr);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("download", ts_JSON_REST_download_order(SGP23_EID1, activation_code));
+
+	/* Check the eIM for new eIM packages, we expect to get a profileDownloadTriggerRequest that contains the
+	 * activationCode that we have created the download with (see above) */
+	esipa_res := f_esipa_transceive(valueof(ts_getEimPackageRequest(SGP23_EID1)),
+					        tr_getEimPackageResponse_dnlTrigReq(tr_profileDownloadTriggerRequest(activation_code)));
+	eim_transaction_id := valueof(esipa_res.getEimPackageResponse.profileDownloadTriggerRequest.eimTransactionId);
+
+	/* Step IC1/IC2: */
+	f_esipa_send(valueof(ts_initiateAuthenticationRequestEsipa(smdpAddress := smdpp_addr,
+								   eimTransactionId := eim_transaction_id)));
+	f_es9p_receive(tr_initiateAuthenticationRequest);
+
+	/* Step 1 Initiate Authentication Response */
+	f_es9p_send(valueof(ts_initiateAuthenticationResponse));
+	f_esipa_receive(tr_initiateAuthenticationResponseEsipa);
+	f_esipa_send(valueof(ts_authenticateClientRequestEsipa));
+	f_es9p_receive(tr_authenticateClientRequest);
+
+	/* Step 2a: SM-DP+ responds with invalid response */
+	f_es9p_send(valueof(invalid_authenticateClientResponseEs9));
+	f_esipa_receive(tr_authenticateClientResponseEsipa_dpe);
+
+	/* Step 2b: IPAd aborts the procedure by doing nothing. After some time, the eIM will detect that nothing
+	 * happens anymore and mark the order as stuck. */
+	f_sleep(30.0);
+
+	/* Step 2c: Check outcome and remove rest resource, we expect that the eIM has detected a stuck order */
+	f_rest_lookup_resource(resource_id, "download", tr_JSON_REST_success(outcome := expected_outcome) );
+	f_rest_delete_resource(resource_id, "download");
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+
+/* See SGP.33-3, section 4.2.12.2.2, Test Sequence #15 and SGP.23, section 4.4.23.2.2, Test Sequence #15 */
+/* TODO: Implement remaining test sequences (#16-#18) when useful. At the moment those test sequences are not
+ * implemented because they would not increase the test coverage. The code paths inside the eIM do not change when a
+ * different authenticateClientResponseEs9 is sent. */
+private function f_TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_SM_DPp_pb_certificate(charstring id)
+runs on eIM_ConnHdlr {
+	f_TC_eIM_AuthenticateClient_ErrorCases_Error_ipad(ts_authenticateClientResponseEs9);
+}
+testcase TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_SM_DPp_pb_certificate() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_SM_DPp_pb_certificate), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
+/* See SGP.33-3, section 4.2.13.2.1, Test Sequence #01 and SGP.23, section 4.4.24.2.1, Test Sequence #01 */
+private function f_TC_eIM_ES9p_HandleNotification_Nominal(charstring id) runs on eIM_ConnHdlr {
+	var charstring resource_id;
+	var template EsipaMessageFromEimToIpa esipa_res;
+	var octetstring eim_transaction_id;
+	var charstring smdpp_addr := mp_es9p_ip & ":" & int2str(mp_es9p_port)
+	var charstring activation_code := f_SGP23_ACTIVATION_CODE_1(test_dp_address := smdpp_addr);
+
+	/* Create a new download at the eIM */
+	resource_id := f_rest_create_order("download", ts_JSON_REST_download_order(SGP23_EID1, activation_code));
+
+	/* Check the eIM for new eIM packages, we expect to get a profileDownloadTriggerRequest that contains the
+	 * activationCode that we have created the download with (see above) */
+	esipa_res := f_esipa_transceive(valueof(ts_getEimPackageRequest(SGP23_EID1)),
+					        tr_getEimPackageResponse_dnlTrigReq(tr_profileDownloadTriggerRequest(activation_code)));
+	eim_transaction_id := valueof(esipa_res.getEimPackageResponse.profileDownloadTriggerRequest.eimTransactionId);
+
+	/* Step IC1/IC2: Initiate Authentication */
+	f_esipa_send(valueof(ts_initiateAuthenticationRequestEsipa(smdpAddress := smdpp_addr,
+								   eimTransactionId := eim_transaction_id)));
+	f_es9p_receive(tr_initiateAuthenticationRequest);
+	f_es9p_send(valueof(ts_initiateAuthenticationResponse));
+	f_esipa_receive(tr_initiateAuthenticationResponseEsipa);
+
+	/* Step IC3: Authenticate Client */
+	f_esipa_send(valueof(ts_authenticateClientRequestEsipa));
+	f_es9p_receive(tr_authenticateClientRequest);
+	f_es9p_send(valueof(ts_authenticateClientResponseEs9));
+	f_esipa_receive(tr_authenticateClientResponseEsipa_dpe);
+
+	/* Step IC4: Get Bound Profiele Package*/
+	f_esipa_send(valueof(ts_getBoundProfilePackageRequestEsipa));
+	f_es9p_transceive(valueof(ts_getBoundProfilePackageResponse), tr_getBoundProfilePackageRequest);
+	f_esipa_receive(tr_getBoundProfilePackageResponseEsipa);
+
+	/* Step 1/2: Handle notification (Profile Installation Result),
+	 * When the Notification arrives at the eIM, the eIM will record the Profile Installation Result from the
+	 * notification and mark the download as done. */
+	f_esipa_send(valueof(ts_handleNotificationEsipa_pendingNotif(
+				ts_SGP32_pendingNotification_prfleInstRslt(
+					profileInstallationResultData := ts_profileInstallationResultData(
+						notificationAddress := smdpp_addr),
+					euiccSignPIR := SGP23_EUICC_SIGN_PIR))));
+	f_es9p_transceive_empty_response(tr_handleNotification(
+						pendingNotification := tr_pendingNotification_prfleInstRslt(
+							profileInstallationResult := tr_profileInstallationResult(
+								profileInstallationResultData := tr_profileInstallationResultData(
+									notificationAddress := smdpp_addr),
+								euiccSignPIR := SGP23_EUICC_SIGN_PIR))));
+	f_rest_lookup_resource(resource_id, "download", tr_JSON_REST_success);
+	f_rest_delete_resource(resource_id, "download");
+
+	/* Step 4: Handle notification (Other Signed Notification) */
+	f_esipa_send(valueof(ts_handleNotificationEsipa_pendingNotif(
+				ts_SGP32_pendingNotification_otherSignedNotif(
+					otherSignedNotification := ts_otherSignedNotification(
+						tbsOtherNotification := ts_notificationMetadata(
+							seqNumber := 123456,
+							profileManagementOperation := '1'B,
+							notificationAddress := smdpp_addr,
+							iccid := SGP23_ICCID_OP_PROF1),
+						euiccNotificationSignature := SGP23_TBS_EUICC_NOTIF_SIG)))));
+	f_es9p_transceive_empty_response(tr_handleNotification(
+						pendingNotification := tr_pendingNotification_otherSignedNotif(
+							otherSignedNotification := tr_otherSignedNotification(
+							tbsOtherNotification := tr_notificationMetadata(
+								seqNumber := 123456,
+								profileManagementOperation := '1'B,
+								notificationAddress := smdpp_addr,
+								iccid := SGP23_ICCID_OP_PROF1),
+							euiccNotificationSignature := SGP23_TBS_EUICC_NOTIF_SIG))));
+
+
+	f_sleep(2.0);
+	setverdict(pass);
+}
+testcase TC_eIM_ES9p_HandleNotification_Nominal() runs on MTC_CT {
+	var charstring id := testcasename();
+	var eIM_ConnHdlrPars pars := f_init_pars();
+	var eIM_ConnHdlr vc_conn;
+	f_init(id);
+	vc_conn := f_start_handler(refers(f_TC_eIM_ES9p_HandleNotification_Nominal), pars);
+	vc_conn.done;
+	setverdict(pass);
+}
+
 control {
+	/* Custom testcases (common situations) */
 	execute ( TC_proc_indirect_prfle_dwnld() );
 	execute ( TC_proc_indirect_prfle_dwnld_cancel_session() );
 	execute ( TC_proc_euicc_pkg_dwnld_exec_enable_psmo() );
@@ -1003,6 +1355,12 @@ control {
 	execute ( TC_proc_euicc_data_req() );
 	execute ( TC_proc_euicc_data_req_err() );
 	execute ( TC_proc_notifyStateChange() );
+
+	/* SGP.33-3 testcases */
+	execute ( TC_eIM_AuthenticateClient_Nominal_without_Confirmation_Code() );
+	execute ( TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_EUM_Certificate() );
+	execute ( TC_eIM_AuthenticateClient_ErrorCases_Error_Invalid_SM_DPp_pb_certificate() );
+	execute ( TC_eIM_ES9p_HandleNotification_Nominal() );
 }
 
 }
