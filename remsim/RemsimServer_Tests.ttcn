@@ -37,12 +37,15 @@ runs on http_CT return JsRoot {
 }
 
 /* run a HTTP PUT to add a new slotmap to the remsim-server */
-function f_rsres_post_slotmap(JsSlotmap slotmap, template integer exp_sts := 201)
+function f_rsres_post_slotmap(JsSlotmap slotmap, template integer exp_sts := 201, boolean maintenance := false)
 runs on http_CT return HTTPResponse {
 	var charstring body := oct2char(f_enc_JsSlotmap(slotmap));
 	var HTTPMessage http_resp;
-	http_resp := f_http_transact(url := "/api/backend/v1/slotmaps", method := "POST",
-				     body := body, exp := tr_HTTP_Resp(exp_sts))
+	var charstring url := "/api/backend/v1/slotmaps";
+	if (maintenance) {
+		url := url & "?maintenance=true";
+	}
+	http_resp := f_http_transact(url := url, method := "POST", body := body, exp := tr_HTTP_Resp(exp_sts))
 	return http_resp.response;
 }
 
@@ -57,12 +60,15 @@ runs on http_CT return HTTPResponse {
 
 
 /* run a HTTP DELETE to remove a slotmap from te remsim-server */
-function f_rsres_delete_slotmap(BankSlot bs, template integer exp_sts := 200)
+function f_rsres_delete_slotmap(BankSlot bs, template integer exp_sts := 200, boolean maintenance := false)
 runs on http_CT return HTTPResponse {
 	var HTTPMessage http_resp;
 	var integer slotmap_id := bs.bankId * 65536 + bs.slotNr;
-	http_resp := f_http_transact(url := "/api/backend/v1/slotmaps/" & int2str(slotmap_id),
-				     method := "DELETE", exp := tr_HTTP_Resp(exp_sts));
+	var charstring url := "/api/backend/v1/slotmaps/" & int2str(slotmap_id);
+	if (maintenance) {
+		url := url & "?maintenance=true";
+	}
+	http_resp := f_http_transact(url := url, method := "DELETE", exp := tr_HTTP_Resp(exp_sts));
 	return http_resp.response;
 }
 
@@ -301,12 +307,16 @@ testcase TC_connect_bank_duplicate() runs on test_CT {
 }
 
 
-function f_ensure_slotmaps(template JsSlotmaps maps)
+function f_ensure_slotmaps(template JsSlotmaps maps, boolean maintenance := false)
 runs on http_CT {
 	var JsRoot js;
+	var charstring url := "/api/backend/v1/slotmaps";
 
 	/* check that it is actually added */
-	js := f_rsres_get("/api/backend/v1/slotmaps");
+	if (maintenance) {
+		url := url & "?maintenance=true";
+	}
+	js := f_rsres_get(url);
 	if (match(js.slotmaps, maps)) {
 		setverdict(pass);
 	} else {
@@ -316,16 +326,16 @@ runs on http_CT {
 
 /* verify that exactly only one slotmap exists (the specified one) */
 function f_ensure_slotmap_exists_only(template ClientSlot cslot, template BankSlot bslot,
-					template SlotmapState state := ?)
+					template SlotmapState state := ?, boolean maintenance := false)
 runs on http_CT {
-	f_ensure_slotmaps({ tr_JsSlotmap(bslot, cslot, state) } );
+	f_ensure_slotmaps({ tr_JsSlotmap(bslot, cslot, state) }, maintenance);
 }
 
 /* verify that exactly only one slotmap exists (possibly among others) */
 function f_ensure_slotmap_exists(template ClientSlot cslot, template BankSlot bslot,
-				 template SlotmapState state := ?)
+				 template SlotmapState state := ?, boolean maintenance := false)
 runs on http_CT {
-	f_ensure_slotmaps({ *, tr_JsSlotmap(bslot, cslot, state), * } );
+	f_ensure_slotmaps({ *, tr_JsSlotmap(bslot, cslot, state), * }, maintenance);
 }
 
 
@@ -661,6 +671,119 @@ testcase TC_slotmap_add_active_bank() runs on test_CT {
 }
 
 
+/* Create a regular mapping between client and bank, then override it via maintenance mapping. */
+testcase TC_slotmap_switch_maintenance() runs on test_CT {
+	var ComponentIdentity rspro_id := valueof(ts_CompId(remsimBankd, testcasename()));
+	var BankSlot bslot := valueof(ts_BankSlot(1, 2));
+	var ClientSlot cslot1 := valueof(ts_ClientSlot(3, 4));
+	var ClientSlot cslot2 := valueof(ts_ClientSlot(5, 6));
+	var JsSlotmap sm1 := valueof(ts_JsSlotmap(bslot, cslot1));
+	var JsSlotmap sm2 := valueof(ts_JsSlotmap(bslot, cslot2));
+
+	f_init();
+	f_rsres_init();
+
+	/* Create a band and two clients. */
+	f_rspro_init(rspro[0], mp_server_ip, mp_server_port, rspro_id, 0);
+	rspro[0].rspro_bank_id := bslot.bankId;
+	rspro[0].rspro_bank_nslots := 8;
+	f_rspro_connect_client(0);
+
+	rspro_id := valueof(ts_CompId(remsimClient, "client1"));
+	f_rspro_init(rspro[1], mp_server_ip, mp_server_port, rspro_id, 1);
+	rspro[1].rspro_client_slot := cslot1;
+	f_rspro_connect_client(1);
+
+	rspro_id := valueof(ts_CompId(remsimClient, "client2"));
+	f_rspro_init(rspro[2], mp_server_ip, mp_server_port, rspro_id, 2);
+	rspro[2].rspro_client_slot := cslot2;
+	f_rspro_connect_client(2);
+
+	/* 1. Create regular mapping. */
+
+	/* Create a new slotmap via HTTP. */
+	f_rsres_post_slotmap(sm1);
+
+	/* Expect the slotmap to be pushed to bank and ACK it. */
+	as_rspro_create_mapping(0, sm1.client, sm1.bank);
+
+	/* An immediate slotmaps check doesn't work. */
+	f_sleep(1.0);
+
+	/* Verify that the slotmap exists and is ACTIVE. */
+	f_ensure_slotmap_exists_only(sm1.client, sm1.bank, ACTIVE);
+
+	/* Expect the client to be configured to connect to bank. */
+	as_rspro_cfg_client_bank(1, sm1.bank, ?);
+
+	/* 2. Create mainenance mapping, while having a regular mapping. */
+
+	/* Create a new slotmap via HTTP. It uses the same bankd/slot */
+	f_rsres_post_slotmap(sm2, maintenance := true);
+
+	/* Expect the slotmap to be removed from bank. */
+	as_rspro_remove_mapping(0, sm1.client, sm1.bank);
+
+	/* Verify the slotmap is removed from client by setting IP/port to '0'. */
+	as_rspro_cfg_client_bank(1, ?, tr_IpPort(ts_IPv4("0.0.0.0"), 0));
+
+	/* Expect the maintenance slotmap to be pushed to bank and ACK it. */
+	as_rspro_create_mapping(0, sm2.client, sm2.bank);
+
+	/* Expect the second client to be configured to connect to bank. */
+	as_rspro_cfg_client_bank(2, sm2.bank, ?);
+
+	/* An immediate slotmaps check doesn't work. */
+	f_sleep(1.0);
+
+	/* Verify that the regular slotmap is INACTIVE. */
+	f_ensure_slotmap_exists_only(sm1.client, sm1.bank, INACTIVE);
+
+	/* Verify that the maintenance slotmap exists and is ACTIVE. */
+	f_ensure_slotmap_exists_only(sm2.client, sm2.bank, ACTIVE, maintenance := true);
+
+	/* 3. Delete mainenance mapping while still having regular mapping. */
+
+	/* Delete the maintenance slotmap via REST. */
+	f_rsres_delete_slotmap(sm2.bank, maintenance := true);
+
+	/* Expect the maintenance slotmap to be removed from bank. */
+	as_rspro_remove_mapping(0, sm2.client, sm2.bank);
+
+	/* Verify the maintenance slotmap is removed from client by setting IP/port to '0'. */
+	as_rspro_cfg_client_bank(2, ?, tr_IpPort(ts_IPv4("0.0.0.0"), 0));
+
+	/* Expect the regular INACTIVE slotmap to be pushed to bank and ACK it. */
+	as_rspro_create_mapping(0, sm1.client, sm1.bank);
+
+	/* Expect the client to be configured to connect to bank. */
+	as_rspro_cfg_client_bank(1, sm1.bank, ?);
+
+	/* An immediate slotmaps check doesn't work. */
+	f_sleep(1.0);
+
+	/* Verify that the slotmap exists and is ACTIVE. */
+	f_ensure_slotmap_exists_only(sm1.client, sm1.bank, ACTIVE);
+
+	/* 3. Delete regular mapping. */
+
+	/* delete the slotmap via REST */
+	f_rsres_delete_slotmap(sm1.bank);
+
+	/* an immediate slotmaps check doesn't work */
+	f_sleep(1.0);
+
+	/* verify the slotmap is gone from REST interface immediately */
+	f_ensure_slotmaps({});
+
+	/* verify the slotmap is removed from bankd */
+	as_rspro_remove_mapping(0, sm1.client, sm1.bank);
+
+	/* verify the slotmap is removed from client by setting IP/port to '0' */
+	as_rspro_cfg_client_bank(1, ?, tr_IpPort(ts_IPv4("0.0.0.0"), 0));
+}
+
+
 
 
 /* TODO
@@ -689,6 +812,7 @@ control {
 	execute( TC_slotmap_del_active() );
 	execute( TC_slotmap_del_active_client() );
 	execute( TC_slotmap_add_active_bank() );
+	execute( TC_slotmap_switch_maintenance() );
 }
 
 
