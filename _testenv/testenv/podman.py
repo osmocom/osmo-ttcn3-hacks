@@ -367,7 +367,14 @@ def stop(restart=False):
         logging.info("Running interactive shell before stopping container (--shell)")
 
         # stdin=None: override stdin=/dev/null, so we can type into the shell
-        exec_cmd(["bash"], ["-i"], cwd=testenv.testdir.testdir, stdin=None, check=False)
+        exec_cmd(
+            ["bash"],
+            ["-i"],
+            cwd=testenv.testdir.testdir,
+            stdin=None,
+            check=False,
+            envtype="binary_repo" if testenv.args.binary_repo else "osmo_dev",
+        )
 
         run_shell_on_stop = False
 
