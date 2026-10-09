@@ -44,7 +44,8 @@ def init():
         cache_dir = "podman" if testenv.args.podman else "host"
         suffix = testenv.cmd.distro_cache_suffix()
         builddir = os.path.join(testenv.args.cache, cache_dir, f"titan-{titan_version}{suffix}")
-        path_old = testenv.cmd.generate_env(podman=testenv.args.podman)["PATH"]
+        envtype = "binary_repo" if testenv.args.binary_repo else "osmo_dev"
+        path_old = testenv.cmd.generate_env(podman=testenv.args.podman, envtype=envtype)["PATH"]
         builddir_env = {
             "BUILDDIR": builddir,
             "TTCN3_DIR": ttcn3_dir,
@@ -155,7 +156,8 @@ def run(cfg):
     if testenv.args.fast:
         env["TESTENV_FAST"] = "1"
 
-    env = testenv.cmd.generate_env(env, testenv.args.podman)
+    envtype = "binary_repo" if testenv.args.binary_repo else "osmo_dev"
+    env = testenv.cmd.generate_env(env, testenv.args.podman, envtype)
 
     cmd = [start_testsuite, suite, section_data["config"]]
 
