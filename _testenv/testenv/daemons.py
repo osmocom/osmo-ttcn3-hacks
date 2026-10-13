@@ -67,7 +67,7 @@ def start(cfg):
             daemons[section] = testenv.podman.exec_cmd_background(cmd, cwd=cwd, env=env, envtype=envtype)
         else:
             logging.debug(f"+ {cmd}")
-            daemons[section] = subprocess.Popen(cmd, cwd=cwd, env=testenv.cmd.generate_env(env, envtype))
+            daemons[section] = subprocess.Popen(cmd, cwd=cwd, env=testenv.cmd.generate_env(env, envtype=envtype))
 
         # Wait 200ms and check if it is still running
         time.sleep(0.2)
