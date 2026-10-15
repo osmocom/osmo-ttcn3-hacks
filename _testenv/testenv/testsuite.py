@@ -97,6 +97,17 @@ def format_log_files(cfg):
     testenv.cmd.run(cmd, cwd=cwd, env=builddir_env)
 
 
+def compress_big_log_files(cfg):
+    cwd = os.path.join(testenv.testdir.testdir, "testsuite")
+
+    if os.getenv("TESTENV_COMPRESS_BIG_LOGS") != "1":
+        return
+
+    logging.info("Compressing big log files")
+    cmd = os.path.join(testenv.data_dir, "scripts/log_compress.sh")
+    testenv.cmd.run(cmd, cwd=cwd, env=builddir_env)
+
+
 def get_junit_logs(topdir):
     pattern = os.path.join(topdir, "**", "junit-*.log")
     return glob.glob(pattern, recursive=True)
@@ -192,6 +203,7 @@ def run(cfg):
 
     merge_log_files(cfg)
     format_log_files(cfg)
+    compress_big_log_files(cfg)
 
     if testenv.args.bisect and not check_testsuite_successful():
         raise testenv.NoTraceException("Testsuite failed!")

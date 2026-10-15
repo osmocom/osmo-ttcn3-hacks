@@ -226,6 +226,11 @@ You can set the following environment variables to change testenv behaviour.
   available but doesn't work in podman. QEMU runs a bit slower when this is
   set.
 
+* `TESTENV_COMPRESS_BIG_LOGS`:
+  When set to 1, compress `.merged` ttcn3 log files that are bigger than 1 MiB
+  with `gz`. This is used in jenkins to reduce job artifact sizes. Requires
+  `pigz` to be installed when running without `--podman`.
+
 ### Environment variables set by testenv
 
 Testenv sets the following variables while running shell commands from
