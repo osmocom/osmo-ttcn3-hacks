@@ -150,6 +150,21 @@ runs on SMF_Session_CT {
 	}
 }
 
+function f_DIA_handle_create_sesion() runs on SMF_Session_CT
+{
+	var boolean do_s6b := is_s2b_iface();
+	if (do_s6b and DIAMETER[DIA_S6b].checkstate("Connected")) {
+		as_DIA_S6b_AAR();
+	}
+	if (DIAMETER[DIA_Gx].checkstate("Connected")) {
+		as_DIA_Gx_CCR(INITIAL_REQUEST);
+	}
+	/* FIXME: When on S2b interface, SMF is not using the Gy interface, unknown reason. */
+	if (DIAMETER[DIA_Gy].checkstate("Connected")) {
+		as_DIA_Gy_CCR(INITIAL_REQUEST);
+	}
+}
+
 /* GTPv2C */
 private function is_s2b_iface() runs on SMF_Session_CT return boolean {
 	return (g_pars.rat_type == GTP2C_RAT_WLAN or g_pars.rat_type == GTP2C_RAT_Virtual);
@@ -209,23 +224,11 @@ return BIT3 {
 	return int2bit(pfcp_pdn_type, 3);
 }
 
-/* create a session on the SMF */
-private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie,
-				  template (value) FullyQualifiedTEID fteid_u_ie,
-				  template (omit) UserLocationInfo uli_ie := omit,
-				  template (omit) APCO apco := omit,
-				  template APCO exp_apco := *) runs on SMF_Session_CT {
-	var PDU_GTPCv2 rx;
-
-	/* Defaults used for s5/s8: */
-	var boolean do_s6b := false;
-	var template APN_Restriction apn_restriction := ?;
-	/* Change behavior when on S2b: */
-	if (is_s2b_iface()) {
-		do_s6b := true;
-		apn_restriction := omit;
-	}
-
+function f_s5s8_tx_create_session_req(template (value) FullyQualifiedTEID fteid_c_ie,
+				      template (value) FullyQualifiedTEID fteid_u_ie,
+				      template (omit) UserLocationInfo uli_ie := omit,
+				      template (omit) APCO apco := omit)
+runs on SMF_Session_CT {
 	var template (value) PDU_GTPCv2 g2c :=
 		ts_GTP2C_CreateSessionReq(imsi := g_pars.imsi,
 					  msisdn := g_pars.msisdn,
@@ -240,6 +243,24 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 					  servingNetwork := ts_GTP2C_ServingNetwork('001'H, '01F'H),
 					  apco := apco);
 
+	GTP2.send(g2c);
+}
+
+/* create a session on the SMF */
+private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie,
+				  template (value) FullyQualifiedTEID fteid_u_ie,
+				  template (omit) UserLocationInfo uli_ie := omit,
+				  template (omit) APCO apco := omit,
+				  template APCO exp_apco := *) runs on SMF_Session_CT {
+	var PDU_GTPCv2 rx;
+
+	/* Defaults used for s5/s8: */
+	var template APN_Restriction apn_restriction := ?;
+	/* Change behavior when on S2b: */
+	if (is_s2b_iface()) {
+		apn_restriction := omit;
+	}
+
 	/////////// START MUTUAL EXCLUSION ZONE ////////////
 	/* This code block cannot be executed by more than one component at a time because
 	 * the RANAP RAB Ass Request triggers the IUT to send PFCP Session Establishment
@@ -253,17 +274,9 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
 	f_PFCPEM_subscribe_seid(c_SEID0);
 
-	GTP2.send(g2c);
-	if (do_s6b and DIAMETER[DIA_S6b].checkstate("Connected")) {
-		as_DIA_S6b_AAR();
-	}
-	if (DIAMETER[DIA_Gx].checkstate("Connected")) {
-		as_DIA_Gx_CCR(INITIAL_REQUEST);
-	}
-	/* FIXME: When on S2b interface, SMF is not using the Gy interface, unknown reason. */
-	if (DIAMETER[DIA_Gy].checkstate("Connected")) {
-		as_DIA_Gy_CCR(INITIAL_REQUEST);
-	}
+	f_s5s8_tx_create_session_req(fteid_c_ie, fteid_u_ie, uli_ie, apco);
+
+	f_DIA_handle_create_sesion();
 
 	/* Expect PFCP Session Establishment Request. */
 	as_pfcp_sess_est_req();
@@ -340,42 +353,64 @@ private function f_create_session(template (value) FullyQualifiedTEID fteid_c_ie
 
 }
 
-/* create a session on the SMF on a S5/S8 interface (from SGW )*/
-function f_s5s8_create_session() runs on SMF_Session_CT {
-	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
+function f_s5s8_UserLocationInfo() runs on SMF_Session_CT return UserLocationInfo
+{
 	var template (value) UserLocationInfo uli_ie;
-
-	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
-					f_inet_addr(mp_local_hostname_c), omit);
-	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPU, g_pars.bearer.teid_local, 2,
-					f_inet_addr(mp_local_hostname_u), omit);
-
-
-	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
 	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
 	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
 	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
+	return valueof(uli_ie);
+}
 
-	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie);
+function f_s5s8_fteid_c_ie() runs on SMF_Session_CT return FullyQualifiedTEID
+{
+	var template (value) FullyQualifiedTEID fteid_c_ie;
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPC, g_pars.teic_local, 0,
+				     f_inet_addr(mp_local_hostname_c), omit);
+	return valueof(fteid_c_ie);
+}
 
+function f_s5s8_fteid_u_ie() runs on SMF_Session_CT return FullyQualifiedTEID
+{
+	var template (value) FullyQualifiedTEID fteid_u_ie;
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S5S8_SGW_GTPU, g_pars.bearer.teid_local, 2,
+				     f_inet_addr(mp_local_hostname_u), omit);
+	return valueof(fteid_u_ie);
+}
+
+/* create a session on the SMF on a S5/S8 interface (from SGW )*/
+function f_s5s8_create_session() runs on SMF_Session_CT {
+	/* open5gs up to 1.2.3 won't accept it without ULI, despite not mandatory */
+	f_create_session(f_s5s8_fteid_c_ie(),
+			 f_s5s8_fteid_u_ie(),
+			 f_s5s8_UserLocationInfo());
+
+}
+
+function f_s2b_fteid_c_ie() runs on SMF_Session_CT return FullyQualifiedTEID
+{
+	var template (value) FullyQualifiedTEID fteid_c_ie;
+	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic_local, 0,
+				     f_inet_addr(mp_local_hostname_c), omit);
+	return valueof(fteid_c_ie);
+}
+
+function f_s2b_fteid_u_ie() runs on SMF_Session_CT return FullyQualifiedTEID
+{
+	var template (value) FullyQualifiedTEID fteid_u_ie;
+	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.bearer.teid_local, 5,
+				     f_inet_addr(mp_local_hostname_u), omit);
+	return valueof(fteid_u_ie);
 }
 
 /* create a session on the SMF on a S2b interface (from ePDG)*/
 function f_s2b_create_session(template (omit) APCO apco := omit,
 			      template APCO exp_apco := *) runs on SMF_Session_CT {
-	var template (value) FullyQualifiedTEID fteid_c_ie, fteid_u_ie;
-	var template (value) UserLocationInfo uli_ie;
-
-	fteid_c_ie := ts_GTP2C_FTEID(FTEID_IF_S2b_ePDG_GTPC, g_pars.teic_local, 0,
-					f_inet_addr(mp_local_hostname_c), omit);
-	fteid_u_ie := ts_GTP2C_FTEID(FTEID_IF_S2bU_ePDG_GTPU, g_pars.bearer.teid_local, 5,
-					f_inet_addr(mp_local_hostname_u), omit);
-
-	var template (value) TAI tai := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0001'O };
-	var template (value) ECGI ecgi := { '0'H, '0'H, '1'H, 'F'H, '0'H, '1'H, '0'H, 23 };
-	uli_ie := ts_GTP2C_UserLocInfo(tai := tai, ecgi := ecgi);
-
-	f_create_session(fteid_c_ie, fteid_u_ie, uli_ie := uli_ie, apco := apco, exp_apco := exp_apco);
+	f_create_session(f_s2b_fteid_c_ie(),
+			 f_s2b_fteid_u_ie(),
+			 uli_ie := f_s5s8_UserLocationInfo(),
+			 apco := apco,
+			 exp_apco := exp_apco);
 
 }
 
