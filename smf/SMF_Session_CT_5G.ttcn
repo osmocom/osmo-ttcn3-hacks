@@ -354,7 +354,57 @@ runs on SMF_Session_CT {
 	setverdict(pass);
 }
 
-/* 3GPP TS 29.502 5.2.2.4 Release SM Context service operation */
+/* 3GPP TS 23.502 4.3.7 CN-initiated selective deactivation of UP connection of an existing PDU Session (step 9)
+ * 3GPP TS 23.502 Figure 4.3.4.2-1 step 7a */
+function f_n11_update_sm_context_pdu_sess_release_ngap()
+runs on SMF_Session_CT {
+	var template (value) SmContextUpdateData sm_ctx_update;
+	var template (value) octetstring body_enc;
+	var integer http2_stream_id := 3;
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+
+	sm_ctx_update := ts_SmContextUpdateData(ueLocation := f_ts_UserLocation(),
+						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("ngap-sm"),
+						n2SmInfoType := ts_N2SmInfoType(PDU_RES_REL_RSP));
+	var octetstring ngap_enc := enc_NGAP_PDUSessionResourceReleaseResponseTransfer(valueof(m_pDUSessionResourceReleaseResponseTransfer()));
+
+	http2_tx := f_n11_prepare_update_sm_context(valueof(sm_ctx_update), ngap_enc, omit);
+
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	/* Successful answer with no content: */
+	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_tx.conn_id);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+function f_n11_update_sm_context_pdu_sess_release_ngnas()
+runs on SMF_Session_CT {
+	var template (value) SmContextUpdateData sm_ctx_update;
+	var template (value) octetstring body_enc;
+	var integer http2_stream_id := 3;
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+
+	sm_ctx_update := ts_SmContextUpdateData(ueLocation := f_ts_UserLocation(),
+						n1SmMsg := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("5gnas-sm"));
+	var octetstring ngnas_enc := f_ng_nas_gen_session_release_complete();
+
+	http2_tx := f_n11_prepare_update_sm_context(valueof(sm_ctx_update), omit, ngnas_enc);
+
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	/* Successful answer with no content: */
+	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_tx.conn_id);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.502 5.2.2.4 Release SM Context service operation
+ * 3GPP TS 23.502 Figure 4.3.4.2-1 step 10a */
 private function f_n11_prepare_release_sm_context(SmContextReleaseData sm_ctx_rel,
 						  template (omit) octetstring ngap_enc := omit)
 runs on SMF_Session_CT return HTTP2_Msg {
@@ -524,6 +574,48 @@ runs on SMF_Session_CT {
 	}
 }
 
+/* 5.2.2.3.1 N1N2MessageTransfer, PDU Session release (see clause 4.3.4 of TS 3GPP 23.502)
+ * 3GPP TS 23.502 4.3.7 CN-initiated selective deactivation of UP connection of an existing PDU Session */
+altstep as_namf_comm_post_n1n2_messages_pdu_sess_release_command()
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	var HTTP2_multipart_part_list parts;
+	[] as_namf_comm_post_n1n2_messages(http2_rx, parts) {
+		var N1N2MessageTransferReqData n1n2msg_req;
+		var NGAP_IEs.PDUSessionResourceReleaseCommandTransfer rel_cmd_transf;
+		var template (value) N1N2MessageTransferRspData n1n2msg_rsp;
+		var NG_NAS_DL_SM_Message_Type dl_nas;
+		var template (value) HTTP2_Msg http2_tx;
+		var octetstring body_enc;
+
+		/* Decode 1st part: SBI json: */
+		f_dec_N1N2MessageTransferReqData(parts[0].data, n1n2msg_req); // TODO: check returned integer.
+
+		/* Decode 2nd part: NG-NAS: */
+		dl_nas := dec_NG_NAS_DL_SM_Message_Type(parts[1].data);
+		f_ng_nas_handle_session_release_command(dl_nas);
+
+		/* Decode 3rd part: NGAP: 3GPP TS 24.501 8.3.14 */
+		rel_cmd_transf := dec_NGAP_PDUSessionResourceReleaseCommandTransfer(parts[2].data);
+		f_ngap_pdu_handle_PDUSessionResourceReleaseCommandTransfer(rel_cmd_transf);
+
+		/* Tx answer: */
+		n1n2msg_rsp := ts_N1N2MessageTransferRspData(cause := ts_N1N2MessageTransferCause(N1_N2_TRANSFER_INITIATED))
+		body_enc := f_enc_N1N2MessageTransferRspData(valueof(n1n2msg_rsp));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json; charset=utf-8")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
 /************************************************
  * N10 Nudm (SBI): Emulated UDM, 3GPP TS 29.503
  ************************************************/
@@ -642,7 +734,7 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 }
 
 /* 3GPP TS 29.503 5.3.2.4.4 SMF deregistration */
-private altstep as_nudm_uecm_delete_IndividualSmfRegistration()
+altstep as_nudm_uecm_delete_IndividualSmfRegistration()
 runs on SMF_Session_CT {
 	var HTTP2_Msg http2_rx;
 	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_UECM_delete_IndividualSmfRegistration()) -> value http2_rx {
@@ -793,7 +885,7 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 }
 
 /* 3GPP TS 29.503 5.2.2.3.2 Subscription to notifications of data change */
-private altstep as_nudm_sdm_delete_IndividualSubscription()
+altstep as_nudm_sdm_delete_IndividualSubscription()
 runs on SMF_Session_CT {
 	var HTTP2_Msg http2_rx;
 	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_SDM_delete_IndividualSubscription()) -> value http2_rx {
@@ -900,7 +992,7 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 }
 
 /* 3GPP TS 29.503 4.2.5.2 SM Policy Association termination */
-private altstep as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination()
+altstep as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination()
 runs on SMF_Session_CT {
 	var HTTP2_Msg http2_rx;
 	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_SMPolicyControl_post_IndividualSMPolicyTermination()) -> value http2_rx {
@@ -965,6 +1057,17 @@ runs on SMF_Session_CT {
 			var QosFlowSetupRequestList qos_req_li := setup_req_transf.protocolIEs[i].value_.QosFlowSetupRequestList;
 		}
 		}
+	}
+}
+
+private function f_ngap_pdu_handle_PDUSessionResourceReleaseCommandTransfer(NGAP_IEs.PDUSessionResourceReleaseCommandTransfer rel_cmd_transf)
+runs on SMF_Session_CT {
+	var template (present) PDUSessionResourceReleaseCommandTransfer exp;
+
+	exp := mw_pDUSessionResourceReleaseCommandTransfer(p_cause := m_cause_nas(normal_release))
+	if (not match(rel_cmd_transf, exp)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx unexpected DL NGAP: ", rel_cmd_transf, " vs exp ", exp));
 	}
 }
 
@@ -1073,6 +1176,33 @@ runs on SMF_Session_CT {
 		log("SMF assigned UE IPv4 address: ", f_inet_ntoa(g_ip4_addr));
 	}
 	}
+}
+
+private function f_ng_nas_handle_session_release_command(NG_NAS_DL_SM_Message_Type dl_nas)
+runs on SMF_Session_CT {
+	var template (present) NG_NAS_DL_SM_Message_Type exp_rx_nas;
+
+	exp_rx_nas := cr_NG_SM_PDU_SESSION_RELEASE_COMMAND(p_PDU_SessionId := cs_NG_PDU_SessionIdV(int2oct(g_pars.namf.pdu_sess_id, 1)),
+							   p_Cause := cs_GMM_GSM_Cause(omit, int2bit(39 /* Reactivation Requested */, 8)));
+		if (not match(dl_nas, exp_rx_nas)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("Rx unexpected DL NG-NAS: ", dl_nas, " vs exp ", exp_rx_nas));
+		}
+}
+
+/* 3GPP TS 24.501 8.3.15 PDU session release complete */
+private function f_ng_nas_gen_session_release_complete()
+runs on SMF_Session_CT return octetstring {
+	var BIT3 pdu_sess_type := f_pfcp_pdn_type_2_ng_nas_pdu_session_type(g_pars.pfcp_pars.pdn_type);
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var octetstring nas_enc;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_COMPLETE(cs_NG_PDU_SessionIdV(int2oct(g_pars.namf.pdu_sess_id, 1)),
+							 pti,
+							 cs_GMM_GSM_Cause('59'O, '00100100'B));
+	nas_enc := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	return nas_enc;
 }
 
 }

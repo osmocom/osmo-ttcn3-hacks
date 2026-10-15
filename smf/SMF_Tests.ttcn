@@ -809,6 +809,66 @@ testcase TC_n11_createSession_deleteSession_250_ipv4v6() runs on SMF_Test_CT {
 	f_TC_n11_createSession_deleteSession_250(c_PFCP_PDN_Type_IPv4v6);
 }
 
+/* Validate IUT detects PFCP Heartbeat timeout and recovers from it tearing down
+ * existing subscriber connections: */
+private template (value) PrometheusExpects t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(integer pfcp_peers_active, integer ues_active) := {
+	ts_PrometheusExpect("pfcp_peers_active", GAUGE, min := pfcp_peers_active, max := pfcp_peers_active),
+	ts_PrometheusExpect("ues_active", GAUGE, min := ues_active, max := ues_active),
+	ts_PrometheusExpect("pfcp_sessions_active", GAUGE, min := ues_active, max := ues_active)
+};
+private function f_TC_5g_pfcp_heartbeat_timeout() runs on SMF_Session_CT {
+	var PDU_PFCP m;
+	var integer rts := f_PFCPEM_get_recovery_timestamp();
+
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(1, 0)), wait_converge := true);
+
+	/* Drop all received Hearbeat requests from IUT: */
+	f_PFCPEM_subscribe_bcast();
+	var default d := activate(as_pfcp_ignore(PFCP, tr_PFCP_Heartbeat_Req));
+
+	f_n11_create_session();
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(1, 1)), wait_converge := true);
+
+	/* Wait for IUT to detect peer went down after Heartbeat timeout, ie. wait for sessions
+	 * being released and another ASSOC SETUP REQ to attempt re-association: */
+	as_namf_comm_post_n1n2_messages_pdu_sess_release_command();
+	f_n11_update_sm_context_pdu_sess_release_ngap();
+	f_n11_update_sm_context_pdu_sess_release_ngnas();
+
+	/* SMF deletes policy in PCF: */
+	as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination();
+
+	/* SMF deregisters on UDM: */
+	as_nudm_sdm_delete_IndividualSubscription();
+	as_nudm_uecm_delete_IndividualSmfRegistration();
+
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(0, 0)), wait_converge := true);
+
+	PFCP.receive(tr_PFCP_Assoc_Setup_Req()) -> value m;
+	deactivate(d);
+	activate(as_pfcp_handle_heartbeat_req(rts, do_repeat := true));
+	PFCP.send(ts_PFCP_Assoc_Setup_Resp(m.sequence_number,
+					   ts_PFCP_Node_ID_ipv4(f_inet_addr(mp_pfcp_ip_local)),
+					   ts_PFCP_Cause(PFCP_Cause_REQUEST_ACCEPTED),
+					   rts,
+					   up_function_features := ts_PFCP_UP_Function_Features(ftup := '1'B,
+												vtime := '1'B)));
+
+	/* After we answer the ASSOC SETUP RESP, IUT detects peer up: */
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(1, 0)), wait_converge := true);
+	setverdict(pass);
+}
+testcase TC_5g_pfcp_heartbeat_timeout() runs on SMF_Test_CT {
+	var SMF_Session_CT vc_conn;
+	var SessionPars pars := f_SessionPars(9,
+					      rat_type := GTP2C_RAT_NR);
+	g_pfcp_answer_heartbeat_req := false;
+	f_init(guard_timeout := 60.0);
+	vc_conn := f_start_handler(refers(f_TC_5g_pfcp_heartbeat_timeout), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
 control {
 	execute( TC_tx_echo() );
 	execute( TC_createSession_deleteSession() );
@@ -830,10 +890,10 @@ control {
 	execute( TC_n11_createSession_deleteSession() );
 	execute( TC_n11_createSession_deleteSession_ipv6() );
 	execute( TC_n11_createSession_deleteSession_ipv4v6() );
-
 	execute( TC_n11_createSession_deleteSession_250() );
 	execute( TC_n11_createSession_deleteSession_250_ipv6() );
 	execute( TC_n11_createSession_deleteSession_250_ipv4v6() );
+	execute( TC_5g_pfcp_heartbeat_timeout() );
 }
 
 
