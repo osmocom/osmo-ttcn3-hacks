@@ -74,6 +74,7 @@ RUN	set -x && \
 		netcat-openbsd \
 		pax-utils \
 		pcscd \
+		pigz \
 		pkg-config \
 		procps \
 		psmisc \
