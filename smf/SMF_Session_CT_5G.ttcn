@@ -33,6 +33,7 @@ import from NGAP_Templates all;
 import from NAS_CommonTypeDefs all;
 import from NG_NAS_TypeDefs all;
 import from NG_NAS_MsgContainers all;
+import from NG_NAS_Templates all;
 import from NG_NAS_Osmo_Types all;
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
@@ -125,34 +126,54 @@ runs on SMF_Session_CT return TS29502_Nsmf_PDUSession.Guami {
 			       amfId := "020040"));
 }
 
-function f_http2_encode_body_multipart_json_5gnas(octetstring json_encoded,
-						  octetstring nas_ecnoded,
-						  charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg==") return octetstring
-{
-	var template (value) HTTP2_multipart_part_list parts;
-	parts := {
-		ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_type("application/json") },
-					json_encoded),
-		ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id("5gnas-sm"),
-					  ts_HTTP2_Hdr_content_type("application/vnd.3gpp.5gnas") },
-					nas_ecnoded)
-	};
-	return f_HTTP2_multipart_msg_encode(parts, boundary);
-}
+/* 3GPP TS 29.502 5.2.2.2 Create SM Context service operation */
+private function f_n11_prepare_create_sm_context(SmContextCreateData sm_ctx_create,
+						 template (omit) octetstring ngap_enc := omit,
+						 template (omit) octetstring ngnas_enc := omit)
+runs on SMF_Session_CT return HTTP2_Msg {
+	var octetstring sm_ctx_create_enc;
+	var template (value) octetstring body_enc;
+	var charstring http2_boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
+	var integer http2_idx;
+	var integer http2_stream_id := 3;
+	var HTTP2_multipart_part_list parts;
+	var template (value) HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
 
-function f_http2_encode_body_multipart_json_ngap(octetstring json_encoded,
-						  octetstring ngap_ecnoded,
-						  charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg==") return octetstring
-{
-	var template (value) HTTP2_multipart_part_list parts;
-	parts := {
-		ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_type("application/json") },
-					json_encoded),
-		ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id("N2SmInfo"),
-					  ts_HTTP2_Hdr_content_type("application/vnd.3gpp.ngap") },
-					ngap_ecnoded)
-	};
-	return f_HTTP2_multipart_msg_encode(parts, boundary);
+	sm_ctx_create_enc := f_enc_SmContextCreateData(sm_ctx_create);
+
+	parts := { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_type("application/json") }, sm_ctx_create_enc)) };
+	if (ispresent(sm_ctx_create.n1SmMsg)) {
+		parts := parts & { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id(sm_ctx_create.n1SmMsg.contentId),
+								     ts_HTTP2_Hdr_content_type("application/vnd.3gpp.5gnas") },
+								   valueof(ngnas_enc))) };
+	}
+	if (ispresent(sm_ctx_create.n2SmInfo)) {
+		parts := parts & { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id(sm_ctx_create.n2SmInfo.contentId),
+								     ts_HTTP2_Hdr_content_type("application/vnd.3gpp.ngap") },
+								   valueof(ngap_enc))) };
+	}
+
+	body_enc := f_HTTP2_multipart_msg_encode(parts, http2_boundary);
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := Nsmf_uri_hostport,
+										      path := Nsmf_PDUSession_path_sm_contexts),
+					headers := {
+						ts_HTTP2_Hdr_content_type_multipart(http2_boundary),
+						ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := body_enc));
+	return valueof(http2_tx);
 }
 
 /* Nsmf_PDUSession_CreateSMContext Request/response
@@ -160,15 +181,11 @@ function f_http2_encode_body_multipart_json_ngap(octetstring json_encoded,
  * 3GPP TS 29.502 6.1.3.2 */
 function f_n11_create_session()
 runs on SMF_Session_CT {
-	var template (value) octetstring body;
-	var integer http2_idx;
-	var integer http2_stream_id := 3;
-	var template (value) HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_tx;
 	var HTTP2_Msg http2_rx;
 	var template (present) HTTP2_Msg http2_exp_rx;
-
 	var template (value) SmContextCreateData sm_contexts;
-	var octetstring sm_contexts_enc;
+
 	sm_contexts := ts_SmContextCreateData(supi := "imsi-" & g_pars.imsi_str,
 					      pei := "imeisv-0790219824011594",
 					      pduSessionId := g_pars.namf.pdu_sess_id,
@@ -182,33 +199,11 @@ runs on SMF_Session_CT {
 					      ratType := ts_RatType(NR),
 					      ueLocation := f_ts_UserLocation(),
 					      smContextStatusUri := ts_Namf_Callback_uri_imsi_sm_context_status_id(g_pars.imsi_str, int2str(g_pars.namf.pdu_sess_id)));
-	sm_contexts_enc := f_enc_SmContextCreateData(valueof(sm_contexts));
-
-	var charstring boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
 
 	var octetstring nas_enc := f_ng_nas_gen_session_establishment_request();
+	http2_tx := f_n11_prepare_create_sm_context(valueof(sm_contexts), omit, nas_enc);
 
-	body := f_http2_encode_body_multipart_json_5gnas(sm_contexts_enc, nas_enc, boundary);
-	http2_idx := f_http2_adapter_find_free_idx();
-	http2_tx := ts_HTTP2_Msg(http2_idx,
-				 http2_stream_id,
-				 hb := {
-					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
-										      scheme := "http",
-										      authority := Nsmf_uri_hostport,
-										      path := Nsmf_PDUSession_path_sm_contexts),
-					headers := {
-						ts_HTTP2_Hdr_content_type_multipart(boundary),
-						ts_HTTP2_Hdr_accept("application/json,application/vnd.3gpp.ngap,application/problem+json"),
-						ts_HTTP2_Hdr_user_agent("ttcn3-amf"),
-						ts_HTTP2_Hdr_accept_encoding("gzip")
-					}
-				 },
-				 body := ts_HTTP2_Data_frame(http2_stream_id,
-							     end_stream_flag := true,
-							     data := body));
-
-	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_idx);
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
 
 	/////////// START MUTUAL EXCLUSION ZONE ////////////
 	/* This code block cannot be executed by more than one component at a time because
@@ -235,14 +230,14 @@ runs on SMF_Session_CT {
 	as_nudm_sdm_post_sdm_subscriptions();
 
 	/* Expect to receive "201 Created body={}" answer to our Nsmf sm-contexts request: */
-	http2_exp_rx := tr_HTTP2_Msg(http2_idx,
-				     http2_stream_id,
+	http2_exp_rx := tr_HTTP2_Msg(http2_tx.conn_id,
+				     http2_tx.stream_id,
 				     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201),
 							   headers := {*, tr_HTTP2_Hdr_location(tr_Nsmf_PDUSession_uri_sm_contexts), *}),
-				     tr_HTTP2_Data_frame(stream_id := http2_stream_id,
+				     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
 							 end_stream_flag := true,
 							 data := char2oct("{}")));
-	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_idx);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
 	/* Store obtained smContextRef:*/
 	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
 	g_pars.nsmf.smContextRef := regexp(created_location, Nsmf_uri_prefix & Nsmf_PDUSession_path_sm_contexts & "/(?+)", 0);
@@ -250,7 +245,7 @@ runs on SMF_Session_CT {
 	f_http2_server_emu_register(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
 				    idx := HTTP2_CONN_SCP);
 	/* Close HTTP2 conn: */
-	f_http2_adapter_close(idx := http2_idx);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
 
 	/* Expect PCF to receive POST sm-policies: */
 	as_npcf_smpolicycontrol_post_sm_policies();
@@ -267,9 +262,8 @@ runs on SMF_Session_CT {
 	f_Mutex_unlock(__BFILE__, __LINE__);
 	/////////// END MUTUAL EXCLUSION ZONE ////////////
 
-	as_namf_comm_post_n1n2_messages();
-
-	f_n11_update_sm_context();
+	as_namf_comm_post_n1n2_messages_pdu_sess_establishment();
+	f_n11_update_sm_context_pdu_sess_establishment();
 
 	if (g_pars.pdn_type == c_PFCP_PDN_Type_IPv6 or
 	    g_pars.pdn_type == c_PFCP_PDN_Type_IPv4v6) {
@@ -280,26 +274,34 @@ runs on SMF_Session_CT {
 
 
 /* 3GPP TS 29.502 5.2.2.3 Update SM Context service operation */
-function f_n11_update_sm_context()
-runs on SMF_Session_CT {
-	var template (value) SmContextUpdateData sm_ctx_update;
+private function f_n11_prepare_update_sm_context(SmContextUpdateData sm_ctx_update,
+						 template (omit) octetstring ngap_enc := omit,
+						 template (omit) octetstring ngnas_enc := omit)
+runs on SMF_Session_CT return HTTP2_Msg {
 	var octetstring sm_ctx_update_enc;
 	var template (value) octetstring body_enc;
 	var charstring http2_boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
 	var integer http2_idx;
 	var integer http2_stream_id := 3;
+	var HTTP2_multipart_part_list parts;
 	var template (value) HTTP2_Msg http2_tx;
 	var HTTP2_Msg http2_rx;
 
-	sm_ctx_update := ts_SmContextUpdateData(ueLocation := f_ts_UserLocation(),
-						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("N2SmInfo"),
-						n2SmInfoType := ts_N2SmInfoType(PDU_RES_SETUP_RSP));
-	sm_ctx_update_enc := f_enc_SmContextUpdateData(valueof(sm_ctx_update));
+	sm_ctx_update_enc := f_enc_SmContextUpdateData(sm_ctx_update);
 
-	/* TODO: generate and encode ngap: */
-	var octetstring ngap_enc := f_ngap_pdu_gen_PDUSessionResourceSetupResponseTransfer();
+	parts := { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_type("application/json") }, sm_ctx_update_enc)) };
+	if (ispresent(sm_ctx_update.n1SmMsg)) {
+		parts := parts & { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id(sm_ctx_update.n1SmMsg.contentId),
+								     ts_HTTP2_Hdr_content_type("application/vnd.3gpp.5gnas") },
+								   valueof(ngnas_enc))) };
+	}
+	if (ispresent(sm_ctx_update.n2SmInfo)) {
+		parts := parts & { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id(sm_ctx_update.n2SmInfo.contentId),
+								     ts_HTTP2_Hdr_content_type("application/vnd.3gpp.ngap") },
+								   valueof(ngap_enc))) };
+	}
 
-	body_enc := f_http2_encode_body_multipart_json_ngap(sm_ctx_update_enc, ngap_enc, http2_boundary);
+	body_enc := f_HTTP2_multipart_msg_encode(parts, http2_boundary);
 	http2_idx := f_http2_adapter_find_free_idx();
 	http2_tx := ts_HTTP2_Msg(http2_idx,
 				 http2_stream_id,
@@ -318,8 +320,24 @@ runs on SMF_Session_CT {
 				 body := ts_HTTP2_Data_frame(http2_stream_id,
 							     end_stream_flag := true,
 							     data := body_enc));
+	return valueof(http2_tx);
+}
 
-	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_idx);
+function f_n11_update_sm_context_pdu_sess_establishment()
+runs on SMF_Session_CT {
+	var template (value) SmContextUpdateData sm_ctx_update;
+	var template (value) octetstring body_enc;
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+
+	sm_ctx_update := ts_SmContextUpdateData(ueLocation := f_ts_UserLocation(),
+						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("ngap-sm"),
+						n2SmInfoType := ts_N2SmInfoType(PDU_RES_SETUP_RSP));
+	var octetstring ngap_enc := f_ngap_pdu_gen_PDUSessionResourceSetupResponseTransfer();
+
+	http2_tx := f_n11_prepare_update_sm_context(valueof(sm_ctx_update), ngap_enc);
+
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
 	f_http2_adapter_send(http2_tx);
 
 	/* SMF updates RAN GTPU IP addr+TEID info on UPF: */
@@ -329,32 +347,34 @@ runs on SMF_Session_CT {
 	as_nudm_uecm_put_IndividualSmfRegistration();
 
 	/* Successful answer with no content: */
-	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_idx);
-	f_http2_adapter_close(idx := http2_idx);
+	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_tx.conn_id);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
 	setverdict(pass);
 }
 
-/* 5.2.2.4 Release SM Context service operation */
-function f_n11_delete_session()
-runs on SMF_Session_CT {
-	var template (value) SmContextReleaseData sm_ctx_rel;
+/* 3GPP TS 29.502 5.2.2.4 Release SM Context service operation */
+private function f_n11_prepare_release_sm_context(SmContextReleaseData sm_ctx_rel,
+						  template (omit) octetstring ngap_enc := omit)
+runs on SMF_Session_CT return HTTP2_Msg {
 	var octetstring sm_ctx_rel_enc;
 	var template (value) octetstring body_enc;
 	var charstring http2_boundary := "=-0EVVjxcWWFYNd1JXh1OQEg=="
 	var integer http2_idx;
 	var integer http2_stream_id := 3;
+	var HTTP2_multipart_part_list parts;
 	var template (value) HTTP2_Msg http2_tx;
 	var HTTP2_Msg http2_rx;
 
-	sm_ctx_rel := ts_SmContextReleaseData(ueLocation := f_ts_UserLocation(),
-						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("N2SmInfo"),
-						n2SmInfoType := ts_N2SmInfoType(PDU_RES_SETUP_RSP));
-	sm_ctx_rel_enc := f_enc_SmContextReleaseData(valueof(sm_ctx_rel));
+	sm_ctx_rel_enc := f_enc_SmContextReleaseData(sm_ctx_rel);
 
-	/* TODO: generate and encode ngap: */
-	var octetstring ngap_enc := f_ngap_pdu_gen_PDUSessionResourceSetupResponseTransfer();
+	parts := { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_type("application/json") }, sm_ctx_rel_enc)) };
+	if (ispresent(sm_ctx_rel.n2SmInfo)) {
+		parts := parts & { valueof(ts_HTTP2_multipart_part({ ts_HTTP2_Hdr_content_id(sm_ctx_rel.n2SmInfo.contentId),
+								     ts_HTTP2_Hdr_content_type("application/vnd.3gpp.ngap") },
+								   valueof(ngap_enc))) };
+	}
 
-	body_enc := f_http2_encode_body_multipart_json_ngap(sm_ctx_rel_enc, ngap_enc, http2_boundary);
+	body_enc := f_HTTP2_multipart_msg_encode(parts, http2_boundary);
 	http2_idx := f_http2_adapter_find_free_idx();
 	http2_tx := ts_HTTP2_Msg(http2_idx,
 				 http2_stream_id,
@@ -373,8 +393,23 @@ runs on SMF_Session_CT {
 				 body := ts_HTTP2_Data_frame(http2_stream_id,
 							     end_stream_flag := true,
 							     data := body_enc));
+	return valueof(http2_tx);
+}
 
-	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_idx);
+/* 5.2.2.4 Release SM Context service operation */
+function f_n11_delete_session()
+runs on SMF_Session_CT {
+	var template (value) SmContextReleaseData sm_ctx_rel;
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+
+	sm_ctx_rel := ts_SmContextReleaseData(ueLocation := f_ts_UserLocation(),
+					      n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("N2SmInfo"),
+					      n2SmInfoType := ts_N2SmInfoType(PDU_RES_SETUP_RSP));
+	var octetstring ngap_enc := f_ngap_pdu_gen_PDUSessionResourceSetupResponseTransfer();
+
+	http2_tx := f_n11_prepare_release_sm_context(valueof(sm_ctx_rel), ngap_enc);
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
 	f_http2_adapter_send(http2_tx);
 
 	/* SMF deletes PDU Session on UPF: */
@@ -388,10 +423,10 @@ runs on SMF_Session_CT {
 	as_nudm_uecm_delete_IndividualSmfRegistration();
 
 	/* Successful answer with no content: */
-	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_idx);
+	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_tx.conn_id);
 	f_http2_server_emu_unregister(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
 				      idx := HTTP2_CONN_SCP);
-	f_http2_adapter_close(idx := http2_idx);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
 	setverdict(pass);
 }
 
@@ -435,21 +470,28 @@ runs on SMF_Session_CT return template (present) HTTP2_Msg {
 }
 
 /* 5.2.2.3.1 N1N2MessageTransfer */
-private altstep as_namf_comm_post_n1n2_messages()
+private altstep as_namf_comm_post_n1n2_messages(out HTTP2_Msg http2_rx, out HTTP2_multipart_part_list parts)
+runs on SMF_Session_CT {
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Namf_Communication_post_n1n2_messages()) -> value http2_rx {
+		/* Split http2_rx.body.data into chunks since it is a multipart message: */
+		var charstring content_type_val := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_content_type));
+		var charstring boundary := f_HTTP2_header_content_type_multipart_val_get_boundary(content_type_val)
+		parts := f_HTTP2_multipart_msg_parse(http2_rx.body.data, boundary);
+	}
+}
+
+/* 5.2.2.3.1 N1N2MessageTransfer, PDU Session establishment (see clause 4.3.2 of 3GPP TS 23.502) */
+private altstep as_namf_comm_post_n1n2_messages_pdu_sess_establishment()
 runs on SMF_Session_CT {
 	var HTTP2_Msg http2_rx;
-	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Namf_Communication_post_n1n2_messages()) -> value http2_rx {
+	var HTTP2_multipart_part_list parts;
+	[] as_namf_comm_post_n1n2_messages(http2_rx, parts) {
 		var N1N2MessageTransferReqData n1n2msg_req;
 		var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
 		var template (value) N1N2MessageTransferRspData n1n2msg_rsp;
 		var NG_NAS_DL_SM_Message_Type dl_nas;
 		var template (value) HTTP2_Msg http2_tx;
 		var octetstring body_enc;
-
-		/* Split http2_rx.body.data into chunks since it is a multipart message: */
-		var charstring content_type_val := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_content_type));
-		var charstring boundary := f_HTTP2_header_content_type_multipart_val_get_boundary(content_type_val)
-		var HTTP2_multipart_part_list parts := f_HTTP2_multipart_msg_parse(http2_rx.body.data, boundary);
 
 		/* Decode 1st part: SBI json: */
 		f_dec_N1N2MessageTransferReqData(parts[0].data, n1n2msg_req); // TODO: check returned integer.
