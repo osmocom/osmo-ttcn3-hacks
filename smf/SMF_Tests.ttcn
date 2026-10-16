@@ -32,8 +32,11 @@ import from PFCP_CodecPort all;
 
 import from HTTP2_Types all;
 import from HTTP2_Templates all;
+import from HTTP2_Msg all;
 import from HTTP2_Adapter all;
 import from HTTP2_Server_Emulation all;
+
+import from NG_NAS_Templates all;
 
 import from Mutex all;
 import from SMF_Session_CT all;
@@ -809,6 +812,91 @@ testcase TC_n11_createSession_deleteSession_250_ipv4v6() runs on SMF_Test_CT {
 	f_TC_n11_createSession_deleteSession_250(c_PFCP_PDN_Type_IPv4v6);
 }
 
+/* create an IPv4 session, then delete it again */
+private function f_TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Session_CT {
+	var HTTP2_Msg http2_tx;
+
+	var PrometheusExpects expects0 := valueof({
+		ts_PrometheusExpect("ues_active", GAUGE, min := 0, max := 0),
+		ts_PrometheusExpect("pfcp_sessions_active", GAUGE, min := 0, max := 0)
+	});
+	var PrometheusExpects expects1 := valueof({
+		ts_PrometheusExpect("ues_active", GAUGE, min := 1, max := 1),
+		ts_PrometheusExpect("pfcp_sessions_active", GAUGE, min := 1, max := 1)
+	});
+	f_prometheus_expect(expects0, wait_converge := true);
+
+
+	/* Subscribe for PFCP Session Establishment Request PDU(s), which are
+	 * expected to have SEID set to 0, as per 3GPP TS 29.244, section 7.2.2.4.2. */
+	f_PFCPEM_subscribe_seid(c_SEID0);
+
+	http2_tx := f_n11_prepare_create_sm_context_pdu_sess_establishment();
+	f_http2_adapter_connect(mp_smf_hostname, mp_smf_sbi_port, mp_amf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	/* PCF: register to rx generic path. We take advantage of the fact that
+	 * we are inside a mutual exclusion zone, so only one session can be here at a time. */
+	f_http2_server_emu_register(Npcf_SMPolicyControl_path_sm_policies, idx := HTTP2_CONN_SCP);
+
+	/* Expect UDM to receive GET sm-data: */
+	as_nudm_sdm_get_sm_data();
+	/* Expect UDM to receive POST sdm-subscriptions: */
+	as_nudm_sdm_post_sdm_subscriptions();
+
+	/* Expect to receive "201 Created body={}" answer to our Nsmf sm-contexts request: */
+	as_n11_create_sm_context_pdu_sess_establishment_201_Created(http2_tx);
+	/* Prepare expect for the smContextRef: */
+	f_http2_server_emu_register(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
+				    idx := HTTP2_CONN_SCP);
+	/* Close HTTP2 conn: */
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+
+	/* Expect PCF to receive POST sm-policies: */
+	as_npcf_smpolicycontrol_post_sm_policies();
+	f_http2_server_emu_unregister(Npcf_SMPolicyControl_path_sm_policies, idx := HTTP2_CONN_SCP);
+
+	f_prometheus_expect(expects1, wait_converge := true);
+
+	log("Waiting 1st PFCP Sess Est Req");
+	PFCP.receive(f_Session_tr_PFCP_Session_Est_Req());
+	log("RX 1st PFCP Sess Est Req");
+	PFCP.receive(f_Session_tr_PFCP_Session_Est_Req());
+	log("RX 2nd PFCP Sess Est Req");
+	PFCP.receive(f_Session_tr_PFCP_Session_Est_Req());
+	log("RX 3rd PFCP Sess Est Req");
+
+	/* SMF deletes policy in PCF: */
+	as_npcf_smpolicycontrol_post_IndividualSMPOlicyTermination();
+
+	/* SMF deregisters on UDM: */
+	alt {
+	[] as_nudm_sdm_delete_IndividualSubscription() { setverdict(pass); } /* expected incoming msg */
+	[] as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject() { /* Unexpecte msg: */
+			setverdict(fail, "Received PDU SESS REJ while waiting for UDM! https://github.com/open5gs/open5gs/issues/4878");
+			repeat;
+		}
+	}
+	as_nudm_uecm_delete_IndividualSmfRegistration();
+
+	/* SMF Rejects the Create Session back to the UE: */
+	as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject(cs_GMM_GSM_Cause(omit, int2bit(38 /* Network Failure */, 8)));
+	f_http2_server_emu_unregister(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
+				      idx := HTTP2_CONN_SCP);
+	f_prometheus_expect(expects0, wait_converge := true);
+	setverdict(pass);
+}
+testcase TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Test_CT {
+	var SMF_Session_CT vc_conn;
+	var SessionPars pars := f_SessionPars(13,
+					      rat_type := GTP2C_RAT_NR);
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_n11_createSession_pfcp_sess_est_timeout), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
+
 /* Validate IUT detects PFCP Heartbeat timeout and recovers from it tearing down
  * existing subscriber connections: */
 private template (value) PrometheusExpects t_TC_5g_pfcp_heartbeat_timeout_Metrics_Expect(integer pfcp_peers_active, integer ues_active) := {
@@ -945,6 +1033,7 @@ control {
 	execute( TC_n11_createSession_deleteSession_250() );
 	execute( TC_n11_createSession_deleteSession_250_ipv6() );
 	execute( TC_n11_createSession_deleteSession_250_ipv4v6() );
+	execute( TC_n11_createSession_pfcp_sess_est_timeout() );
 	execute( TC_5g_pfcp_heartbeat_timeout() );
 	execute( TC_5g_pfcp_heartbeat_recovery_timestamp() );
 }
