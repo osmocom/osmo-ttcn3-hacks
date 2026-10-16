@@ -869,6 +869,58 @@ testcase TC_5g_pfcp_heartbeat_timeout() runs on SMF_Test_CT {
 	f_shutdown();
 }
 
+/* Validate IUT detects PFCP Heartbeat Recovery Timestamp change and recovers from it restoring
+ * existing subscriber connections: */
+private template (value) PrometheusExpects t_TC_5g_pfcp_heartbeat_recovery_timestamp(integer pfcp_peers_active, integer ues_active) := {
+	ts_PrometheusExpect("pfcp_peers_active", GAUGE, min := pfcp_peers_active, max := pfcp_peers_active),
+	ts_PrometheusExpect("ues_active", GAUGE, min := ues_active, max := ues_active),
+	ts_PrometheusExpect("pfcp_sessions_active", GAUGE, min := ues_active, max := ues_active)
+};
+private function f_TC_5g_pfcp_heartbeat_recovery_timestamp() runs on SMF_Session_CT {
+	var PDU_PFCP m;
+	var integer rts := f_PFCPEM_get_recovery_timestamp();
+
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_recovery_timestamp(1, 0)), wait_converge := true);
+
+	f_PFCPEM_subscribe_bcast();
+	as_pfcp_handle_heartbeat_req(rts);
+
+	f_n11_create_session();
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_recovery_timestamp(1, 1)), wait_converge := true);
+
+	rts := rts + 1;
+	as_pfcp_handle_heartbeat_req(rts);
+	activate(as_pfcp_handle_heartbeat_req(rts, do_repeat := true));
+
+	/* Wait for IUT to detect during rx of Heartbeat Response that peer restarted, ie. wait for a
+	 * 2nd ASSOC SETUP REQ after Heartbeat timeout: */
+	PFCP.receive(tr_PFCP_Assoc_Setup_Req()) -> value m;
+
+	f_prometheus_expect(valueof(t_TC_5g_pfcp_heartbeat_recovery_timestamp(0, 1)), wait_converge := true);
+	PFCP.send(ts_PFCP_Assoc_Setup_Resp(m.sequence_number,
+					   ts_PFCP_Node_ID_ipv4(f_inet_addr(mp_pfcp_ip_local)),
+					   ts_PFCP_Cause(PFCP_Cause_REQUEST_ACCEPTED),
+					   rts,
+					   up_function_features := ts_PFCP_UP_Function_Features(ftup := '1'B,
+												vtime := '1'B)));
+
+	/* IUT restores existing subscriber connections */
+	as_pfcp_sess_est_req(exp_sess_restoration := true);
+
+	f_n11_delete_session();
+	setverdict(pass);
+}
+testcase TC_5g_pfcp_heartbeat_recovery_timestamp() runs on SMF_Test_CT {
+	var SMF_Session_CT vc_conn;
+	var SessionPars pars := f_SessionPars(12,
+					      rat_type := GTP2C_RAT_NR);
+	g_pfcp_answer_heartbeat_req := false;
+	f_init(guard_timeout := 60.0);
+	vc_conn := f_start_handler(refers(f_TC_5g_pfcp_heartbeat_recovery_timestamp), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
 control {
 	execute( TC_tx_echo() );
 	execute( TC_createSession_deleteSession() );
@@ -894,6 +946,7 @@ control {
 	execute( TC_n11_createSession_deleteSession_250_ipv6() );
 	execute( TC_n11_createSession_deleteSession_250_ipv4v6() );
 	execute( TC_5g_pfcp_heartbeat_timeout() );
+	execute( TC_5g_pfcp_heartbeat_recovery_timestamp() );
 }
 
 
