@@ -147,8 +147,8 @@ RUN	set -x && \
 	echo "deb [signed-by=/obs.key] $OSMOCOM_REPO ./" >/etc/apt/sources.list.d/osmocom-latest.list && \
 	apt-get update && \
 	apt-get install -y --no-install-recommends \
-		eclipse-titan-optdir-9.0.0 \
 		eclipse-titan-optdir-11.1.0 \
+		eclipse-titan-optdir-11.2.1 \
 		&& \
 	apt-get clean && \
 	rm /etc/apt/sources.list.d/osmocom-latest.list
