@@ -55,6 +55,7 @@ SUBDIRS= \
 	smdpp \
 	stp \
 	sysinfo \
+	udm \
 	upf \
 	$(NULL)
 

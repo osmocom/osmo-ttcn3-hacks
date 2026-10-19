@@ -1,0 +1,386 @@
+/* UDM test suite in TTCN-3 (3GPP TS 29.503), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29503_Nudm_UEAU all;
+import from TS29503_Nudm_UEAU_Templates all;
+import from TS29505_Subscription_Data all;
+import from TS29505_Subscription_Data_Templates all;
+
+import from UDM_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match()
+runs on ConnHdlr return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.imsi_str & "*";
+	return imsi_match;
+}
+
+type record ConnHdlrPars {
+	hexstring imsi,
+	charstring imsi_str,
+	charstring serving_network,
+	NfInstanceId1 ausf_instance_id,
+	charstring nudm_ueau_auth_event_id optional
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var hexstring imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx);
+	var charstring imsi_str := f_dec_TBCD(imsi_hex2oct(imsi));
+	var template (value) ConnHdlrPars pars := {
+		imsi := imsi,
+		imsi_str := imsi_str,
+		serving_network := "5G:mnc070.mcc999.3gppnetwork.org", /* TODO: set based on mp_mcc and mp_mnc */
+		ausf_instance_id := "ausf-instance-id-" & int2str(idx),
+		nudm_ueau_auth_event_id := omit
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+	f_http2_server_emu_unregister(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring SCP_uri_prefix := "http://" & SCP_uri_hostport;
+
+/****************************************************
+ * N13 Nudm_UEAU (SBI): Emulated AUSF, 3GPP TS 29.503
+ ****************************************************/
+const charstring Nudm_uri_hostport := mp_udm_hostname & ":" & int2str(mp_udm_sbi_port);
+const charstring Nudm_uri_prefix := "http://" & Nudm_uri_hostport;
+
+/* 3GPP TS 29.503 6.3.3.2.4.2 Operation: generate-auth-data */
+private function f_n13_prepare_generate_auth_data(AuthenticationInfoRequest1 aut_info_req)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring aut_info_req_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	aut_info_req_enc := f_enc_AuthenticationInfoRequest1(aut_info_req);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := Nudm_uri_hostport,
+										      path := ts_Nudm_UEAU_path_generate_auth_data(g_pars.imsi_str)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-ausf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := aut_info_req_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 29.503 6.3.3.2.4.2 Operation: generate-auth-data */
+function f_n13_generate_auth_data()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) AuthenticationInfoRequest1 auth_info_req;
+
+	auth_info_req := ts_AuthenticationInfoRequest1(servingNetworkName := g_pars.serving_network,
+						       ausfInstanceId := g_pars.ausf_instance_id);
+
+	http2_tx := f_n13_prepare_generate_auth_data(valueof(auth_info_req));
+	f_http2_adapter_connect(mp_udm_hostname, mp_udm_sbi_port, mp_ausf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	as_Nudr_DR_get_authentication_subscription();
+
+	/* 3GPP TS 29.503 Table 6.3.3.2.4.2.2-2 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(200)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_AuthenticationInfoResult1));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.503 6.3.3.3.3.1 Resource: AuthEvents (POST) */
+private function f_n13_prepare_auth_events(AuthEvent1 auth_event)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring auth_event_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	auth_event_enc := f_enc_AuthEvent1(auth_event);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := Nudm_uri_hostport,
+										      path := ts_Nudm_UEAU_path_auth_events(g_pars.imsi_str)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-ausf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := auth_event_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 29.503 5.4.2.3.2 Authentication Confirmation */
+function f_n13_authentication_confirmation()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) AuthEvent1 auth_event;
+
+	auth_event := ts_AuthEvent1(nfInstanceId := g_pars.ausf_instance_id,
+				    success := true,
+				    timeStamp := "2026-10-20T11:58:44.069417+00:00", /* TODO: generate the now() timestamp string */
+				    authType := ts_AuthType1(FiveG_AKA),
+				    servingNetworkName := g_pars.serving_network);
+
+	http2_tx := f_n13_prepare_auth_events(valueof(auth_event));
+	f_http2_adapter_connect(mp_udm_hostname, mp_udm_sbi_port, mp_ausf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	as_Nudr_DR_put_authentication_status();
+
+	/* 3GPP TS 29.503 Table 6.3.3.3.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_AuthEvent1) ifpresent);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	/* Store obtained smContextRef:*/
+	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
+	g_pars.nudm_ueau_auth_event_id := regexp(created_location, Nudm_uri_prefix & valueof(ts_Nudm_UEAU_path_auth_events(g_pars.imsi_str)) & "/(?+)", 0);
+
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.503 6.3.3.6.2.1 Resource: Individual AuthEvent (PUT) */
+private function f_n13_prepare_individual_auth_event(template (value) AuthEvent1 auth_event)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring auth_event_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	auth_event_enc := f_enc_AuthEvent1(valueof(auth_event));
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "PUT",
+										      scheme := "http",
+										      authority := Nudm_uri_hostport,
+										      path := ts_Nudm_UEAU_path_indivdual_auth_event(g_pars.imsi_str,
+																     g_pars.nudm_ueau_auth_event_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-ausf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := auth_event_enc));
+	return valueof(http2_tx);
+}
+
+/* 5.4.2.3.3 Authentication Result Removal */
+function f_n13_authentication_result_removal()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) AuthEvent1 auth_event;
+
+	auth_event := ts_AuthEvent1(nfInstanceId := g_pars.ausf_instance_id,
+				    success := true,
+				    timeStamp := "2026-10-20T11:58:44.069417+00:00", /* TODO: generate the now() timestamp string */
+				    authType := ts_AuthType1(FiveG_AKA),
+				    servingNetworkName := g_pars.serving_network);
+
+	http2_tx := f_n13_prepare_individual_auth_event(auth_event);
+	f_http2_adapter_connect(mp_udm_hostname, mp_udm_sbi_port, mp_ausf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	/* FIXME: This is probably incorrect, it should send a DELETE, but it's what open5gs-udmd is sending right now...
+	 * See https://github.com/open5gs/open5gs/issues/4896 */
+	as_Nudr_DR_put_authentication_status();
+
+	/* 3GPP TS 29.503 Table 6.3.3.6.2.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(204)),
+			     omit);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/************************************************************************************
+ * N35 Nudr_DataRepository (SBI): Emulated UDR, 3GPP TS 29.504, 3GPP TS 29.505 A.2
+ ************************************************************************************/
+
+/* 3GPP TS 29.505 5.2.2.3.1 AuthenticationSubscription (GET) */
+function f_tr_Nudr_DR_get_authentication_subscription()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := tr_Nudr_DR_path_authentication_subscription(g_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb, body := omit);
+	return http2_msg;
+}
+
+/* 3GPP TS 29.505 5.2.2 Resource: AuthenticationSubscription */
+altstep as_Nudr_DR_get_authentication_subscription()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudr_DR_get_authentication_subscription()) -> value http2_rx {
+		var template (value) AuthenticationSubscription auth_sub;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		auth_sub := ts_AuthenticationSubscription(ts_AuthMethod(FiveG_AKA),
+							  encPermanentKey := "3c6e0b8a9c15224a8228b9a98ca1531d",
+							  sequenceNumber := ts_SequenceNumber(sqn := "0"),
+							  authenticationManagementField := "8000",
+							  encOpcKey := "762a2206fe0b4151ace403c86a11e479");
+		body_enc := f_enc_AuthenticationSubscription(valueof(auth_sub));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 3GPP TS 29.505 5.2.2.3.1 AuthenticationSubscription (PUT) */
+function f_tr_Nudr_DR_put_authentication_status()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := tr_Nudr_DR_path_authentication_status(g_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb, body := tr_HTTP2_Data_frame(data := decmatch tr_AuthEvent));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.505 5.2.2 Resource: AuthenticationSubscription */
+altstep as_Nudr_DR_put_authentication_status()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudr_DR_put_authentication_status()) -> value http2_rx {
+		var template (value) HTTP2_Msg http2_tx;
+		http2_tx := ts_HTTP2_Msg_204_No_Content(http2_rx.conn_id,
+							http2_rx.stream_id,
+							headers := {
+								ts_HTTP2_Hdr_content_type("application/json")
+							},
+							body := omit);
+
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+}

@@ -64,6 +64,7 @@ DIR=$BASEDIR/titan.TestPorts.HTTPmsg/src
 FILES="HTTPmsg_MessageLen.ttcn HTTPmsg_MessageLen_Function.cc HTTPmsg_PT.cc HTTPmsg_PT.hh HTTPmsg_PortType.ttcn HTTPmsg_Types.ttcn "
 gen_links $DIR $FILES
 
+# Needed by HTTP2_Adapter:
 DIR=$BASEDIR/titan.ProtocolModules.HTTP2/src
 FILES="HTTP2_EncDec.cc HTTP2_Types.ttcn"
 gen_links $DIR $FILES
