@@ -22,4 +22,9 @@ FILES="
 	TCCInterface.cc
 "
 
+# https://gitlab.eclipse.org/eclipse/titan/titan.core/-/work_items/798
+REGEN_MAKEFILE_ADD_TTCN3_COMPILER_FLAGS_IF_SUPPORTED="
+	--legacy-template-subrefs
+"
+
 . ../_buildsystem/regen_makefile.inc.sh

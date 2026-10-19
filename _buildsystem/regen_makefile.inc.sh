@@ -65,6 +65,36 @@ if [ "$USE_CCACHE" != 0 ] && command -v ccache >/dev/null; then
 fi
 
 #
+# Add options to ttcn3_compiler if they are supported
+#
+add_ttcn3_compiler_opts_if_supported() {
+	local i
+	local add_flags=""
+
+	if [ -z "$REGEN_MAKEFILE_ADD_TTCN3_COMPILER_FLAGS_IF_SUPPORTED" ]; then
+		return
+	fi
+
+	for i in $REGEN_MAKEFILE_ADD_TTCN3_COMPILER_FLAGS_IF_SUPPORTED; do
+		if ttcn3_compiler --help 2>&1 | grep -q -- "$i"; then
+			echo "Using ttcn3_compiler flag: $i"
+			add_flags="$add_flags $i"
+		else
+			echo "Unsupported ttcn3_compiler flag: $i"
+		fi
+	done
+
+	sed -i "s/COMPILER_FLAGS = /COMPILER_FLAGS = $add_flags /" Makefile
+
+	if ! grep -q "COMPILER_FLAGS = $add_flags " Makefile; then
+		echo "ERROR: failed to add compiler flags: $add_flags"
+		exit 1
+	fi
+}
+
+add_ttcn3_compiler_opts_if_supported
+
+#
 # Make output more readable (skip with make V=1)
 #
 
