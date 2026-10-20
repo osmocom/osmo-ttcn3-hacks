@@ -26,6 +26,11 @@ CPPFLAGS_TTCN3="
 	-DIPA_EMULATION_CTRL
 "
 
+# https://gitlab.eclipse.org/eclipse/titan/titan.core/-/work_items/798
+REGEN_MAKEFILE_ADD_TTCN3_COMPILER_FLAGS_IF_SUPPORTED="
+	--legacy-template-subrefs
+"
+
 . ../_buildsystem/regen_makefile.inc.sh
 
 # required for forkpty(3) used by PIPEasp
