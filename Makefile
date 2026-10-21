@@ -56,6 +56,7 @@ SUBDIRS= \
 	stp \
 	sysinfo \
 	udm \
+	udr \
 	upf \
 	$(NULL)
 
