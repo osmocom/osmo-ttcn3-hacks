@@ -1,0 +1,162 @@
+/* UDR test suite in TTCN-3 (3GPP TS 29.503)
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module UDR_Tests {
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from TCCEncoding_Functions all;
+
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from JSON_Generic_Templates all;
+import from TS29505_Subscription_Data_Templates all;
+
+import from ConnHdlr all;
+
+modulepar {
+	charstring mp_udr_hostname := "127.0.0.20";
+	integer	mp_udr_sbi_port := 7777;
+
+	charstring mp_scp_local_ip := "127.0.0.200";
+	integer mp_scp_local_port := 7777;
+
+	/* IP address at which we listen for HTTP2/SBI to emulate a UDM in ttcn3 */
+	charstring mp_udm_local_ip := "127.0.0.6";
+
+	GsmMcc mp_mcc := '999'H;
+	GsmMnc mp_mnc := '70'H;
+	HEX15n mp_imsi := '999700000000000'H;
+}
+
+type component MTC_CT extends HTTP2_CT, HTTP2_ConnHdlr {
+	/* emulated SCP */
+	var HTTP2_Server_Emulation_CT vc_HTTP2_SRV_SCP;
+
+	timer g_Tguard := 30.0;
+}
+
+private function f_init_http2_srv(charstring id) runs on MTC_CT {
+	id := id & "-HTTP2SRV";
+
+	var Http2ServerEmulationCfg http2_srv_cfg := {
+		http2_bind_ip := mp_scp_local_ip,
+		http2_bind_port := mp_scp_local_port,
+		one_req_per_conn := false
+	};
+
+	vc_HTTP2_SRV_SCP := HTTP2_Server_Emulation_CT.create(id) alive;
+	vc_HTTP2_SRV_SCP.start(HTTP2_Server_Emulation.main(http2_srv_cfg));
+
+	connect(self:HTTP2_CONN_PROC[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN_PROC);
+}
+
+
+private function f_init(integer imsi_suffix := 0, float t_guard := 30.0) runs on MTC_CT {
+	var charstring id := testcasename();
+
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+
+	f_init_http2_srv(id);
+}
+
+private function f_shutdown() runs on MTC_CT {
+	f_http2_server_close_conn_all();
+	setverdict(pass);
+}
+
+private function f_start_handler_create()
+runs on MTC_CT return ConnHdlr
+{
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename();
+
+	vc_conn := ConnHdlr.create(id);
+
+	if (isbound(vc_HTTP2_SRV_SCP)) {
+		connect(vc_conn:HTTP2_CONN[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN);
+		connect(vc_conn:HTTP2_CONN_PROC[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN_PROC);
+	}
+
+	return vc_conn;
+}
+
+private function f_start_handler_run(ConnHdlr vc_conn, void_fn fn, ConnHdlrPars pars) runs on MTC_CT
+{
+	vc_conn.start(f_ConnHdlr_init(fn, pars));
+}
+
+/* start a connection handler with given parameters */
+private function f_start_handler(void_fn fn, ConnHdlrPars pars)
+runs on MTC_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_create();
+	f_start_handler_run(vc_conn, fn, pars);
+	return vc_conn;
+}
+
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+private function f_TC_authentication_subscription() runs on ConnHdlr {
+	f_n35_get_authentication_subscription();
+	var integer sqn := str2int(g_pars.auth_subscr.sequenceNumber.sqn);
+	sqn := 96;
+	f_n35_patch_authentication_subscription({ ts_PatchItem(op := ts_PatchOperation(replace_),
+							       path := "/sequenceNumber/sqn",
+							       value_ := ts_JSON_generic_val_string(hex2str(f_Nudr_DR_sqn_int2hex(sqn)))) });
+	/* Upon patch, open5gs-udrd increments (+32) the sqn: */
+	f_n35_get_authentication_subscription(exp_sqn := sqn + 32);
+	setverdict(pass);
+}
+testcase TC_authentication_subscription() runs on MTC_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := f_ConnHdlrPars(0);
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_authentication_subscription), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
+/* 5.2.6 Resource: Amf3GppAccessRegistration */
+private function f_TC_amf_3gpp_access_registration() runs on ConnHdlr {
+	f_n35_put_amf_3gpp_access();
+	f_n35_patch_amf_3gpp_access({ ts_PatchItem(op := ts_PatchOperation(replace_),
+						   path := "PurgeFlag",
+						   value_ := ts_JSON_generic_val_bool(true)) });
+	setverdict(pass);
+}
+testcase TC_amf_3gpp_access_registration() runs on MTC_CT {
+	var ConnHdlr vc_conn;
+	var ConnHdlrPars pars := f_ConnHdlrPars(0);
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_amf_3gpp_access_registration), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
+control {
+	execute( TC_authentication_subscription() );
+	execute( TC_amf_3gpp_access_registration() );
+}
+
+}
