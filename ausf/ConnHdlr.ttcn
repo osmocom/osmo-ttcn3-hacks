@@ -1,0 +1,339 @@
+/* AUSF test suite in TTCN-3 (3GPP TS 29.503, 3GPP TS 29.509), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29571_CommonData_Templates all;
+import from TS29503_Nudm_UEAU all;
+import from TS29503_Nudm_UEAU_Templates all;
+import from TS29509_Nausf_UEAuthentication all;
+import from TS29509_Nausf_UEAuthentication_Templates all;
+
+import from AUSF_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match()
+runs on ConnHdlr return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.imsi_str & "*";
+	return imsi_match;
+}
+
+type record ConnHdlrPars {
+	integer idx,
+	hexstring imsi,
+	charstring imsi_str,
+	charstring serving_network,
+	charstring nudm_ueau_auth_ctx_id optional
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var hexstring imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx);
+	var charstring imsi_str := f_dec_TBCD(imsi_hex2oct(imsi));
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		imsi := imsi,
+		imsi_str := imsi_str,
+		serving_network := "5G:mnc070.mcc999.3gppnetwork.org", /* TODO: set based on mp_mcc and mp_mnc */
+		nudm_ueau_auth_ctx_id := omit
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+	f_http2_server_emu_unregister(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring c_SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring c_SCP_uri_prefix := "http://" & c_SCP_uri_hostport;
+
+/***********************************************************************
+ * N12 Nausf_UEAuthentication (SBI): Emulated AMF, 3GPP TS 29.509 A.2
+ ***********************************************************************/
+const charstring c_Nausf_uri_hostport := mp_ausf_hostname & ":" & int2str(mp_ausf_sbi_port);
+const charstring c_Nausf_uri_prefix := "http://" & c_Nausf_uri_hostport;
+
+/* 3GPP TS 29.509 6.1.3.2.3.1 Resource: ue-authentications (POST) */
+private function f_n12_prepare_post_ue_authentications(AuthenticationInfo auth_info)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring auth_info_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	auth_info_enc := f_enc_AuthenticationInfo(auth_info);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_Nausf_uri_hostport,
+										      path := c_Nausf_UEAuthentication_path_ue_authentications),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-ausf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := auth_info_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 29.509 6.1.3.2.3.1 Resource: ue-authentications (POST) */
+function f_n12_post_ue_authentications()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) AuthenticationInfo auth_info;
+
+	auth_info := ts_AuthenticationInfo(supiOrSuci := ts_sbi_Supi(g_pars.imsi_str),
+					   servingNetworkName := g_pars.serving_network);
+
+	http2_tx := f_n12_prepare_post_ue_authentications(valueof(auth_info));
+	f_http2_adapter_connect(mp_ausf_hostname, mp_ausf_sbi_port, mp_ausf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	as_Nudm_UEAU_post_generate_auth_data();
+
+	/* 3GPP TS 29.509 Table 6.1.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_UEAuthenticationCtx));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	/* Store obtained authCtxId:*/
+	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
+	g_pars.nudm_ueau_auth_ctx_id := regexp(created_location, c_Nausf_uri_prefix & c_Nausf_UEAuthentication_path_ue_authentications & "/(?+)", 0);
+
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.509 6.1.3.3.3.1 Resource: 5g-aka-confirmation (PUT) */
+private function f_n12_prepare_put_5g_aka_confirmation(ConfirmationData conf_data)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring conf_data_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	conf_data_enc := f_enc_ConfirmationData(conf_data);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "PUT",
+										      scheme := "http",
+										      authority := c_Nausf_uri_hostport,
+										      path := ts_Nausf_UEAuthentication_path_5g_aka_confirmation(g_pars.nudm_ueau_auth_ctx_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-ausf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := conf_data_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 29.509 6.1.3.3.3.1 Resource: 5g-aka-confirmation (PUT) */
+function f_n12_put_5g_aka_confirmation()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) ConfirmationData conf_data;
+
+	conf_data := ts_ConfirmationData(resStar := ts_ResStar(""));
+
+	http2_tx := f_n12_prepare_put_5g_aka_confirmation(valueof(conf_data));
+	f_http2_adapter_connect(mp_ausf_hostname, mp_ausf_sbi_port, mp_ausf_local_ip, idx := http2_tx.conn_id);
+	f_http2_adapter_send(http2_tx);
+
+	as_Nudm_UEAU_post_auth_events();
+
+	/* 3GPP TS 29.503 Table 6.3.3.2.4.2.2-2 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(200)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_ConfirmationDataResponse));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/****************************************************
+ * N13 Nudm_UEAU (SBI): Emulated UDM, 3GPP TS 29.503
+ ****************************************************/
+const charstring Nudm_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring Nudm_uri_prefix := "http://" & Nudm_uri_hostport;
+
+template (value) charstring
+ts_Nudm_UEAU_uri_indivdual_auth_event(template (value) charstring imsi,
+				      template (value) charstring auth_event_id)
+:= Nudm_uri_prefix & "/" & valueof(ts_Nudm_UEAU_path_indivdual_auth_event(imsi, auth_event_id));
+
+/* 3GPP TS 29.503 6.3.3.2.4.2 Operation: generate-auth-data (POST) */
+function f_tr_Nudm_UEAU_post_generate_auth_data()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := tr_Nudm_UEAU_path_generate_auth_data(g_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_AuthenticationInfoRequest1));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 6.3.3.2.4.2 Operation: generate-auth-data */
+altstep as_Nudm_UEAU_post_generate_auth_data()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_UEAU_post_generate_auth_data()) -> value http2_rx {
+		var template (value) AuthenticationInfoResult1 auth_info_res;
+		var template (value) Av5GHeAka1 aka;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		aka := ts_Av5GHeAka1(avType := ts_AvType1(FiveG_HE_AKA),
+				     rand := "22fd7b017a00a3d10a7fa43bcdb38737",
+				     xresStar := "7fd887a888a0711e2bf090b3e83ecc41",
+				     autn := "39e2eeb667fe8000df925c009944031b",
+				     kausf := "9f4319e9b73df525fd1d4212dabd0642ca73de96d485252fde7e664a8b59f739");
+		auth_info_res := ts_AuthenticationInfoResult1(authType := ts_AuthType1(FiveG_AKA),
+							      authenticationVector := ts_AuthenticationVector1_5GHeAka(aka),
+							      supi := ts_sbi_Supi(g_pars.imsi_str));
+		body_enc := f_enc_AuthenticationInfoResult1(valueof(auth_info_res));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 3GPP TS 29.503 6.3.3.3.3.1 Resource: AuthEvents (POST) */
+function f_tr_Nudm_UEAU_post_auth_events()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := tr_Nudm_UEAU_path_auth_events(g_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_AuthEvent1));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.4.2.3.2 Authentication Confirmation */
+altstep as_Nudm_UEAU_post_auth_events()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_UEAU_post_auth_events()) -> value http2_rx {
+		var AuthEvent1 auth_event;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		/* 3GPP TS 29.503 Table 6.3.3.3.3.1-3 */
+		f_dec_AuthEvent1(http2_rx.body.data, auth_event); // TODO: check return code
+		body_enc := f_enc_AuthEvent1(valueof(auth_event));
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json"),
+							ts_HTTP2_Hdr_location(ts_Nudm_UEAU_uri_indivdual_auth_event(g_pars.imsi_str,
+														    int2str(g_pars.idx)))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+}
