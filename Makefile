@@ -18,6 +18,7 @@ BUILDDIR ?= _build
 SUBDIRS= \
 	5gc \
 	asterisk \
+	ausf \
 	bsc \
 	bsc-nat \
 	bts \
