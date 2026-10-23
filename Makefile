@@ -42,6 +42,7 @@ SUBDIRS= \
 	ns \
 	pcap-client \
 	pcu \
+	pcf \
 	pcrf \
 	pgw \
 	remsim \

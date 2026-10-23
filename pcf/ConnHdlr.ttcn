@@ -1,0 +1,257 @@
+/* PCF test suite in TTCN-3 (3GPP TS 29.512), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29571_CommonData_Templates all;
+import from TS29505_Subscription_Data all;
+import from TS29505_Subscription_Data_Templates all;
+import from TS29512_Npcf_SMPolicyControl all;
+import from TS29512_Npcf_SMPolicyControl_Templates all;
+import from TS29519_Policy_Data all;
+import from TS29519_Policy_Data_Templates all;
+
+import from PCF_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match()
+runs on ConnHdlr return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.imsi_str & "*";
+	return imsi_match;
+}
+
+type record ConnHdlrPars {
+	integer idx,
+	integer pdu_sess_id,
+	hexstring imsi,
+	charstring imsi_str,
+	charstring serving_network,
+	NfInstanceId1 ausf_instance_id,
+	charstring nudm_ueau_auth_event_id optional
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var hexstring imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx);
+	var charstring imsi_str := f_dec_TBCD(imsi_hex2oct(imsi));
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		pdu_sess_id := idx + 1,
+		imsi := imsi,
+		imsi_str := imsi_str,
+		serving_network := "5G:mnc070.mcc999.3gppnetwork.org", /* TODO: set based on mp_mcc and mp_mnc */
+		ausf_instance_id := "ausf-instance-id-" & int2str(idx),
+		nudm_ueau_auth_event_id := omit
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+	f_http2_server_emu_unregister(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+}
+
+function f_http2_adapter_connect_pcf(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_pcf_hostname, mp_pcf_sbi_port, mp_smf_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_pcf(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_pcf(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring SCP_uri_prefix := "http://" & SCP_uri_hostport;
+
+/****************************************************
+ * N7 NPcf (SBI): Emulated SMF, 3GPP TS 29.512
+ ****************************************************/
+const charstring c_Npcf_uri_hostport := mp_pcf_hostname & ":" & int2str(mp_pcf_sbi_port);
+const charstring c_Npcf_uri_prefix := "http://" & c_Npcf_uri_hostport;
+
+function f_ts_PlmnIdNid1()
+runs on ConnHdlr return TS29512_Npcf_SMPolicyControl.PlmnIdNid1 {
+	return valueof(TS29512_Npcf_SMPolicyControl_Templates.ts_PlmnIdNid1("001", "001"));
+}
+
+/* 3GPP TS 29.512 5.3.2.3.1 Resource: SM Policies (POST) */
+private function f_n13_prepare_sm_policies(SmPolicyContextData1 ctx_data)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring ctx_data_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	ctx_data_enc := f_enc_SmPolicyContextData1(ctx_data);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_Npcf_uri_hostport,
+										      path := c_Npcf_SMPolicyControl_path_sm_policies),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-smf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := ctx_data_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 29.512 5.3.2 Resource: SM Policies (POST) */
+function f_n7_sm_policies()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) SmPolicyContextData1 ctx_data;
+
+	ctx_data := ts_SmPolicyContextData1(supi := ts_sbi_Supi(g_pars.imsi_str),
+					    pduSessionId := g_pars.pdu_sess_id,
+					    pduSessionType := ts_PduSessionType1(IPV4),
+					    dnn := "internet",
+					    notificationUri := ts_Nsmf_Callback_uri_sm_policy_notify(int2str(g_pars.pdu_sess_id)),
+					    servingNetwork := f_ts_PlmnIdNid1(),
+					    ipv4Address := "10.45.0.2",
+					    sliceInfo := TS29512_Npcf_SMPolicyControl_Templates.ts_Snssai1(1));
+
+	http2_tx := f_n13_prepare_sm_policies(valueof(ctx_data));
+	f_http2_adapter_connect_send_pcf(http2_tx, idx := http2_tx.conn_id);
+
+	/* Expect UDR to receive GET sm-data: */
+	as_nudr_DR_policy_data_get_sm_data();
+
+	/* TODO: handle: POST /nbsf-management/v1/pcfBindings, DATA[3], JSON (application/json) */
+
+	/* 3GPP TS 29.512 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_SmPolicyDecision1));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+
+/************************************************************************************
+ * N35 Nudr_DataRepository (SBI): Emulated UDR, 3GPP TS 29.504, 3GPP TS 29.505 A.2
+ ************************************************************************************/
+
+function f_tr_Nudr_DR_policy_data_get_sm_data()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := tr_Nudr_DR_policy_data_path_sm_data(g_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?, hb := hb, body := omit);
+	return http2_msg;
+}
+
+altstep as_nudr_DR_policy_data_get_sm_data()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudr_DR_policy_data_get_sm_data()) -> value http2_rx {
+		var template (value) SmPolicyData sm_policy_data;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		sm_policy_data := ts_SmPolicyData(smPolicySnssaiData := {
+							{"", ts_SmPolicySnssaiData(snssai := ts_Snssai(1),
+										   smPolicyDnnData := {{"internet",
+										   			ts_SmPolicyDnnData(dnn := "internet")}})}
+						  });
+		body_enc := f_enc_SmPolicyData(valueof(sm_policy_data));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json; charset=utf-8")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/************************************************************
+ * N17 Nsmf (SBI): Emulated SMF, 3GPP TS 29.502
+ ************************************************************/
+const charstring c_Nsmf_uri_hostport := SCP_uri_hostport;
+const charstring c_Nsmf_uri_prefix := "http://" & c_Nsmf_uri_hostport;
+const charstring c_Nsmf_Callback_path_api_prefix := "/nsmf-callback/v1";
+
+template (value) charstring
+ts_Nsmf_Callback_uri_sm_policy_notify(template (value) charstring id)
+:= c_Nsmf_uri_prefix & c_Nsmf_Callback_path_api_prefix & "/sm-policy-notify/" & valueof(id);
+
+
+}
