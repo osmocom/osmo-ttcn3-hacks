@@ -21,6 +21,7 @@ SUBDIRS= \
 	ausf \
 	bsc \
 	bsc-nat \
+	bsf \
 	bts \
 	cbc \
 	ccid \

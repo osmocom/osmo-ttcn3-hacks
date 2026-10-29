@@ -1,0 +1,355 @@
+/* BSF test suite in TTCN-3 (3GPP TS 29.521), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29571_CommonData_Templates all;
+import from TS29521_Nbsf_Management all;
+import from TS29521_Nbsf_Management_Templates all;
+
+import from BSF_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match()
+runs on ConnHdlr return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.imsi_str & "*";
+	return imsi_match;
+}
+
+type record ConnHdlrPars {
+	integer idx,
+	integer pdu_sess_id,
+	hexstring imsi,
+	charstring imsi_str,
+	charstring serving_network,
+	NfInstanceId pcf_instance_id,
+	charstring binding_id optional
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var hexstring imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx);
+	var charstring imsi_str := f_dec_TBCD(imsi_hex2oct(imsi));
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		pdu_sess_id := idx + 1,
+		imsi := imsi,
+		imsi_str := imsi_str,
+		serving_network := "5G:mnc070.mcc999.3gppnetwork.org", /* TODO: set based on mp_mcc and mp_mnc */
+		pcf_instance_id := "pcf-instance-id-" & int2str(idx),
+		binding_id := omit
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+	f_http2_server_emu_unregister(f_http2_server_path_match(), idx := HTTP2_CONN_SCP);
+}
+
+function f_http2_adapter_connect_pcf(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_bsf_hostname, mp_bsf_sbi_port, mp_pcf_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_bsf(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_pcf(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring SCP_uri_prefix := "http://" & SCP_uri_hostport;
+
+/****************************************************
+ * Nbsf_Management (SBI) Emulated PCF, 3GPP TS 29.521
+ ****************************************************/
+const charstring c_Nbsf_uri_hostport := mp_bsf_hostname & ":" & int2str(mp_bsf_sbi_port);
+const charstring c_Nbsf_uri_prefix := "http://" & c_Nbsf_uri_hostport;
+
+/* 5.3.2.3.1 Resource: BSF for a PDU Session Bindings (POST) */
+private function f_nbsf_mgmt_prepare_post_pcfbindings(PcfBinding pcf_binding)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring pcf_binding_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	pcf_binding_enc := f_enc_PcfBinding(pcf_binding);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_Nbsf_uri_hostport,
+										      path := c_Nbsf_Management_path_pcfBindings),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-pcf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := pcf_binding_enc));
+	return valueof(http2_tx);
+}
+
+/* 4.2.2.2 Register a new PCF for a PDU Session binding information */
+function f_nbsf_mgmt_post_pcfbindings()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) PcfBinding pcf_binding;
+
+	pcf_binding := ts_PcfBinding(supi := ts_sbi_Supi(g_pars.imsi_str),
+				     ipv4Addr := mp_pcf_local_ip,
+				     dnn := "internet",
+				     pcfIpEndPoints := { ts_IpEndPoint(ipv4Address := mp_pcf_local_ip,
+								       port_ := mp_scp_local_port) },
+				     snssai := TS29521_Nbsf_Management_Templates.ts_Snssai(1),
+				     pcfId := g_pars.pcf_instance_id);
+
+	http2_tx := f_nbsf_mgmt_prepare_post_pcfbindings(valueof(pcf_binding));
+	f_http2_adapter_connect_send_bsf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_PcfBinding));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	/* Store obtained bindingId: */
+	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
+	g_pars.binding_id := regexp(created_location, c_Nbsf_uri_prefix & c_Nbsf_Management_path_pcfBindings & "/(?+)", 0);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 5.3.3.3.1 Resource: Individual PCF for a PDU Session Binding (DELETE) */
+private function f_nbsf_mgmt_prepare_delete_individual_pcfbinding()
+runs on ConnHdlr return HTTP2_Msg {
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "DELETE",
+										      scheme := "http",
+										      authority := c_Nbsf_uri_hostport,
+										      path := ts_Nbsf_Management_path_individual_pcf_pdu_sess_binding(g_pars.binding_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-pcf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := omit);
+	return valueof(http2_tx);
+}
+
+/* 4.2.3.2 Deregister an individual PCF for a PDU Session binding information */
+function f_nbsf_mgmt_delete_individual_pcfbinding()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+
+	http2_tx := f_nbsf_mgmt_prepare_delete_individual_pcfbinding();
+	f_http2_adapter_connect_send_bsf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(204)),
+			     omit);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	g_pars.binding_id := omit;
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 5.3.7.3.1 Resource: PCF for a UE Bindings (POST) */
+private function f_nbsf_mgmt_prepare_post_pcf_ue_bindings(PcfForUeBinding pcf_ue_binding)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring pcf_ue_binding_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	pcf_ue_binding_enc := f_enc_PcfForUeBinding(pcf_ue_binding);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_Nbsf_uri_hostport,
+										      path := c_Nbsf_Management_path_pcf_ue_bindings),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-pcf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := pcf_ue_binding_enc));
+	return valueof(http2_tx);
+}
+
+/* 4.2.2.3 Register a new PCF for a UE binding information */
+function f_nbsf_mgmt_post_pcf_ue_bindings()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) PcfForUeBinding pcf_ue_binding;
+
+	pcf_ue_binding := ts_PcfForUeBinding(supi := ts_sbi_Supi(g_pars.imsi_str),
+					     pcfForUeIpEndPoints := { ts_IpEndPoint(ipv4Address := mp_pcf_local_ip,
+										     port_ := mp_scp_local_port) },
+					     pcfId := g_pars.pcf_instance_id);
+
+	http2_tx := f_nbsf_mgmt_prepare_post_pcf_ue_bindings(valueof(pcf_ue_binding));
+	f_http2_adapter_connect_send_bsf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(201)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_PcfForUeBinding));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	/* Store obtained bindingId: */
+	var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
+	g_pars.binding_id := regexp(created_location, c_Nbsf_uri_prefix & c_Nbsf_Management_path_pcf_ue_bindings & "/(?+)", 0);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 5.3.3.3.1 Resource: Individual PCF for a PDU Session Binding (DELETE) */
+private function f_nbsf_mgmt_prepare_delete_individual_pcf_ue_binding()
+runs on ConnHdlr return HTTP2_Msg {
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "DELETE",
+										      scheme := "http",
+										      authority := c_Nbsf_uri_hostport,
+										      path := ts_Nbsf_Management_path_individual_pcf_ue_binding(g_pars.binding_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-pcf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := omit);
+	return valueof(http2_tx);
+}
+
+/* 4.2.3.3 Deregister an individual PCF for a UE binding information */
+function f_nbsf_mgmt_delete_individual_pcf_ue_binding()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+
+	http2_tx := f_nbsf_mgmt_prepare_delete_individual_pcf_ue_binding();
+	f_http2_adapter_connect_send_bsf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(204)),
+			     omit);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	g_pars.binding_id := omit;
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+}
