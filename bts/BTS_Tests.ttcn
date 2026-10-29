@@ -153,7 +153,13 @@ modulepar {
 
 type record of RslChannelNr ChannelNrs;
 
-type component test_CT extends CTRL_Adapter_CT {
+/* Optional TRXC connections to the transceiver (BTS side), one per transceiver */
+type component TRXC_CT {
+	port TRXC_CODEC_PT BTS_TRXC;
+	var ro_ConnectionId g_bts_trxc_conn_ids := { };
+}
+
+type component test_CT extends CTRL_Adapter_CT, TRXC_CT {
 	/* IPA Emulation component underneath RSL */
 	var IPA_Emulation_CT vc_IPA;
 	/* RSL Emulation component (for ConnHdlr tests) */
@@ -163,10 +169,6 @@ type component test_CT extends CTRL_Adapter_CT {
 
 	/* L1CTL port (for classic tests) */
 	port L1CTL_PT L1CTL;
-
-	/* Optional TRXC connection to FakeTRX (BTS side) */
-	port TRXC_CODEC_PT BTS_TRXC;
-	var integer g_bts_trxc_conn_id;
 
 	/* VTY connections to both BTS and BSC */
 	port TELNETasp_PT BTSVTY;
@@ -204,12 +206,8 @@ type component test_CT extends CTRL_Adapter_CT {
 }
 
 /* an individual call / channel */
-type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT {
+type component ConnHdlr extends RSL_DchanHdlr, lapdm_test_CT, TRXC_CT {
 	port L1CTL_PT L1CTL;
-
-	/* Optional TRXC connection to FakeTRX (BTS side) */
-	port TRXC_CODEC_PT BTS_TRXC;
-	var integer g_bts_trxc_conn_id;
 
 	/* port to be initialized optionally to access BSC VTY */
 	port TELNETasp_PT BSCVTY;
@@ -503,18 +501,45 @@ private function f_init_pcu(PCUIF_CODEC_PT pt, charstring id,
 	}
 }
 
-private function f_init_trxc(TRXC_CODEC_PT pt, charstring id,
-			     out integer trxc_conn_id) {
-	var Result res;
+/* Connect to the TRXC interface of each transceiver: the transceiver binds
+ * TRXC of the N-th channel to (base_port + 2 * N + 1), where mp_bts_trxc_port
+ * is the TRXC port of the first channel (base_port + 1). */
+private function f_init_trxc() runs on TRXC_CT {
+	g_bts_trxc_conn_ids := { };
 
-	res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(pt, mp_bts_trxc_ip, mp_bts_trxc_port,
-						       "", -1, -1, { udp := {} }, {});
-	if (not ispresent(res.connId)) {
-		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
-					"Could not connect to the control (TRXC) interface " &
-					"of FakeTRX, check your configuration");
+	for (var integer i := 0; i < mp_transceiver_num; i := i + 1) {
+		var Result res;
+
+		res := TRXC_CodecPort_CtrlFunct.f_IPL4_connect(BTS_TRXC, mp_bts_trxc_ip,
+							       mp_bts_trxc_port + 2 * i,
+							       "", -1, -1, { udp := {} }, {});
+		if (not ispresent(res.connId)) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						"Could not connect to the control (TRXC) interface " &
+						"of the transceiver, check your configuration");
+		}
+		g_bts_trxc_conn_ids[i] := res.connId;
 	}
-	trxc_conn_id := res.connId;
+}
+
+/* Send a TRXC command to all transceivers, expect a response from each */
+private function f_trxc_broadcast(template (value) TrxcMessage cmd) runs on TRXC_CT {
+	for (var integer i := 0; i < lengthof(g_bts_trxc_conn_ids); i := i + 1) {
+		var TrxcMessage ret;
+		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_ids[i], cmd);
+	}
+}
+
+private function f_trxc_fake_rssi(TRXC_RSSI rssi) runs on TRXC_CT {
+	f_trxc_broadcast(ts_TRXC_FAKE_RSSI(rssi));
+}
+
+private function f_trxc_fake_toffs256(int16_t toffs256) runs on TRXC_CT {
+	f_trxc_broadcast(ts_TRXC_FAKE_TIMING(toffs256));
+}
+
+private function f_trxc_fake_ci(int16_t ci) runs on TRXC_CT {
+	f_trxc_broadcast(ts_TRXC_FAKE_CI(ci));
 }
 
 private function f_gen_chans_for_ts(uint3_t tn, PchanConfig config)
@@ -608,17 +633,15 @@ runs on test_CT
 	f_rsl_bcch_fill(RSL_SYSTEM_INFO_4, ts_SI4_default);
 
 	if (mp_bts_trxc_port != -1) {
-		var TrxcMessage ret;
-
-		/* Init TRXC interface to FakeTRX */
+		/* Init TRXC interface to the transceiver */
 		map(self:BTS_TRXC, system:BTS_TRXC);
-		f_init_trxc(BTS_TRXC, id, g_bts_trxc_conn_id);
+		f_init_trxc();
 
 		/* Start with a default moderate timing offset equalling TA=2, and RSSI=-60 */
-		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_TIMING(2*256));
-		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_RSSI(-60));
+		f_trxc_fake_toffs256(2*256);
+		f_trxc_fake_rssi(-60);
 		/* OsmoBTS may have different AB / NB threshold (see MIN_QUAL_NORM, MIN_QUAL_RACH) */
-		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_CI(60));
+		f_trxc_fake_ci(60);
 	}
 
 	/* Wait some extra time to make sure the BTS emits a stable carrier.
@@ -737,21 +760,6 @@ friend function f_l1_tune(L1CTL_PT L1CTL, L1ctlCcchMode ccch_mode := CCCH_MODE_C
 	f_L1CTL_FBSB(L1CTL, arfcn, ccch_mode, mp_rxlev_exp);
 }
 
-private function f_trxc_fake_rssi(TRXC_RSSI rssi) runs on ConnHdlr {
-	var TrxcMessage ret;
-	ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_RSSI(rssi));
-}
-
-private function f_trxc_fake_toffs256(int16_t toffs256) runs on ConnHdlr {
-	var TrxcMessage ret;
-	ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_TIMING(toffs256));
-}
-
-private function f_trxc_fake_ci(int16_t ci) runs on ConnHdlr {
-	var TrxcMessage ret;
-	ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_CI(ci));
-}
-
 /* first function started in ConnHdlr component */
 private function f_handler_init(void_fn fn, charstring id, ConnHdlrPars pars)
 runs on ConnHdlr {
@@ -763,7 +771,7 @@ runs on ConnHdlr {
 	}
 
 	if (mp_bts_trxc_port != -1 and BTS_TRXC.checkstate("Mapped")) {
-		f_init_trxc(BTS_TRXC, id, g_bts_trxc_conn_id);
+		f_init_trxc();
 	}
 
 	g_Tguard.start(pars.t_guard);
@@ -1931,9 +1939,8 @@ testcase TC_rach_load_count() runs on test_CT {
 }
 
 private function f_rach_toffs(int16_t toffs256, boolean expect_pass) runs on test_CT {
-	var TrxcMessage ret;
-	/* tell fake_trx to use a given timing offset for all bursts */
-	ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_TIMING(toffs256));
+	/* tell the transceiver to use a given timing offset for all bursts */
+	f_trxc_fake_toffs256(toffs256);
 	f_sleep(0.5);
 
 	/* Transmit RACH request + wait for confirmation */
@@ -6007,9 +6014,7 @@ testcase TC_pcu_data_ind_lqual_cb() runs on test_CT {
 
 	/* C/I in centiBels, test range: -256 .. +1280, step 128 */
 	for (var int16_t i := -256; i <= 1280; i := i + 128) {
-		var TrxcMessage ret;
-
-		ret := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id, ts_TRXC_FAKE_CI(i));
+		f_trxc_fake_ci(i);
 
 		log("Testing C/I=", i, " cB");
 		f_TC_pcu_data_ind_lqual_cb(i);
@@ -6976,7 +6981,7 @@ testcase TC_dyn_osmo_pdch_tchh_race_act() runs on test_CT {
 	f_init();
 
 	/* Configure an artificial delay of 200 ms for TRXC RSP messages */
-	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id,
+	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_ids[0],
 				 ts_TRXC_FAKE_TRXC_DELAY(200));
 
 	/* Activate all sub-channels of TCH/H on TS4 immediately in hope that the second
@@ -6994,7 +6999,7 @@ testcase TC_dyn_osmo_pdch_tchh_race_act() runs on test_CT {
 	}
 
 	/* Disable the artificial delay for TRXC RSP messages */
-	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id,
+	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_ids[0],
 				 ts_TRXC_FAKE_TRXC_DELAY(0));
 }
 testcase TC_dyn_osmo_pdch_sdcch8_race_act() runs on test_CT {
@@ -7005,7 +7010,7 @@ testcase TC_dyn_osmo_pdch_sdcch8_race_act() runs on test_CT {
 	f_init();
 
 	/* Configure an artificial delay of 200 ms for TRXC RSP messages */
-	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id,
+	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_ids[0],
 				 ts_TRXC_FAKE_TRXC_DELAY(200));
 
 	/* Activate all sub-channels of SDCCH/8 on TS4 immediately in hope that subsequent
@@ -7023,7 +7028,7 @@ testcase TC_dyn_osmo_pdch_sdcch8_race_act() runs on test_CT {
 	}
 
 	/* Disable the artificial delay for TRXC RSP messages */
-	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_id,
+	rsp := f_TRXC_transceive(BTS_TRXC, g_bts_trxc_conn_ids[0],
 				 ts_TRXC_FAKE_TRXC_DELAY(0));
 }
 
