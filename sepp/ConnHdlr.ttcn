@@ -1,0 +1,546 @@
+/* SEPP test suite in TTCN-3 (3GPP TS 29.573, 3GPP TS 33.501), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29510_Nnrf_NFManagement all;
+import from TS29510_Nnrf_NFManagement_Templates all;
+import from TS29573_N32_Handshake all;
+import from TS29573_N32_Handshake_Templates all;
+import from TS29573_JOSEProtectedMessageForwarding all;
+import from TS29573_JOSEProtectedMessageForwarding_Templates all;
+
+import from SEPP_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+const integer HTTP2_CONN_SEPP := 1;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match_scp()
+runs on ConnHdlr return charstring {
+	var charstring nf_instance_match := c_Nnrf_NFM_path_nf_instances & "/?+";
+	var charstring match_ := "(" & c_Nnrf_NFM_path_nf_instances & ")|(" & nf_instance_match & ")";
+	return match_;
+}
+
+function f_http2_server_path_match_sepp()
+runs on ConnHdlr return charstring {
+	var charstring match_n32c := c_N32_Handshake_path_sec_cap_neg;
+	var charstring match_n32f := "/nudr-dr/v1/subscription-data/?+";
+	var charstring match_ := "(" & match_n32c & ")|(" & match_n32f & ")"
+	return match_;
+}
+
+type record ConnHdlrPars {
+	integer idx,
+	charstring fqdn_sender,
+	charstring n32f_context_id
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		fqdn_sender := "sepp2.localdomain",
+		n32f_context_id := int2str(idx) /* 3GPP TS 29.573 Table 6.2.5.2.9-1 n32fContextId */
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match_scp(), idx := HTTP2_CONN_SCP);
+	f_http2_server_emu_register(f_http2_server_path_match_sepp(), idx := HTTP2_CONN_SEPP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+}
+
+function f_http2_adapter_connect_sepp_n32c(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_sepp_n32c_hostname, mp_sepp_n32c_port, mp_sepp_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_sepp_n32c(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_sepp_n32c(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+function f_http2_adapter_connect_sepp_n32f(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_sepp_n32f_hostname, mp_sepp_n32f_port, mp_sepp_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_sepp_n32f(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_sepp_n32f(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+function f_http2_adapter_connect_sepp_sbi(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_sepp_sbi_hostname, mp_sepp_sbi_port, mp_sepp_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_sepp_sbi(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_sepp_sbi(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring SCP_uri_prefix := "http://" & SCP_uri_hostport;
+
+/****************************************************
+ * N32-c (SBI) Emulated SEPP, 3GPP TS 29.573
+ ****************************************************/
+const charstring c_N32c_uri_hostport := mp_sepp_n32c_hostname & ":" & int2str(mp_sepp_n32c_port);
+const charstring c_N32c_uri_prefix := "http://" & c_N32c_uri_hostport;
+
+/* 6.1.4.2.2 Operation: Security Capability Negotiation (POST) */
+function f_tr_N32_Handshake_post_sec_cap_neg()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := c_N32_Handshake_path_sec_cap_neg);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_SecNegotiateReqData));
+	return http2_msg;
+}
+
+/* 6.1.4.2.2 Operation: Security Capability Negotiation (POST) */
+altstep as_N32_Handshake_post_sec_cap_neg(template (value) SecurityCapability_enum selected_sec_cap := TLS)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SEPP].receive(f_tr_N32_Handshake_post_sec_cap_neg()) -> value http2_rx {
+		var SecNegotiateReqData req;
+		var template (value) SecNegotiateRspData rsp;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_SecNegotiateReqData(http2_rx.body.data, req); // TODO: check rc
+		rsp := ts_SecNegotiateRspData(sender_ := g_pars.fqdn_sender,
+					      selectedSecCapability := ts_SecurityCapability(selected_sec_cap),
+					      plmnIdList := { ts_PlmnId(mcc := mp_sepp_local_plmn_mcc,
+									mnc := mp_sepp_local_plmn_mnc) });
+		body_enc := f_enc_SecNegotiateRspData(valueof(rsp));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SEPP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.4.2.2 Operation: Security Capability Negotiation (POST) */
+private function f_N32_Handshake_prepare_post_sec_cap_neg(SecNegotiateReqData sec_neg_req)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring sec_neg_req_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	sec_neg_req_enc := f_enc_SecNegotiateReqData(sec_neg_req);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_N32c_uri_hostport,
+										      path := c_N32_Handshake_path_sec_cap_neg),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-sepp"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := sec_neg_req_enc));
+	return valueof(http2_tx);
+}
+
+/* 6.1.4.2 Operation: Security Capability Negotiation */
+function f_N32_Handshake_post_sec_cap_neg(template (value) SecurityCapability_enum sec_cap := NONE)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) SecNegotiateReqData sec_neg_req;
+
+	sec_neg_req := ts_SecNegotiateReqData(sender_ := g_pars.fqdn_sender,
+					      supportedSecCapabilityList := { ts_SecurityCapability(sec_cap) },
+					      plmnIdList := { ts_PlmnId(mcc := mp_sepp_local_plmn_mcc,
+									mnc := mp_sepp_local_plmn_mnc) } );
+
+	http2_tx := f_N32_Handshake_prepare_post_sec_cap_neg(valueof(sec_neg_req));
+	f_http2_adapter_connect_send_sepp_n32c(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(200)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_SecNegotiateRspData(sender_ := mp_sepp_fqdn_sender,
+											 selectedSecCapability := tr_SecurityCapability(sec_cap))));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 6.1.4.3 Operation: Parameter Exchange */
+private function f_N32_Handshake_prepare_post_exchange_params(SecParamExchReqData param_exch_req)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring param_exch_req_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	param_exch_req_enc := f_enc_SecParamExchReqData(param_exch_req);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_N32c_uri_hostport,
+										      path := c_N32_Handshake_path_exchange_params),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-sepp"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := param_exch_req_enc));
+	return valueof(http2_tx);
+}
+
+/* 6.1.4.3 Operation: Parameter Exchange */
+function f_N32_Handshake_post_exchange_params()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) SecParamExchReqData param_exch_req;
+
+	param_exch_req := ts_SecParamExchReqData(n32fContextId := g_pars.n32f_context_id,
+						 sender_ := g_pars.fqdn_sender);
+
+	http2_tx := f_N32_Handshake_prepare_post_exchange_params(valueof(param_exch_req));
+	f_http2_adapter_connect_send_sepp_n32c(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.521 Table 5.3.2.3.1-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(200)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_SecParamExchRspData(n32fContextId := g_pars.n32f_context_id,
+											 sender_ := mp_sepp_fqdn_sender)));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/****************************************************
+ * N32-f (SBI) Emulated SEPP, 3GPP TS 29.573 5.3 Message Forwarding Procedure on N32 (N32-f)
+ ****************************************************/
+const charstring c_N32f_uri_hostport := mp_sepp_n32f_hostname & ":" & int2str(mp_sepp_n32f_port);
+const charstring c_N32f_uri_prefix := "http://" & c_N32f_uri_hostport;
+
+/* 5.3.2.4 Message Forwarding to Peer SEPP */
+private function f_N32f_Forward_prepare_post_forward(N32fReformattedReqMsg req)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring req_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	req_enc := f_enc_N32fReformattedReqMsg(req);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "POST",
+										      scheme := "http",
+										      authority := c_N32f_uri_hostport,
+										      path := c_N32f_Forward_path_n32f_process),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-sepp"),
+						ts_HTTP2_Hdr_accept_encoding("gzip")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := req_enc));
+	return valueof(http2_tx);
+}
+
+
+/* 5.3.2.4 Message Forwarding to Peer SEPP */
+function f_N32f_Forward_post_forward()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) N32fReformattedReqMsg req;
+
+	req := ts_N32fReformattedReqMsg(reformattedData := ts_FlatJweJson(ciphertext := "foobar"),
+					modificationsBlock := omit);
+
+	http2_tx := f_N32f_Forward_prepare_post_forward(valueof(req));
+	f_http2_adapter_connect_send_sepp_sbi(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.573 Table 6.2.4.2.2-2 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(200)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_N32fReformattedRspMsg()));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* Receive content of f_n35_get_authentication_subscription() forwarded by the IUT SEPP to our emulated SEPP: */
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+function f_tr_receive_forwarded_traffic()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := c_Nudr_DR_path);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+altstep as_N32f_receive_forwarded_traffic(template (present) HTTP2_Msg http2_exp)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SEPP].receive(http2_exp) -> value http2_rx {
+		var template (value) HTTP2_Msg http2_tx;
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := omit);
+		HTTP2_CONN[HTTP2_CONN_SEPP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+
+/****************************************************
+ * Nnrf (SBI) Emulated NRF, 3GPP TS 29.510
+ ****************************************************/
+const charstring c_Nnrf_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring c_Nnrf_uri_prefix := "http://" & c_Nnrf_uri_hostport;
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+function f_tr_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := c_Nnrf_NFM_path_nf_instances);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+altstep as_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nnrf_NFM_get_nf_instances()) -> value http2_rx {
+		var template (value) UriList1 uri_list;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		uri_list := ts_UriList1(links := { {"item", ts_LinksValueSchema1(ts_Link1("heyval"))} });
+		body_enc := f_enc_UriList1(valueof(uri_list));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+function f_tr_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := tr_Nnrf_NFM_path_nf_instance);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_NFProfile1));
+	return http2_msg;
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+altstep as_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nnrf_NFM_put_nf_instance()) -> value http2_rx {
+		var NFProfile1 profile;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_NFProfile1(http2_rx.body.data, profile); // TODO: check rc
+		profile.plmnList := { valueof(ts_PlmnId1(mcc := mp_sepp_plmn_mcc, mnc := mp_sepp_plmn_mnc)) };
+		body_enc := f_enc_NFProfile1(profile);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/****************************************************
+ * SBI Emulated NF, 3GPP TS 29.573
+ ****************************************************/
+const charstring c_sbi_uri_hostport := mp_sepp_sbi_hostname & ":" & int2str(mp_sepp_sbi_port);
+const charstring c_sbi_uri_prefix := "http://" & c_sbi_uri_hostport;
+const charstring c_sbi_uri_fqdn := "http://5gc.mnc" & mp_sepp_local_plmn_mnc & ".mcc" & mp_sepp_local_plmn_mcc & ".3gppnetwork.org";
+
+const charstring c_HTTP2_HDR_3Gpp_Sbi_Target_apiRoot := "3gpp-sbi-target-apiroot";
+
+/* Test msg to be forwarded:*/
+const charstring c_Nudr_DR_path := "/nudr-dr/v1/subscription-data/imsi-345645645433/authentication-data/authentication-subscription";
+
+/* Prepare some sample msg to be forwarded by the IUT SEPP
+ * payload: (3GPP TS 29.505 5.2.2.3.1 Resource: AuthenticationSubscription (GET)) */
+function f_n35_prepare_get_authentication_subscription()
+runs on ConnHdlr return HTTP2_Msg {
+	var integer http2_idx := f_http2_adapter_find_free_idx();
+	var integer http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	var template (value) HTTP2_Msg http2_tx;
+
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "GET",
+										      scheme := "http",
+										      authority := c_sbi_uri_hostport,
+										      path := c_Nudr_DR_path),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-udm"),
+						ts_HTTP2_Hdr_accept_encoding("gzip"),
+						ts_HTTP2_header_field(c_HTTP2_HDR_3Gpp_Sbi_Target_apiRoot, c_sbi_uri_fqdn)
+					}
+				 });
+	return valueof(http2_tx);
+}
+
+
+}

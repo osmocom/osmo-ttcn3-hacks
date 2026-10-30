@@ -50,6 +50,7 @@ SUBDIRS= \
 	s1gw \
 	sccp \
 	selftest \
+	sepp \
 	sgsn \
 	simtrace \
 	sip \
