@@ -815,8 +815,10 @@ testcase TC_n11_createSession_deleteSession_250_ipv4v6() runs on SMF_Test_CT {
 	f_TC_n11_createSession_deleteSession_250(c_PFCP_PDN_Type_IPv4v6);
 }
 
-/* create an IPv4 session, then delete it again */
-private function f_TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Session_CT {
+/* Create a session, then emulated UPF never answers the PFCP Sess Est Req:
+ * timeout should release the session in the SMF and reject the UE.
+ * https://github.com/open5gs/open5gs/issues/4878 */
+private function f_TC_n11_createSession_pfcp_sess_est_timeout_(boolean pdu_sess_rej_reply := true) runs on SMF_Session_CT {
 	var HTTP2_Msg http2_tx;
 
 	var PrometheusExpects expects0 := valueof({
@@ -874,18 +876,22 @@ private function f_TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Sess
 	/* SMF deregisters on UDM: */
 	alt {
 	[] as_nudm_sdm_delete_IndividualSubscription() { setverdict(pass); } /* expected incoming msg */
-	[] as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject() { /* Unexpected msg: */
+	[] as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject(do_reply := pdu_sess_rej_reply) { /* Unexpected msg: */
 			setverdict(fail, "Received PDU SESS REJ while waiting for UDM! https://github.com/open5gs/open5gs/issues/4878");
 			repeat;
 		}
 	}
 
 	/* SMF Rejects the Create Session back to the UE: */
-	as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject(cs_GMM_GSM_Cause(omit, int2bit(38 /* Network Failure */, 8)));
+	as_namf_comm_post_n1n2_messages_pdu_sess_establishment_reject(cs_GMM_GSM_Cause(omit, int2bit(38 /* Network Failure */, 8)),
+								      do_reply := pdu_sess_rej_reply);
 	f_http2_server_emu_unregister(valueof(ts_Nsmf_PDUSession_path_sm_contexts(g_pars.nsmf.smContextRef)),
 				      idx := HTTP2_CONN_SCP);
-	f_prometheus_expect(expects0, wait_converge := true);
+	f_prometheus_expect(expects0, wait_converge := true, time_out := 15.0);
 	setverdict(pass);
+}
+private function f_TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Session_CT {
+	f_TC_n11_createSession_pfcp_sess_est_timeout_(pdu_sess_rej_reply := true)
 }
 testcase TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Test_CT {
 	var SMF_Session_CT vc_conn;
@@ -893,6 +899,20 @@ testcase TC_n11_createSession_pfcp_sess_est_timeout() runs on SMF_Test_CT {
 					      rat_type := GTP2C_RAT_NR);
 	f_init();
 	vc_conn := f_start_handler(refers(f_TC_n11_createSession_pfcp_sess_est_timeout), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+/* Same TC_n11_createSession_pfcp_sess_est_timeout, but gNodeB never answers the n1n2-messages(PDU Sess Est Rej):
+ * SBI timeout should release the session and metrics updated accordingly. */
+private function f_TC_n11_createSession_pfcp_sess_est_timeout_no_pdu_sess_est_rej() runs on SMF_Session_CT {
+	f_TC_n11_createSession_pfcp_sess_est_timeout_(pdu_sess_rej_reply := false)
+}
+testcase TC_n11_createSession_pfcp_sess_est_timeout_no_pdu_sess_est_rej() runs on SMF_Test_CT {
+	var SMF_Session_CT vc_conn;
+	var SessionPars pars := f_SessionPars(13,
+					      rat_type := GTP2C_RAT_NR);
+	f_init();
+	vc_conn := f_start_handler(refers(f_TC_n11_createSession_pfcp_sess_est_timeout_no_pdu_sess_est_rej), pars);
 	vc_conn.done;
 	f_shutdown();
 }
@@ -1035,6 +1055,7 @@ control {
 	execute( TC_n11_createSession_deleteSession_250_ipv6() );
 	execute( TC_n11_createSession_deleteSession_250_ipv4v6() );
 	execute( TC_n11_createSession_pfcp_sess_est_timeout() );
+	execute( TC_n11_createSession_pfcp_sess_est_timeout_no_pdu_sess_est_rej() );
 	execute( TC_5g_pfcp_heartbeat_timeout() );
 	execute( TC_5g_pfcp_heartbeat_recovery_timestamp() );
 }
