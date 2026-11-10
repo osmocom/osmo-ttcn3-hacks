@@ -27,6 +27,7 @@ SUBDIRS= \
 	ccid \
 	dia2gsup \
 	eim \
+	eir \
 	fr \
 	fr-net \
 	epdg \
