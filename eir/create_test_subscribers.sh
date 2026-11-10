@@ -1,0 +1,15 @@
+#!/bin/sh -ex
+DB_URI="mongodb://127.0.0.103/open5gs"
+DBCTL_CMD="open5gs-dbctl --db_uri=$DB_URI"
+
+# mongod needs some time to bootstrap...
+while ! mongosh --quiet $DB_URI</dev/null; do
+	sleep 1
+done
+
+$DBCTL_CMD eir add imei "490154203000000" "WHITELISTED" # "999700000000000" No IMSI
+$DBCTL_CMD eir add imei "490154203000001" "BLACKLISTED" # "999700000000001" No IMSI
+$DBCTL_CMD eir add imei "490154203000002" "GREYLISTED"  # "999700000000002" No IMSI
+$DBCTL_CMD eir add imei "490154203000003" "WHITELISTED" "999700000000003"
+$DBCTL_CMD eir add imei "490154203000004" "BLACKLISTED" "999700000000004"
+$DBCTL_CMD eir add imei "490154203000005" "GREYLISTED"  "999700000000005"
