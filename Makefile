@@ -42,6 +42,7 @@ SUBDIRS= \
 	mme \
 	msc \
 	ns \
+	nssf \
 	pcap-client \
 	pcu \
 	pcf \
