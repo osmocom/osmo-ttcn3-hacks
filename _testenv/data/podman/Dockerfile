@@ -5,6 +5,7 @@ ARG	REPODIR=Debian_12
 
 # Copy from common dir
 COPY	obs.key /obs.key
+COPY	home.key /home.key
 
 # Install packages from Debian repositories (alphabetic order)
 ENV	DEBIAN_FRONTEND=noninteractive
@@ -143,11 +144,10 @@ RUN	set -x && \
 
 # Add eclipse-titan from osmocom:latest
 RUN	set -x && \
-	export OSMOCOM_REPO="https://downloads.osmocom.org/packages/osmocom:/latest/$REPODIR/" && \
-	echo "deb [signed-by=/obs.key] $OSMOCOM_REPO ./" >/etc/apt/sources.list.d/osmocom-latest.list && \
+	export OSMOCOM_REPO="https://people.osmocom.org/packages/home:/osmith:/titan/$REPODIR/" && \
+	echo "deb [signed-by=/home.key] $OSMOCOM_REPO ./" >/etc/apt/sources.list.d/osmocom-latest.list && \
 	apt-get update && \
 	apt-get install -y --no-install-recommends \
-		eclipse-titan-optdir-11.1.0 \
 		eclipse-titan-optdir-11.2.1 \
 		&& \
 	apt-get clean && \
