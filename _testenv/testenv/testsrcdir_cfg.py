@@ -11,7 +11,7 @@ import traceback
 
 cfg = {
     "max_jobs_per_gb_ram": None,
-    "titan_min": "11.1.0",
+    "titan_min": "11.2.1",
 }
 
 titan_version_in_path = None
