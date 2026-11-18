@@ -28,6 +28,7 @@ RUN	set -x && \
 		ccache \
 		cmake \
 		cpio \
+		debuginfod \
 		erlang-dev \
 		erlang-nox \
 		flex \
@@ -98,6 +99,20 @@ RUN	set -x && \
 		wireshark-common \
 		&& \
 	apt-get clean
+
+# Debug symbols for some libraries are only available from debuginfod. These
+# cannot be read during address sanitizer crashes, so fetch them ahead of time
+# and put them in the needed directory structure.
+ENV	DEBUGINFOD_URLS="https://debuginfod.debian.net"
+RUN	set -x && \
+	debuginfod-find debuginfo /usr/lib/x86_64-linux-gnu/libtalloc.so && \
+	cd /root/.cache/debuginfod_client && \
+	for i in */debuginfo; do \
+		first="$(echo "$i" | cut -c-2)" && \
+		rest="$(echo "$i" | cut -c3-40)" && \
+		mkdir -p /usr/lib/debug/.build-id/"$first" && \
+		ln -s "$PWD"/"$i" /usr/lib/debug/.build-id/"$first"/"$rest".debug; \
+	done
 
 # Install newer libcurl4 from bookworm-backports, libcurl4 7.88.1-10+deb12u12
 # shipped with debian12 is buggy and generates wrong HTTP2 for open5gs.
