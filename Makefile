@@ -41,6 +41,7 @@ SUBDIRS= \
 	mgw \
 	mme \
 	msc \
+	nrf \
 	ns \
 	nssf \
 	pcap-client \

@@ -1,0 +1,305 @@
+/* NRF test suite in TTCN-3 (3GPP TS 29.510), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29510_Nnrf_NFManagement all;
+import from TS29510_Nnrf_NFManagement_Templates all;
+
+import from NRF_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+type record ConnHdlrPars {
+	integer idx,
+	charstring nf_instance_id,
+	NFType1_enum nf_type
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0, NFType1_enum nf_type := AMF) return ConnHdlrPars
+{
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		nf_instance_id := int2str(idx),
+		nf_type := nf_type
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	f_http2_adapter_init();
+
+	fn.apply();
+}
+
+function f_http2_adapter_connect_nrf(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_nrf_hostname, mp_nrf_sbi_port, mp_nf_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_nrf(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_nrf(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+function f_ts_PlmnIdNid1()
+runs on ConnHdlr return TS29510_Nnrf_NFManagement.PlmnIdNid1 {
+	return valueof(TS29510_Nnrf_NFManagement_Templates.ts_PlmnIdNid1("001", "001"));
+}
+
+
+function f_ts_Guami1()
+runs on ConnHdlr return TS29510_Nnrf_NFManagement.Guami1 {
+	var template (value) TS29510_Nnrf_NFManagement.PlmnIdNid1 plmn_id_nid := f_ts_PlmnIdNid1();
+	return valueof(TS29510_Nnrf_NFManagement_Templates.ts_Guami1(plmnId := plmn_id_nid,
+								     amfId := "020040"));
+}
+
+/********************************************
+ * SCP
+/*******************************************/
+const charstring c_SCP_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring c_SCP_uri_prefix := "http://" & c_SCP_uri_hostport;
+
+/***********************************************************************
+ * Nnrf_NFManagement (SBI): Emulated NF, 3GPP TS 29.510
+ ***********************************************************************/
+const charstring c_Nnrf_NFM_uri_hostport := mp_nrf_hostname & ":" & int2str(mp_nrf_sbi_port);
+const charstring c_Nnrf_NFM_uri_prefix := "http://" & c_Nnrf_NFM_uri_hostport;
+
+/* 3GPP TS 29.510 6.1.3.3.3.2 Resource: nf-instance (Document) (PUT) */
+private function f_Nnrf_NFM_prepare_put_NFRegister(NFProfile1 nfprofile)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring nfprofile_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	nfprofile_enc := f_enc_NFProfile1(nfprofile);
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "PUT",
+										      scheme := "http",
+										      authority := c_Nnrf_NFM_uri_hostport,
+										      path := ts_Nnrf_NFM_path_nf_instance(g_pars.nf_instance_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-nf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip"),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-service-names", "nnrf-nfm"),
+						ts_HTTP2_header_field("3gpp-sbi-max-rsp-time", int2str(10000)),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-target-nf-type", "NRF")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := nfprofile_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 23.502 4.17.1 NF service Registration
+ * 3GPP TS 29.510 5.2.2.2.2 NF (other than NRF) registration to NRF
+ * 3GPP TS 29.510 6.1.3.3.3.2 Resource: nf-instance (Document) (PUT) */
+function f_Nnrf_NFM_put_NFRegister(integer exp_resp_code := 201)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+	var template (value) NFProfile1 nfprofile;
+
+	nfprofile := ts_NFProfile1(nfInstanceId := g_pars.nf_instance_id,
+				   nfType := ts_NFType1(g_pars.nf_type),
+				   nfStatus := ts_NFStatus1(REGISTERED),
+				   ipv4Addresses := { mp_nf_local_ip },
+				   priority := 0,
+				   capacity := 180,
+				   load := 0,
+				   amfInfo := ts_AmfInfo1(amfSetId := g_pars.nf_instance_id,
+							  amfRegionId := int2str(g_pars.idx),
+							  guamiList := { f_ts_Guami1() }),
+				   nfProfileChangesSupportInd := true);
+
+	http2_tx := f_Nnrf_NFM_prepare_put_NFRegister(valueof(nfprofile));
+	f_http2_adapter_connect_send_nrf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.510 Table 6.1.3.3.3.2-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(exp_resp_code)),
+			     tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+						 end_stream_flag := true,
+						 data := decmatch tr_NFProfile1));
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	if (exp_resp_code == 201) {
+		/* Make sure location is present in the response: */
+		var charstring created_location := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_location));
+		if (not match(created_location, ts_Nnrf_NFM_path_nf_instance(g_pars.nf_instance_id))) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+				log2str("Unexpected location Header ", created_location,
+					" vs exp ", ts_Nnrf_NFM_path_nf_instance(g_pars.nf_instance_id)));
+		}
+	}
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.510 6.1.3.3.3.3 Resource: nf-instance (Document) (PATCH) */
+private function f_Nnrf_NFM_prepare_patch_NFUpdate(template (value) PatchItem1_list patch_item_li)
+runs on ConnHdlr return HTTP2_Msg {
+	var octetstring patch_item_li_enc;
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	patch_item_li_enc := f_enc_PatchItem1_list(valueof(patch_item_li));
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "PATCH",
+										      scheme := "http",
+										      authority := c_Nnrf_NFM_uri_hostport,
+										      path := ts_Nnrf_NFM_path_nf_instance(g_pars.nf_instance_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json-patch+json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-nf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip"),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-service-names", "nnrf-nfm"),
+						ts_HTTP2_header_field("3gpp-sbi-max-rsp-time", int2str(10000)),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-target-nf-type", "NRF")
+					}
+				 },
+				 body := ts_HTTP2_Data_frame(http2_stream_id,
+							     end_stream_flag := true,
+							     data := patch_item_li_enc));
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 23.502 4.17.2 NF service update
+ * 3GPP TS 29.510 5.2.2.3 NFUpdate
+ * 3GPP TS 29.510 6.1.3.3.3.3 Resource: nf-instance (Document) (PATCH) */
+function f_Nnrf_NFM_patch_NFUpdate(template (value) PatchItem1_list patch_item_li)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+
+	http2_tx := f_Nnrf_NFM_prepare_patch_NFUpdate(patch_item_li);
+	f_http2_adapter_connect_send_nrf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.510 Table Table 6.1.3.3.3.3-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(204)),
+			     omit);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 29.510 6.1.3.3.3.4 Resource: nf-instance (Document) (DELETE) */
+private function f_Nnrf_NFM_prepare_delete_NFDeregister()
+runs on ConnHdlr return HTTP2_Msg {
+	var integer http2_idx;
+	var integer http2_stream_id;
+	var template (value) HTTP2_Msg http2_tx;
+
+	http2_idx := f_http2_adapter_find_free_idx();
+	http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "DELETE",
+										      scheme := "http",
+										      authority := c_Nnrf_NFM_uri_hostport,
+										      path := ts_Nnrf_NFM_path_nf_instance(g_pars.nf_instance_id)),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("ttcn3-nf"),
+						ts_HTTP2_Hdr_accept_encoding("gzip"),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-service-names", "nnrf-nfm"),
+						ts_HTTP2_header_field("3gpp-sbi-max-rsp-time", int2str(10000)),
+						ts_HTTP2_header_field("3gpp-sbi-discovery-target-nf-type", "NRF")
+					}
+				 },
+				 body := omit);
+	return valueof(http2_tx);
+}
+
+/* 3GPP TS 23.502 4.17.3 NF service deregistration
+ * 3GPP TS 29.510 5.2.2.4.2 NF Instance Deregistration
+ * 3GPP TS 29.510 6.1.3.3.3.4 Resource: nf-instance (Document) (DELETE) */
+function f_Nnrf_NFM_delete_NFDeregister()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_tx;
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx;
+
+	http2_tx := f_Nnrf_NFM_prepare_delete_NFDeregister();
+	f_http2_adapter_connect_send_nrf(http2_tx, idx := http2_tx.conn_id);
+
+	/* 3GPP TS 29.510 Table 6.1.3.3.3.2-3 */
+	http2_exp_rx :=
+		tr_HTTP2_Msg(http2_tx.conn_id,
+			     http2_tx.stream_id,
+			     tr_HTTP2_header_block(pseudo_headers := tr_HTTP2_pseudo_headers_Resp(204)),
+			     omit);
+	as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id);
+
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+}
