@@ -38,6 +38,7 @@ import from NG_NAS_Osmo_Types all;
 import from NG_NAS_Osmo_Templates all;
 import from NG_NAS_Functions all;
 
+import from PFCP_Types all;
 import from PFCP_Templates all;
 import from PFCP_Emulation all;
 import from Mutex all;
@@ -410,6 +411,76 @@ runs on SMF_Session_CT {
 
 	/* Successful answer with no content: */
 	as_http2_adapter_receive(http2_rx, tr_HTTP2_Msg_204_No_Content(), idx := http2_tx.conn_id);
+	f_http2_adapter_close(idx := http2_tx.conn_id);
+	setverdict(pass);
+}
+
+/* 3GPP TS 23.502 Figure 4.9.1.3.2-1 step 11f
+ * 3GPP TS 29.502 Table 6.1.3.3.4.2.2-2, 6.1.6.2.5 Type: SmContextUpdatedData
+ * Expect to receive "200 OK with multipart body containing SBI + NGAP Handover Command */
+altstep as_n11_200_OK_handover_command(HTTP2_Msg http2_tx)
+runs on SMF_Session_CT {
+	var HTTP2_Msg http2_rx;
+	var template (present) HTTP2_Msg http2_exp_rx :=
+		tr_HTTP2_Msg_200_OK(conn_id := http2_tx.conn_id,
+				    stream_id := http2_tx.stream_id,
+				    headers := ?,
+				    body := tr_HTTP2_Data_frame(stream_id := http2_tx.stream_id,
+								end_stream_flag := true,
+								data := ?));
+
+	[] as_http2_adapter_receive(http2_rx, http2_exp_rx, idx := http2_tx.conn_id) {
+		/* Split http2_rx.body.data into chunks since it is a multipart message: */
+		var charstring content_type_val := valueof(f_HTTP2_header_list_find_header(http2_rx.hb.headers, c_HTTP2_HDR_content_type));
+		var charstring boundary := f_HTTP2_header_content_type_multipart_val_get_boundary(content_type_val);
+		var HTTP2_multipart_part_list parts := f_HTTP2_multipart_msg_parse(http2_rx.body.data, boundary);
+
+		var SmContextUpdatedData sm_ctx_updated_data;
+		var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+		var NGAP_IEs.HandoverCommandTransfer ho_cmd_transfer
+
+		/* Decode 1st part: SBI json: */
+		f_dec_SmContextUpdatedData(parts[0].data, sm_ctx_updated_data); // TODO: check returned integer.
+		/* TODO: Match sm_ctx_updated_data against what is received. */
+
+		/* Decode 2nd part: NGAP Handover Command: */
+		ho_cmd_transfer := dec_NGAP_HandoverCommandTransfer(parts[1].data);
+		/* TODO: there seems to be a bug here, SMF is sending 0.0.0.0 as the IP address... because we don't send whateve rin the answer in as_pfcp_sess_mod_req() below. */
+	}
+}
+
+/* 3GPP TS 23.502 Figure 4.9.1.3.2-1 step 11a, 11b */
+function f_n11_update_sm_context_handover_request_ack(template (omit) UPTransportLayerInformation dl_forward_utla := omit)
+runs on SMF_Session_CT {
+	var template (value) SmContextUpdateData sm_ctx_update;
+	var template (value) octetstring body_enc;
+	var HTTP2_Msg http2_tx;
+
+	sm_ctx_update := ts_SmContextUpdateData(ueLocation := f_ts_UserLocation(),
+						n2SmInfo := TS29502_Nsmf_PDUSession_Templates.ts_RefToBinaryData("ngap-sm"),
+						n2SmInfoType := ts_N2SmInfoType(HANDOVER_REQ_ACK));
+	var octetstring ngap_enc := f_ngap_pdu_gen_HandoverRequestAcknowledge(dl_forward_utla := dl_forward_utla);
+
+	http2_tx := f_n11_prepare_update_sm_context(valueof(sm_ctx_update), ngap_enc);
+	f_http2_adapter_connect_send_smf(http2_tx, idx := http2_tx.conn_id);
+
+	/* SMF updates RAN GTPU IP addr+TEID info on UPF: */
+	if (isvalue(dl_forward_utla)) {
+		var template (present) Outer_Header_Creation ohc :=
+			tr_PFCP_Outer_Header_Creation_GTP_ipv4(dl_forward_utla.gTPTunnel.gTP_TEID,
+							bit2oct(valueof(dl_forward_utla.gTPTunnel.transportLayerAddress)));
+		var template (present) Create_FAR far :=
+			tr_PFCP_Create_FAR(far_id := ?,
+					aa := tr_PFCP_Apply_Action( forw := '1'B),
+					fp := tr_PFCP_Forwarding_Parameters(dest_iface := PFCP_Dest_Iface_ACCESS,
+									    ohc := ohc));
+		as_pfcp_sess_mod_req(create_far_list := {far});
+		/* TODO: also match the Create PDR in the PFCP Sess Mod Req */
+	}
+
+	/* Successful answer with HandoverCommandTransfer: */
+	as_n11_200_OK_handover_command(http2_tx);
+
 	f_http2_adapter_close(idx := http2_tx.conn_id);
 	setverdict(pass);
 }
@@ -1075,6 +1146,27 @@ runs on SMF_Session_CT return octetstring {
 	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
 
 	return enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf);
+}
+
+/* 3GPP TS 38.413 9.3.4.11 Handover Request Acknowledge Transfer */
+private function f_ngap_pdu_gen_HandoverRequestAcknowledge(template (omit) UPTransportLayerInformation dl_forward_utla := omit)
+runs on SMF_Session_CT return octetstring {
+	var template (value) UPTransportLayerInformation utla;
+	var template (value) QosFlowItemWithDataForwarding qos;
+	var NGAP_IEs.HandoverRequestAcknowledgeTransfer ho_req_ack_transf;
+	var integer qos_id := bit2int(g_pars.nas.qos_rules[0].u.creat.flowIdentifier);
+
+	/* Prepare Response for it: */
+	utla := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.namf.ran_gtpu_ip)),
+					p_gtp_teid := g_pars.namf.ran_gtpu_teid));
+	qos := m_qosFlowItemWithDataForwarding(qos_id,
+					       m_dataForwardingAccepted(data_forwarding_accepted));
+	ho_req_ack_transf := valueof(m_handoverRequestAcknowledgeTransfer(p_dL_NGU_UP_TNLInformation := utla,
+									  p_qosFlowSetupResponseList := { qos },
+									  p_dLForwardingUP_TNLInformation := dl_forward_utla));
+
+	return enc_NGAP_HandoverRequestAcknowledgeTransfer(ho_req_ack_transf);
 }
 
 /************

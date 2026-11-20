@@ -209,6 +209,26 @@ NGAP__IEs::PathSwitchRequestTransfer dec__NGAP__PathSwitchRequestTransfer(const 
 	return ret;
 }
 
+OCTETSTRING enc__NGAP__HandoverCommandTransfer(const NGAP__IEs::HandoverCommandTransfer &p)
+{
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	p.encode(NGAP__IEs::HandoverCommandTransfer_descr_, TTCN_buf,
+		 TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return OCTETSTRING(TTCN_buf.get_len(), TTCN_buf.get_data());
+}
+
+NGAP__IEs::HandoverCommandTransfer dec__NGAP__HandoverCommandTransfer(const OCTETSTRING &stream)
+{
+	NGAP__IEs::HandoverCommandTransfer ret;
+	TTCN_Buffer TTCN_buf;
+	TTCN_buf.clear();
+	TTCN_buf.put_os(stream);
+	ret.decode(NGAP__IEs::HandoverCommandTransfer_descr_, TTCN_buf,
+		   TTCN_EncDec::CT_PER, PER_ALIGNED);
+	return ret;
+}
+
 OCTETSTRING enc__NGAP__HandoverRequiredTransfer(const NGAP__IEs::HandoverRequiredTransfer &p)
 {
 	TTCN_Buffer TTCN_buf;
