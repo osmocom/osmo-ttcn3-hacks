@@ -46,7 +46,7 @@ FILES="Misc_Helpers.ttcn General_Types.ttcn GSM_Types.ttcn Osmocom_Types.ttcn Na
 FILES+="SCTP_Templates.ttcn "
 FILES+="HTTP2_CodecPort.ttcn HTTP2_CodecPort_CtrlFunct.ttcn HTTP2_CodecPort_CtrlFunctDef.cc HTTP2_Templates.ttcn HTTP2_Functions.ttcn HTTP2_Msg.ttcn HTTP2_Adapter.ttcn HTTP2_Server_Emulation.ttcn "
 FILES+="HTTP_Adapter.ttcn Prometheus_Checker.ttcn "
-FILES+="TS29571_CommonData_Templates.ttcn TS29503_Nudm_UEAU_Templates.ttcn TS29505_Subscription_Data_Templates.ttcn "
+FILES+="JSON_Generic_Templates.ttcn TS29571_CommonData_Templates.ttcn TS29503_Nudm_UEAU_Templates.ttcn TS29505_Subscription_Data_Templates.ttcn "
 gen_links $DIR $FILES
 
 gen_links_finish
