@@ -55,7 +55,10 @@ def start(cfg):
             pipe = f">{shlex.quote(log)} 2>&1"
         cmd = ["sh", "-c", f"ulimit -c unlimited; {program} {pipe}"]
 
-        env = {}
+        env = {
+            "TESTENV_END_LOG": testenv.testdir.testdir_topdir_end_log,
+            "TESTENV_TESTDIR": testenv.testdir.testdir,
+        }
         if testenv.args.io_uring:
             env["LIBOSMO_IO_BACKEND"] = "IO_URING"
 

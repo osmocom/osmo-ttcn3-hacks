@@ -135,11 +135,30 @@ def main():
         clean()
 
 
+def show_end_log():
+    if getattr(testenv.args, "action", None) != "run":
+        return
+
+    end_log = testenv.testdir.testdir_topdir_end_log
+    if not end_log or not os.path.exists(end_log):
+        return
+
+    with open(end_log) as e:
+        lines = e.readlines()
+
+    warnings = "warning" if len(lines) == 1 else "warnings"
+    logging.warning(f"{len(lines)} {warnings} found in end.log:")
+    for line in lines:
+        logging.warning(f"> {line.rstrip()}")
+
+
 try:
     main()
+    show_end_log()
 except testenv.NoTraceException as e:
     logging.error(e)
     testenv.podman.stop()
+    show_end_log()
     sys.exit(2)
 except KeyboardInterrupt:
     print()  # new line
@@ -147,7 +166,9 @@ except KeyboardInterrupt:
     if test:
         logging.critical(f"^C during {test}")
     testenv.podman.stop()
+    show_end_log()
     sys.exit(3)
 except:
     testenv.podman.stop()
+    show_end_log()
     raise

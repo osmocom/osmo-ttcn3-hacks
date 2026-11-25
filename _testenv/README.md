@@ -241,7 +241,7 @@ Testenv sets the following variables while running shell commands from
   The user's `PATH` environment variable is prefixed with the following paths:
   * The directory of the testsuite.
   * The directory for binaries built from source.
-  * The directory `_testenv/data/scripts` (which has e.g. `respawn.sh`).
+  * The directory `_testenv/data/scripts` (which has e.g. `respawn-expected.sh`).
   * The directory `_testenv/data/scripts/qemu`.
 
 * `PWD`:
@@ -249,14 +249,29 @@ Testenv sets the following variables while running shell commands from
   log dir. For example:
 
 ```
-/tmp/logs
+/tmp/logs                  # TESTENV_TESTDIR
+├── end.log                # TESTENV_END_LOG
 ├── ggsn                   # Executables from [ggsn] section run in this dir
 │   ├── ggsn.log
 │   └── osmo-ggsn.cfg
 └── testsuite              # Executables from [testsuite] run in this dir
+    ├── .current_test      # The current test name is in this file
     ├── Common.cfg
     ├── GGSN_Tests.cfg
     └── GGSN_Tests.default
+```
+  If a testsuite has multiple configurations (`./testenv.py run -c`), then
+  `TESTENV_TESTDIR` ends in the name of the current configuration and is next
+  to `end.log`. For example:
+```
+/tmp/logs
+├── end.log                 # TESTENV_END_LOG is here for all configurations
+├── generic                 # TESTENV_TESTDIR while running the generic config
+│   ├── bsc
+│   ├── bts
+│   └── testsuite
+├── hopping                 # TESTENV_TESTDIR while running the hopping config
+└── oml                     # TESTENV_TESTDIR while running the oml config
 ```
 
 * `TESTENV_INSTALL_DIR`:
@@ -305,6 +320,16 @@ Testenv sets the following variables while running shell commands from
   When running in podman (`--podman`), this variable is set to the user that is
   running podman. This is used in `_testenv/data/scripts/require_ulimit_r.sh`
   to display a hint for setting the rtprio limit for this user.
+
+* `TESTENV_TESTDIR`:
+  (Set for `program=` of test components only.) This directory contains logs
+  and configurations for the current configuration. See `PWD` above for
+  examples.
+
+* `TESTENV_END_LOG`:
+  (Set for `program=` of test components only.) Path to an `end.log` file, to
+  which warnings can be written that will be displayed at the end of the
+  testenv run. This is used by `respawn-unexpected.sh`.
 
 ## Eclipse-titan versions
 

@@ -17,7 +17,7 @@ case "$CONFIG" in
 		;;
 esac
 
-respawn.sh \
+respawn-expected.sh \
 	osmo-bts-omldummy \
 		"$BTS_FEATURES" \
 		"127.0.0.1" \

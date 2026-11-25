@@ -18,12 +18,14 @@ import uuid
 # current configuration.
 testdir = None
 testdir_topdir = None
+testdir_topdir_end_log = None
 prefix = None
 clean_scripts = {}
 
 
 def init():
     global testdir_topdir
+    global testdir_topdir_end_log
     global prefix
 
     prefix = f"testenv-{testenv.args.testsuite}-"
@@ -49,6 +51,8 @@ def init():
         if os.path.exists("/tmp/logs"):
             testenv.cmd.run(["rm", "/tmp/logs"], no_podman=True)
         testenv.cmd.run(["ln", "-sf", testdir_topdir, "/tmp/logs"], no_podman=True)
+
+    testdir_topdir_end_log = os.path.join(testdir_topdir, "end.log")
 
 
 def prepare(cfg_name, cfg, loop_count):
