@@ -52,6 +52,7 @@ SUBDIRS= \
 	remsim \
 	s1gw \
 	sccp \
+	scp \
 	selftest \
 	sepp \
 	sgsn \

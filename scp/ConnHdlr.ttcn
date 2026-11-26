@@ -1,0 +1,408 @@
+/* SCP test suite in TTCN-3 (3GPP TS 23.501, 3GPP TS 29.570), ConnHdlr
+ * (C) 2026 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from TCCEncoding_Functions all;
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29510_Nnrf_NFManagement all;
+import from TS29510_Nnrf_NFManagement_Templates all;
+import from TS29510_Nnrf_NFDiscovery all;
+import from TS29510_Nnrf_NFDiscovery_Templates all;
+
+import from SCP_Tests all;
+
+const integer HTTP2_CONN_NRF := 0;
+const integer HTTP2_CONN_NF := 1;
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match_nrf()
+runs on ConnHdlr return charstring {
+	var charstring nf_instance_match := c_Nnrf_NFM_path_nf_instances & "/?+";
+	var charstring subscription_match := c_Nnrf_NFM_path_subscriptions & "/?+";
+	var charstring match_ := "(" & c_Nnrf_NFM_path_nf_instances &
+				 ")|(" & nf_instance_match &
+				 ")|(" & c_Nnrf_NFM_path_subscriptions &
+				 ")|(" & subscription_match &
+				 ")|(" & c_Nnrf_DISC_path_nf_instances & "\??+" &
+				 ")";
+	return match_;
+}
+
+function f_http2_server_path_match_nf()
+runs on ConnHdlr return charstring {
+	var charstring match_ := "(/nudr-dr/v1/subscription-data/?+)"
+	return match_;
+}
+
+type record ConnHdlrPars {
+	integer idx,
+	charstring fqdn_sender,
+	charstring n32f_context_id
+}
+
+type component ConnHdlr extends HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT {
+	var ConnHdlrPars g_pars;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+function f_ConnHdlrPars(integer idx := 0) return ConnHdlrPars
+{
+	var template (value) ConnHdlrPars pars := {
+		idx := idx,
+		fqdn_sender := "UDR.localdomain",
+		n32f_context_id := int2str(idx) /* 3GPP TS 29.573 Table 6.2.5.2.9-1 n32fContextId */
+	};
+	return valueof(pars);
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match_nrf(), idx := HTTP2_CONN_NRF);
+	f_http2_server_emu_register(f_http2_server_path_match_nf(), idx := HTTP2_CONN_NF);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+}
+
+function f_http2_adapter_connect_scp(integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect(mp_scp_hostname, mp_scp_port, mp_nf_local_ip, idx := idx);
+}
+
+function f_http2_adapter_connect_send_scp(template (value) HTTP2_Msg http2_msg, integer idx := 0)
+runs on ConnHdlr {
+	f_http2_adapter_connect_scp(idx := idx);
+	f_http2_adapter_send(http2_msg);
+}
+
+/****************************************************
+ * SBI emulated NF consumer, originator towards SCP (IUT), 3GPP TS 23.501, 3GPP TS 29.570
+ ****************************************************/
+const charstring c_SCP_uri_hostport := mp_scp_hostname & ":" & int2str(mp_scp_port);
+const charstring c_SCP_uri_prefix := "http://" & c_SCP_uri_hostport;
+const charstring c_SCP_uri_fqdn := "http://5gc.mnc" & mp_scp_local_plmn_mnc & ".mcc" & mp_scp_local_plmn_mcc & ".3gppnetwork.org";
+
+const charstring c_HTTP2_HDR_3Gpp_Sbi_Target_apiRoot := "3gpp-sbi-target-apiroot";
+
+/* suffixes in  TS 29.510 Table 6.2.3.2.3.1-1 */
+const charstring c_HTTP2_HDR_3gpp_Sbi_Discovery_prefix
+:= "3gpp-sbi-discovery-"
+const charstring c_HTTP2_HDR_3gpp_Sbi_Discovery_target_nf_type
+:= c_HTTP2_HDR_3gpp_Sbi_Discovery_prefix & "target-nf-type";
+const charstring c_HTTP2_HDR_3gpp_Sbi_Discovery_service_names
+:= c_HTTP2_HDR_3gpp_Sbi_Discovery_prefix & "service-names";
+
+/* Test msg to be forwarded:*/
+const charstring c_Nudr_DR_path := "/nudr-dr/v1/subscription-data/imsi-345645645433/authentication-data/authentication-subscription";
+
+/* Prepare some sample msg to be forwarded by the IUT SCP
+ * payload: (3GPP TS 29.505 5.2.2.3.1 Resource: AuthenticationSubscription (GET)) */
+function f_n35_prepare_get_authentication_subscription(template (omit) charstring sbi_target_apiroot := omit)
+runs on ConnHdlr return HTTP2_Msg {
+	var integer http2_idx := f_http2_adapter_find_free_idx();
+	var integer http2_stream_id := f_http2_adapter_next_stream_id(http2_idx);
+	var template (value) HTTP2_Msg http2_tx;
+
+	http2_tx := ts_HTTP2_Msg(http2_idx,
+				 http2_stream_id,
+				 hb := {
+					pseudo_headers := ts_HTTP2_pseudo_headers_Req(method := "GET",
+										      scheme := "http",
+										      authority := c_SCP_uri_hostport,
+										      path := c_Nudr_DR_path),
+					headers := {
+						ts_HTTP2_Hdr_content_type("application/json"),
+						ts_HTTP2_Hdr_accept("application/json"),
+						ts_HTTP2_Hdr_user_agent("UDM-ttcn3"),
+						ts_HTTP2_Hdr_accept_encoding("gzip"),
+						ts_HTTP2_header_field(c_HTTP2_HDR_3gpp_Sbi_Discovery_target_nf_type, "UDR"),
+						ts_HTTP2_header_field(c_HTTP2_HDR_3gpp_Sbi_Discovery_service_names, "nudr-dr")
+					}
+				 });
+	if (isvalue(sbi_target_apiroot)) {
+		http2_tx.hb.headers := valueof(http2_tx.hb.headers) &
+				       { valueof(ts_HTTP2_header_field(c_HTTP2_HDR_3Gpp_Sbi_Target_apiRoot,
+								       valueof(sbi_target_apiroot))) }
+	}
+	return valueof(http2_tx);
+}
+
+/****************************************************
+ * SBI Emulated NF producer, 3GPP TS 23.501
+ ****************************************************/
+
+const charstring c_NF_uri_hostport := mp_nf_local_ip & ":" & int2str(mp_nf_local_port);
+const charstring c_NF_uri_prefix := "http://" & c_NF_uri_hostport;
+
+/* Receive content of f_n35_get_authentication_subscription() forwarded by the IUT SCP to our emulated UDM: */
+function f_tr_receive_forwarded_traffic()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := c_Nudr_DR_path);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+altstep as_nf_producer_receive_forwarded_traffic(template (present) HTTP2_Msg http2_exp)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_NF].receive(http2_exp) -> value http2_rx {
+		var template (value) HTTP2_Msg http2_tx;
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := omit);
+		HTTP2_CONN[HTTP2_CONN_NF].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/****************************************************
+ * Nnrf (SBI) Emulated NRF, 3GPP TS 29.510
+ ****************************************************/
+const charstring c_Nnrf_uri_hostport := mp_nrf_local_ip & ":" & int2str(mp_nrf_local_port);
+const charstring c_Nnrf_uri_prefix := "http://" & c_Nnrf_uri_hostport;
+
+template (value) charstring
+ts_Nnrf_NFM_uri_nf_instance(template (value) charstring nf_instance_id)
+:= c_Nnrf_uri_prefix & "/" & valueof(ts_Nnrf_NFM_path_nf_instance(nf_instance_id));
+
+template (value) charstring
+ts_Nnrf_NFM_uri_subscription(template (value) charstring subscriptionID)
+:= c_Nnrf_uri_prefix & "/" & valueof(ts_Nnrf_NFM_path_subscription(subscriptionID));
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+function f_tr_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := c_Nnrf_NFM_path_nf_instances);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+altstep as_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_NRF].receive(f_tr_Nnrf_NFM_get_nf_instances()) -> value http2_rx {
+		var template (value) UriList1 uri_list;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		uri_list := ts_UriList1(links := { {"item", ts_LinksValueSchema1(ts_Link1("heyval"))} });
+		body_enc := f_enc_UriList1(valueof(uri_list));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_NRF].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+function f_tr_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := tr_Nnrf_NFM_path_nf_instance);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch TS29510_Nnrf_NFManagement_Templates.tr_NFProfile1));
+	return http2_msg;
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+altstep as_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_NRF].receive(f_tr_Nnrf_NFM_put_nf_instance()) -> value http2_rx {
+		var TS29510_Nnrf_NFManagement.NFProfile1 profile;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_NFProfile1(http2_rx.body.data, profile); // TODO: check rc
+		profile.plmnList := { valueof(ts_PlmnId1(mcc := mp_scp_plmn_mcc, mnc := mp_scp_plmn_mnc)) };
+		body_enc := f_enc_NFProfile1(profile);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json"),
+							ts_HTTP2_Hdr_location(http2_rx.hb.pseudo_headers.path)
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_NRF].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.3.4.3.1 Resource: subscriptions (Collection) (POST) */
+function f_tr_Nnrf_NFM_post_subscriptions(template SubscrCond1 subscrCond := *)
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+	var template (present) TS29510_Nnrf_NFManagement.SubscriptionData1 exp_subscr_data;
+
+	exp_subscr_data := TS29510_Nnrf_NFManagement_Templates.tr_SubscriptionData1(
+				subscrCond := subscrCond,
+				reqNfType := TS29510_Nnrf_NFManagement_Templates.tr_NFType1(SCP));
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := c_Nnrf_NFM_path_subscriptions);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch exp_subscr_data));
+	return http2_msg;
+}
+
+/* 6.1.3.4.3.1 Resource: subscriptions (Collection) (POST) */
+altstep as_Nnrf_NFM_post_subscriptions(template SubscrCond1 subscrCond := *)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_NRF].receive(f_tr_Nnrf_NFM_post_subscriptions(subscrCond := subscrCond)) -> value http2_rx {
+		var SubscriptionData1 subscr_data;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_SubscriptionData1(http2_rx.body.data, subscr_data); // TODO: check rc
+		body_enc := f_enc_SubscriptionData1(subscr_data);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json"),
+							ts_HTTP2_Hdr_location(ts_Nnrf_NFM_uri_subscription(int2str(g_pars.idx)))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_NRF].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+function f_Nnrf_NFM_wait_all_post_subscriptions()
+runs on ConnHdlr {
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(SEPP));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(AMF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(AUSF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(BSF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(NSSF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(PCF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(SMF));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(UDM));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(UDR));
+}
+
+
+/* 6.2.3.2.3.1 Resource: nf-instances (Store) (GET) */
+function f_tr_Nnrf_DISC_get_nf_instances()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := pattern c_Nnrf_DISC_path_nf_instances & "\??+" );
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 6.2.3.2.3.1 Resource: nf-instances (Store) (GET) */
+altstep as_Nnrf_DISC_get_nf_instances(template (value) TS29510_Nnrf_NFDiscovery.NFProfile1 resp_nf_instance)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_NRF].receive(f_tr_Nnrf_DISC_get_nf_instances()) -> value http2_rx {
+		var template (value) SearchResult1 sr;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		sr := ts_SearchResult1(validityPeriod := 10, nfInstances := { resp_nf_instance });
+		body_enc := f_enc_SearchResult1(valueof(sr));
+
+		/* Table 6.2.3.2.3.1-3 */
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_NRF].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+}
