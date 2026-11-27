@@ -1,0 +1,1739 @@
+/* 5GC (55G Core) test suite in TTCN-3, ConnHdlr
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module ConnHdlr {
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from DNS_Helpers all;
+
+import from Milenage_Functions all;
+
+import from NGAP_PDU_Descriptions all;
+import from NGAP_IEs all;
+import from NGAP_PDU_Contents all;
+import from NGAP_Constants all;
+
+import from NGAP_Types all;
+import from NGAP_Pixits all;
+import from NGAP_Templates all;
+import from NGAP_Functions all;
+import from NGAP_Emulation all;
+
+import from NAS_CommonTypeDefs all;
+import from NAS_CommonTemplates all;
+import from NG_NAS_Common all;
+import from NG_NAS_TypeDefs all;
+import from NG_NAS_MsgContainers all;
+import from NG_NAS_Templates all;
+
+import from NG_NAS_Osmo_Types all;
+import from NG_NAS_Osmo_Templates all;
+import from NG_NAS_Functions all;
+import from NG_CryptoFunctions all;
+
+import from HTTP2_Types all;
+import from HTTP2_Templates all;
+import from HTTP2_Functions all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from Prometheus_Checker all;
+
+import from TS29503_Nudm_UECM all;
+import from TS29503_Nudm_UECM_Templates all;
+import from TS29509_Nausf_UEAuthentication all;
+import from TS29509_Nausf_UEAuthentication_Templates all;
+import from TS29510_Nnrf_NFManagement all;
+import from TS29510_Nnrf_NFManagement_Templates all;
+
+import from OGS_UEInfo all;
+
+import from AMF_Tests all;
+
+const integer HTTP2_CONN_SCP := 0;
+
+/* (maximum) number of emulated gNBs */
+const integer NUM_NGRAN := 2;
+
+
+/* parameters of emulated gNB / ng-eNB */
+type record NGRANParams {
+	GlobalRANNodeID global_ngran_id,
+	NGRAN_CGI cell_identity,
+	SupportedTAList supported_ta_list
+}
+
+type record UeDerivedKeys {
+	OCT32 kausf,
+	OCT32 kseaf,
+	OCT32 kamf
+};
+
+type record PDUSessionParams {
+	PDUSessionID id,
+	charstring ran_gtpu_ip,
+	OCT4 ran_gtpu_teid,
+	charstring cn_gtpu_ip optional,
+	OCT4 cn_gtpu_teid optional,
+	QoS_RuleList qos_rules optional,
+	charstring ue_ip4 optional,
+	charstring ue_ip6 optional,
+	octetstring ipv6_interface_id optional
+};
+
+/* parameters of emulated UE */
+type record UeParams {
+	integer idx,
+	HEX15n imsi,
+	charstring imsi_str,
+	HEX16n imeisv,
+	octetstring usim_key,
+	octetstring usim_opc,
+	charstring apn,
+	RAN_UE_NGAP_ID ran_id,
+	AMF_UE_NGAP_ID amf_id optional,
+	octetstring guti optional,
+	ProcedureTransactionIdentifier pti,
+	PDUSessionParams sess_pars
+};
+
+type record ConnHdlrPars {
+	/* copied over from MTC_CT on start of component */
+	NGRANParams ngran_pars[NUM_NGRAN],
+	/* copied over from MTC_CT on start of component */
+	UeParams ue_pars,
+	/* currently used 5GC (index into ngran_pars, NGAP, ...) */
+	integer c5g_idx,
+	/* Currently set KSI */
+	NAS_KeySetIdentifier kset_id,
+	/* Expect "Core Network Assistance Information for RRC INACTIVE" IE present in Initial Context Setup Request */
+	boolean exp_CoreNetworkAssistanceInformationForInactive
+}
+
+/* Kind of 3GPP TS 38.423 9.1.1.1 HANDOVER REQUEST plus
+ * 3GPP TS 38.423 8.2.4 RETRIEVE UE CONTEXT RESPONSE (see 9.1.1.9 and 9.2.1.13 too). */
+type record Handover_Xn_Pars {
+	AMF_UE_NGAP_ID source_amf_id,
+	octetstring guti,
+	ProcedureTransactionIdentifier pti,
+	PDUSessionParams sess_pars,
+	NAS_KeySetIdentifier kset_id,
+	NG_NAS_UE_State	nus /* 3GPP TS 38.423 9.2.1.13 UE Context Information */
+};
+
+/* Pass needed UE context state between ConnHdlr */
+type record Handover_n2_Pars {
+	octetstring guti,
+	ProcedureTransactionIdentifier pti,
+	PDUSessionParams sess_pars,
+	NAS_KeySetIdentifier kset_id,
+	NG_NAS_UE_State	nus /* 3GPP TS 38.423 9.2.1.13 UE Context Information */,
+	/* Whether to expect received HO Request should contain a DataForwardingNotPossible IE: */
+	boolean exp_ho_request_data_forwarding_not_possible
+};
+
+type port ConnHdlr_Coord_PT message
+{
+	inout charstring, Handover_Xn_Pars, Handover_n2_Pars;
+} with { extension "internal" };
+
+type component ConnHdlr extends NGAP_ConnHdlr, HTTP2_CT, HTTP2_ConnHdlr, Prometheus_Checker_CT, OGS_UEInfo_CT {
+	port ConnHdlr_Coord_PT COORD;
+
+	var ConnHdlrPars g_pars;
+	var UeDerivedKeys g_keys;
+
+	/* number of programs started, used as identifier. */
+	var integer g_start_prog_count := 0;
+}
+
+type function void_fn() runs on ConnHdlr;
+
+/* generate parameters for a connection handler */
+function f_ConnHdlrPars(integer ue_idx := 0, integer c5g_idx := 0)
+runs on MTC_CT return ConnHdlrPars {
+	var ConnHdlrPars pars := {
+		ngran_pars := g_ngran_pars,
+		ue_pars := valueof(ts_UeParams(ue_idx)),
+		c5g_idx := c5g_idx,
+		kset_id := valueof(cs_NAS_KeySetIdentifier_lv(tsc_NasKsi_NoKey, '0'B)),
+		exp_CoreNetworkAssistanceInformationForInactive := false
+	};
+	return pars;
+}
+
+function f_ConnHdlr_init(void_fn fn, ConnHdlrPars pars) runs on ConnHdlr {
+	/* make parameters available via component variable */
+	g_pars := pars;
+
+	/* Setup */
+	/* Register SCP HTTP2 sever, where IUT will send all SBI requests: */
+	f_http2_server_emu_register(f_http2_server_path_match_scp(), idx := HTTP2_CONN_SCP);
+	f_http2_adapter_init();
+
+	fn.apply();
+
+	/* Cleanup */
+	f_http2_server_emu_unregister(f_http2_server_path_match_scp(), idx := HTTP2_CONN_SCP);
+}
+
+/* These are a preset of path matches which can be applied through the entire lifecycle of the session: */
+function f_http2_server_path_match_scp()
+runs on ConnHdlr return charstring {
+	var charstring imsi_match := "*imsi-" & g_pars.ue_pars.imsi_str & "*";
+	var charstring nausf_aka_confirmation_match := valueof(ts_Nausf_UEAuthentication_path_5g_aka_confirmation(int2str(g_pars.ue_pars.idx)));
+	var charstring match_ := "(" & nausf_aka_confirmation_match &
+				 ")|(" & imsi_match &
+				 ")";
+	return match_;
+}
+
+template (value) NGAP_IEs.TAI ts_ngran_NGAP_TAI(NGRANParams ngran_pars) := {
+	pLMNIdentity := ngran_pars.global_ngran_id.globalGNB_ID.pLMNIdentity,
+	tAC := ngran_pars.supported_ta_list[0].tAC,
+	iE_Extensions := omit
+}
+
+private function f_imsi_plmn_id()  runs on ConnHdlr return PLMNIdentity {
+	var hexstring imsi := g_pars.ue_pars.imsi;
+	var GsmMcc mcc := substr(imsi, 0, 3);
+	var GsmMnc mnc := substr(imsi, 3, 2);
+	return f_enc_mcc_mnc(mcc, mnc);
+}
+
+private function f_SUCI_IMSI() runs on ConnHdlr return octetstring {
+	var hexstring imsi := g_pars.ue_pars.imsi;
+	var PLMNIdentity plmn_id := f_imsi_plmn_id();
+	var octetstring imsi_suffix := imsi_hex2oct(substr(imsi, lengthof(imsi) - 10, 10));
+	return plmn_id & '21430001'O & imsi_suffix;
+}
+
+private function f_NG_MobileIdentity_STMSI() runs on ConnHdlr return NG_MobileIdentity {
+	return valueof(cs_NG_MobileIdentity_STMSI(omit, substr(g_pars.ue_pars.guti, 4, lengthof(g_pars.ue_pars.guti) - 4)));
+}
+
+private function f_UE_SecurityCapability() runs on ConnHdlr return NG_UE_SecurityCapability {
+	var template (value) NG_UE_SecurityCapability ue_sec_cap;
+	ue_sec_cap := cs_NG_UE_SecurityCapabilityTLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
+						     ngiaCap := '40'O /* ONLY NIA1 supported */);
+	return valueof(ue_sec_cap);
+}
+
+private function f_ULI() runs on ConnHdlr return UserLocationInformation {
+	var template (value) UserLocationInformation p_ueLocInf
+	p_ueLocInf := m_uPTransportLayerInformation_userLocationInformationNR(
+			m_userLocationInformationNR(
+				g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI,
+				ts_ngran_NGAP_TAI(g_pars.ngran_pars[g_pars.c5g_idx])
+
+	));
+	return valueof(p_ueLocInf);
+}
+
+private function f_UPTLI() runs on ConnHdlr return UPTransportLayerInformation {
+	var template (value) UPTransportLayerInformation uptli;
+
+	uptli := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
+				    p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
+	return valueof(uptli);
+}
+
+private function f_tr_ConnHdlr_kset_id() runs on ConnHdlr return template (present) NAS_KeySetIdentifier {
+	/* KSI not yet set, expect whatever assignment from network: */
+	if (g_pars.kset_id.nasKeySetId == tsc_NasKsi_NoKey) {
+		return cr_NAS_KeySetIdentifier(?, ?);
+	} else {
+		/* Expect specific kset_id. Upon transmitting it UE->Network, f_attach()
+		 * has updated it to the expected value. */
+		return g_pars.kset_id;
+	}
+}
+
+private function f_tr_ConnHdlr_CoreNetworkAssistanceInformationForInactive() runs on ConnHdlr return template CoreNetworkAssistanceInformationForInactive {
+	var template CoreNetworkAssistanceInformationForInactive exp := omit
+	if (g_pars.exp_CoreNetworkAssistanceInformationForInactive) {
+		/* "CN MT Communication Handling IE" inside "Core Network Assistance Information for RRC INACTIVE IE",
+		 * 3GPP TS 38.413 9.3.1.15.
+		 * NOTE: current open5gs v2.7.3 doesn't set it, meaning it doesn't support RRC_INACTIVE state. */
+		var template (present) CoreNetworkAssistanceInformationForInactive.iE_Extensions ie_ext;
+		ie_ext := f_mw_CoreNetworkAssistanceInformationForInactive_ExtIEs(p_cN_MT_CommunicationHandling := supported);
+		exp := mw_CoreNetworkAssistanceInformationForInactive(p_iE_Extensions := ie_ext);
+	}
+	return exp;
+}
+
+/* 3GPP TS 24.501 9.6, 3GPP TS 24.007 11.2.3.1a.
+ * 0 = "No procedure transaction identity assigned", 255 = "Reserved". */
+private function f_next_pti() runs on ConnHdlr return ProcedureTransactionIdentifier
+{
+	var integer i := oct2int(g_pars.ue_pars.pti);
+	if (i >= 254) {
+		g_pars.ue_pars.pti := '01'O;
+	} else {
+		g_pars.ue_pars.pti := int2oct(i + 1, 1);
+	}
+	return g_pars.ue_pars.pti;
+}
+
+/* 3GPP TS 24.501 9.11.3.44 PDU session status */
+function f_PDU_SessionStatus() runs on ConnHdlr return PDU_SessionStatus
+{
+	var template (value) PDU_SessionStatus st;
+	var BIT1 sess_id1_active;
+
+	if (ispresent(g_pars.ue_pars.sess_pars.cn_gtpu_teid)) {
+		sess_id1_active := '1'B;
+	} else {
+		sess_id1_active := '0'B;
+	}
+
+	st := cs_PDU_SessionStatus('000000'B & sess_id1_active & '0'B, '00000000'B);
+	return valueof(st);
+}
+
+function f_UESecurityCapabilities() runs on ConnHdlr return UESecurityCapabilities
+{
+	var template (value) UESecurityCapabilities cap;
+	cap := m_uESecurityCapabilities(p_nRencryptionAlgorithms := '0000000000000000'B,
+					p_nRintegrityProtectionAlgorithms := '0000000000000000'B,
+					p_eUTRAencryptionAlgorithms := '0000000000000000'B,
+					p_eUTRAintegrityProtectionAlgorithms := '0000000000000000'B);
+	return valueof(cap);
+}
+
+/* 3GPP TS 24.501 5.4.1.3.2, 3GPP TS 33.501 6.1.3.2 */
+private altstep as_ngap_handle_auth(boolean allow_resync := true) runs on ConnHdlr {
+	var NG_NAS_DL_Message_Type rx_nas;
+	var template (present) NAS_KeySetIdentifier kset_id := f_tr_ConnHdlr_kset_id();
+	[] NGAP.receive(cr_NG_AUTHENTICATION_REQUEST) -> value rx_nas {
+		var integer ret;
+		var integer my_sqn := 0; /* TODO: move to a ConnHdlr state attribute? */
+		var OCT16 rand := bit2oct(rx_nas.authentication_Request.rand.randValue);
+		var OCT16 autn := bit2oct(rx_nas.authentication_Request.autn.aUTN);
+		var OCT2 abba := rx_nas.authentication_Request.abba.abbaValue;
+		var OCT16 ik;
+		var OCT16 ck;
+		var OCT8 res;
+		var OCT14 auts;
+
+		g_pars.kset_id := rx_nas.authentication_Request.ngNasKeySetId;
+
+		ret := f_milenage_check(g_pars.ue_pars.usim_key,
+					g_pars.ue_pars.usim_opc,
+					int2oct(my_sqn, 8),
+					rand, autn, ik, ck, res, auts);
+		if (ret == -1) {
+			Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+						log2str("f_milenage_check() failed! -1"));
+		}
+		if (ret == -2) {
+			if (not allow_resync) {
+				Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+							log2str("f_milenage_check() unexpected Resync!"));
+			}
+			log("Milenage: RX-SQN differs from SIM SQN: Re-Sync! AUTS=", auts);
+			/* 3GPP TS 24.501 5.4.1.3.6 d) */
+			NGAP.send(cs_NG_AUTHENTICATION_FAILURE(cs_GMM_GSM_Cause(omit, int2bit(21, 8)),
+							       cs_AuthFailParam(oct2bit(auts))));
+			as_Nausf_UEAuth_put_5g_aka_confirmation(auth_result := AUTHENTICATION_FAILURE);
+			as_Nausf_UEAuth_post_ue_authentications(force_resync := false);
+			as_ngap_handle_auth(allow_resync := false);
+			return;
+		}
+
+		var octetstring ssn := f_NG_NAS_ServingNetworkName_OCT(f_imsi_plmn_id(), omit);
+		g_keys.kausf := f_kdf_kausf(ck, ik, ssn, autn);
+		g_keys.kseaf := f_kdf_kseaf(g_keys.kausf, ssn);
+		g_keys.kamf := f_kdf_kamf(g_keys.kseaf, char2oct(hex2str(g_pars.ue_pars.imsi)), abba);
+
+		var NGAPEM_Config cfg := {
+			set_nas_keys := {
+				k_nas_int := f_kdf_ng_nas_int(g_keys.kamf, NG_NAS_ALG_IP_NIA1),
+				k_nas_enc := f_kdf_ng_nas_enc(g_keys.kamf, NG_NAS_ALG_ENC_NEA0)
+			}
+		};
+		NGAP.send(cfg);
+
+		/* Derive (X)RES* from (X)RES, 3GPP TS 33.501 A.4  */
+		var OCT16 res_star := f_kdf_xres_star(ssn, ck, ik, rand, res);
+		NGAP.send(cs_NG_AUTHENTICATION_RESPONSE(cs_AuthenticationResponseParameter(oct2bit(res_star))));
+		as_Nausf_UEAuth_put_5g_aka_confirmation(auth_result := AUTHENTICATION_SUCCESS);
+	}
+}
+
+private altstep as_ngap_handle_sec_mode() runs on ConnHdlr {
+	var NGAPEM_Config cfg;
+	var NG_NAS_DL_Message_Type rx_nas;
+	/* Make sure network selected specific algos we requested: */
+	var template (present) NG_UE_SecurityCapability ue_sec_cap :=
+		cr_NG_UE_SecurityCapabilityLV(ngeaCap := '80'O, /* ONLY NEA0 (no encryption) for now */
+					      ngiaCap := '40'O /* ONLY NIA1 supported */);
+
+	[] NGAP.receive(cr_NG_SECURITY_MODE_COMMAND(p_UECap := ue_sec_cap)) -> value rx_nas {
+		/* Configure integrity protection: */
+		cfg := {
+			set_nas_alg_int := NG_NAS_ALG_IP_NIA1
+		};
+		NGAP.send(cfg);
+		/* Configure Ciphering: */
+		cfg := {
+			set_nas_alg_enc := NG_NAS_ALG_ENC_NEA0
+		};
+		NGAP.send(cfg);
+
+		var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+		var NAS_PDU nas_pdu;
+		nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationInitial, '1'B),
+							g_pars.kset_id.nasKeySetId,
+							g_pars.kset_id.tsc,
+							cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
+										 f_SUCI_IMSI()),
+							p_UESecurityCap := f_UE_SecurityCapability());
+		nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+		NGAP.send(cs_NG_SECURITY_MODE_COMPLETE(cs_NG_MobileIdentityTLV_IMEISV(hex2oct(g_pars.ue_pars.imeisv)),
+										      cs_ReplayedNASMessageContainerTLV(nas_pdu)));
+	}
+}
+
+altstep as_ngap_handle_configuration_update() runs on ConnHdlr {
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	[] NGAP.receive(cr_NG_CONFIGURATION_UPDATE_COMMAND) -> value rx_nas {
+		NGAP.send(cs_NG_CONFIGURATION_UPDATE_COMPLETE);
+	}
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer and return a Result */
+private function f_pdu_handle_PDUSessionResourceSetupRequestTransfer(NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf,
+								     boolean exp_data_forwarding_not_possible)
+runs on ConnHdlr return NGAP_IEs.PDUSessionResourceSetupResponseTransfer {
+	var template (value) UPTransportLayerInformation utla;
+	var template (value) QosFlowPerTNLInformation qos;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+	var integer qos_id := 0;
+	var boolean found_data_forwarding_not_possible := false;
+
+	for (var integer i := 0; i < lengthof(setup_req_transf.protocolIEs); i := i + 1) {
+		select (setup_req_transf.protocolIEs[i].id) {
+		case (id_UL_NGU_UP_TNLInformation) {
+			var UPTransportLayerInformation utli := setup_req_transf.protocolIEs[i].value_.uPTransportLayerInformation;
+			g_pars.ue_pars.sess_pars.cn_gtpu_ip := f_inet_ntoa(bit2oct(utli.gTPTunnel.transportLayerAddress));
+			g_pars.ue_pars.sess_pars.cn_gtpu_teid := utli.gTPTunnel.gTP_TEID;
+			}
+		case (id_QosFlowSetupRequestList) {
+			var QosFlowSetupRequestList qos_req_li := setup_req_transf.protocolIEs[i].value_.QosFlowSetupRequestList;
+			qos_id := qos_req_li[0].qosFlowIdentifier;
+		}
+		case (id_DataForwardingNotPossible) {
+			found_data_forwarding_not_possible := true;
+		}
+		}
+	}
+
+	if (exp_data_forwarding_not_possible != found_data_forwarding_not_possible) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("PDUSessionResourceSetupRequestTransfer: DataForwardingNotPossible IE: received presence ",
+						found_data_forwarding_not_possible, " vs exp ",
+						exp_data_forwarding_not_possible));
+	}
+
+	/* Prepare Response for it: */
+	utla := m_uPTransportLayerInformation_gTPTunnel(
+			m_gTPTunnel(p_tla := oct2bit(f_inet_addr(g_pars.ue_pars.sess_pars.ran_gtpu_ip)),
+					p_gtp_teid := g_pars.ue_pars.sess_pars.ran_gtpu_teid));
+	qos := m_qosFlowPerTNLInformation(utla, { m_associatedQosFlowItem(qos_id) });
+	setup_resp_transf := valueof(m_pDUSessionResourceSetupResponseTransfer(qos));
+
+	return setup_resp_transf;
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_setup_item_ctx(PDUSessionResourceSetupItemCxtReq req) runs on ConnHdlr return PDUSessionResourceSetupItemCxtRes
+{
+	var PDUSessionResourceSetupItemCxtRes resp;
+	var octetstring setup_trans_enc;
+	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+
+	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
+	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
+	setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf, false);
+
+	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
+	resp := valueof(m_pDUSessionResourceSetupItemCxtRes(req.pDUSessionID, setup_trans_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_setup_list_ctx(PDUSessionResourceSetupListCxtReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListCxtRes
+{
+	var PDUSessionResourceSetupListCxtRes li_resp;
+	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
+		var PDUSessionResourceSetupItemCxtRes it_resp;
+		it_resp := f_pdu_handle_session_resource_setup_item_ctx(li_req[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+/* 3GPP TS 23.502 Figure 4.3.2.2.1-1 steps 12-14. */
+altstep as_ngap_handle_InitialCtxReq_withPDUSessionList(template (present) AMF_UE_NGAP_ID amf_id := ?) runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg((f_mw_n2_InitialContextSetupRequest(amf_id,
+								    g_pars.ue_pars.ran_id,
+								    p_uEAggregateMaximumBitRate := ?,
+								    p_coreNetworkAssistanceInformationForInactive := f_tr_ConnHdlr_CoreNetworkAssistanceInformationForInactive(),
+								    p_pDUSessionResourceSetupListCxtReq := ?,
+								    p_nextHopNH := ?,
+								    p_maskedIMEISV := ?),
+				 f_mw_n2_InitialContextSetupRequest(amf_id,
+								    g_pars.ue_pars.ran_id,
+								    p_uEAggregateMaximumBitRate := ?,
+								    p_coreNetworkAssistanceInformationForInactive := f_tr_ConnHdlr_CoreNetworkAssistanceInformationForInactive(),
+								    p_pDUSessionResourceSetupListCxtReq := ?,
+								    p_nextHopNH := ?,
+								    p_maskedIMEISV := ?,
+								    p_nAS_PDU := ?)
+				));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var InitialContextSetupRequest ctx_setup_req := rx_ngap.initiatingMessage.value_.initialContextSetupRequest;
+		var PDUSessionResourceSetupListCxtRes resources;
+
+		/* Update amf_id: */
+		g_pars.ue_pars.amf_id := ctx_setup_req.protocolIEs[0].value_.aMF_UE_NGAP_ID;
+
+		for (var integer i := 0; i < lengthof(ctx_setup_req.protocolIEs); i := i + 1) {
+			if (ctx_setup_req.protocolIEs[i].id != id_PDUSessionResourceSetupListCxtReq) {
+				continue;
+			}
+			var PDUSessionResourceSetupListCxtReq li := ctx_setup_req.protocolIEs[i].value_.pDUSessionResourceSetupListCxtReq;
+			resources := f_pdu_handle_session_resource_setup_list_ctx(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_InitialContextSetupResponse(g_pars.ue_pars.amf_id,
+									  g_pars.ue_pars.ran_id,
+									  resources)));
+	}
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_setup_item_su(PDUSessionResourceSetupItemSUReq req) runs on ConnHdlr return PDUSessionResourceSetupItemSURes
+{
+	var PDUSessionResourceSetupItemSURes resp;
+	var octetstring setup_trans_enc;
+	var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+	var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+
+	/* Parse PDUSessionResourceSetupRequestTransfer contained inside InitialContextSetupRequest's PDUSessionResourceSetup Item: */
+	setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(req.pDUSessionResourceSetupRequestTransfer);
+	setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf, false);
+
+	setup_trans_enc := enc_NGAP_PDUSessionResourceSetupResponseTransfer(setup_resp_transf)
+	resp := valueof(m_pDUSessionResourceSetupItemSURes(req.pDUSessionID, setup_trans_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_setup_list_su(PDUSessionResourceSetupListSUReq li_req) runs on ConnHdlr return PDUSessionResourceSetupListSURes
+{
+	var PDUSessionResourceSetupListSURes li_resp;
+	for (var integer i := 0; i < lengthof(li_req); i := i + 1) {
+		var PDUSessionResourceSetupItemSURes it_resp;
+		it_resp := f_pdu_handle_session_resource_setup_item_su(li_req[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+/* 3GPP TS 38.413 9.2.1.1 PDU SESSION RESOURCE SETUP REQUEST */
+altstep as_ngap_handle_PDUSessionResourceSetupReq() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(f_mw_n2_PDUSessionResourceSetupRequest(g_pars.ue_pars.amf_id,
+								       g_pars.ue_pars.ran_id,
+								       p_nAS_PDU := ?,
+								       p_pDUSessionResourceSetupListSUReq := ?));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var PDUSessionResourceSetupRequest pdu := rx_ngap.initiatingMessage.value_.pDUSessionResourceSetupRequest;
+		var PDUSessionResourceSetupListSURes resources;
+
+		for (var integer i := 0; i < lengthof(pdu.protocolIEs); i := i + 1) {
+			if (pdu.protocolIEs[i].id != id_PDUSessionResourceSetupListSUReq) {
+				continue;
+			}
+			var PDUSessionResourceSetupListSUReq li := pdu.protocolIEs[i].value_.pDUSessionResourceSetupListSUReq;
+			resources := f_pdu_handle_session_resource_setup_list_su(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceSetupResponse(g_pars.ue_pars.amf_id,
+									      g_pars.ue_pars.ran_id,
+									      resources)));
+	}
+}
+
+/* 3GPP TS 23.502 4.3.2.2 UE Requested PDU Session Establishment
+ * 3GPP TS 24.501 8.3.1 PDU session establishment request */
+function f_pdu_sess_establish(BIT3 request_type := c_RequestType_initial_request,
+			      BIT3 pdu_sess_type := c_PDU_SessionType_IPv4,
+			      template (omit) AlwaysOnPDUSessionReq p_AlwaysOnPDUSessionReq := omit,
+			      template (omit) ExtdProtocolConfigOptions p_ExtdPCO := omit)
+runs on ConnHdlr return NG_PDU_SESSION_ESTABLISHMENT_ACCEPT  {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var OCT1 pdu_sess_id := int2oct(g_pars.ue_pars.sess_pars.id, 1);
+	var NG_PDU_SESSION_ESTABLISHMENT_ACCEPT sess_acc;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_ESTABLISHMENT_REQUEST(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							      p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateV('FF'O, 'FF'O),
+							      p_PDU_SessionType := cs_PDU_SessionTypeTV(pdu_sess_type),
+							      p_SSC_Mode := cs_SSC_ModeTV('001'B),
+							      p_AlwaysOnPDUSessionReq := p_AlwaysOnPDUSessionReq,
+							      p_ExtdPCO := p_ExtdPCO);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id),
+					     p_RequestType := cs_NG_Request_TypeTV(request_type),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(g_pars.ue_pars.apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_InitialCtxReq_withPDUSessionList(g_pars.ue_pars.amf_id);
+
+	/* PDU Session Establishment Accept: This DL NAS arrives contained in InitialCtxReq handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	sess_acc := inner_nas.pdu_Session_Establishment_Accept;
+
+	g_pars.ue_pars.sess_pars.qos_rules := sess_acc.authorizedQoSRules.listofQoSRules;
+	log("5GC assigned CN GTPU Address: ", g_pars.ue_pars.sess_pars.cn_gtpu_ip, " TEID: ", g_pars.ue_pars.sess_pars.cn_gtpu_teid);
+	select (pdu_sess_type) {
+	case (c_PDU_SessionType_IPv4) {
+		g_pars.ue_pars.sess_pars.ue_ip4 := f_inet_ntoa(sess_acc.pduAddress.adressInfo);
+		log("5GC assigned UE IPv4 address: ", g_pars.ue_pars.sess_pars.ue_ip4);
+	}
+	case (c_PDU_SessionType_IPv6) {
+		g_pars.ue_pars.sess_pars.ipv6_interface_id := sess_acc.pduAddress.adressInfo
+		log("5GC assigned IPv6 Interface Id: ", g_pars.ue_pars.sess_pars.ipv6_interface_id);
+		/* Use the link-local address for now: */
+		var octetstring ll_addr := 'FE80000000000000'O & g_pars.ue_pars.sess_pars.ipv6_interface_id;
+		g_pars.ue_pars.sess_pars.ue_ip6 := f_inet6_ntoa(ll_addr);
+		log("5GC assigned IPv6 link-local Address: ", g_pars.ue_pars.sess_pars.ue_ip6);
+	}
+	case (c_PDU_SessionType_IPv4v6) {
+		var octetstring eua_v6 := substr(sess_acc.pduAddress.adressInfo, 0, 8);
+		var octetstring eua_v4 := substr(sess_acc.pduAddress.adressInfo, 8, 4);
+		g_pars.ue_pars.sess_pars.ue_ip4 := f_inet_ntoa(eua_v4);
+		log("5GC assigned UE IPv4 address: ", g_pars.ue_pars.sess_pars.ue_ip4);
+		g_pars.ue_pars.sess_pars.ipv6_interface_id := eua_v6;
+		log("5GC assigned IPv6 Interface Id: ", g_pars.ue_pars.sess_pars.ipv6_interface_id);
+		var octetstring ll_addr := 'FE80000000000000'O & g_pars.ue_pars.sess_pars.ipv6_interface_id;
+		g_pars.ue_pars.sess_pars.ue_ip6 := f_inet6_ntoa(ll_addr);
+		log("5GC assigned IPv6 link-local Address: ", g_pars.ue_pars.sess_pars.ue_ip6);
+	}
+	case (?) {
+		setverdict(fail, "PDU Session Type not implemented");
+	}
+	}
+
+	return sess_acc;
+}
+
+private function f_pdu_handle_session_resource_modify_item_qos_flow_list(QosFlowAddOrModifyRequestList qos_flow_req_li) runs on ConnHdlr return QosFlowAddOrModifyResponseList
+{
+	var QosFlowAddOrModifyResponseList qos_flow_resp_li;
+	for (var integer i := 0; i < lengthof(qos_flow_req_li); i := i + 1) {
+		var QosFlowAddOrModifyRequestItem qos_flow_req_it := qos_flow_req_li[i];
+		var QosFlowAddOrModifyResponseItem qos_flow_resp_it := valueof(m_qosFlowAddOrModifyResponseItem(qos_flow_req_it.qosFlowIdentifier));
+		qos_flow_resp_li[i] := qos_flow_resp_it;
+	}
+	return qos_flow_resp_li;
+}
+
+/* Handle a PDUSessionResourceModifyRequestTransfer contained inside NGAP PDUSessionResourceModifyRequest and return a Result for PDUSessionResourceModifyResponse */
+private function f_pdu_handle_session_resource_modify_item(PDUSessionResourceModifyItemModReq req) runs on ConnHdlr return PDUSessionResourceModifyItemModRes
+{
+	var PDUSessionResourceModifyItemModRes resp;
+	var NGAP_IEs.PDUSessionResourceModifyRequestTransfer mod_req_transf;
+	var NGAP_IEs.PDUSessionResourceModifyResponseTransfer mod_resp_transf;
+	var octetstring mod_resp_transf_enc;
+	var template (omit) QosFlowAddOrModifyResponseList qos_flow_resp_li := omit;
+
+	mod_req_transf := dec_NGAP_PDUSessionResourceModifyRequestTransfer(req.pDUSessionResourceModifyRequestTransfer);
+
+	for (var integer i := 0; i < lengthof(mod_req_transf.protocolIEs); i := i + 1) {
+		select(mod_req_transf.protocolIEs[i].id) {
+		case (id_QosFlowAddOrModifyRequestList) {
+			var QosFlowAddOrModifyRequestList qos_flow_req_li := mod_req_transf.protocolIEs[i].value_.qosFlowAddOrModifyRequestList;
+			qos_flow_resp_li := f_pdu_handle_session_resource_modify_item_qos_flow_list(qos_flow_req_li);
+			}
+		case (id_UL_NGU_UP_TNLModifyList) {
+			// TODO: assign the fields below, see how it's done in f_pdu_handle_session_resource_setup_item()
+			// g_pars.ue_pars.sess_pars.cn_gtpu_ip := ;
+			// g_pars.ue_pars.sess_pars.cn_gtpu_teid := ;
+			// TODO: Update IP+TEID in usperlane osmo-uecups if any of them changed.
+			}
+		}
+	}
+
+	/* Prepare Response for it: */
+	mod_resp_transf := valueof(m_pDUSessionResourceModifyResponseTransfer(p_qosFlowAddOrModifyResponseList := qos_flow_resp_li));
+	mod_resp_transf_enc := enc_NGAP_PDUSessionResourceModifyResponseTransfer(mod_resp_transf);
+	resp := valueof(m_pDUSessionResourceModifyItemModRes(req.pDUSessionID, mod_resp_transf_enc));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_modify_list(PDUSessionResourceModifyListModReq li_cmd) runs on ConnHdlr return PDUSessionResourceModifyListModRes
+{
+	var PDUSessionResourceModifyListModRes li_resp;
+	for (var integer i := 0; i < lengthof(li_cmd); i := i + 1) {
+		var PDUSessionResourceModifyItemModRes it_resp;
+		it_resp := f_pdu_handle_session_resource_modify_item(li_cmd[i]);
+		li_resp[i] := it_resp;
+	}
+	return li_resp;
+}
+
+private altstep as_ngap_handle_PDUSessionResourceModifyRequest() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(mw_n2_PDUSessionResourceModify(g_pars.ue_pars.amf_id,
+							       g_pars.ue_pars.ran_id,
+							       ?));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var PDUSessionResourceModifyRequest mod_req := rx_ngap.initiatingMessage.value_.PDUSessionResourceModifyRequest;
+		var PDUSessionResourceModifyListModRes resources;
+
+		for (var integer i := 0; i < lengthof(mod_req.protocolIEs); i := i + 1) {
+			if (mod_req.protocolIEs[i].id != id_PDUSessionResourceModifyListModReq) {
+				continue;
+			}
+			var PDUSessionResourceModifyListModReq li := mod_req.protocolIEs[i].value_.pDUSessionResourceModifyListModReq;
+			resources := f_pdu_handle_session_resource_modify_list(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceModifyResponse(g_pars.ue_pars.amf_id,
+									       g_pars.ue_pars.ran_id,
+									       resources)));
+	}
+}
+
+/* 3GPP TS 24.501 8.3.7 PDU session modification request,
+ * 3GPP TS 23.502 4.3.3.2 UE requested PDU Session Modification */
+function f_pdu_sess_modify() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var OCT1 pdu_sess_id := int2oct(g_pars.ue_pars.sess_pars.id, 1);
+
+	var template (value) QoS_RuleU qos_rule_u := cs_QoS_RuleU_Create(
+		g_pars.ue_pars.sess_pars.qos_rules[0].u.creat.flowIdentifier,
+		'09'O,
+		{cs_PacketFilter_MediaUDP('0110'B, 60350)},
+		'0'B,
+		g_pars.ue_pars.sess_pars.qos_rules[0].u.creat.spare,
+		'1'B
+	);
+	var template (value) QoS_RuleList qos_rules := {
+		cs_QoS_Rule(g_pars.ue_pars.sess_pars.qos_rules[0].identifier,
+			    qos_rule_u)
+	};
+
+	/* 3GPP TS 24.501 Table 8.3.7.1. */
+	nas_ul_msg := cs_NG_PDU_SESSION_MODIFICATION_REQUEST(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							     p_IntegrityProtMaxDataRate := cs_IntegrityProtMaxDataRateTV('FF'O, 'FF'O),
+							     p_QoS_Rules := cs_QoS_Rules(qos_rules, p_IEI := '7A'O));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(g_pars.ue_pars.apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_PDUSessionResourceModifyRequest();
+
+	/* 5G-NAS PDU Session Modify Request: This DL NAS arrives contained in NGAP PDUSessionModifyRequest handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	if (not match(inner_nas, cr_NG_PDU_SESSION_MODIFICATION_COMMAND(cs_NG_PDU_SessionIdV(pdu_sess_id),
+									pti))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected decoded NAS Payload Container ", inner_nas));
+	}
+
+	nas_ul_msg := cs_NG_PDU_SESSION_MODIFICATION_COMPLETE(cs_NG_PDU_SessionIdV(pdu_sess_id),
+							      pti);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id));
+	NGAP.send(nas_ul_msg);
+}
+
+/* 3GPP TS 38.413 8.2.5 PDU Session Resource Modify Indication
+ * 3GPP TS 38.413 9.3.4.6 PDU Session Resource Modify Indication Transfer
+ * 3GPP TS 29.502 5.2.2.3.7 RAN Initiated QoS Flow Mobility
+ * 3GPP TS 23.502 4.14.1 RAN Initiated QoS Flow Mobility */
+function f_pdu_sess_modify_ind() runs on ConnHdlr {
+	var template (value) QosFlowPerTNLInformation qos;
+	var template (value) PDUSessionResourceModifyIndicationTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceModifyItemModInd it;
+	var template (value) NGAP_PDU tx_pdu;
+	var integer qos_id := 0;
+
+	qos := m_qosFlowPerTNLInformation(f_UPTLI(), { m_associatedQosFlowItem(qos_id) });
+	transfer := m_pDUSessionResourceModifyIndicationTransfer(qos);
+	transfer_enc := enc_NGAP_PDUSessionResourceModifyIndicationTransfer(valueof(transfer));
+	it := m_pDUSessionResourceModifyItemModInd(g_pars.ue_pars.sess_pars.id,
+					    transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(
+			m_n2_PDUSessionResourceModifyIndication(
+				g_pars.ue_pars.amf_id,
+				g_pars.ue_pars.ran_id,
+				{ it }));
+	NGAP.send(tx_pdu);
+
+	/* Note: This currently fails because handling PDUSessionResourceModifyIndication
+	 * is not implemented in open5gs. */
+	NGAP.receive(mw_ngap_succMsg(mw_n2_PDUSessionResourceModifyConfirm(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					?)));
+}
+
+/* 3GPP TS 23.502 4.2.2.2.2 General Registration */
+function f_register(BIT3 registration_type := tsc_NG_RegistrationInitial,
+		    template (present) NG_NAS_DL_Message_Type exp_registration_accept := cr_NG_REGISTRATION_ACCEPT) runs on ConnHdlr {
+	var template (value) NGAP_PDU tx_pdu;
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	f_http2_server_emu_register(c_Nausf_UEAuthentication_path_ue_authentications, idx := HTTP2_CONN_SCP);
+
+	nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(registration_type, '1'B),
+						 g_pars.kset_id.nasKeySetId,
+						 g_pars.kset_id.tsc,
+						 cs_NG_MobileIdentitySUCI('0000'B /* Type IMSI */,
+									  f_SUCI_IMSI()),
+						 p_UESecurityCap := f_UE_SecurityCapability());
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.ue_pars.ran_id,
+						       nas_pdu, /* Registration request */
+						       f_ULI(),
+						       mo_Signalling));
+	NGAP.send(tx_pdu);
+
+	as_Nausf_UEAuth_post_ue_authentications(force_resync := true);
+	/* Expect updated KSI from network following 5G Core standards
+	*(open5gs.git 70310979c58fe186e9eaa06bec9d9a31f24ff7a1): */
+	if (g_pars.kset_id.nasKeySetId != tsc_NasKsi_NoKey) {
+		if (g_pars.kset_id.nasKeySetId == '110'B) {
+			g_pars.kset_id.nasKeySetId := '000'B;
+		} else {
+			g_pars.kset_id.nasKeySetId := int2bit(bit2int(g_pars.kset_id.nasKeySetId) + 1, 3);
+		}
+	}
+
+	as_ngap_handle_auth();
+	as_ngap_handle_sec_mode();
+
+	f_http2_server_emu_unregister(c_Nausf_UEAuthentication_path_ue_authentications, idx := HTTP2_CONN_SCP);
+	as_nudm_uecm_put_Amf3GppAccessRegistration();
+	/* TODO: as_nudm_sdm_get... : GET /nudm-sdm/v2/imsi-999700000000000?dataset-names=AM%2CSMF_SEL&plmn-id=%7B%22mcc%22%3A%22999%22%2C%22mnc%22%3A%2270%22%7D */
+
+	/* After receiving DL NAS Transport above, the UE-AMF-Id became known in NGAP_Emulation: */
+	g_pars.ue_pars.amf_id := f_ngap_obtain_amf_id();
+
+	NGAP.receive(exp_registration_accept) -> value rx_nas;
+	g_pars.ue_pars.guti := rx_nas.registration_Accept.guti.otherDigits;
+	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
+
+	as_ngap_handle_configuration_update();
+}
+
+function f_periodic_register_update() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	nas_ul_msg := cs_NG_REGISTRATION_REQUEST(cs_RegistrationType(tsc_NG_RegistrationPeriodic, '1'B),
+						 g_pars.kset_id.nasKeySetId,
+						 g_pars.kset_id.tsc,
+						 cs_NG_MobileIdentity_Guti(omit, g_pars.ue_pars.guti),
+						 p_UESecurityCap := f_UE_SecurityCapability());
+	NGAP.send(nas_ul_msg);
+
+	/* Expect updated KSI from network following 5G Core standards
+	* (open5gs.git 70310979c58fe186e9eaa06bec9d9a31f24ff7a1): */
+	if (g_pars.kset_id.nasKeySetId != tsc_NasKsi_NoKey) {
+		if (g_pars.kset_id.nasKeySetId == '110'B) {
+			g_pars.kset_id.nasKeySetId := '000'B;
+		} else {
+			g_pars.kset_id.nasKeySetId := int2bit(bit2int(g_pars.kset_id.nasKeySetId) + 1, 3);
+		}
+	}
+
+	NGAP.receive(cr_NG_REGISTRATION_ACCEPT) -> value rx_nas;
+	g_pars.ue_pars.guti := rx_nas.registration_Accept.guti.otherDigits;
+	NGAP.send(cs_NG_REGISTRATION_COMPLETE);
+
+	as_ngap_handle_configuration_update();
+}
+
+
+/* 3GPP TS 24.501 5.6.1 Service request procedure
+ * 3GPP TS 23.502 4.2.3.2 UE Triggered Service Request */
+function f_service_request_cm_connected(template (omit) ULDataStatus ul_data_status := omit,
+					template (omit) PDU_SessionStatus pdu_sess_status := omit) runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_ULDataStatus := ul_data_status,
+					    p_PDU_SessionStatus := pdu_sess_status);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	NGAP.send(nas_ul_msg);
+}
+
+private function f_encode_nas(NG_NAS_UL_Message_Type nas_ul_msg) runs on ConnHdlr return NAS_PDU {
+	var NAS_PDU nas_pdu;
+	var NG_NAS_UE_State nus;
+	var BIT4 sec_hdr_t := '0001'B;
+	var OCT1 seq_nr;
+	var OCT4 mac;
+	var NG_NAS_UL_Message_Type nas_out;
+
+	nus := f_ngap_obtain_nus(g_pars.ue_pars.ran_id);
+
+	nus.tx_count := nus.tx_count + 1;
+	seq_nr := int2oct(nus.tx_count, 1);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	mac := f_NG_NAS_mac_calc(NG_NAS_ALG_IP_NIA1, f_kdf_ng_nas_int(g_keys.kamf, NG_NAS_ALG_IP_NIA1),
+				 nus.tx_count,
+				 bit2int(tsc_NG_RegResult_3GPP),
+				 false, seq_nr & nas_pdu);
+	nas_out := valueof(cs_NG_SECURITY_PROTECTED_NAS_MESSAGE(tsc_EPD_GMM,
+								sec_hdr_t,
+								mac,
+								seq_nr,
+								nas_pdu));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_out));
+
+	f_ngap_set_nus(g_pars.ue_pars.ran_id, nus);
+	return nas_pdu;
+}
+
+/* 3GPP TS 24.501 5.6.1 Service request procedure
+ * 3GPP TS 23.502 4.2.3.2 UE Triggered Service Request */
+function f_service_request_cm_idle(template (omit) ULDataStatus ul_data_status := omit,
+				   template (omit) PDU_SessionStatus pdu_sess_status := omit) runs on ConnHdlr {
+	var template (value) NGAP_PDU tx_pdu;
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_ULDataStatus := ul_data_status,
+					    p_PDU_SessionStatus := pdu_sess_status);
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_signalling,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_Msg := cs_ReplayedNASMessageContainerTLV(nas_pdu));
+
+	nas_pdu := f_encode_nas(valueof(nas_ul_msg));
+
+	tx_pdu := m_ngap_initMsg(m_n2_initialUeMessage(g_pars.ue_pars.ran_id,
+						       nas_pdu, /* Service request */
+						       f_ULI(),
+						       mo_Signalling));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 23.502 4.13.4.2 Emergency Services Fallback, step 3 + 4 */
+function f_service_request_emergency_services_fallback() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+
+	nas_ul_msg := cs_NG_SERVICE_REQUEST(c_ServiceType_emergency_services_fallback,
+					    g_pars.kset_id,
+					    f_NG_MobileIdentity_STMSI(),
+					    p_ULDataStatus := f_PDU_SessionStatus(),
+					    p_PDU_SessionStatus := f_PDU_SessionStatus());
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	NGAP.send(nas_ul_msg);
+}
+
+/* 3GPP TS 38.413 9.2.14.1 SECONDARY RAT DATA USAGE REPORT
+ * 3GPP TS 23.502 4.21 Secondary RAT Usage Data Reporting Procedure
+ * 3GPP TS 38.413 8.15.1 Secondary RAT Data Usage Report
+ **/
+function f_secondary_rat_data_usage_report() runs on ConnHdlr {
+	var template (value) SecondaryRATUsageInformation rat_use_info;
+	var template (value) SecondaryRATDataUsageReportTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceSecondaryRATUsageItem it;
+	var template (value) NGAP_PDU tx_pdu;
+
+	rat_use_info := m_secondaryRATUsageInformation();
+	transfer := m_secondaryRATDataUsageReportTransfer(rat_use_info);
+	transfer_enc := enc_NGAP_SecondaryRATDataUsageReportTransfer(valueof(transfer));
+	it := m_pPDUSessionResourceSecondaryRATUsageItem(g_pars.ue_pars.sess_pars.id,
+							 transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(
+			m_n2_SecondaryRATDataUsageReport(
+				g_pars.ue_pars.amf_id,
+				g_pars.ue_pars.ran_id,
+				{ it }));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 24.501 5.5.2.2 UE-initiated de-registration procedure,
+ * 3GPP TS 23.502 4.2.2.3.2 UE-initiated Deregistration */
+function f_deregister() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NG_NAS_DL_Message_Type rx_nas;
+
+	nas_ul_msg := cs_NG_DEREGISTRATION_REQUEST_MO(crs_DeregisterType ('0'B,/* p_SwitchOff */
+									  '0'B,/* p_ReReg */
+									  '01'B/* p_Access */),
+						      g_pars.kset_id,
+						      cs_NG_MobileIdentity_Guti(omit, g_pars.ue_pars.guti));
+	NGAP.send(nas_ul_msg);
+
+	NGAP.receive(cr_NG_DEREGISTRATION_ACCEPT_MO);
+	as_ngap_handle_UeContextReleaseCmd();
+}
+
+/* 3GPP TS 38.413 8.3.3 UE Context Release (AMF initiated) */
+altstep as_ngap_handle_UeContextReleaseCmd(template (present) Cause exp_cause := ?) runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(mw_n2_UEContextReleaseCommand(
+					mw_uE_NGAP_IDs_uE_NGAP_ID_pair(
+						mw_uE_NGAP_ID_pair(g_pars.ue_pars.amf_id,
+								   g_pars.ue_pars.ran_id)),
+					p_cause := exp_cause));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		NGAP.send(m_ngap_succMsg(f_ts_n2_UEContextReleaseComplete(g_pars.ue_pars.amf_id,
+									  g_pars.ue_pars.ran_id,
+									  f_ULI())));
+	}
+}
+
+/* 3GPP TS 38.413 8.3.2 UE Context Release Request (NG-RAN node initiated),
+ * 3GPP TS 23.502 4.2.6 AN Release */
+function f_ue_context_release(template (value) Cause cause := m_cause_radioNetwork(unspecified)) runs on ConnHdlr {
+	var template (value) NGAP_PDU tx_pdu;
+
+	if (ispresent(g_pars.ue_pars.sess_pars.cn_gtpu_teid)) {
+		var template (value) PDUSessionResourceListCxtRelReq li_req;
+		var template (value) PDUSessionResourceItemCxtRelReq it_req;
+		it_req := m_pDUSessionResourceItemCxtRelReq(g_pars.ue_pars.sess_pars.id);
+		li_req := { it_req };
+		tx_pdu := m_ngap_initMsg(m_n2_UEContextReleaseRequest_withPDUSessionList(
+						g_pars.ue_pars.amf_id,
+						g_pars.ue_pars.ran_id,
+						li_req,
+						cause));
+	} else {
+		tx_pdu := m_ngap_initMsg(m_n2_UEContextReleaseRequest(
+						g_pars.ue_pars.amf_id,
+						g_pars.ue_pars.ran_id,
+						cause));
+	}
+	NGAP.send(tx_pdu);
+	as_ngap_handle_UeContextReleaseCmd(exp_cause := cause);
+}
+
+/* 3GPP TS 38.413 8.3.13 "MT Communication Handling"
+ * 3GPP TS 23.502 4.8.1.1(a) Connection Inactive procedure step 2. */
+function f_mt_communication_handling() runs on ConnHdlr
+{
+	var template (value) NGAP_PDU tx_pdu;
+
+	tx_pdu := m_ngap_initMsg(m_n2_MTCommunicationHandlingRequest(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					m_FiveGCAction_HLComActivate(m_hLComActivate(m_nR_Paging_Long_eDRX_Information_for_RRC_INACTIVE(hf1024, s32))),
+					{m_PDUSessionListMTCommHReq_Item(g_pars.ue_pars.sess_pars.id)}));
+	NGAP.send(tx_pdu);
+	NGAP.receive(mw_ngap_succMsg(mw_n2_MTCommunicationHandlingResponse(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id)));
+}
+
+/* 3GPP TS 38.413 9.2.2.16 UE CONTEXT SUSPEND REQUEST
+ * 3GPP TS 23.502 4.8.1.2 Connection Suspend procedure */
+function f_ue_context_suspend() runs on ConnHdlr
+{
+	var template (value) UEContextSuspendRequestTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) NGAP_PDU tx_pdu;
+
+	transfer := m_uEContextSuspendRequestTransfer(p_suspendIndicator := m_suspendIndicator);
+	transfer_enc := enc_NGAP_UEContextSuspendRequestTransfer(valueof(transfer));
+	tx_pdu := m_ngap_initMsg(m_n2_UEContextSuspendRequest(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					{m_pDUSessionResourceSuspendItemSUSReq(g_pars.ue_pars.sess_pars.id, transfer_enc)}));
+	NGAP.send(tx_pdu);
+	NGAP.receive(mw_ngap_succMsg(mw_n2_UEContextSuspendResponse(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id)));
+}
+
+/* 3GPP TS 38.413 9.2.2.16 9.2.2.19 UE CONTEXT RESUME REQUEST
+ * 3GPP TS 23.502 4.8.2.3 Connection Resume procedure */
+function f_ue_context_resume() runs on ConnHdlr
+{
+	var template (value) NGAP_PDU tx_pdu;
+
+	tx_pdu := m_ngap_initMsg(m_n2_UEContextResumeRequest(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					m_rRCEstablishmentCause));
+	NGAP.send(tx_pdu);
+	NGAP.receive(mw_ngap_succMsg(mw_n2_UEContextResumeResponse(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id)));
+}
+
+/* 3GPP TS 38.413 8.4.4 Path Switch Request
+ * 3GPP TS 38.413 9.2.3.8 PATH SWITCH REQUEST
+ * 3GPP TS 23.502 4.9.1.2.2 Xn based inter NG-RAN handover without User Plane function re-allocation */
+function f_n2_path_switch(AMF_UE_NGAP_ID source_amf_id) runs on ConnHdlr
+{
+	var template (value) PathSwitchRequestTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceToBeSwitchedDLItem it;
+	var template (value) NGAP_PDU tx_pdu;
+	var NGAP_PDU rx_pdu;
+
+	transfer := m_pathSwitchRequestTransfer(p_dL_NGU_UP_TNLInformation := f_UPTLI(),
+						p_qosFlowAcceptedList := { m_qosFlowAcceptedItem(1) },
+						p_dL_NGU_TNLInformationReused := omit,
+						p_userPlaneSecurityInformation := omit);
+	transfer_enc := enc_NGAP_PathSwitchRequestTransfer(valueof(transfer));
+	it := m_pDUSessionResourceToBeSwitchedDLItem(g_pars.ue_pars.sess_pars.id,
+						     transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(m_n2_PathSwitchRequest(
+					g_pars.ue_pars.ran_id,
+					source_amf_id,
+					f_ULI(),
+					f_UESecurityCapabilities(),
+					{ it }));
+	NGAP.send(tx_pdu);
+	NGAP.receive(mw_ngap_succMsg(mw_n2_PathSwitchRequestAcknowledge(?, g_pars.ue_pars.ran_id))) -> value rx_pdu;
+
+	/* Update amf_id: */
+	var PathSwitchRequestAcknowledge path_switch_ack := rx_pdu.successfulOutcome.value_.PathSwitchRequestAcknowledge;
+	g_pars.ue_pars.amf_id := path_switch_ack.protocolIEs[0].value_.aMF_UE_NGAP_ID;
+}
+
+/* 3GPP TS 38.413 8.4.1 Handover Preparation
+ * 3GPP TS 38.413 9.2.3.1 HANDOVER REQUIRED
+ * 3GPP TS 38.413 9.3.4.14 Handover Required Transfer */
+function f_n2_handover_required(template (value) TargetID target_id,
+				template (omit) DirectForwardingPathAvailability direct_forwarding_avail := omit)
+runs on ConnHdlr {
+	var template (value) HandoverRequiredTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceItemHORqd it;
+	var template (value) NGAP_PDU tx_pdu;
+	var template (value) SourceNGRANNode_ToTargetNGRANNode_TransparentContainer container;
+	var octetstring container_enc;
+
+	transfer := m_handoverRequiredTransfer(direct_forwarding_avail);
+	transfer_enc := enc_NGAP_HandoverRequiredTransfer(valueof(transfer));
+	it := m_pDUSessionResourceItemHORqd(g_pars.ue_pars.sess_pars.id,
+					    transfer_enc);
+
+	container := m_sourceNGRANNode_ToTargetNGRANNode_TransparentContainer(
+		p_targetCell_ID := m_ngENB_ID_nR_CGI(g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI),
+		p_rRCContainer := ''O /* TODO: TS 38.331 HandoverPreparationInformation */,
+		p_uEHistoryInformation := {
+			m_lastVisitedCellItem(
+				m_interSystemHandoverReportType_nGRANCell(
+					m_lastVisitedNGRANCellInformation(
+						p_globalCellID := m_ngENB_ID_nR_CGI(g_pars.ngran_pars[g_pars.c5g_idx].cell_identity.nR_CGI),
+						p_cellType := m_cellType(m_cellSize(medium)),
+						p_timeUEStayedInCell := 10
+					)
+				)
+			)
+		});
+	container_enc := enc_NGAP_SourceNGRANNode_ToTargetNGRANNode_TransparentContainer(valueof(container));
+
+	tx_pdu := m_ngap_initMsg(
+			f_m_n2_HandoverRequired(
+				g_pars.ue_pars.amf_id,
+				g_pars.ue_pars.ran_id,
+				intra5gs,
+				m_cause_radioNetwork(resource_optimisation_handover),
+				target_id,
+				direct_forwarding_avail,
+				{ it },
+				container_enc));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 38.413 9.2.3.4 HANDOVER REQUEST
+ * 3GPP TS 23.502 4.9.1.3.2 step 9+10 */
+function f_n2_handover_request(boolean exp_ho_request_data_forwarding_not_possible := true) runs on ConnHdlr
+{
+	var template (value) QosFlowItemWithDataForwarding qos;
+	var template (value) HandoverRequestAcknowledgeTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceAdmittedItem it;
+	var template (value) NGAP_PDU tx_pdu;
+	var NGAP_PDU rx_pdu;
+	var HandoverRequest ho_req;
+	var QosFlowIdentifier qos_id := 0;
+
+	NGAP.receive(mw_ngap_initMsg(
+			mw_n2_HandoverRequest(? /* AMF ID not known yet here*/,
+					      intra5gs))) -> value rx_pdu;
+	ho_req := rx_pdu.initiatingMessage.value_.handoverRequest;
+
+	for (var integer i := 0; i < lengthof(ho_req.protocolIEs); i := i + 1) {
+		select(ho_req.protocolIEs[i].id) {
+		case (id_AMF_UE_NGAP_ID) {
+			/* Update amf_id: */
+			g_pars.ue_pars.amf_id := ho_req.protocolIEs[i].value_.aMF_UE_NGAP_ID;
+			}
+		case (id_PDUSessionResourceSetupListHOReq) {
+			var PDUSessionResourceSetupListHOReq res_li := ho_req.protocolIEs[i].value_.PDUSessionResourceSetupListHOReq;
+			var PDUSessionResourceSetupItemHOReq res_it := res_li[0];
+			var NGAP_IEs.PDUSessionResourceSetupRequestTransfer setup_req_transf;
+			var NGAP_IEs.PDUSessionResourceSetupResponseTransfer setup_resp_transf;
+			setup_req_transf := dec_NGAP_PDUSessionResourceSetupRequestTransfer(res_it.handoverRequestTransfer);
+			setup_resp_transf := f_pdu_handle_PDUSessionResourceSetupRequestTransfer(setup_req_transf, exp_ho_request_data_forwarding_not_possible);
+			qos_id := setup_resp_transf.dLQosFlowPerTNLInformation.associatedQosFlowList[0].qosFlowIdentifier;
+			}
+		}
+	}
+
+	qos := m_qosFlowItemWithDataForwarding(qos_id);
+	transfer := m_handoverRequestAcknowledgeTransfer(f_UPTLI(), {qos});
+	transfer_enc := enc_NGAP_HandoverRequestAcknowledgeTransfer(valueof(transfer));
+	it := m_pDUSessionResourceAdmittedItem(g_pars.ue_pars.sess_pars.id, transfer_enc);
+	tx_pdu := mw_ngap_succMsg(m_n2_HandoverRequestAcknowledge(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					{ it },
+					'1234'O));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 38.413 9.2.3.2 HANDOVER COMMAND
+ * 3GPP TS 23.502 4.9.1.3.3 step 1 */
+function f_n2_handover_command() runs on ConnHdlr
+{
+	var NGAP_PDU rx_pdu;
+
+	NGAP.receive(mw_ngap_succMsg(mw_n2_HandoverCommand(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					intra5gs,
+					?))) -> value rx_pdu;
+}
+
+/* 3GPP TS 23.502 9.2.3.7 HANDOVER NOTIFY
+ * 3GPP TS 23.502 4.9.1.3.3 step 5 */
+function f_n2_handover_notify() runs on ConnHdlr
+{
+	var template (value) HandoverRequiredTransfer transfer;
+	var octetstring transfer_enc;
+	var template (value) PDUSessionResourceItemHORqd it;
+	var template (value) NGAP_PDU tx_pdu;
+
+	transfer := m_handoverRequiredTransfer(omit);
+	transfer_enc := enc_NGAP_HandoverRequiredTransfer(valueof(transfer));
+	it := m_pDUSessionResourceItemHORqd(g_pars.ue_pars.sess_pars.id,
+					    transfer_enc);
+
+	tx_pdu := m_ngap_initMsg(m_n2_HandoverNotify(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					f_ULI()));
+	NGAP.send(tx_pdu);
+}
+
+/* 3GPP TS 23.502 9.2.3.11 HANDOVER CANCEL
+ * 3GPP TS 23.502 4.9.1.4 */
+function f_n2_handover_cancel() runs on ConnHdlr
+{
+	var template (value) NGAP_PDU tx_pdu;
+	var NGAP_PDU rx_pdu;
+
+	tx_pdu := m_ngap_initMsg(m_n2_HandoverCancel(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id,
+					m_cause_radioNetwork(unspecified)));
+	NGAP.send(tx_pdu);
+
+	NGAP.receive(mw_ngap_succMsg(mw_n2_HandoverCancelAcknowledge(
+					g_pars.ue_pars.amf_id,
+					g_pars.ue_pars.ran_id))) -> value rx_pdu;
+}
+
+/* Handle a PDUSessionResourceSetupRequestTransfer contained inside NGAP InitialContextSetupRequest and return a Result for InitialContextSetupResponse */
+private function f_pdu_handle_session_resource_released_item(PDUSessionResourceToReleaseItemRelCmd cmd) runs on ConnHdlr return PDUSessionResourceReleasedItemRelRes
+{
+	var PDUSessionResourceReleasedItemRelRes resp;
+	var NAS_CauseValue_Type nas_cause;
+
+	nas_cause := oct2bit(cmd.pDUSessionResourceReleaseCommandTransfer);
+
+	g_pars.ue_pars.sess_pars.cn_gtpu_ip := omit;
+	g_pars.ue_pars.sess_pars.cn_gtpu_teid := omit;
+
+	/* Prepare Response for it: */
+	resp := valueof(m_pDUSessionResourceReleasedItemRelRes(cmd.pDUSessionID, bit2oct(nas_cause)));
+	return resp;
+}
+
+private function f_pdu_handle_session_resource_released_list(PDUSessionResourceToReleaseListRelCmd li_cmd) runs on ConnHdlr return PDUSessionResourceReleasedListRelRes
+{
+	var PDUSessionResourceReleasedListRelRes li_resp;
+	for (var integer i := 0; i < lengthof(li_cmd); i := i + 1) {
+		var PDUSessionResourceReleasedItemRelRes it_resp;
+		it_resp := f_pdu_handle_session_resource_released_item(li_cmd[i]);
+		if (i == 0) { /* min 1 item in list doesn't allow previously allocating an empty list */
+			li_resp := { it_resp };
+		} else {
+			li_resp := li_resp & { it_resp };
+		}
+	}
+	return li_resp;
+}
+
+private altstep as_ngap_handle_PDUSessionReleaseCommand() runs on ConnHdlr {
+	var NGAP_PDU rx_ngap;
+	var template (present) NGAP_PDU exp_ngap :=
+		mw_ngap_initMsg(f_tr_n2_PDUSessionResourceReleaseCommand(g_pars.ue_pars.amf_id,
+									 g_pars.ue_pars.ran_id,
+									 ?, ?));
+
+	[] NGAP.receive(exp_ngap) -> value rx_ngap {
+		var PDUSessionResourceReleaseCommand rel_cmd := rx_ngap.initiatingMessage.value_.PDUSessionResourceReleaseCommand;
+		var PDUSessionResourceReleasedListRelRes resources;
+
+		for (var integer i := 0; i < lengthof(rel_cmd.protocolIEs); i := i + 1) {
+			if (rel_cmd.protocolIEs[i].id != id_PDUSessionResourceToReleaseListRelCmd) {
+				continue;
+			}
+			var PDUSessionResourceToReleaseListRelCmd li := rel_cmd.protocolIEs[i].value_.pDUSessionResourceToReleaseListRelCmd;
+			resources := f_pdu_handle_session_resource_released_list(li);
+		}
+		NGAP.send(m_ngap_succMsg(m_n2_PDUSessionResourceReleaseResponse(g_pars.ue_pars.amf_id,
+										g_pars.ue_pars.ran_id,
+										resources)));
+	}
+}
+
+/* 3GPP TS 23.502 4.3.4 PDU Session Release */
+function f_pdu_sess_release() runs on ConnHdlr {
+	var template (value) NG_NAS_UL_Message_Type nas_ul_msg;
+	var NAS_PDU nas_pdu;
+	var NG_NAS_DL_Message_Type rx_nas, inner_nas;
+	var ProcedureTransactionIdentifier pti := f_next_pti();
+	var NAS_CauseValue_Type cause_val := c_5GSM_Cause_RegularDeactivation;
+	var OCT1 pdu_sess_id := int2oct(g_pars.ue_pars.sess_pars.id, 1);
+
+	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_REQUEST(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							p_Cause := cs_GMM_GSM_Cause('59'O, cause_val));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id),
+					     p_RequestType := cs_NG_Request_TypeTV('001'B),
+					     p_DNN := cs_DNN_TLV(f_enc_dns_hostname(g_pars.ue_pars.apn)));
+	NGAP.send(nas_ul_msg);
+	as_ngap_handle_PDUSessionReleaseCommand();
+
+	/* 5G-NAS PDU Session Release Command: This DL NAS arrives contained in NGAP PDUSessionReleaseCommand handled above: */
+	NGAP.receive(cr_NG_DL_NAS_TRANSPORT) -> value rx_nas;
+	inner_nas := f_dec_NG_NAS_DL_Message_Payload_Container(rx_nas.dl_Nas_Transport.payloadContainerType.container,
+							       rx_nas.dl_Nas_Transport.payload.payload);
+	if (not match(inner_nas, cr_NG_PDU_SESSION_RELEASE_COMMAND(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							           cs_GMM_GSM_Cause(omit, cause_val)))) {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Unexpected decoded NAS Payload Container ", inner_nas));
+	}
+
+	g_pars.ue_pars.sess_pars.qos_rules := omit;
+	g_pars.ue_pars.sess_pars.ue_ip4 := omit;
+	g_pars.ue_pars.sess_pars.ue_ip6 := omit;
+
+	nas_ul_msg := cs_NG_PDU_SESSION_RELEASE_COMPLETE(cs_NG_PDU_SessionIdV(pdu_sess_id), pti,
+							 p_Cause := cs_GMM_GSM_Cause('59'O, cause_val));
+	nas_pdu := enc_NG_NAS_UL_Message_Type(valueof(nas_ul_msg));
+	nas_ul_msg := cs_NG_UL_NAS_TRANSPORT(cs_PayloadContainerType(tsc_PayloadContainerESMMsg),
+					     cs_PayloadContainerLV(nas_pdu),
+					     p_PDU_SessionId := cs_NG_PDU_SessionIdTV(pdu_sess_id));
+	NGAP.send(nas_ul_msg);
+}
+
+/****************************************************
+ * Nnrf (SBI) Emulated NRF, 3GPP TS 29.510
+ ****************************************************/
+const charstring c_Nnrf_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring c_Nnrf_uri_prefix := "http://" & c_Nnrf_uri_hostport;
+
+template (value) charstring
+ts_Nnrf_NFM_uri_subscription(template (value) charstring subscriptionID)
+:= c_Nnrf_uri_prefix & valueof(ts_Nnrf_NFM_path_subscription(subscriptionID));
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+function f_tr_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "GET",
+						      path := c_Nnrf_NFM_path_nf_instances);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := omit);
+	return http2_msg;
+}
+
+/* 6.1.3.2 Resource: nf-instances (Store) (GET) */
+altstep as_Nnrf_NFM_get_nf_instances()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nnrf_NFM_get_nf_instances()) -> value http2_rx {
+		var template (value) UriList1 uri_list;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		uri_list := ts_UriList1(links := { {"item", ts_LinksValueSchema1(ts_Link1("heyval"))} });
+		body_enc := f_enc_UriList1(valueof(uri_list));
+
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+function f_tr_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := tr_Nnrf_NFM_path_nf_instance);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_NFProfile1));
+	return http2_msg;
+}
+
+/* 6.1.3.3 Resource: nf-instance (PUT) */
+altstep as_Nnrf_NFM_put_nf_instance()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nnrf_NFM_put_nf_instance()) -> value http2_rx {
+		var NFProfile1 profile;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_NFProfile1(http2_rx.body.data, profile); // TODO: check rc
+		profile.plmnList := { valueof(ts_PlmnId1(mcc := hex2str(mp_mcc), mnc := hex2str(mp_mnc))) };
+		body_enc := f_enc_NFProfile1(profile);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 6.1.3.4.3.1 Resource: subscriptions (Collection) (POST) */
+function f_tr_Nnrf_NFM_post_subscriptions(template SubscrCond1 subscrCond := *)
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+	var template (present) TS29510_Nnrf_NFManagement.SubscriptionData1 exp_subscr_data;
+
+	exp_subscr_data := TS29510_Nnrf_NFManagement_Templates.tr_SubscriptionData1(
+				subscrCond := subscrCond,
+				reqNfType := TS29510_Nnrf_NFManagement_Templates.tr_NFType1(AMF));
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := c_Nnrf_NFM_path_subscriptions);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch exp_subscr_data));
+	return http2_msg;
+}
+
+/* 6.1.3.4.3.1 Resource: subscriptions (Collection) (POST) */
+altstep as_Nnrf_NFM_post_subscriptions(template SubscrCond1 subscrCond := *)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nnrf_NFM_post_subscriptions(subscrCond := subscrCond)) -> value http2_rx {
+		var SubscriptionData1 subscr_data;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_SubscriptionData1(http2_rx.body.data, subscr_data); // TODO: check rc
+		body_enc := f_enc_SubscriptionData1(subscr_data);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json"),
+							ts_HTTP2_Hdr_location(ts_Nnrf_NFM_uri_subscription(int2str(g_pars.ue_pars.idx)))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+function f_Nnrf_NFM_wait_all_post_subscriptions()
+runs on ConnHdlr {
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_NFtype(SEPP));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(nausf_auth));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(nudm_uecm));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(nudm_sdm));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(npcf_am_policy_control));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(nsmf_pdusession));
+	as_Nnrf_NFM_post_subscriptions(subscrCond := tr_SubscrCond1_ServiceName(nnssf_nsselection));
+}
+
+/***********************************************************************
+ * N12 Nausf_UEAuthentication (SBI): Emulated AUSF, 3GPP TS 29.509 A.2
+ ***********************************************************************/
+const charstring c_Nausf_uri_hostport := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+const charstring c_Nausf_uri_prefix := "http://" & c_Nausf_uri_hostport;
+
+template (value) charstring
+ts_Nausf_UEAuthentication_uri_individual_ue_authentication(template (value) charstring auth_ctx_id)
+:= c_Nausf_uri_prefix & valueof(ts_Nausf_UEAuthentication_path_individual_ue_authentication(auth_ctx_id));
+
+template (value) charstring
+ts_Nausf_UEAuthentication_uri_5g_aka_confirmation(template (value) charstring auth_ctx_id)
+:= c_Nausf_uri_prefix & valueof(ts_Nausf_UEAuthentication_path_5g_aka_confirmation(auth_ctx_id));
+
+/* 3GPP TS 29.509 6.1.3.2.3.1 Resource: ue-authentications (POST) */
+function f_tr_Nausf_UEAuth_post_ue_authentications(template (present) AuthenticationInfo auth_info := ?)
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "POST",
+						      path := c_Nausf_UEAuthentication_path_ue_authentications);
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch auth_info));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.509 6.1.3.2.3.1 Resource: ue-authentications (POST) */
+altstep as_Nausf_UEAuth_post_ue_authentications(template (present) AuthenticationInfo auth_info := ?, boolean force_resync := false)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nausf_UEAuth_post_ue_authentications(auth_info := auth_info)) -> value http2_rx {
+		var template (value) UEAuthenticationCtx ue_auth_ctx;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+		var charstring aka_link := valueof(ts_Nausf_UEAuthentication_uri_5g_aka_confirmation(int2str(g_pars.ue_pars.idx)));
+		var template (value) Av5gAka auth_tuple;
+		if (force_resync) {
+			auth_tuple := ts_Av5gAka(rand := "989412c4f4b4795cbc294ed80f9dc7f6",
+						 hxresStar := "5411b6b758e8296200af5633d56ca6f8",
+						 autn := "20502291734f80000863a380878aa310");
+		} else {
+			auth_tuple := ts_Av5gAka(rand := "ec68e3268268c43be673e6155c6c7713",
+						 hxresStar := "54ecc70258d97fef1dbce4cb217961ec",
+						 autn := "7812bbcc5fc78000825b6d1aae174f7b");
+		}
+		ue_auth_ctx := ts_UEAuthenticationCtx(authType := ts_AuthType(FiveG_AKA),
+						      fivegAuthData := ts_FivegAuthDataUnion_Av5gAka(auth_tuple),
+						      links := { {"5g-aka", ts_LinksValueSchema(ts_Link(aka_link))} });
+		body_enc := f_enc_UEAuthenticationCtx(valueof(ue_auth_ctx));
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							ts_HTTP2_Hdr_content_type("application/json"),
+							ts_HTTP2_Hdr_location(ts_Nausf_UEAuthentication_uri_individual_ue_authentication(int2str(g_pars.ue_pars.idx)))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+										 end_stream_flag := true,
+										 data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+/* 3GPP TS 29.509 6.1.3.3.3.1 Resource: 5g-aka-confirmation (PUT) */
+function f_tr_Nausf_UEAuth_put_5g_aka_confirmation(template (present) ConfirmationData conf_data := tr_ConfirmationData())
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := ts_Nausf_UEAuthentication_path_5g_aka_confirmation(int2str(g_pars.ue_pars.idx)));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch conf_data));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.509 6.1.3.3.3.1 Resource: 5g-aka-confirmation (PUT) */
+altstep as_Nausf_UEAuth_put_5g_aka_confirmation(AuthResult auth_result)
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nausf_UEAuth_put_5g_aka_confirmation()) -> value http2_rx {
+		var template (value) ConfirmationDataResponse conf_data_rsp;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+		select (auth_result) {
+		case (AUTHENTICATION_SUCCESS) {
+			conf_data_rsp := ts_ConfirmationDataResponse(authResult := auth_result,
+								     supi := "imsi-" & g_pars.ue_pars.imsi_str,
+								     kseaf := "5b5bac11884c1952b4e578ee5eff7da04aae634d314b5daf3966c761d8833e07");
+			}
+		case (AUTHENTICATION_FAILURE) {
+			conf_data_rsp := ts_ConfirmationDataResponse(authResult := auth_result)
+			}
+		}
+
+		body_enc := f_enc_ConfirmationDataResponse(valueof(conf_data_rsp));
+
+		/* 3GPP TS 29.503 Table 6.3.3.2.4.2.2-2 */
+		http2_tx := ts_HTTP2_Msg_200_OK(http2_rx.conn_id,
+						http2_rx.stream_id,
+						headers := {
+							ts_HTTP2_Hdr_content_type("application/json")
+						},
+						body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									    end_stream_flag := true,
+									    data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+
+/************************************************
+ * N8 Nudm (SBI): Emulated UDM, 3GPP TS 29.503
+ ************************************************/
+const charstring c_Nudm_uri_prefix := mp_scp_local_ip & ":" & int2str(mp_scp_local_port);
+
+/* 3GPP TS 29.503 6.2.3.2.3.1 Resource: Amf3GppAccessRegistration (PUT) */
+function f_tr_Nudm_UECM_put_Amf3GppAccessRegistration()
+runs on ConnHdlr return template (present) HTTP2_Msg {
+	var template (present) HTTP2_Msg http2_msg;
+	var template (present) HTTP2_header_block hb;
+	var template (present) HTTP2_pseudo_headers pseudo_headers;
+	var template HTTP2_header_list headers := *;
+
+	pseudo_headers := tr_HTTP2_pseudo_headers_Req(method := "PUT",
+						      path := tr_Nudm_UECM_path_amf_3gpp_registration(g_pars.ue_pars.imsi_str));
+	hb := tr_HTTP2_header_block(pseudo_headers, headers);
+	http2_msg := tr_HTTP2_Msg(?, ?,
+				  hb := hb,
+				  body := tr_HTTP2_Data_frame(data := decmatch tr_Amf3GppAccessRegistration));
+	return http2_msg;
+}
+
+/* 3GPP TS 29.503 5.3.2.2.2 AMF registration for 3GPP access (PUT) */
+private altstep as_nudm_uecm_put_Amf3GppAccessRegistration()
+runs on ConnHdlr {
+	var HTTP2_Msg http2_rx;
+	[] HTTP2_CONN[HTTP2_CONN_SCP].receive(f_tr_Nudm_UECM_put_Amf3GppAccessRegistration()) -> value http2_rx {
+		var Amf3GppAccessRegistration amf_3gpp_reg;
+		var octetstring body_enc;
+		var template (value) HTTP2_Msg http2_tx;
+
+		f_dec_Amf3GppAccessRegistration(http2_rx.body.data, amf_3gpp_reg);
+		body_enc := f_enc_Amf3GppAccessRegistration(amf_3gpp_reg);
+
+		http2_tx := ts_HTTP2_Msg_201_Created(http2_rx.conn_id,
+						     http2_rx.stream_id,
+						     headers := {
+							     ts_HTTP2_Hdr_content_type("application/json; charset=utf-8")//,
+							     //ts_HTTP2_Hdr_location(ts_Nudm_UECM_uri_individual_smf_registration(g_pars.imsi_str,
+								//								int2str(g_pars.namf.pdu_sess_id)))
+						     },
+						     body := ts_HTTP2_Data_frame(http2_rx.stream_id,
+									         end_stream_flag := true,
+									         data := body_enc));
+		HTTP2_CONN[HTTP2_CONN_SCP].send(http2_tx);
+		setverdict(pass);
+	}
+}
+
+}

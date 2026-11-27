@@ -1,0 +1,408 @@
+/* 5GC (55G Core) test suite in TTCN-3
+ * (C) 2025 by sysmocom - s.f.m.c. GmbH <info@sysmocom.de>
+ * All rights reserved.
+ * Author: Pau Espin Pedrol <pespin@sysmocom.de>
+ *
+ * Released under the terms of GNU General Public License, Version 2 or
+ * (at your option) any later version.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+module AMF_Tests {
+
+import from General_Types all;
+import from Native_Functions all;
+import from IPL4asp_Types all;
+import from Misc_Helpers all;
+
+import from Osmocom_Types all;
+import from GSM_Types all;
+
+import from TCCEncoding_Functions all;
+
+import from DNS_Helpers all;
+
+import from Milenage_Functions all;
+
+import from NGAP_PDU_Descriptions all;
+import from NGAP_IEs all;
+import from NGAP_PDU_Contents all;
+import from NGAP_Constants all;
+
+import from NGAP_Types all;
+import from NGAP_Pixits all;
+import from NGAP_Templates all;
+import from NGAP_Functions all;
+import from NGAP_Emulation all;
+
+import from NAS_CommonTypeDefs all;
+import from NAS_CommonTemplates all;
+import from NG_NAS_Common all;
+import from NG_NAS_TypeDefs all;
+import from NG_NAS_MsgContainers all;
+import from NG_NAS_Templates all;
+
+import from NG_NAS_Osmo_Types all;
+import from NG_NAS_Osmo_Templates all;
+import from NG_NAS_Functions all;
+import from NG_CryptoFunctions all;
+
+import from OGS_UEInfo all;
+import from JSON_Generic all;
+import from JSON_Generic_Templates all;
+
+import from HTTP2_Templates all;
+import from HTTP2_Msg all;
+import from HTTP2_Adapter all;
+import from HTTP2_Server_Emulation all;
+
+import from TS29510_Nnrf_NFManagement_Templates all;
+
+import from ConnHdlr all;
+
+modulepar {
+	/* NG-C interface */
+	charstring mp_5gc_ngap_ip := "127.0.0.1";
+	integer mp_5gc_ngap_port := 38412;
+	charstring mp_local_ngap_ip := "127.0.0.1";
+	integer mp_local_ngap_port := 50000;
+	GsmMcc mp_mcc := '999'H;
+	GsmMnc mp_mnc := '70'H;
+	HEX15n mp_imsi := '999700000000000'H;
+	octetstring mp_usim_key := '762a2206fe0b4151ace403c86a11e479'O;
+	octetstring mp_usim_opc := '3c6e0b8a9c15224a8228b9a98ca1531d'O;
+	uint24_t mp_tac := 1;
+	charstring mp_apn := "internet";
+	charstring mp_local_gtpu_ip := "127.0.0.20";
+	charstring mp_5gc_amf_metrics_hostname := "127.0.0.5";
+	integer mp_5gc_amf_metrics_port := 9090;
+
+	charstring mp_scp_local_ip := "127.0.0.200";
+	integer mp_scp_local_port := 7777;
+}
+
+template (value) PDUSessionParams ts_PDUSessionParams(template (value) PDUSessionID id,
+						      template (value) OCT4 ran_gtpu_teid) :=
+{
+	id := id,
+	ran_gtpu_ip := mp_local_gtpu_ip,
+	ran_gtpu_teid := ran_gtpu_teid,
+	cn_gtpu_ip := omit,
+	cn_gtpu_teid := omit,
+	qos_rules := omit,
+	ue_ip4 := omit,
+	ue_ip6 := omit,
+	ipv6_interface_id := omit
+};
+
+template (value) UeParams ts_UeParams(integer idx) :=
+{
+	idx := idx,
+	imsi := f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx),
+	imsi_str := f_dec_TBCD(imsi_hex2oct(f_concat_pad(lengthof(mp_imsi), substr(mp_imsi, 0, lengthof(mp_imsi) - 6), idx))),
+	imeisv := f_rnd_imeisv(),
+	usim_key := mp_usim_key,
+	usim_opc := mp_usim_opc,
+	apn := mp_apn,
+	ran_id := idx,
+	amf_id := omit,
+	guti := omit,
+	pti := '00'O,
+	sess_pars := ts_PDUSessionParams(id := 1,
+					 ran_gtpu_teid := int2oct(idx + 1, 4))
+}
+
+type component MTC_CT extends HTTP2_CT, HTTP2_ConnHdlr {
+	/* S1 intreface of emulated ENBs */
+	var NGRANParams g_ngran_pars[NUM_NGRAN];
+	var NGAP_Emulation_CT vc_NGAP[NUM_NGRAN];
+	port NGAP_PT NGAP_UNIT[NUM_NGRAN];
+	port NGAPEM_PROC_PT NGAP_PROC[NUM_NGRAN];
+
+	/* emulated SCP */
+	var HTTP2_Server_Emulation_CT vc_HTTP2_SRV_SCP;
+
+	timer g_Tguard := 30.0;
+}
+
+/* send incoming unit data messages (like reset) to global NGAP_UNIT port */
+private function NGapForwardUnitdataCallback(NGAP_PDU msg)
+runs on NGAP_Emulation_CT return template NGAP_PDU {
+	NGAP_UNIT.send(msg);
+	return omit;
+}
+
+private function f_init_one_ngran(integer num := 0) runs on MTC_CT {
+	var charstring id := testcasename() & "-NGAP" & int2str(num);
+	var NGAPOps ops := {
+		create_cb := refers(NGAP_Emulation.ExpectedCreateCallback),
+		unitdata_cb := refers(NGapForwardUnitdataCallback)
+	};
+	var NGAP_conn_parameters pars := {
+		remote_ip := mp_5gc_ngap_ip,
+		remote_sctp_port := mp_5gc_ngap_port,
+		local_ip := mp_local_ngap_ip,
+		local_sctp_port := mp_local_ngap_port + num,
+		role := NG_NAS_ROLE_UE
+	};
+	var PLMNIdentity plmn_id := f_enc_mcc_mnc(mp_mcc, mp_mnc);
+	var NGRANParams ngran_pars := {
+		global_ngran_id := valueof(m_globalRANNodeID_globalGNB_ID(m_ie_globalGnbId(plmn_id, int2bit(num, 22)))),
+		cell_identity := { nR_CGI := valueof(m_nR_CGI(plmn_id, int2bit(num, 36))) },
+		supported_ta_list := {
+			{
+				tAC := int2oct(mp_tac, 3),
+				broadcastPLMNList := {
+					valueof(m_ie_broadcastPLMNItem(plmn_id, { m_sliceSupportItem(m_s_NSSAI('01'O)) }))
+				},
+				iE_Extensions := omit
+			}
+		}
+	};
+
+	g_ngran_pars[num] := ngran_pars;
+	vc_NGAP[num] := NGAP_Emulation_CT.create(id);
+	map(vc_NGAP[num]:NGAP, system:NGAP_CODEC_PT);
+	connect(vc_NGAP[num]:NGAP_PROC, self:NGAP_PROC[num]);
+	connect(vc_NGAP[num]:NGAP_UNIT, self:NGAP_UNIT[num]);
+	vc_NGAP[num].start(NGAP_Emulation.main(ops, pars, id));
+	NGAP_UNIT[num].receive(NGAPEM_Event:{up_down:=NGAPEM_EVENT_UP});
+}
+
+private function f_init_ngap(integer imsi_suffix := 0) runs on MTC_CT {
+	var integer i;
+	for (i := 0; i < NUM_NGRAN; i := i+1) {
+		f_init_one_ngran(i);
+	}
+}
+
+private function f_init_http2_srv(charstring id) runs on MTC_CT {
+	id := id & "-HTTP2SRV";
+
+	var Http2ServerEmulationCfg http2_srv_cfg := {
+		http2_bind_ip := mp_scp_local_ip,
+		http2_bind_port := mp_scp_local_port,
+		one_req_per_conn := false
+	};
+	vc_HTTP2_SRV_SCP := HTTP2_Server_Emulation_CT.create(id & "-SCP") alive;
+	vc_HTTP2_SRV_SCP.start(HTTP2_Server_Emulation.main(http2_srv_cfg));
+
+	connect(self:HTTP2_CONN_PROC[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN_PROC);
+}
+
+private function f_init(integer imsi_suffix := 0, float t_guard := 30.0) runs on MTC_CT {
+	var charstring id := testcasename();
+
+	/* start guard timer and activate it as default */
+	g_Tguard.start(t_guard);
+	activate(as_Tguard());
+
+	f_init_http2_srv(id);
+	f_init_ngap(imsi_suffix);
+}
+
+private function f_shutdown() runs on MTC_CT {
+	f_http2_server_close_conn_all(idx := HTTP2_CONN_SCP);
+	setverdict(pass);
+}
+
+private function f_start_handler_create(integer ngap_idx := 0)
+runs on MTC_CT return ConnHdlr
+{
+	var ConnHdlr vc_conn;
+	var charstring id := testcasename() & int2str(ngap_idx);
+
+	vc_conn := ConnHdlr.create(id);
+	/* NGAP part */
+	connect(vc_conn:NGAP, vc_NGAP[ngap_idx]:NGAP_CLIENT);
+	connect(vc_conn:NGAP_PROC, vc_NGAP[ngap_idx]:NGAP_PROC);
+
+	if (isbound(vc_HTTP2_SRV_SCP)) {
+		connect(vc_conn:HTTP2_CONN[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN);
+		connect(vc_conn:HTTP2_CONN_PROC[HTTP2_CONN_SCP], vc_HTTP2_SRV_SCP:CONN_PROC);
+	}
+
+	return vc_conn;
+}
+
+private function f_start_handler_run(ConnHdlr vc_conn, void_fn fn, ConnHdlrPars pars) runs on MTC_CT
+{
+	vc_conn.start(f_ConnHdlr_init(fn, pars));
+}
+
+/* start a connection handler with given parameters */
+private function f_start_handler(void_fn fn, ConnHdlrPars pars, integer ngap_idx := 0)
+runs on MTC_CT return ConnHdlr {
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler_create(ngap_idx);
+	f_start_handler_run(vc_conn, fn, pars);
+
+	return vc_conn;
+}
+
+/* altstep for the global guard timer */
+private altstep as_Tguard() runs on MTC_CT {
+	[] g_Tguard.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Tguard timeout");
+	}
+}
+
+/* Validate AMF registers against NRF at startup: */
+private function f_TC_startup_nrf_registration() runs on ConnHdlr {
+	var charstring nf_instance_match := c_Nnrf_NFM_path_nf_instances & "/?+";
+	var charstring subscription_match := c_Nnrf_NFM_path_subscriptions & "/?+";
+	var charstring match_ := "(" & c_Nnrf_NFM_path_nf_instances &
+				 ")|(" & nf_instance_match &
+				 ")|(" & c_Nnrf_NFM_path_subscriptions &
+				 ")|(" & subscription_match &
+				 ")";
+	f_http2_server_emu_register(match_, idx := HTTP2_CONN_SCP);
+
+	as_Nnrf_NFM_put_nf_instance();
+	f_Nnrf_NFM_wait_all_post_subscriptions();
+	as_Nnrf_NFM_get_nf_instances();
+
+	f_http2_server_emu_unregister(match_, idx := HTTP2_CONN_SCP);
+	/* Leave some time for HTTP2 responses to reach the IUT: */
+	f_sleep(1.0);
+	setverdict(pass);
+}
+testcase TC_startup_nrf_registration() runs on MTC_CT {
+	var ConnHdlr vc_conn;
+	f_init();
+	var ConnHdlrPars pars := f_ConnHdlrPars(0);
+	vc_conn := f_start_handler(refers(f_TC_startup_nrf_registration), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
+private function f_ngap_setup(integer idx := 0, template (omit) NGAP_IEs.Cause cause := omit) runs on MTC_CT {
+	var template (present) NGAP_IEs.Cause exp_cause := ?;
+	var boolean exp_fail := false;
+	timer T := 5.0;
+	var template (value) NGAP_PDU tx_pdu;
+	var template (present) NGAP_PDU exp_pdu;
+	var NGAP_PDU rx_pdu;
+
+	tx_pdu := m_ngap_initMsg(m_n2_NGSetupRequest(g_ngran_pars[idx].global_ngran_id,
+						     g_ngran_pars[idx].supported_ta_list,
+						     v32));
+
+	if (not istemplatekind(cause, "omit")) {
+		exp_fail := true;
+		exp_cause := cause;
+	}
+
+	if (exp_fail) {
+		exp_pdu := mw_ngap_unsuccMsg((mw_n2_NGSetupFailure(exp_cause),
+					      f_mw_n2_NGSetupFailure(exp_cause, p_timeToWait := ?)));
+	} else {
+		exp_pdu := mw_ngap_succMsg(mw_n2_NGSetupResponse);
+	}
+
+	NGAP_UNIT[idx].send(tx_pdu);
+	T.start;
+	alt {
+	[] NGAP_UNIT[idx].receive(exp_pdu) {
+		setverdict(pass);
+		}
+	[] NGAP_UNIT[idx].receive(NGAP_PDU:?) -> value rx_pdu {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail,
+					log2str("Received unexpected NGAP ", rx_pdu, " vs exp ", exp_pdu));
+		}
+	[] T.timeout {
+		Misc_Helpers.f_shutdown(__BFILE__, __LINE__, fail, "Timeout waiting for NGAP Setup result");
+		}
+	}
+}
+
+/* NG Setup procedure to 5GC using a Global gNB ID containing unknown/foreign PLMN.
+ * Related: https://github.com/open5gs/open5gs/issues/3544 */
+testcase TC_ng_setup_unknown_global_gnb_id_plmn() runs on MTC_CT {
+	f_init();
+	g_ngran_pars[0].global_ngran_id.globalGNB_ID.pLMNIdentity := '62F224'O;
+	f_ngap_setup(0);
+	f_shutdown();
+}
+
+/* Unsuccessful NG Setup procedure to AMF (wrong PLMN) */
+testcase TC_ng_setup_wrong_tac() runs on MTC_CT {
+	f_init();
+	g_ngran_pars[0].supported_ta_list[0].broadcastPLMNList[0].pLMNIdentity := '62F224'O;
+	f_ngap_setup(0, {misc:=unknown_PLMN_or_SNPN});
+	f_shutdown();
+}
+
+/* NG Setup procedure to 5GC using a correct Global gNB ID. */
+testcase TC_ng_setup() runs on MTC_CT {
+	f_init();
+	f_ngap_setup(0);
+	f_shutdown();
+}
+
+private function f_TC_register() runs on ConnHdlr {
+	f_register();
+	f_deregister();
+}
+testcase TC_ng_register() runs on MTC_CT {
+	f_init();
+	f_ngap_setup(0);
+
+	var ConnHdlrPars pars := f_ConnHdlrPars(ue_idx := 0);
+	var ConnHdlr vc_conn;
+	vc_conn := f_start_handler(refers(f_TC_register), pars);
+	vc_conn.done;
+	f_shutdown();
+}
+
+control {
+	/* This should be the first test: */
+	execute( TC_startup_nrf_registration() );
+
+	execute( TC_ng_setup() );
+	execute( TC_ng_setup_unknown_global_gnb_id_plmn() );
+	execute( TC_ng_setup_wrong_tac() );
+	execute( TC_ng_register() );
+}
+
+/* TODO:
+ * - 3GPP TS 23.502 4.2.2.2.3 Registration with AMF re-allocation: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4214).
+ * - 3GPP TS 23.502 4.2.2.2.4 Registration with Onboarding SNPN: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4215)
+ * - 3GPP TS 23.502 4.2.2.3.3 Network-initiated Deregistration: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4216)
+ * - 3GPP TS 23.502 4.2.4.3 UE Configuration Update procedure for transparent UE Policy delivery
+ * - 3GPP TS 23.502 4.2.5.2 UE Reachability Notification Request procedure: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4318)
+ * - 3GPP TS 23.502 4.2.5.3 UE Activity Notification procedure: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4318)
+ * - 3GPP TS 23.502 4.2.9.2 Network Slice-Specific Authentication and Authorization: open5gs-nsssafd not implemented, nssaa interface not implemented in open5gs-amfd.
+ * - 3GPP TS 23.502 4.2.9.3 AAA Server triggered Network Slice-Specific Re-authentication and Re-authorization procedure: open5gs-nsssafd not implemented, Nnssaaf_NSSAA_Re-AuthNotification not implemented in open5gs-amfd (Nudm_UECM_Get is implemented in open5gs-udm).
+ * - 3GPP TS 23.502 4.2.9.4 AAA Server triggered Slice-Specific Authorization Revocation: open5gs-nsssafd not implemented, Nnssaaf_NSSAA_RevocationNotification not implemented in open5gs-amfd (Nudm_UECM_Get is implemented in open5gs-udm).
+ * - 3GPP TS 23.502 4.5.2 Session Management Subscriber Data Update Notification to SMF: open5gs-udm supports sotring subscriptions, but never triggers notifications whenever subscriber data is changed. open5gs-smfd registers to UDM but doesn't implement receiving a notification.
+ * - 3GPP TS 23.502 4.7 ME Identity check procedure: N5g-eir (OGS_SBI_SERVICE_NAME_N5G_EIR_EIC) not implemented
+ * - 3GPP TS 23.502 4.8.1.1(a) Connection Inactive procedure: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4319)
+ * - 3GPP TS 23.502 4.8.1.2 Connection Suspend procedure: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4322)
+ * - 3GPP TS 23.502 4.8.2 Connection Resume procedure: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4322)
+ * - 3GPP TS 23.502 4.11.1.2.1 5GS to EPS handover using N26 interface: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.11.1.2.2 EPS to 5GS handover using N26 interface: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.11.1.2.3 Handover Cancel: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.11.1.3.2 5GS to EPS Idle mode mobility using N26 interface: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.11.1.3.3 EPS to 5GS Mobility Registration Procedure (Idle and Connected State) using N26 interface: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.11.2 Interworking procedures without N26 interface: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.12 Procedures for Untrusted non-3GPP access: Seems transparent to the 5GC?
+ * - 3GPP TS 23.502 4.12a Procedures for Trusted non-3GPP access: Seems transparent to the 5GC?
+ * - 3GPP TS 23.502 4.13.3 SMS over NAS procedures: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.3.3 MO SMS over NAS in CM-IDLE (baseline): Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.3.5 MO SMS over NAS in CM-CONNECTED: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.3.6 MT SMS over NAS in CM-IDLE state and RRC_INACTIVE with CN based MT communication state via 3GPP access: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.3.7 MT SMS over NAS in CM-CONNECTED state via 3GPP access: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.3.8 MT SMS over NAS via non-3GPP access: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4362)
+ * - 3GPP TS 23.502 4.13.5 Location Services procedures: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/4364)
+ * - 3GPP TS 23.502 4.13.6.1 EPS fallback for IMS voice: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.13.6.2 Inter RAT Fallback in 5GC for IMS voice: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.502 4.13.6.3 Transfer of PDU session used for IMS voice from non-3GPP access to 5GS: Not supported by open5gs (https://github.com/open5gs/open5gs/issues/2534)
+ * - 3GPP TS 23.632 5.3.2 Mobility from 5GC to EPC: Nudm_UECM_AMFDeregistration not supported by open5gs
+ * - 3GPP TS 23.632 5.3.3 Mobility from EPC to 5GC: Not supported by open5gs (missing Nhss interface use in UDM)
+ * - 3GPP TS 23.632 5.2.3 Vector Generation in UDM/ARPF: Not supported by open5gs (missing Nudm_UEAuthentication_GetHssAv in UDM)
+ * - 3GPP TS 23.502 Annex G (normative): Support of GERAN/UTRAN access by SMF+PGW-C: Not supported by open5gs (Gn<->N7 (to PCF) in open5gs-smfd)
+ */
+
+}
